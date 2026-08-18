@@ -34,6 +34,11 @@ _Avoid_: 线程, thread, 任务
 _Code_: `turn`
 _Avoid_: 任务, 轮次
 
+**消息**:
+会话一侧的一条完整消息的落盘事件，与流式增量 text.delta 相对；role 为 driver 表示核心 agent 的输入、worker 表示 worker 的输出。driver 侧消息由控制面自身发出。
+_Code_: `message`
+_Avoid_: 回复, 输出
+
 **动作**:
 接口层暴露的动词操作：spawn、send、wait、interrupt、kill、list、attach。
 _Code_: `action`

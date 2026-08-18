@@ -159,7 +159,7 @@ export const domainEventSchema = v.union([
     sessionId: sessionIdSchema,
     turnId: v.string(),
     messageId: v.string(),
-    role: v.union([v.literal("user"), v.literal("agent")]),
+    role: v.union([v.literal("driver"), v.literal("worker")]),
     content: v.string(),
   }),
   v.object({

@@ -14,6 +14,7 @@ export type FakeDriverControls = {
   }>;
   readonly terminated: readonly SessionId[];
   setInterruptFinalReply(value: string | null): void;
+  setDeliverStartsTurn(value: boolean): void;
 };
 
 export function createFakeDriver(): {
@@ -28,6 +29,8 @@ export function createFakeDriver(): {
   const interrupted: { sessionId: SessionId; message?: string }[] = [];
   const terminated: SessionId[] = [];
   let interruptFinalReply: string | null = null;
+  let deliverStartsTurn = false;
+  const turnSeq = new Map<SessionId, number>();
 
   const factory: WorkerDriverFactory = (emit) => {
     emitRef = emit;
@@ -48,9 +51,19 @@ export function createFakeDriver(): {
           sessionId: spec.sessionId,
           turnId: `${spec.sessionId}:t1`,
         });
+        turnSeq.set(spec.sessionId, 1);
       },
       deliver(sessionId, message) {
         delivered.push({ sessionId, message });
+        if (deliverStartsTurn) {
+          const next = (turnSeq.get(sessionId) ?? 0) + 1;
+          turnSeq.set(sessionId, next);
+          emitEvent({
+            type: "turn.started",
+            sessionId,
+            turnId: `${sessionId}:t${next}`,
+          });
+        }
       },
       interrupt(sessionId, message) {
         interrupted.push(
@@ -82,6 +95,9 @@ export function createFakeDriver(): {
       terminated,
       setInterruptFinalReply: (value) => {
         interruptFinalReply = value;
+      },
+      setDeliverStartsTurn: (value) => {
+        deliverStartsTurn = value;
       },
     },
   };

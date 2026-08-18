@@ -32,7 +32,7 @@ type SessionRecord = {
   readonly spawnedAt: string;
   state: "busy" | "idle" | "killed";
   currentTurnId: string | null;
-  inbox: string[];
+  inbox: Array<{ messageId: string; text: string }>;
   turns: TurnCompleted[];
 };
 
@@ -51,6 +51,7 @@ function machineError(
 
 function toInfo(session: SessionRecord): SessionInfo {
   const lastTurn = session.turns[session.turns.length - 1];
+
   return {
     sessionId: session.id,
     harness: session.harness,
@@ -62,7 +63,7 @@ function toInfo(session: SessionRecord): SessionInfo {
     spawnedAt: session.spawnedAt,
     turns: session.turns.length,
     lastStopReason: lastTurn === undefined ? null : lastTurn.stopReason,
-  };
+  } satisfies SessionInfo;
 }
 
 export type SessionMachine = {
@@ -90,7 +91,7 @@ export function createSessionMachine(options: {
   let sessionSeq = 0;
   let messageSeq = 0;
 
-  const driver = options.driverFactory((event) => {
+  function enqueue(event: DomainEvent): void {
     queue.push(event);
     if (draining) return;
     draining = true;
@@ -103,7 +104,26 @@ export function createSessionMachine(options: {
     } finally {
       draining = false;
     }
-  });
+  }
+
+  const driver = options.driverFactory(enqueue);
+
+  function emitDriverMessage(
+    session: SessionRecord,
+    messageId: string,
+    text: string,
+  ): void {
+    // driver 侧消息由机器自己发出；依赖 driver 在开启新回合时同步发出 turn.started。
+    if (session.currentTurnId === null) return;
+    enqueue({
+      type: "message",
+      sessionId: session.id,
+      turnId: session.currentTurnId,
+      messageId,
+      role: "driver",
+      content: text,
+    });
+  }
 
   function processEvent(event: DomainEvent): void {
     for (const listener of subscribers) listener(event);
@@ -147,8 +167,9 @@ export function createSessionMachine(options: {
       case "tool.completed":
         if (session !== undefined && session.inbox.length > 0) {
           const pending = session.inbox.splice(0);
-          for (const message of pending) {
-            driver.deliver(event.sessionId, message);
+          for (const item of pending) {
+            driver.deliver(event.sessionId, item.text);
+            emitDriverMessage(session, item.messageId, item.text);
           }
         }
         break;
@@ -250,9 +271,10 @@ export function createSessionMachine(options: {
       const messageId = `m${messageSeq}`;
       if (session.state === "idle") {
         driver.deliver(sessionId, message);
+        emitDriverMessage(session, messageId, message);
         return { messageId, deliveryPoint: "new_turn" };
       }
-      session.inbox.push(message);
+      session.inbox.push({ messageId, text: message });
       return { messageId, deliveryPoint: "boundary" };
     },
     async wait(params) {

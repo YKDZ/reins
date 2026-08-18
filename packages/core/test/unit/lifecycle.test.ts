@@ -49,7 +49,7 @@ describe("回合生命周期", () => {
       sessionId: id,
       turnId: "s1:t1",
       messageId: "m2",
-      role: "agent",
+      role: "worker",
       content: "结论",
     });
     fake.controls.emit({

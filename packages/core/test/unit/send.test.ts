@@ -8,7 +8,10 @@ import { createFakeDriver } from "./fake-driver.ts";
 describe("send", () => {
   test("对 idle 会话触发新回合，ack deliveryPoint=new_turn", () => {
     const fake = createFakeDriver();
+    fake.controls.setDeliverStartsTurn(true);
     const machine = createSessionMachine({ driverFactory: fake.factory });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
       harness: "codex",
       message: "第一步",
@@ -29,6 +32,13 @@ describe("send", () => {
     });
     expect(fake.controls.delivered).toEqual([
       { sessionId: id, message: "继续" },
+    ]);
+    expect(events.map((event) => event.type)).toEqual([
+      "session.created",
+      "turn.started",
+      "turn.completed",
+      "turn.started",
+      "message",
     ]);
   });
 
@@ -65,6 +75,7 @@ describe("send", () => {
       "session.created",
       "turn.started",
       "tool.completed",
+      "message",
     ]);
     expect(machine.list()[0]).toEqual(
       expect.objectContaining({ sessionId: id, state: "busy", turns: 0 }),
@@ -74,6 +85,8 @@ describe("send", () => {
   test("多条暂存消息在同一边界按序一起注入", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
       harness: "qoder",
       message: "进行中",
@@ -87,13 +100,31 @@ describe("send", () => {
       sessionId: id,
       turnId: "s1:t1",
       messageId: "m-agent",
-      role: "agent",
+      role: "worker",
       content: "阶段小结",
     });
 
     expect(fake.controls.delivered).toEqual([
       { sessionId: id, message: "第一条" },
       { sessionId: id, message: "第二条" },
+    ]);
+    expect(events.map((event) => event.type)).toEqual([
+      "session.created",
+      "turn.started",
+      "message",
+      "message",
+      "message",
+    ]);
+    expect(
+      events
+        .filter((event) => event.type === "message" && event.role === "driver")
+        .map((event) => ({
+          messageId: event.type === "message" ? event.messageId : "",
+          content: event.type === "message" ? event.content : "",
+        })),
+    ).toEqual([
+      { messageId: "m1", content: "第一条" },
+      { messageId: "m2", content: "第二条" },
     ]);
   });
 
