@@ -1,0 +1,13 @@
+node_modules/
+.pnpm-store/
+dist/
+target/
+.turbo/
+coverage/
+.env
+.template/
+data/
+playwright-report/
+test-results/
+
+skills-lock.json

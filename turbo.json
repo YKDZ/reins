@@ -1,0 +1,88 @@
+{
+  "boundaries": {
+    "tags": {
+      "app": {
+        "dependencies": {
+          "allow": ["protocol", "library"]
+        }
+      },
+      "adapter": {
+        "dependencies": {
+          "allow": ["protocol", "adapter-kit", "library"]
+        }
+      },
+      "adapter-kit": {
+        "dependencies": {
+          "allow": ["protocol", "library"]
+        }
+      },
+      "core": {
+        "dependencies": {
+          "allow": ["protocol", "library"]
+        }
+      },
+      "library": {
+        "dependencies": {
+          "allow": ["library"]
+        }
+      },
+      "protocol": {
+        "dependencies": {
+          "allow": ["library"]
+        }
+      }
+    }
+  },
+  "globalPassThroughEnv": ["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"],
+  "tasks": {
+    "//#boundaries": {
+      "cache": false
+    },
+    "//#format:check": {
+      "outputs": []
+    },
+    "//#format:write": {
+      "cache": false,
+      "dependsOn": ["//#lint:fix"]
+    },
+    "//#lint": {
+      "outputs": []
+    },
+    "//#lint:fix": {
+      "cache": false
+    },
+    "//#typecheck": {
+      "outputs": []
+    },
+    "build": {
+      "dependsOn": ["^build"]
+    },
+    "deployment": {
+      "cache": false
+    },
+    "format:check": {
+      "outputs": []
+    },
+    "format:write": {
+      "cache": false,
+      "dependsOn": ["lint:fix"]
+    },
+    "lint": {
+      "outputs": []
+    },
+    "lint:fix": {
+      "cache": false
+    },
+    "test": {
+      "outputs": []
+    },
+    "test:e2e": {
+      "cache": false,
+      "dependsOn": ["build"]
+    },
+    "typecheck": {
+      "dependsOn": ["^typecheck"],
+      "outputs": []
+    }
+  }
+}

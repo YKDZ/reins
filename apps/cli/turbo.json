@@ -1,0 +1,9 @@
+{
+  "extends": ["//"],
+  "tags": ["app"],
+  "tasks": {
+    "build": { "outputs": ["dist/**"] },
+    "test": { "dependsOn": [] },
+    "test:e2e": { "dependsOn": ["build"], "cache": false }
+  }
+}

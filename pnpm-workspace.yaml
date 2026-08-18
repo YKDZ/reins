@@ -1,0 +1,33 @@
+packages:
+  - apps/*
+  - packages/*
+  - adapters/*
+
+nodeLinker: isolated
+preferSymlinkedExecutables: true
+autoInstallPeers: false
+injectWorkspacePackages: false
+dedupeInjectedDeps: false
+
+syncInjectedDepsAfterScripts:
+  - build
+
+minimumReleaseAge: 1440
+minimumReleaseAgeStrict: true
+
+minimumReleaseAgeExclude:
+  - "@ykdz/template"
+
+allowBuilds:
+  esbuild: true
+
+catalog:
+  "@types/node": ^24.13.3
+  "commander": ^15.0.0
+  "oxfmt": ^0.58.0
+  "oxlint": ^1.73.0
+  "oxlint-tsgolint": ^7.0.2001
+  "turbo": 2.10.5
+  "typescript-7": npm:typescript@^7.0.2
+  "valibot": ^1.4.2
+  "vitest": ^4.1.10

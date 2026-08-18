@@ -1,0 +1,22 @@
+{
+  "build": {
+    "args": {
+      "NODE_VERSION": "24",
+      "PACKAGE_MANAGER_PIN": "pnpm@11.22.0"
+    },
+    "dockerfile": "Dockerfile"
+  },
+  "customizations": {
+    "vscode": {
+      "extensions": ["oxc.oxc-vscode"]
+    }
+  },
+  "mounts": [
+    {
+      "source": "${devcontainerId}-pnpm-store",
+      "target": "/pnpm/store",
+      "type": "volume"
+    }
+  ],
+  "name": "reins"
+}

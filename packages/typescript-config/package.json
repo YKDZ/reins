@@ -1,0 +1,18 @@
+{
+  "name": "@reins/typescript-config",
+  "version": "0.0.0",
+  "private": true,
+  "files": [
+    "base.json"
+  ],
+  "scripts": {
+    "format:check": "oxfmt --list-different --config ../../oxfmt.config.ts .",
+    "format:write": "oxfmt --write --config ../../oxfmt.config.ts ."
+  },
+  "devDependencies": {
+    "oxfmt": "catalog:"
+  },
+  "engines": {
+    "node": "24"
+  }
+}
