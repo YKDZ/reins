@@ -30,8 +30,8 @@ export type DeliveryPoint = v.InferOutput<typeof deliveryPointSchema>;
 // —— 七动作的参数与结果 ——
 
 export const spawnParamsSchema = v.object({
-  harness: v.string(),
-  message: v.string(),
+  harness: v.pipe(v.string(), v.minLength(1)),
+  message: v.pipe(v.string(), v.minLength(1)),
   agent: v.optional(v.string()),
   model: v.optional(v.string()),
   reasoning: v.optional(v.string()),
@@ -73,7 +73,13 @@ export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
 export const waitResultSchema = v.object({
   status: v.union([v.literal("completed"), v.literal("timeout")]),
-  results: v.array(turnCompletedSchema),
+  results: v.array(
+    v.object({
+      sessionId: sessionIdSchema,
+      status: v.union([v.literal("completed"), v.literal("killed")]),
+      turn: v.optional(turnCompletedSchema),
+    }),
+  ),
 });
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 
@@ -102,6 +108,26 @@ export const attachParamsSchema = v.object({
   exitOn: v.optional(v.array(stopReasonSchema)),
 });
 export type AttachParams = v.InferOutput<typeof attachParamsSchema>;
+
+export const killResultSchema = v.object({
+  sessionId: sessionIdSchema,
+  status: v.union([v.literal("killed"), v.literal("not_found")]),
+});
+export type KillResult = v.InferOutput<typeof killResultSchema>;
+
+export const sessionInfoSchema = v.object({
+  sessionId: sessionIdSchema,
+  harness: v.string(),
+  state: sessionStateSchema,
+  model: v.nullable(v.string()),
+  reasoning: v.nullable(v.string()),
+  cwd: v.string(),
+  label: v.nullable(v.string()),
+  spawnedAt: v.string(),
+  turns: v.number(),
+  lastStopReason: v.nullable(stopReasonSchema),
+});
+export type SessionInfo = v.InferOutput<typeof sessionInfoSchema>;
 
 // —— 领域事件 ——
 
@@ -190,3 +216,49 @@ export const adapterCapabilitiesSchema = v.object({
 export type AdapterCapabilities = v.InferOutput<
   typeof adapterCapabilitiesSchema
 >;
+
+// —— 错误码与机器错误（程序化契约；可读文案由 CLI / MCP 映射） ——
+
+export const errorCodeSchema = v.union([
+  v.literal("session_not_found"),
+  v.literal("session_killed"),
+  v.literal("invalid_params"),
+]);
+export type ErrorCode = v.InferOutput<typeof errorCodeSchema>;
+
+export const machineErrorSchema = v.object({
+  code: errorCodeSchema,
+  context: v.optional(v.record(v.string(), v.unknown())),
+});
+export type MachineError = v.InferOutput<typeof machineErrorSchema>;
+
+// —— worker driver 契约（缝 B：adapter 实现，core 调用） ——
+
+export type WorkerSpec = {
+  readonly sessionId: SessionId;
+  readonly harness: string;
+  readonly message: string;
+  readonly agent?: string;
+  readonly model?: string;
+  readonly reasoning?: string;
+  readonly cwd: string;
+  readonly permissionMode?: string;
+  readonly sandbox?: string;
+  readonly label?: string;
+  readonly spawnedAt: string;
+};
+
+export interface WorkerDriver {
+  // start 必须同步发出该会话的 session.created 与 turn.started。
+  start(spec: WorkerSpec): void;
+  // 把消息交给 worker；若因此开启新回合，必须同步发出 turn.started。
+  deliver(sessionId: SessionId, message: string): void;
+  // 必须在返回前同步发出该会话的 turn.completed(cancelled)。
+  interrupt(sessionId: SessionId, message?: string): void;
+  // 必须在返回前同步发出该会话的 session.killed。
+  terminate(sessionId: SessionId): void;
+}
+
+export type WorkerDriverFactory = (
+  emit: (event: DomainEvent) => void,
+) => WorkerDriver;
