@@ -83,3 +83,13 @@ _Avoid_: 插件层, driver 层
 适配层中对应单个 harness 的翻译器。
 _Code_: `adapter`
 _Avoid_: 驱动, connector, 桥
+
+**daemon**:
+单用户本机常驻进程，持有会话表、adapter 表与 worker 进程表，通过内部协议服务 CLI 客户端。
+_Code_: `daemon`
+_Avoid_: 服务, 后台进程
+
+**内部协议**:
+daemon 与 CLI 之间基于 Unix socket 的 NDJSON 行协议，承载七动作请求与领域事件流。
+_Code_: `internalProtocol`
+_Avoid_: IPC, RPC
