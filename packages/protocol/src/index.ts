@@ -92,6 +92,7 @@ export type InterruptParams = v.InferOutput<typeof interruptParamsSchema>;
 export const interruptOutcomeSchema = v.object({
   sessionId: sessionIdSchema,
   status: v.union([v.literal("requested"), v.literal("idle")]),
+  turnId: v.optional(v.string()),
 });
 export type InterruptOutcome = v.InferOutput<typeof interruptOutcomeSchema>;
 export type InterruptAck = readonly InterruptOutcome[];

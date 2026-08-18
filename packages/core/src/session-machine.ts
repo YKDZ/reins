@@ -352,7 +352,13 @@ export function createSessionMachine(options: {
         }
         if (session.state === "busy") {
           driver.interrupt(id, parsed.output.message);
-          outcomes.push({ sessionId: id, status: "requested" });
+          outcomes.push({
+            sessionId: id,
+            status: "requested",
+            ...(session.currentTurnId === null
+              ? {}
+              : { turnId: session.currentTurnId }),
+          });
         } else {
           outcomes.push({ sessionId: id, status: "idle" });
         }
