@@ -8,7 +8,6 @@ import { createFakeDriver } from "./fake-driver.ts";
 describe("send", () => {
   test("对 idle 会话触发新回合，ack deliveryPoint=new_turn", () => {
     const fake = createFakeDriver();
-    fake.controls.setDeliverStartsTurn(true);
     const machine = createSessionMachine({ driverFactory: fake.factory });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
@@ -31,7 +30,7 @@ describe("send", () => {
       deliveryPoint: "new_turn",
     });
     expect(fake.controls.delivered).toEqual([
-      { sessionId: id, message: "继续" },
+      { sessionId: id, turnId: "s1:t2", message: "继续" },
     ]);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
@@ -69,7 +68,7 @@ describe("send", () => {
     });
 
     expect(fake.controls.delivered).toEqual([
-      { sessionId: id, message: "改用方案 B" },
+      { sessionId: id, turnId: "s1:t1", message: "改用方案 B" },
     ]);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
@@ -105,8 +104,8 @@ describe("send", () => {
     });
 
     expect(fake.controls.delivered).toEqual([
-      { sessionId: id, message: "第一条" },
-      { sessionId: id, message: "第二条" },
+      { sessionId: id, turnId: "s1:t1", message: "第一条" },
+      { sessionId: id, turnId: "s1:t1", message: "第二条" },
     ]);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",

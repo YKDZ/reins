@@ -8,7 +8,6 @@ import { createFakeDriver } from "./fake-driver.ts";
 describe("interrupt", () => {
   test("停止 busy 会话的当前回合，保留会话与部分产出", () => {
     const fake = createFakeDriver();
-    fake.controls.setInterruptFinalReply("部分产出：入口在 main.ts");
     const machine = createSessionMachine({ driverFactory: fake.factory });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
@@ -18,20 +17,22 @@ describe("interrupt", () => {
       cwd: "/tmp/demo",
     });
 
-    const results = machine.interrupt({ ids: [id], message: "改用方案 B" });
+    const ack = machine.interrupt({ ids: [id], message: "改用方案 B" });
 
-    expect(results).toEqual([
-      {
-        sessionId: id,
-        turnId: "s1:t1",
-        stopReason: "cancelled",
-        finalReply: "部分产出：入口在 main.ts",
-        usage: {},
-      },
-    ]);
+    expect(ack).toEqual([{ sessionId: id, status: "requested" }]);
     expect(fake.controls.interrupted).toEqual([
       { sessionId: id, message: "改用方案 B" },
     ]);
+
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId: id,
+      turnId: "s1:t1",
+      stopReason: "cancelled",
+      finalReply: "部分产出：入口在 main.ts",
+      usage: {},
+    });
+
     expect(events.at(-1)?.type).toBe("turn.completed");
     expect(machine.list()[0]).toEqual(
       expect.objectContaining({
@@ -60,7 +61,9 @@ describe("interrupt", () => {
       usage: {},
     });
 
-    expect(machine.interrupt({ ids: [id] })).toEqual([]);
+    expect(machine.interrupt({ ids: [id] })).toEqual([
+      { sessionId: id, status: "idle" },
+    ]);
     expect(fake.controls.interrupted).toEqual([]);
   });
 

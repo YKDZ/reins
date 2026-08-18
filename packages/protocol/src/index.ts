@@ -89,6 +89,13 @@ export const interruptParamsSchema = v.object({
 });
 export type InterruptParams = v.InferOutput<typeof interruptParamsSchema>;
 
+export const interruptOutcomeSchema = v.object({
+  sessionId: sessionIdSchema,
+  status: v.union([v.literal("requested"), v.literal("idle")]),
+});
+export type InterruptOutcome = v.InferOutput<typeof interruptOutcomeSchema>;
+export type InterruptAck = readonly InterruptOutcome[];
+
 export const killParamsSchema = v.object({
   ids: v.array(sessionIdSchema),
 });
@@ -236,6 +243,7 @@ export type MachineError = v.InferOutput<typeof machineErrorSchema>;
 
 export type WorkerSpec = {
   readonly sessionId: SessionId;
+  readonly turnId: string;
   readonly harness: string;
   readonly message: string;
   readonly agent?: string;
@@ -245,17 +253,16 @@ export type WorkerSpec = {
   readonly permissionMode?: string;
   readonly sandbox?: string;
   readonly label?: string;
-  readonly spawnedAt: string;
 };
 
 export interface WorkerDriver {
-  // start 必须同步发出该会话的 session.created 与 turn.started。
+  // 启动 worker 进程/会话；worker 内容事件通过 emit 回调流入 core。
   start(spec: WorkerSpec): void;
-  // 把消息交给 worker；若因此开启新回合，必须同步发出 turn.started。
-  deliver(sessionId: SessionId, message: string): void;
-  // 必须在返回前同步发出该会话的 turn.completed(cancelled)。
+  // 把消息交给 worker；turnId 标识它所属的回合。
+  deliver(sessionId: SessionId, turnId: string, message: string): void;
+  // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
   interrupt(sessionId: SessionId, message?: string): void;
-  // 必须在返回前同步发出该会话的 session.killed。
+  // 终止 worker 进程；会话的 session.killed 事件由 core 发出。
   terminate(sessionId: SessionId): void;
 }
 

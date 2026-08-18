@@ -63,6 +63,14 @@ describe("权限与事件", () => {
     });
 
     machine.interrupt({ ids: [id] });
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId: id,
+      turnId: "s1:t1",
+      stopReason: "cancelled",
+      finalReply: null,
+      usage: {},
+    });
 
     expect(events.map((event) => event.type)).toEqual([
       "session.created",

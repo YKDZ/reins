@@ -42,7 +42,7 @@ _Avoid_: 回复, 输出
 **动作**:
 接口层暴露的动词操作：spawn、send、wait、interrupt、kill、list、attach。
 _Code_: `action`
-_Avoid_: 操作, 命令
+_Avoid_: 动词, 操作, 命令
 
 **事件**:
 接口层发出的归一化会话事实，如 text.delta、tool.completed、turn.completed；adapter 的原生输出不得进入事件流。
