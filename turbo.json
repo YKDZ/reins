@@ -3,7 +3,7 @@
     "tags": {
       "app": {
         "dependencies": {
-          "allow": ["protocol", "library"]
+          "allow": ["protocol", "transport", "library"]
         }
       },
       "adapter": {
@@ -21,6 +21,11 @@
           "allow": ["protocol", "library"]
         }
       },
+      "daemon": {
+        "dependencies": {
+          "allow": ["protocol", "core", "adapter", "transport", "library"]
+        }
+      },
       "library": {
         "dependencies": {
           "allow": ["library"]
@@ -29,6 +34,11 @@
       "protocol": {
         "dependencies": {
           "allow": ["library"]
+        }
+      },
+      "transport": {
+        "dependencies": {
+          "allow": ["protocol", "library"]
         }
       }
     }

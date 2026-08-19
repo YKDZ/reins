@@ -1,29 +1,21 @@
 {
-  "name": "@reins/cli",
+  "name": "@reins/daemon",
   "version": "0.0.0",
-  "bin": {
-    "reins": "./dist/cli.js"
-  },
-  "files": [
-    "dist"
-  ],
+  "private": true,
   "type": "module",
   "imports": {
-    "#main": {
-      "source": "./src/main.ts",
-      "types": "./src/main.ts",
-      "default": "./dist/main.js"
+    "#/*": {
+      "source": "./src/*.ts",
+      "types": "./src/*.ts",
+      "default": "./dist/*.js"
     }
   },
   "exports": {
     ".": {
-      "source": "./src/main.ts",
-      "types": "./dist/main.d.ts",
-      "default": "./dist/main.js"
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
-  },
-  "publishConfig": {
-    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json --pretty false",
@@ -31,13 +23,13 @@
     "format:write": "oxfmt --write --config ../../oxfmt.config.ts .",
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
-    "postbuild": "node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@reins/core": "workspace:*",
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
-    "commander": "catalog:"
+    "valibot": "catalog:"
   },
   "devDependencies": {
     "@reins/typescript-config": "workspace:*",
@@ -48,6 +40,9 @@
     "typescript-7": "catalog:"
   },
   "dependenciesMeta": {
+    "@reins/core": {
+      "injected": false
+    },
     "@reins/protocol": {
       "injected": false
     },
@@ -56,6 +51,6 @@
     }
   },
   "engines": {
-    "node": ">=24"
+    "node": "24"
   }
 }
