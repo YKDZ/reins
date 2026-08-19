@@ -11,3 +11,14 @@ playwright-report/
 test-results/
 
 skills-lock.json
+
+.qoder
+
+.agents/
+.scratch/
+AGENTS.md
+CONTEXT.md
+docs/adr/
+docs/agents/
+.scratch
+.agents
