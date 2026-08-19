@@ -19,9 +19,11 @@ minimumReleaseAgeExclude:
   - "@ykdz/template"
 
 allowBuilds:
+  "@qodercn-ai/qodercn-agent-sdk": true
   esbuild: true
 
 catalog:
+  "@qodercn-ai/qodercn-agent-sdk": 1.0.23
   "@types/node": ^24.13.3
   "commander": ^15.0.0
   "oxfmt": ^0.58.0

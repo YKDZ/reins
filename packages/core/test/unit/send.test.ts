@@ -65,6 +65,7 @@ describe("send", () => {
       toolCallId: "c1",
       name: "Read",
       result: "app.ts",
+      isError: false,
     });
 
     expect(fake.controls.delivered).toEqual([

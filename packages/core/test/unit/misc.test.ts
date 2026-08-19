@@ -23,15 +23,14 @@ describe("权限与事件", () => {
       turnId: "s1:t1",
       permissionId: "p1",
       kind: "Bash(npm test)",
+      options: [{ outcome: "allow", scope: "once" }],
     });
     expect(machine.list()[0]?.state).toBe("busy");
 
-    fake.controls.emit({
-      type: "permission.resolved",
+    machine.resolvePermission({
       sessionId: id,
-      turnId: "s1:t1",
       permissionId: "p1",
-      decision: "allow",
+      resolution: { outcome: "allow", scope: "once" },
     });
 
     expect(
@@ -60,6 +59,7 @@ describe("权限与事件", () => {
       turnId: "s1:t1",
       permissionId: "p1",
       kind: "Bash(npm test)",
+      options: [{ outcome: "allow", scope: "once" }],
     });
 
     machine.interrupt({ ids: [id] });
@@ -141,6 +141,27 @@ describe("权限与事件", () => {
     });
 
     expect(events).toHaveLength(2);
+  });
+
+  test("订阅者抛错经 onListenerError 上报，不打断机器", () => {
+    const fake = createFakeDriver();
+    const sink: Array<{ error: unknown; event: DomainEvent }> = [];
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      onListenerError: (error, event) => sink.push({ error, event }),
+    });
+    machine.subscribe(() => {
+      throw new Error("bad listener");
+    });
+
+    const id = machine.spawn({
+      harness: "codex",
+      message: "开始",
+      cwd: "/tmp/demo",
+    });
+
+    expect(sink).toHaveLength(2);
+    expect(machine.list()[0]?.sessionId).toBe(id);
   });
 });
 

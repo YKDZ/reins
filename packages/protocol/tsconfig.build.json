@@ -4,5 +4,6 @@
     "customConditions": [],
     "outDir": "dist",
     "rootDir": "src"
-  }
+  },
+  "exclude": ["test/**"]
 }

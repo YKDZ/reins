@@ -10,6 +10,10 @@ import {
   killParamsSchema,
   type ListFilter,
   type MachineError,
+  type PermissionOption,
+  permissionResolutionSchemaFor,
+  type ResolvePermissionParams,
+  resolvePermissionParamsSchema,
   type SendAck,
   type SendParams,
   sendParamsSchema,
@@ -20,9 +24,12 @@ import {
   type WaitParams,
   type WaitResult,
   waitParamsSchema,
+  type WorkerDriver,
   type WorkerDriverFactory,
 } from "@reins/protocol";
 import * as v from "valibot";
+
+import { createEventBus, type EventBus } from "#/event-bus";
 
 type SessionRecord = {
   readonly id: SessionId;
@@ -35,6 +42,10 @@ type SessionRecord = {
   state: "busy" | "idle" | "killed";
   currentTurnId: string | null;
   inbox: Array<{ messageId: string; text: string }>;
+  pendingPermissions: Map<
+    string,
+    { turnId: string; options: PermissionOption[] }
+  >;
   turns: TurnCompleted[];
 };
 
@@ -73,6 +84,7 @@ export type SessionMachine = {
   send(params: SendParams): SendAck;
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): InterruptAck;
+  resolvePermission(params: ResolvePermissionParams): void;
   kill(params: KillParams): KillResult[];
   list(filter?: ListFilter): SessionInfo[];
   subscribe(listener: (event: DomainEvent) => void): () => void;
@@ -80,56 +92,25 @@ export type SessionMachine = {
 
 export function createSessionMachine(options: {
   driverFactory: WorkerDriverFactory;
+  onListenerError?: (error: unknown, event: DomainEvent) => void;
 }): SessionMachine {
   const sessions = new Map<SessionId, SessionRecord>();
-  const subscribers = new Set<(event: DomainEvent) => void>();
   const waiters: Array<{
     ids: ReadonlySet<SessionId>;
     resolve: (result: WaitResult) => void;
     timer: ReturnType<typeof setTimeout> | null;
   }> = [];
-  const queue: DomainEvent[] = [];
-  let draining = false;
   let sessionSeq = 0;
   let turnSeq = 0;
   let messageSeq = 0;
 
-  function enqueue(event: DomainEvent): void {
-    queue.push(event);
-    if (draining) return;
-    draining = true;
-    try {
-      while (queue.length > 0) {
-        const next = queue[0];
-        queue.shift();
-        if (next !== undefined) processEvent(next);
-      }
-    } finally {
-      draining = false;
-    }
-  }
+  let bus: EventBus;
+  let driver: WorkerDriver;
 
-  const driver = options.driverFactory(enqueue);
+  driver = options.driverFactory((event) => bus.publish(event));
 
-  function emitDriverMessage(
-    session: SessionRecord,
-    messageId: string,
-    text: string,
-  ): void {
-    // driver 侧消息由机器自己发出；回合由机器开启，turnId 一定已就位。
-    if (session.currentTurnId === null) return;
-    enqueue({
-      type: "message",
-      sessionId: session.id,
-      turnId: session.currentTurnId,
-      messageId,
-      role: "driver",
-      content: text,
-    });
-  }
-
-  function processEvent(event: DomainEvent): void {
-    for (const listener of subscribers) listener(event);
+  // 事件折叠：只改状态，不做任何订阅通知；通知由总线在折叠前发出。
+  const apply = (event: DomainEvent): void => {
     const session = sessions.get(event.sessionId);
     if (session !== undefined && session.state === "killed") return;
     switch (event.type) {
@@ -145,6 +126,7 @@ export function createSessionMachine(options: {
           state: "busy",
           currentTurnId: null,
           inbox: [],
+          pendingPermissions: new Map(),
           turns: [],
         });
         break;
@@ -165,6 +147,7 @@ export function createSessionMachine(options: {
           });
           session.state = "idle";
           session.currentTurnId = null;
+          session.pendingPermissions.clear();
         }
         break;
       case "message":
@@ -174,8 +157,21 @@ export function createSessionMachine(options: {
           for (const item of pending) {
             const turnId = session.currentTurnId;
             if (turnId === null) continue;
-            driver.deliver(event.sessionId, turnId, item.text);
-            emitDriverMessage(session, item.messageId, item.text);
+            bus.transaction(
+              [
+                {
+                  type: "message",
+                  sessionId: session.id,
+                  turnId,
+                  messageId: item.messageId,
+                  role: "driver",
+                  content: item.text,
+                },
+              ],
+              () => {
+                driver.deliver(session.id, turnId, item.text);
+              },
+            );
           }
         }
         break;
@@ -184,13 +180,29 @@ export function createSessionMachine(options: {
           session.state = "killed";
           session.currentTurnId = null;
           session.inbox = [];
+          session.pendingPermissions.clear();
+        }
+        break;
+      case "permission.requested":
+        if (session !== undefined) {
+          session.pendingPermissions.set(event.permissionId, {
+            turnId: event.turnId,
+            options: event.options,
+          });
         }
         break;
       default:
         break;
     }
     settleWaiters();
-  }
+  };
+
+  bus = createEventBus({
+    apply,
+    ...(options.onListenerError === undefined
+      ? {}
+      : { onListenerError: options.onListenerError }),
+  });
 
   function collectOutcomes(ids: ReadonlySet<SessionId>): WaitOutcome[] {
     const outcomes: WaitOutcome[] = [];
@@ -239,49 +251,51 @@ export function createSessionMachine(options: {
     spawn(params) {
       const parsed = v.safeParse(spawnParamsSchema, params);
       if (!parsed.success) {
-        throw machineError("invalid_params", {
-          issues: parsed.issues.map((issue) => issue.message),
-        });
+        throw machineError("invalid_params");
       }
       const spec = parsed.output;
       sessionSeq += 1;
       const sessionId: SessionId = `s${sessionSeq}`;
       const turnId = nextTurnId(sessionId);
       const cwd = spec.cwd ?? process.cwd();
-      enqueue({
-        type: "session.created",
-        sessionId,
-        harness: spec.harness,
-        model: spec.model ?? null,
-        reasoning: spec.reasoning ?? null,
-        cwd,
-        label: spec.label ?? null,
-        spawnedAt: new Date().toISOString(),
-      });
-      enqueue({ type: "turn.started", sessionId, turnId });
-      driver.start({
-        sessionId,
-        turnId,
-        harness: spec.harness,
-        message: spec.message,
-        cwd,
-        ...(spec.agent === undefined ? {} : { agent: spec.agent }),
-        ...(spec.model === undefined ? {} : { model: spec.model }),
-        ...(spec.reasoning === undefined ? {} : { reasoning: spec.reasoning }),
-        ...(spec.permissionMode === undefined
-          ? {}
-          : { permissionMode: spec.permissionMode }),
-        ...(spec.sandbox === undefined ? {} : { sandbox: spec.sandbox }),
-        ...(spec.label === undefined ? {} : { label: spec.label }),
-      });
+      bus.transaction(
+        [
+          {
+            type: "session.created",
+            sessionId,
+            harness: spec.harness,
+            model: spec.model ?? null,
+            reasoning: spec.reasoning ?? null,
+            cwd,
+            label: spec.label ?? null,
+            spawnedAt: new Date().toISOString(),
+          },
+          { type: "turn.started", sessionId, turnId },
+        ],
+        () => {
+          driver.start({
+            sessionId,
+            turnId,
+            harness: spec.harness,
+            message: spec.message,
+            cwd,
+            authorizationMode: spec.authorizationMode ?? "allowAll",
+            ...(spec.agent === undefined ? {} : { agent: spec.agent }),
+            ...(spec.model === undefined ? {} : { model: spec.model }),
+            ...(spec.reasoning === undefined
+              ? {}
+              : { reasoning: spec.reasoning }),
+            ...(spec.sandbox === undefined ? {} : { sandbox: spec.sandbox }),
+            ...(spec.label === undefined ? {} : { label: spec.label }),
+          });
+        },
+      );
       return sessionId;
     },
     send(params) {
       const parsed = v.safeParse(sendParamsSchema, params);
       if (!parsed.success) {
-        throw machineError("invalid_params", {
-          issues: parsed.issues.map((issue) => issue.message),
-        });
+        throw machineError("invalid_params");
       }
       const { sessionId, message } = parsed.output;
       const session = sessions.get(sessionId);
@@ -295,9 +309,22 @@ export function createSessionMachine(options: {
       const messageId = `m${messageSeq}`;
       if (session.state === "idle") {
         const turnId = nextTurnId(sessionId);
-        enqueue({ type: "turn.started", sessionId, turnId });
-        driver.deliver(sessionId, turnId, message);
-        emitDriverMessage(session, messageId, message);
+        bus.transaction(
+          [
+            { type: "turn.started", sessionId, turnId },
+            {
+              type: "message",
+              sessionId,
+              turnId,
+              messageId,
+              role: "driver",
+              content: message,
+            },
+          ],
+          () => {
+            driver.deliver(sessionId, turnId, message);
+          },
+        );
         return { messageId, deliveryPoint: "new_turn" };
       }
       session.inbox.push({ messageId, text: message });
@@ -306,9 +333,7 @@ export function createSessionMachine(options: {
     async wait(params) {
       const parsed = v.safeParse(waitParamsSchema, params);
       if (!parsed.success) {
-        throw machineError("invalid_params", {
-          issues: parsed.issues.map((issue) => issue.message),
-        });
+        throw machineError("invalid_params");
       }
       const ids = new Set(parsed.output.ids);
       for (const id of ids) {
@@ -337,9 +362,7 @@ export function createSessionMachine(options: {
     interrupt(params) {
       const parsed = v.safeParse(interruptParamsSchema, params);
       if (!parsed.success) {
-        throw machineError("invalid_params", {
-          issues: parsed.issues.map((issue) => issue.message),
-        });
+        throw machineError("invalid_params");
       }
       const outcomes: InterruptOutcome[] = [];
       for (const id of parsed.output.ids) {
@@ -365,12 +388,57 @@ export function createSessionMachine(options: {
       }
       return outcomes;
     },
+    resolvePermission(params) {
+      const parsed = v.safeParse(resolvePermissionParamsSchema, params);
+      if (!parsed.success) {
+        throw machineError("invalid_params");
+      }
+      const { sessionId, permissionId, resolution } = parsed.output;
+      const session = sessions.get(sessionId);
+      if (session === undefined) {
+        throw machineError("session_not_found", { sessionId });
+      }
+      if (session.state === "killed") {
+        throw machineError("session_killed", { sessionId });
+      }
+      const pending = session.pendingPermissions.get(permissionId);
+      if (pending === undefined) {
+        throw machineError("permission_not_pending", {
+          sessionId,
+          permissionId,
+        });
+      }
+      const inMenu = v.safeParse(
+        permissionResolutionSchemaFor(pending.options),
+        resolution,
+      );
+      if (!inMenu.success) {
+        throw machineError("permission_resolution_mismatch", {
+          sessionId,
+          permissionId,
+        });
+      }
+      // 转交抛错时整个帧回滚：不产生 resolved、未决请求保留可重试。
+      bus.transaction(
+        [
+          {
+            type: "permission.resolved",
+            sessionId,
+            turnId: pending.turnId,
+            permissionId,
+            resolution,
+          },
+        ],
+        () => {
+          driver.resolvePermission(sessionId, permissionId, resolution);
+        },
+      );
+      session.pendingPermissions.delete(permissionId);
+    },
     kill(params) {
       const parsed = v.safeParse(killParamsSchema, params);
       if (!parsed.success) {
-        throw machineError("invalid_params", {
-          issues: parsed.issues.map((issue) => issue.message),
-        });
+        throw machineError("invalid_params");
       }
       return parsed.output.ids.map((id) => {
         const session = sessions.get(id);
@@ -380,8 +448,9 @@ export function createSessionMachine(options: {
         if (session.state === "killed") {
           return { sessionId: id, status: "killed" };
         }
-        enqueue({ type: "session.killed", sessionId: id });
-        driver.terminate(id);
+        bus.transaction([{ type: "session.killed", sessionId: id }], () => {
+          driver.terminate(id);
+        });
         return { sessionId: id, status: "killed" };
       });
     },
@@ -406,10 +475,7 @@ export function createSessionMachine(options: {
         );
     },
     subscribe(listener) {
-      subscribers.add(listener);
-      return () => {
-        subscribers.delete(listener);
-      };
+      return bus.subscribe(listener);
     },
   };
 }

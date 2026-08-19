@@ -27,16 +27,81 @@ export const deliveryPointSchema = v.union([
 ]);
 export type DeliveryPoint = v.InferOutput<typeof deliveryPointSchema>;
 
+export const authorizationModeSchema = v.union([
+  v.literal("interactive"),
+  v.literal("allowAll"),
+]);
+export type AuthorizationMode = v.InferOutput<typeof authorizationModeSchema>;
+
+// —— 权限决议与选项菜单 ——
+
+export const permissionResolutionSchema = v.union([
+  v.strictObject({
+    outcome: v.literal("allow"),
+    scope: v.union([v.literal("once"), v.literal("session")]),
+  }),
+  v.strictObject({
+    outcome: v.literal("deny"),
+    feedback: v.optional(v.string()),
+  }),
+]);
+export type PermissionResolution = v.InferOutput<
+  typeof permissionResolutionSchema
+>;
+
+export const permissionOptionSchema = v.union([
+  v.strictObject({
+    outcome: v.literal("allow"),
+    scope: v.union([v.literal("once"), v.literal("session")]),
+  }),
+  v.strictObject({
+    outcome: v.literal("deny"),
+    feedback: v.boolean(),
+  }),
+]);
+export type PermissionOption = v.InferOutput<typeof permissionOptionSchema>;
+
+// 答案形状契约：一个决议是否落在某个选项允许的形状内。这不是决议逻辑，
+// 只是核对"答卷是否在本次请求的菜单里"；allow/deny 的选择由调用方做出。
+function optionAllowsResolution(
+  option: PermissionOption,
+  resolution: PermissionResolution,
+): boolean {
+  if (option.outcome === "allow" && resolution.outcome === "allow") {
+    return option.scope === resolution.scope;
+  }
+  if (option.outcome === "deny" && resolution.outcome === "deny") {
+    // feedback=true 表示该 adapter 的 deny 必须由调用方提供文本；
+    // feedback=false 表示没有文本通道。控制面不合成任何文案。
+    if (option.feedback) return resolution.feedback !== undefined;
+    return resolution.feedback === undefined;
+  }
+  return false;
+}
+
+// 把"决议 ∈ 本次请求的选项菜单"表达为 valibot schema：
+// core 用它做命令入口的同步校验，adapter 用它复验兜底。
+export function permissionResolutionSchemaFor(
+  options: readonly PermissionOption[],
+): v.GenericSchema {
+  return v.pipe(
+    permissionResolutionSchema,
+    v.check((resolution) =>
+      options.some((option) => optionAllowsResolution(option, resolution)),
+    ),
+  );
+}
+
 // —— 七动作的参数与结果 ——
 
-export const spawnParamsSchema = v.object({
+export const spawnParamsSchema = v.strictObject({
   harness: v.pipe(v.string(), v.minLength(1)),
   message: v.pipe(v.string(), v.minLength(1)),
   agent: v.optional(v.string()),
   model: v.optional(v.string()),
   reasoning: v.optional(v.string()),
   cwd: v.optional(v.string()),
-  permissionMode: v.optional(v.string()),
+  authorizationMode: v.optional(authorizationModeSchema),
   sandbox: v.optional(v.string()),
   label: v.optional(v.string()),
   meta: v.optional(v.record(v.string(), v.unknown())),
@@ -96,6 +161,15 @@ export const interruptOutcomeSchema = v.object({
 });
 export type InterruptOutcome = v.InferOutput<typeof interruptOutcomeSchema>;
 export type InterruptAck = readonly InterruptOutcome[];
+
+export const resolvePermissionParamsSchema = v.object({
+  sessionId: sessionIdSchema,
+  permissionId: v.string(),
+  resolution: permissionResolutionSchema,
+});
+export type ResolvePermissionParams = v.InferOutput<
+  typeof resolvePermissionParamsSchema
+>;
 
 export const killParamsSchema = v.object({
   ids: v.array(sessionIdSchema),
@@ -171,7 +245,7 @@ export const domainEventSchema = v.union([
     content: v.string(),
   }),
   v.object({
-    type: v.literal("tool.started"),
+    type: v.literal("tool.requested"),
     sessionId: sessionIdSchema,
     turnId: v.string(),
     toolCallId: v.string(),
@@ -184,6 +258,7 @@ export const domainEventSchema = v.union([
     toolCallId: v.string(),
     name: v.string(),
     result: v.nullable(v.string()),
+    isError: v.boolean(),
   }),
   v.object({
     type: v.literal("permission.requested"),
@@ -191,13 +266,15 @@ export const domainEventSchema = v.union([
     turnId: v.string(),
     permissionId: v.string(),
     kind: v.string(),
+    input: v.optional(v.unknown()),
+    options: v.array(permissionOptionSchema),
   }),
   v.object({
     type: v.literal("permission.resolved"),
     sessionId: sessionIdSchema,
     turnId: v.string(),
     permissionId: v.string(),
-    decision: v.union([v.literal("allow"), v.literal("deny")]),
+    resolution: permissionResolutionSchema,
   }),
   v.object({
     type: v.literal("turn.completed"),
@@ -231,6 +308,8 @@ export const errorCodeSchema = v.union([
   v.literal("session_not_found"),
   v.literal("session_killed"),
   v.literal("invalid_params"),
+  v.literal("permission_not_pending"),
+  v.literal("permission_resolution_mismatch"),
 ]);
 export type ErrorCode = v.InferOutput<typeof errorCodeSchema>;
 
@@ -251,7 +330,7 @@ export type WorkerSpec = {
   readonly model?: string;
   readonly reasoning?: string;
   readonly cwd: string;
-  readonly permissionMode?: string;
+  readonly authorizationMode: AuthorizationMode;
   readonly sandbox?: string;
   readonly label?: string;
 };
@@ -263,6 +342,12 @@ export interface WorkerDriver {
   deliver(sessionId: SessionId, turnId: string, message: string): void;
   // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
   interrupt(sessionId: SessionId, message?: string): void;
+  // 把控制面的授权决议交还 adapter，翻译为 harness 原生回答。
+  resolvePermission(
+    sessionId: SessionId,
+    permissionId: string,
+    resolution: PermissionResolution,
+  ): void;
   // 终止 worker 进程；会话的 session.killed 事件由 core 发出。
   terminate(sessionId: SessionId): void;
 }

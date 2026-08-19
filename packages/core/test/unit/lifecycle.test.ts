@@ -30,7 +30,7 @@ describe("回合生命周期", () => {
       delta: "思考中",
     });
     fake.controls.emit({
-      type: "tool.started",
+      type: "tool.requested",
       sessionId: id,
       turnId: "s1:t1",
       toolCallId: "c1",
@@ -43,6 +43,7 @@ describe("回合生命周期", () => {
       toolCallId: "c1",
       name: "Read",
       result: "app.ts",
+      isError: false,
     });
     fake.controls.emit({
       type: "message",
@@ -65,7 +66,7 @@ describe("回合生命周期", () => {
       "session.created",
       "turn.started",
       "text.delta",
-      "tool.started",
+      "tool.requested",
       "tool.completed",
       "message",
       "turn.completed",

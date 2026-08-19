@@ -26,7 +26,6 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
-    "@reins/adapter-kit": "workspace:*",
     "@reins/protocol": "workspace:*",
     "valibot": "catalog:"
   },
@@ -39,9 +38,6 @@
     "typescript-7": "catalog:"
   },
   "dependenciesMeta": {
-    "@reins/adapter-kit": {
-      "injected": false
-    },
     "@reins/protocol": {
       "injected": false
     }

@@ -1,5 +1,6 @@
 import type {
   DomainEvent,
+  PermissionResolution,
   SessionId,
   WorkerDriver,
   WorkerDriverFactory,
@@ -19,9 +20,23 @@ export type FakeDriverControls = {
     message?: string;
   }>;
   readonly terminated: readonly SessionId[];
+  readonly resolved: ReadonlyArray<{
+    sessionId: SessionId;
+    permissionId: string;
+    resolution: PermissionResolution;
+  }>;
 };
 
-export function createFakeDriver(): {
+export function createFakeDriver(options?: {
+  start?: (spec: WorkerSpec) => void;
+  deliver?: (sessionId: SessionId, turnId: string, message: string) => void;
+  resolvePermission?: (
+    sessionId: SessionId,
+    permissionId: string,
+    resolution: PermissionResolution,
+  ) => void;
+  terminate?: (sessionId: SessionId) => void;
+}): {
   readonly factory: WorkerDriverFactory;
   readonly controls: FakeDriverControls;
 } {
@@ -37,23 +52,47 @@ export function createFakeDriver(): {
   }[] = [];
   const interrupted: { sessionId: SessionId; message?: string }[] = [];
   const terminated: SessionId[] = [];
+  const resolved: {
+    sessionId: SessionId;
+    permissionId: string;
+    resolution: PermissionResolution;
+  }[] = [];
 
   const factory: WorkerDriverFactory = (emit) => {
     emitRef = emit;
     const driver: WorkerDriver = {
       start(spec) {
-        started.push(spec);
+        if (options?.start === undefined) {
+          started.push(spec);
+        } else {
+          options.start(spec);
+        }
       },
       deliver(sessionId, turnId, message) {
-        delivered.push({ sessionId, turnId, message });
+        if (options?.deliver === undefined) {
+          delivered.push({ sessionId, turnId, message });
+        } else {
+          options.deliver(sessionId, turnId, message);
+        }
       },
       interrupt(sessionId, message) {
         interrupted.push(
           message === undefined ? { sessionId } : { sessionId, message },
         );
       },
+      resolvePermission(sessionId, permissionId, resolution) {
+        if (options?.resolvePermission === undefined) {
+          resolved.push({ sessionId, permissionId, resolution });
+        } else {
+          options.resolvePermission(sessionId, permissionId, resolution);
+        }
+      },
       terminate(sessionId) {
-        terminated.push(sessionId);
+        if (options?.terminate === undefined) {
+          terminated.push(sessionId);
+        } else {
+          options.terminate(sessionId);
+        }
       },
     };
     return driver;
@@ -67,6 +106,7 @@ export function createFakeDriver(): {
       delivered,
       interrupted,
       terminated,
+      resolved,
     },
   };
 }

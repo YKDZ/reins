@@ -1,6 +1,7 @@
-// adapter 共享工具占位：PTY / 进程管理、事件归一化等。
-import type { SessionId } from "@reins/protocol";
-
-export type { SessionId };
-
-export const adapterKitVersion = "0.0.0";
+export { createAsyncQueue, type AsyncQueue } from "./async-queue.ts";
+export {
+  HarnessSession,
+  type HarnessSessionOptions,
+  type TurnJournal,
+} from "./harness-session.ts";
+export { noopTranscript, type TranscriptSink } from "./transcript.ts";

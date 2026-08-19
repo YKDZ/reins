@@ -23,12 +23,14 @@
     "format:write": "oxfmt --write --config ../../oxfmt.config.ts .",
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
+    "record:fixture": "node test/scripts/record-fixture.ts",
+    "test": "vitest run test",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@qodercn-ai/qodercn-agent-sdk": "catalog:",
     "@reins/adapter-kit": "workspace:*",
-    "@reins/protocol": "workspace:*",
-    "valibot": "catalog:"
+    "@reins/protocol": "workspace:*"
   },
   "devDependencies": {
     "@reins/typescript-config": "workspace:*",
@@ -36,7 +38,8 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
-    "typescript-7": "catalog:"
+    "typescript-7": "catalog:",
+    "vitest": "catalog:"
   },
   "dependenciesMeta": {
     "@reins/adapter-kit": {
