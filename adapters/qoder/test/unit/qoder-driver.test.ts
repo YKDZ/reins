@@ -1,5 +1,11 @@
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
-import type { DomainEvent } from "@reins/protocol";
+import type {
+  DomainEvent,
+  PermissionId,
+  SessionId,
+  SessionName,
+  TurnId,
+} from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createQoderDriver } from "#/qoder-driver";
@@ -10,6 +16,10 @@ import { createFakeSdk } from "../helpers/fake-sdk.ts";
 const flush = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
+const sessionId = "reviewer@g1" as SessionId;
+const firstTurnId = "t1" as TurnId;
+const permissionId = "p1" as PermissionId;
+const sessionName = "reviewer" as SessionName;
 
 function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
   events: DomainEvent[];
@@ -25,8 +35,9 @@ function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
   const events: DomainEvent[] = [];
   const driver = factory((event) => events.push(event));
   driver.start({
-    sessionId: "s1",
-    turnId: "s1:t1",
+    sessionId,
+    turnId: firstTurnId,
+    sessionName,
     harness: "qoder",
     message: "检查",
     cwd: "/tmp/demo",
@@ -143,8 +154,8 @@ describe("qoder driver 事件映射", () => {
     const completed = events.find((event) => event.type === "turn.completed");
     expect(completed).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "end_turn",
       finalReply: "分析完成",
       usage: expect.objectContaining({ input_tokens: 12, output_tokens: 34 }),
@@ -162,8 +173,8 @@ describe("qoder driver 事件映射", () => {
     ]);
     expect(events.find((event) => event.type === "turn.completed")).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "end_turn",
       finalReply: "回答完毕",
       usage: expect.objectContaining({ input_tokens: 5, output_tokens: 6 }),
@@ -188,8 +199,8 @@ describe("qoder driver 事件映射", () => {
 
     expect(events.find((event) => event.type === "turn.completed")).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "end_turn",
       finalReply: "回答完毕",
       usage: expect.objectContaining({ input_tokens: 7, output_tokens: 8 }),
@@ -231,9 +242,9 @@ describe("qoder driver 事件映射", () => {
     expect(events.filter((event) => event.type === "tool.completed")).toEqual([
       {
         type: "tool.completed",
-        sessionId: "s1",
-        turnId: "s1:t1",
-        toolCallId: "tc2",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
         name: "Bash",
         result: "ok",
         isError: false,
@@ -296,16 +307,16 @@ describe("qoder driver 事件映射", () => {
     ).toEqual([
       {
         type: "tool.requested",
-        sessionId: "s1",
-        turnId: "s1:t1",
-        toolCallId: "tc1",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
         name: "Bash",
       },
       {
         type: "tool.completed",
-        sessionId: "s1",
-        turnId: "s1:t1",
-        toolCallId: "tc1",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
         name: "Bash",
         result: "ok",
         isError: false,
@@ -327,8 +338,8 @@ describe("qoder driver 事件映射", () => {
 
     expect(events.find((event) => event.type === "turn.completed")).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "failed",
       finalReply: null,
     });
@@ -384,8 +395,8 @@ describe("permission 桥", () => {
     );
     expect(requested).toEqual({
       type: "permission.requested",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       permissionId: "p1",
       kind: "tool:Bash",
       input: { command: "ls" },
@@ -396,7 +407,7 @@ describe("permission 桥", () => {
       ],
     });
 
-    driver.resolvePermission("s1", "p1", {
+    driver.resolvePermission(sessionId, permissionId, {
       outcome: "allow",
       scope: "session",
     });
@@ -421,7 +432,7 @@ describe("permission 桥", () => {
     );
     await flush();
 
-    driver.resolvePermission("s1", "p1", {
+    driver.resolvePermission(sessionId, permissionId, {
       outcome: "deny",
       feedback: "改用安全命令",
     });
@@ -436,7 +447,7 @@ describe("permission 桥", () => {
 describe("interrupt 与 kill", () => {
   test("interrupt 后 aborted 合成 cancelled", async () => {
     const { events, fake, driver } = setup();
-    driver.interrupt("s1");
+    driver.interrupt(sessionId);
     expect(fake.controls.interruptCount()).toBe(1);
 
     fake.controls.push({
@@ -451,8 +462,8 @@ describe("interrupt 与 kill", () => {
 
     expect(events.find((event) => event.type === "turn.completed")).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "cancelled",
       finalReply: null,
     });
@@ -460,7 +471,7 @@ describe("interrupt 与 kill", () => {
 
   test("terminate 中止底层会话；流结束后进行中回合兜底 failed", async () => {
     const { events, fake, driver } = setup();
-    driver.terminate("s1");
+    driver.terminate(sessionId);
     expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
       true,
     );
@@ -469,8 +480,8 @@ describe("interrupt 与 kill", () => {
     await flush();
     expect(events.find((event) => event.type === "turn.completed")).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "failed",
       finalReply: null,
     });

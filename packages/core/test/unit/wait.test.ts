@@ -3,6 +3,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
+import { ids } from "./ids.ts";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -14,6 +15,7 @@ describe("wait", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-22"),
       harness: "codex",
       message: "跑很久的任务",
       cwd: "/tmp/demo",
@@ -32,11 +34,13 @@ describe("wait", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
     const a = machine.spawn({
+      sessionName: ids.sessionName("fixture-23"),
       harness: "codex",
       message: "甲",
       cwd: "/tmp/demo",
     });
     const b = machine.spawn({
+      sessionName: ids.sessionName("fixture-24"),
       harness: "qoder",
       message: "乙",
       cwd: "/tmp/demo",
@@ -46,7 +50,7 @@ describe("wait", () => {
     fake.controls.emit({
       type: "turn.completed",
       sessionId: b,
-      turnId: "s2:t1",
+      turnId: ids.turn("t2"),
       stopReason: "end_turn",
       finalReply: "乙完成",
       usage: {},
@@ -60,7 +64,7 @@ describe("wait", () => {
           status: "completed",
           turn: {
             sessionId: b,
-            turnId: "s2:t1",
+            turnId: ids.turn("t2"),
             stopReason: "end_turn",
             finalReply: "乙完成",
             usage: {},
@@ -75,6 +79,7 @@ describe("wait", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-25"),
       harness: "dsh",
       message: "临时任务",
       cwd: "/tmp/demo",
@@ -93,9 +98,11 @@ describe("wait", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
 
-    await expect(machine.wait({ ids: ["s999"] })).rejects.toEqual({
+    await expect(
+      machine.wait({ ids: [ids.session("missing@g0")] }),
+    ).rejects.toEqual({
       code: "session_not_found",
-      context: { sessionId: "s999" },
+      sessionId: ids.session("missing@g0"),
     });
   });
 });

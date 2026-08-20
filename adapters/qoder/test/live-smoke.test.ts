@@ -1,4 +1,9 @@
-import type { DomainEvent } from "@reins/protocol";
+import type {
+  DomainEvent,
+  SessionId,
+  SessionName,
+  TurnId,
+} from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createQoderDriver } from "#/qoder-driver";
@@ -30,8 +35,9 @@ live("qoder live smoke", () => {
     });
 
     driver.start({
-      sessionId: "smoke1",
-      turnId: "smoke1:t1",
+      sessionId: "smoke@g1" as SessionId,
+      turnId: "t1" as TurnId,
+      sessionName: "smoke" as SessionName,
       harness: "qoder",
       message: "用一条 shell 命令列出当前目录的内容",
       cwd: process.cwd(),
@@ -43,6 +49,6 @@ live("qoder live smoke", () => {
     expect(completed.stopReason).toBe("end_turn");
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
     expect(events.some((event) => event.type === "tool.completed")).toBe(true);
-    driver.terminate("smoke1");
+    driver.terminate("smoke@g1" as SessionId);
   }, 120_000);
 });

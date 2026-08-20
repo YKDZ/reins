@@ -8,13 +8,6 @@ import type {
 
 import type { AdapterRegistry } from "./registry.ts";
 
-function machineError(
-  code: MachineError["code"],
-  context?: MachineError["context"],
-): MachineError {
-  return context === undefined ? { code } : { code, context };
-}
-
 // SessionMachine 只接受单一 driverFactory；路由 driver 按 harness 懒实例化
 // 各家 factory，并按 sessionId→harness 表路由（ADR-0009 adapter 表落地）。
 export function createRoutingDriverFactory(
@@ -34,9 +27,11 @@ export function createRoutingDriverFactory(
       start(spec: WorkerSpec) {
         const adapter = adapters.get(spec.harness);
         if (adapter === undefined) {
-          throw machineError("unknown_harness", {
-            valid: { harness: [...adapters.keys()] },
-          });
+          throw {
+            code: "unknown_harness",
+            harness: spec.harness,
+            availableHarnesses: [...adapters.keys()],
+          } satisfies MachineError;
         }
         let driver = drivers.get(spec.harness);
         if (driver === undefined) {

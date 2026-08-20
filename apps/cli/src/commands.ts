@@ -5,11 +5,18 @@ import type {
   PermissionResolution,
   ProtocolResponse,
   SendAck,
+  SessionId,
   SessionInfo,
   SpawnParams,
   StopReason,
   WaitResult,
 } from "@reins/protocol";
+import {
+  permissionIdSchema,
+  sessionIdSchema,
+  sessionNameSchema,
+} from "@reins/protocol";
+import * as v from "valibot";
 
 import { runAndWait, runAttach } from "./attach.ts";
 import { CapabilityStore } from "./capabilities.ts";
@@ -60,6 +67,7 @@ function spawnParamsFromOptions(
   const params: SpawnParams = {
     harness,
     message: messageParts.join(" "),
+    sessionName: v.parse(sessionNameSchema, options.name),
     ...(options.agent === undefined ? {} : { agent: options.agent as string }),
     ...(options.model === undefined ? {} : { model: options.model as string }),
     ...(options.reasoning === undefined
@@ -70,7 +78,6 @@ function spawnParamsFromOptions(
     ...(options.sandbox === undefined
       ? {}
       : { sandbox: options.sandbox as string }),
-    ...(options.label === undefined ? {} : { label: options.label as string }),
   };
   if (options.meta !== undefined) {
     params.meta = JSON.parse(options.meta as string) as Record<string, unknown>;
@@ -87,14 +94,14 @@ async function runSpawn(ctx: RunContext): Promise<void> {
     if (validation !== null) throw validation;
     const response = await client.request("spawn", params);
     printSpawnResult(
-      requireResult(response) as { sessionId: string },
+      requireResult(response) as { sessionId: SessionId },
       ctx.mode,
     );
   });
 }
 
 async function runSend(ctx: RunContext): Promise<void> {
-  const sessionId = ctx.args[0] as string;
+  const sessionId = v.parse(sessionIdSchema, ctx.args[0]);
   const messageParts = ctx.args[1] as readonly string[];
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("send", {
@@ -106,7 +113,9 @@ async function runSend(ctx: RunContext): Promise<void> {
 }
 
 async function runWait(ctx: RunContext): Promise<void> {
-  const ids = ctx.args[0] as readonly string[];
+  const ids = (ctx.args[0] as readonly string[]).map((id) =>
+    v.parse(sessionIdSchema, id),
+  );
   const timeoutMs = Number(ctx.options.timeout);
   await withClient(ctx.mode, async (client) => {
     const response = await client.request(
@@ -124,7 +133,9 @@ async function runWait(ctx: RunContext): Promise<void> {
 }
 
 async function runInterrupt(ctx: RunContext): Promise<void> {
-  const ids = ctx.args[0] as readonly string[];
+  const ids = (ctx.args[0] as readonly string[]).map((id) =>
+    v.parse(sessionIdSchema, id),
+  );
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("interrupt", {
       ids: [...ids],
@@ -141,7 +152,9 @@ async function runInterrupt(ctx: RunContext): Promise<void> {
 }
 
 async function runKill(ctx: RunContext): Promise<void> {
-  const ids = ctx.args[0] as readonly string[];
+  const ids = (ctx.args[0] as readonly string[]).map((id) =>
+    v.parse(sessionIdSchema, id),
+  );
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("kill", { ids: [...ids] });
     printKillResult(requireResult(response) as KillResult[], ctx.mode);
@@ -158,9 +171,9 @@ async function runList(ctx: RunContext): Promise<void> {
       ...(options.state === undefined
         ? {}
         : { state: options.state as ListFilter["state"] }),
-      ...(options.label === undefined
+      ...(options.name === undefined
         ? {}
-        : { label: options.label as string }),
+        : { sessionName: v.parse(sessionNameSchema, options.name) }),
       ...(options.model === undefined
         ? {}
         : { model: options.model as string }),
@@ -171,7 +184,7 @@ async function runList(ctx: RunContext): Promise<void> {
 }
 
 async function runAttachCommand(ctx: RunContext): Promise<void> {
-  const sessionId = ctx.args[0] as string;
+  const sessionId = v.parse(sessionIdSchema, ctx.args[0]);
   const options = ctx.options;
   const params: AttachParams = { sessionId };
   if (options.replay !== undefined) {
@@ -204,8 +217,8 @@ async function runCapabilities(ctx: RunContext): Promise<void> {
 }
 
 async function runResolvePermission(ctx: RunContext): Promise<void> {
-  const sessionId = ctx.args[0] as string;
-  const permissionId = ctx.args[1] as string;
+  const sessionId = v.parse(sessionIdSchema, ctx.args[0]);
+  const permissionId = v.parse(permissionIdSchema, ctx.args[1]);
   const options = ctx.options;
   const outcome = options.outcome as string;
   let resolution: PermissionResolution;

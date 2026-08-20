@@ -1,19 +1,27 @@
 import type {
   DomainEvent,
+  CapabilitiesResult,
   HarnessCapability,
   PermissionOption,
+  PermissionId,
+  RequestId,
   PermissionResolution,
   ProtocolMessage,
   ProtocolMethod,
   ProtocolResponse,
   StopReason,
+  SessionId,
+  TurnId,
+  MessageId,
   WorkerDriver,
   WorkerDriverFactory,
 } from "@reins/protocol";
+import { machineErrorSchema } from "@reins/protocol";
 import {
   createInMemoryTransportServer,
   type TransportConnection,
 } from "@reins/transport";
+import * as v from "valibot";
 import { afterEach, describe, expect, test, vi } from "vitest";
 
 import type { Daemon } from "../../src/daemon.ts";
@@ -91,7 +99,7 @@ function makeRequester(
     timeoutMs = 2000,
   ): Promise<ProtocolResponse> => {
     seq += 1;
-    const requestId = `r${seq}`;
+    const requestId = `r${seq}` as RequestId;
     return new Promise<ProtocolResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
         unsubscribe();
@@ -193,7 +201,7 @@ function createFakeHarness(options: {
     terminated: [],
   };
   let emitEvent: ((event: DomainEvent) => void) | null = null;
-  let current: { sessionId: string; turnId: string } | null = null;
+  let current: { sessionId: SessionId; turnId: TurnId } | null = null;
   let permissionSeq = 0;
   let messageSeq = 0;
 
@@ -207,7 +215,7 @@ function createFakeHarness(options: {
           type: "permission.requested",
           sessionId: spec.sessionId,
           turnId: spec.turnId,
-          permissionId: `p${permissionSeq}`,
+          permissionId: `p${permissionSeq}` as PermissionId,
           kind: "tool:Bash",
           input: { command: "echo hi" },
           options: options.autoPermission.options,
@@ -266,7 +274,7 @@ function createFakeHarness(options: {
           type: "message",
           sessionId: current.sessionId,
           turnId: current.turnId,
-          messageId: `w${messageSeq}`,
+          messageId: `w${messageSeq}` as MessageId,
           role: "worker",
           content,
         });
@@ -299,30 +307,33 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
 
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
     expect(spawned).toMatchObject({
       kind: "response",
-      result: { sessionId: "s1" },
+      result: { sessionId: "reviewer@g0" },
     });
     fake.controls.completeTurn("end_turn", "ok");
 
     const collector = collectNotifications(client);
     const attached = await requester("attach", {
-      sessionId: "s1",
+      sessionId: "reviewer@g0",
       exitOn: ["end_turn"],
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId: "s1", replayed: 3 },
+      result: { sessionId: "reviewer@g0", replayed: 3 },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
       "turn.completed",
     ]);
-    expect(collector.ended).toEqual([{ sessionId: "s1", reason: "end_turn" }]);
+    expect(collector.ended).toEqual([
+      { sessionId: "reviewer@g0", reason: "end_turn" },
+    ]);
   });
 
   test("未知 harness 返回 unknown_harness 并附合法 harness 列表", async () => {
@@ -334,6 +345,7 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("spawn", {
+      sessionName: "reviewer",
       harness: "nope",
       message: "x",
     });
@@ -341,7 +353,8 @@ describe("daemon 协议面（缝 C）", () => {
       kind: "response",
       error: {
         code: "unknown_harness",
-        context: { valid: { harness: ["fake"] } },
+        harness: "nope",
+        availableHarnesses: ["fake"],
       },
     });
     expect(fake.calls.factoryCalls).toBe(0);
@@ -388,6 +401,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -405,9 +419,10 @@ describe("daemon 协议面（缝 C）", () => {
           status: "completed",
           turn: {
             sessionId,
-            turnId: "s1:t1",
+            turnId: "t1",
             stopReason: "end_turn",
             finalReply: "ok",
+            usage: undefined,
           },
         },
       ],
@@ -424,6 +439,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -439,7 +455,7 @@ describe("daemon 协议面（缝 C）", () => {
     fake.controls.emitWorkerMessage("worker 部分产出");
     await waitFor(() => fake.calls.delivered.length > 0);
     expect(fake.calls.delivered).toEqual([
-      { sessionId, turnId: "s1:t1", message: "边界消息" },
+      { sessionId, turnId: "t1", message: "边界消息" },
     ]);
   });
 
@@ -453,6 +469,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -463,7 +480,7 @@ describe("daemon 协议面（缝 C）", () => {
     expect(resultOf(sent)).toMatchObject({ deliveryPoint: "new_turn" });
     await waitFor(() => fake.calls.delivered.length > 0);
     expect(fake.calls.delivered).toEqual([
-      { sessionId, turnId: "s1:t2", message: "再来一轮" },
+      { sessionId, turnId: "t2", message: "再来一轮" },
     ]);
   });
 
@@ -480,6 +497,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requesterB = makeRequester(clientB);
 
     const spawned = await requesterA("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -533,6 +551,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -540,7 +559,7 @@ describe("daemon 协议面（缝 C）", () => {
 
     const interrupted = await requester("interrupt", { ids: [sessionId] });
     expect(resultOf(interrupted)).toEqual([
-      { sessionId, status: "requested", turnId: "s1:t1" },
+      { sessionId, status: "requested", turnId: "t1" },
     ]);
     expect(fake.calls.interrupted).toEqual([sessionId]);
     fake.controls.completeTurn("cancelled", null);
@@ -564,6 +583,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -584,7 +604,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
 
     const missing = await requester("wait", {
-      ids: ["missing"],
+      ids: ["missing@g0"],
       timeoutMs: 1000,
     });
     expect(missing).toMatchObject({
@@ -610,6 +630,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const collector = collectNotifications(client);
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -651,7 +672,7 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("attach", {
-      sessionId: "s9",
+      sessionId: "missing@g0",
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -669,6 +690,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -732,10 +754,87 @@ describe("daemon 协议面（缝 C）", () => {
         {
           harness: "bad",
           code: "capability_query_failed",
-          message: "Error: boom",
+          cause: { kind: "exception", message: "Error: boom" },
         },
       ],
     });
+  });
+
+  test("capability failure causes are UTF-8 bounded", async () => {
+    const dummyDriver: WorkerDriver = {
+      start() {},
+      deliver() {},
+      interrupt() {},
+      resolvePermission() {},
+      terminate() {},
+    };
+    const makeFailingAdapter = (message: string): HarnessAdapter => ({
+      driverFactory: () => dummyDriver,
+      async capabilities() {
+        throw new Error(message);
+      },
+    });
+    const { server } = startDaemon(
+      new Map([
+        ["ascii", makeFailingAdapter("a".repeat(5000))],
+        ["unicode", makeFailingAdapter("界".repeat(2000))],
+      ]),
+    );
+    const client = server.connect();
+    await flush();
+
+    const result = resultOf(
+      await makeRequester(client).request("capabilities", {}),
+    ) as CapabilitiesResult;
+    const causes = result.failures.map((failure) => failure.cause);
+    expect(causes).toHaveLength(2);
+    for (const cause of causes) {
+      expect(cause).toBeDefined();
+      expect(
+        new TextEncoder().encode(cause?.message).length,
+      ).toBeLessThanOrEqual(4 * 1024);
+    }
+    expect(causes[0]?.message).toHaveLength(4 * 1024);
+    expect(causes[1]?.message).toHaveLength("Error: ".length + 1363);
+  });
+
+  test("unexpected dispatch errors are schema-valid UTF-8 bounded causes", async () => {
+    const failingDriver: WorkerDriver = {
+      start() {
+        throw new Error("a".repeat(5000));
+      },
+      deliver() {},
+      interrupt() {},
+      resolvePermission() {},
+      terminate() {},
+    };
+    const adapter: HarnessAdapter = {
+      driverFactory: () => failingDriver,
+      async capabilities() {
+        return emptyCapability("failing");
+      },
+    };
+    const { server } = startDaemon(new Map([["failing", adapter]]));
+    const client = server.connect();
+    await flush();
+
+    const response = await makeRequester(client).request("spawn", {
+      sessionName: "failing",
+      harness: "failing",
+      message: "hello",
+    });
+    if (!("error" in response)) throw new Error("expected machine error");
+    expect(v.safeParse(machineErrorSchema, response.error).success).toBe(true);
+    expect(response.error).toMatchObject({
+      code: "internal_error",
+      cause: { kind: "exception" },
+    });
+    if (response.error.code !== "internal_error") {
+      throw new Error("expected internal error");
+    }
+    expect(new TextEncoder().encode(response.error.cause?.message).length).toBe(
+      4 * 1024,
+    );
   });
 
   test("未知方法返回 method_not_found，非法 envelope 返回 protocol_error", async () => {
@@ -781,9 +880,21 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
-    await requester("spawn", { harness: "a", message: "1" });
-    await requester("spawn", { harness: "a", message: "2" });
-    await requester("spawn", { harness: "b", message: "3" });
+    await requester("spawn", {
+      sessionName: "a-one",
+      harness: "a",
+      message: "1",
+    });
+    await requester("spawn", {
+      sessionName: "a-two",
+      harness: "a",
+      message: "2",
+    });
+    await requester("spawn", {
+      sessionName: "b-one",
+      harness: "b",
+      message: "3",
+    });
     expect(fakeA.calls.factoryCalls).toBe(1);
     expect(fakeA.calls.starts).toBe(2);
     expect(fakeB.calls.factoryCalls).toBe(1);
@@ -827,6 +938,7 @@ describe("daemon 空闲退出", () => {
     const client = server.connect();
     await flush();
     const spawned = await makeRequester(client).request("spawn", {
+      sessionName: "reviewer",
       harness: "fake",
       message: "hi",
     });

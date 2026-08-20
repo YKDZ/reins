@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
+import { ids } from "./ids.ts";
 
 describe("send", () => {
   test("对 idle 会话触发新回合，ack deliveryPoint=new_turn", () => {
@@ -12,6 +13,7 @@ describe("send", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-17"),
       harness: "codex",
       message: "第一步",
       cwd: "/tmp/demo",
@@ -19,18 +21,20 @@ describe("send", () => {
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
-      turnId: "s1:t1",
+      turnId: ids.turn("t1"),
       stopReason: "end_turn",
       finalReply: "完成",
       usage: {},
     });
 
     expect(machine.send({ sessionId: id, message: "继续" })).toEqual({
-      messageId: "m1",
+      sessionId: id,
+      turnId: ids.turn("t2"),
+      messageId: ids.message("m1"),
       deliveryPoint: "new_turn",
     });
     expect(fake.controls.delivered).toEqual([
-      { sessionId: id, turnId: "s1:t2", message: "继续" },
+      { sessionId: id, turnId: ids.turn("t2"), message: "继续" },
     ]);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
@@ -47,13 +51,16 @@ describe("send", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-18"),
       harness: "codex",
       message: "进行中",
       cwd: "/tmp/demo",
     });
 
     expect(machine.send({ sessionId: id, message: "改用方案 B" })).toEqual({
-      messageId: "m1",
+      sessionId: id,
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m1"),
       deliveryPoint: "boundary",
     });
     expect(fake.controls.delivered).toEqual([]);
@@ -61,15 +68,15 @@ describe("send", () => {
     fake.controls.emit({
       type: "tool.completed",
       sessionId: id,
-      turnId: "s1:t1",
-      toolCallId: "c1",
+      turnId: ids.turn("t1"),
+      toolCallId: ids.toolCall("c1"),
       name: "Read",
       result: "app.ts",
       isError: false,
     });
 
     expect(fake.controls.delivered).toEqual([
-      { sessionId: id, turnId: "s1:t1", message: "改用方案 B" },
+      { sessionId: id, turnId: ids.turn("t1"), message: "改用方案 B" },
     ]);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
@@ -88,6 +95,7 @@ describe("send", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-19"),
       harness: "qoder",
       message: "进行中",
       cwd: "/tmp/demo",
@@ -98,15 +106,15 @@ describe("send", () => {
     fake.controls.emit({
       type: "message",
       sessionId: id,
-      turnId: "s1:t1",
-      messageId: "m-agent",
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m-agent"),
       role: "worker",
       content: "阶段小结",
     });
 
     expect(fake.controls.delivered).toEqual([
-      { sessionId: id, turnId: "s1:t1", message: "第一条" },
-      { sessionId: id, turnId: "s1:t1", message: "第二条" },
+      { sessionId: id, turnId: ids.turn("t1"), message: "第一条" },
+      { sessionId: id, turnId: ids.turn("t1"), message: "第二条" },
     ]);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
@@ -123,8 +131,8 @@ describe("send", () => {
           content: event.type === "message" ? event.content : "",
         })),
     ).toEqual([
-      { messageId: "m1", content: "第一条" },
-      { messageId: "m2", content: "第二条" },
+      { messageId: ids.message("m1"), content: "第一条" },
+      { messageId: ids.message("m2"), content: "第二条" },
     ]);
   });
 
@@ -132,6 +140,7 @@ describe("send", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-20"),
       harness: "dsh",
       message: "临时",
       cwd: "/tmp/demo",
@@ -142,7 +151,7 @@ describe("send", () => {
       expect.objectContaining({ code: "session_killed" }),
     );
     expect(() =>
-      machine.send({ sessionId: "s999", message: "hi" }),
+      machine.send({ sessionId: ids.session("missing@g0"), message: "hi" }),
     ).toThrowError(expect.objectContaining({ code: "session_not_found" }));
   });
 });

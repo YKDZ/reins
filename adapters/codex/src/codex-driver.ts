@@ -7,6 +7,7 @@ import type {
   WorkerDriver,
   WorkerDriverFactory,
   WorkerSpec,
+  PermissionId,
 } from "@reins/protocol";
 
 import type { UserInput } from "#/generated/v2/UserInput";
@@ -41,7 +42,7 @@ export function createCodexDriver(deps: {
     let threadId = "";
     let activeTurnId: string | null = null;
     let ended = false;
-    const pendingByRequest = new Map<number, string>();
+    const pendingByRequest = new Map<number, PermissionId>();
 
     async function startTurn(message: string): Promise<void> {
       if (transport === null || threadId === "") return;

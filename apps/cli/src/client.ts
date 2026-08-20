@@ -5,7 +5,7 @@ import type {
   ProtocolParams,
   ProtocolResponse,
 } from "@reins/protocol";
-import { protocolResultSchemaFor } from "@reins/protocol";
+import { protocolResultSchemaFor, requestIdSchema } from "@reins/protocol";
 import type { TransportConnection } from "@reins/transport";
 import * as v from "valibot";
 
@@ -52,10 +52,8 @@ export function createReinsClient(
       }
       return;
     }
-    const error = machineError("internal_error", {
-      transport: event.kind,
-      message:
-        event.kind === "closed" ? "connection closed" : "transport error",
+    const error = machineError({
+      code: "daemon_disconnected",
     });
     for (const entry of pending.values()) {
       entry.reject(new Error(JSON.stringify(error)));
@@ -66,19 +64,12 @@ export function createReinsClient(
   return {
     request(method, params, timeoutMs = 30_000) {
       seq += 1;
-      const requestId = `cli${seq}`;
+      const requestId = v.parse(requestIdSchema, `cli${seq}`);
       return new Promise<ProtocolResponse>((resolve, reject) => {
         const timer = setTimeout(() => {
           pending.delete(requestId);
           reject(
-            new Error(
-              JSON.stringify(
-                machineError("protocol_error", {
-                  method,
-                  timeoutMs,
-                }),
-              ),
-            ),
+            new Error(JSON.stringify(machineError({ code: "daemon_timeout" }))),
           );
         }, timeoutMs);
         pending.set(requestId, {
@@ -96,10 +87,7 @@ export function createReinsClient(
               reject(
                 new Error(
                   JSON.stringify(
-                    machineError("protocol_error", {
-                      method,
-                      reason: "invalid_result",
-                    }),
+                    machineError({ code: "invalid_daemon_response" }),
                   ),
                 ),
               );

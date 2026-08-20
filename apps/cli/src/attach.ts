@@ -34,8 +34,14 @@ function optionLabel(option: PermissionOption, index: number): string {
 
 async function resolveFromMenu(
   input: NodeJS.ReadableStream,
-  sessionId: string,
-  permissionId: string,
+  sessionId: Extract<
+    DomainEvent,
+    { type: "permission.requested" }
+  >["sessionId"],
+  permissionId: Extract<
+    DomainEvent,
+    { type: "permission.requested" }
+  >["permissionId"],
   event: Extract<DomainEvent, { type: "permission.requested" }>,
   client: ReinsClient,
 ): Promise<void> {
@@ -145,7 +151,9 @@ export async function runAndWait(
 ): Promise<never> {
   const spawnResponse = await client.request("spawn", params.spawn);
   if ("error" in spawnResponse) throw spawnResponse.error;
-  const sessionId = (spawnResponse.result as { sessionId: string }).sessionId;
+  const sessionId = (
+    spawnResponse.result as { sessionId: import("@reins/protocol").SessionId }
+  ).sessionId;
   const holder: {
     finalTurn: Extract<DomainEvent, { type: "turn.completed" }> | null;
   } = { finalTurn: null };

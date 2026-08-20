@@ -1,7 +1,9 @@
 import type {
   DomainEvent,
+  PermissionId,
   PermissionResolution,
   SessionId,
+  TurnId,
   WorkerDriver,
   WorkerDriverFactory,
   WorkerSpec,
@@ -12,24 +14,24 @@ export type FakeDriverControls = {
   readonly started: readonly WorkerSpec[];
   readonly delivered: ReadonlyArray<{
     sessionId: SessionId;
-    turnId: string;
+    turnId: TurnId;
     message: string;
   }>;
   readonly interrupted: ReadonlyArray<{ sessionId: SessionId }>;
   readonly terminated: readonly SessionId[];
   readonly resolved: ReadonlyArray<{
     sessionId: SessionId;
-    permissionId: string;
+    permissionId: PermissionId;
     resolution: PermissionResolution;
   }>;
 };
 
 export function createFakeDriver(options?: {
   start?: (spec: WorkerSpec) => void;
-  deliver?: (sessionId: SessionId, turnId: string, message: string) => void;
+  deliver?: (sessionId: SessionId, turnId: TurnId, message: string) => void;
   resolvePermission?: (
     sessionId: SessionId,
-    permissionId: string,
+    permissionId: PermissionId,
     resolution: PermissionResolution,
   ) => void;
   terminate?: (sessionId: SessionId) => void;
@@ -44,14 +46,14 @@ export function createFakeDriver(options?: {
   const started: WorkerSpec[] = [];
   const delivered: {
     sessionId: SessionId;
-    turnId: string;
+    turnId: TurnId;
     message: string;
   }[] = [];
   const interrupted: { sessionId: SessionId }[] = [];
   const terminated: SessionId[] = [];
   const resolved: {
     sessionId: SessionId;
-    permissionId: string;
+    permissionId: PermissionId;
     resolution: PermissionResolution;
   }[] = [];
 

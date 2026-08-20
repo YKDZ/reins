@@ -1,6 +1,11 @@
 import { readFile } from "node:fs/promises";
 
-import type { DomainEvent } from "@reins/protocol";
+import type {
+  DomainEvent,
+  SessionId,
+  SessionName,
+  TurnId,
+} from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createCodexDriver } from "#/codex-driver";
@@ -32,8 +37,9 @@ describe("录制 fixture 回放", () => {
     const events: DomainEvent[] = [];
     const driver = factory((event) => events.push(event));
     driver.start({
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId: "reviewer@g1" as SessionId,
+      turnId: "t1" as TurnId,
+      sessionName: "reviewer" as SessionName,
       harness: "codex",
       message: "列出当前目录的内容",
       cwd: "/tmp",

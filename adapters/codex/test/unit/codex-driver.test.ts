@@ -1,4 +1,10 @@
-import type { DomainEvent } from "@reins/protocol";
+import type {
+  DomainEvent,
+  PermissionId,
+  SessionId,
+  SessionName,
+  TurnId,
+} from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createCodexDriver } from "#/codex-driver";
@@ -10,6 +16,11 @@ const flush = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
+const sessionId = "reviewer@g1" as SessionId;
+const firstTurnId = "t1" as TurnId;
+const secondTurnId = "t2" as TurnId;
+const permissionId = "p1" as PermissionId;
+const sessionName = "reviewer" as SessionName;
 
 function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
   events: DomainEvent[];
@@ -26,8 +37,9 @@ function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
   const events: DomainEvent[] = [];
   const driver = factory((event) => events.push(event));
   driver.start({
-    sessionId: "s1",
-    turnId: "s1:t1",
+    sessionId,
+    turnId: firstTurnId,
+    sessionName,
     harness: "codex",
     message: "检查",
     cwd: "/tmp/demo",
@@ -105,8 +117,8 @@ describe("codex driver", () => {
     ]);
     expect(events.at(-1)).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "end_turn",
       finalReply: "分析完成",
     });
@@ -153,16 +165,16 @@ describe("codex driver", () => {
     ).toEqual([
       {
         type: "tool.requested",
-        sessionId: "s1",
-        turnId: "s1:t1",
-        toolCallId: "e1",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
         name: "commandExecution",
       },
       {
         type: "tool.completed",
-        sessionId: "s1",
-        turnId: "s1:t1",
-        toolCallId: "e1",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
         name: "commandExecution",
         result: "not found",
         isError: true,
@@ -191,8 +203,8 @@ describe("codex driver", () => {
     );
     expect(requested).toEqual({
       type: "permission.requested",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       permissionId: "p1",
       kind: "tool:commandExecution",
       input: { threadId: "thr1", turnId: "turn1", itemId: "e1", command: "ls" },
@@ -203,7 +215,7 @@ describe("codex driver", () => {
       ],
     });
 
-    driver.resolvePermission("s1", "p1", {
+    driver.resolvePermission(sessionId, permissionId, {
       outcome: "allow",
       scope: "once",
     });
@@ -247,7 +259,7 @@ describe("codex driver", () => {
     });
     await flush();
 
-    driver.resolvePermission("s1", "p1", {
+    driver.resolvePermission(sessionId, permissionId, {
       outcome: "deny",
     });
     expect(fake.controls.responded()).toEqual([
@@ -259,7 +271,7 @@ describe("codex driver", () => {
     const { fake, driver } = setup();
     await flush();
 
-    driver.deliver("s1", "s1:t1", "继续");
+    driver.deliver(sessionId, firstTurnId, "继续");
     await flush();
     const steer = fake.controls.requests().at(-1);
     expect(steer?.method).toBe("turn/steer");
@@ -275,7 +287,7 @@ describe("codex driver", () => {
       params: { threadId: "thr1", turn: { id: "turn1", status: "completed" } },
     });
     await flush();
-    driver.deliver("s1", "s1:t2", "下一步");
+    driver.deliver(sessionId, secondTurnId, "下一步");
     await flush();
     expect(fake.controls.requests().at(-1)?.method).toBe("turn/start");
   });
@@ -284,7 +296,7 @@ describe("codex driver", () => {
     const { events, fake, driver } = setup();
     await flush();
 
-    driver.interrupt("s1");
+    driver.interrupt(sessionId);
     await flush();
     expect(fake.controls.requests().at(-1)?.method).toBe("turn/interrupt");
 
@@ -299,8 +311,8 @@ describe("codex driver", () => {
     await flush();
     expect(events.at(-1)).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "cancelled",
       finalReply: null,
     });
@@ -310,7 +322,7 @@ describe("codex driver", () => {
     const { events, fake, driver } = setup();
     await flush();
 
-    driver.terminate("s1");
+    driver.terminate(sessionId);
     await flush();
     expect(fake.controls.requests().at(-1)?.method).toBe("thread/delete");
     expect(fake.controls.closed()).toBe(true);
@@ -332,18 +344,19 @@ describe("codex driver", () => {
     await flush();
     fake.controls.end();
 
-    driver.deliver("s1", "s1:t2", "继续");
+    driver.deliver(sessionId, secondTurnId, "继续");
     await flush();
 
     expect(
       events.filter(
-        (event) => event.type === "turn.completed" && event.turnId === "s1:t2",
+        (event) =>
+          event.type === "turn.completed" && event.turnId === secondTurnId,
       ),
     ).toEqual([
       {
         type: "turn.completed",
-        sessionId: "s1",
-        turnId: "s1:t2",
+        sessionId,
+        turnId: secondTurnId,
         stopReason: "failed",
         finalReply: null,
       },

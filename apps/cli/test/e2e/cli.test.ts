@@ -149,7 +149,7 @@ describe("A 类：帮助（stdout + 退出 0）", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain(
-      "Usage: reins spawn <harness> <message...> [options]",
+      "Usage: reins spawn <harness> <message...> --name <session-name> [options]",
     );
     expect(result.stdout).toContain("--authorization-mode");
   });
@@ -193,10 +193,13 @@ describe("CLI 进程边界（缝 D）", () => {
 
   test("spawn 成功并以 JSON 输出 sessionId", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["spawn", "fake", "hello"], env);
+    const result = await runCli(
+      ["spawn", "fake", "hello", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ sessionId: "s1" });
-    await runCli(["kill", "s1"], env);
+    expect(JSON.parse(result.stdout)).toEqual({ sessionId: "test-session@g0" });
+    await runCli(["kill", "test-session@g0"], env);
   });
 
   test("spawn 接受合法 --authorization-mode 与 --meta", async () => {
@@ -210,38 +213,51 @@ describe("CLI 进程边界（缝 D）", () => {
         "allow-all",
         "--meta",
         '{"a":1}',
+        "--name",
+        "test-session",
       ],
       env,
     );
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ sessionId: "s1" });
-    await runCli(["kill", "s1"], env);
+    expect(JSON.parse(result.stdout)).toEqual({ sessionId: "test-session@g0" });
+    await runCli(["kill", "test-session@g0"], env);
   });
 
   test("run 默认只返回紧凑最终结果，不流式回放事件", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["run", "fake", "hello"], env);
+    const result = await runCli(
+      ["run", "fake", "hello", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual({
-      sessionId: "s1",
+      sessionId: "test-session@g0",
       stopReason: "end_turn",
       finalReply: "ok",
     });
     expect(result.stdout).not.toContain('"method":"event"');
-    await runCli(["kill", "s1"], env);
+    await runCli(["kill", "test-session@g0"], env);
   });
 
   test("--pretty run 输出人类可读最终结果", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "run", "fake", "hello"], env);
+    const result = await runCli(
+      ["--pretty", "run", "fake", "hello", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("Turn completed: end_turn (s1)\nok\n");
-    await runCli(["kill", "s1"], env);
+    expect(result.stdout).toBe(
+      "Turn completed: end_turn (test-session@g0)\nok\n",
+    );
+    await runCli(["kill", "test-session@g0"], env);
   });
 
   test("attach 仍默认流式回放事件（JSON 诊断视图）", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(["spawn", "fake", "hello"], env);
+    const spawned = await runCli(
+      ["spawn", "fake", "hello", "--name", "test-session"],
+      env,
+    );
     expect(spawned.exitCode).toBe(0);
     const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
       .sessionId;
@@ -259,7 +275,10 @@ describe("CLI 进程边界（缝 D）", () => {
 
   test("wait 超时退出码 4", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(["spawn", "hang", "wait me"], env);
+    const spawned = await runCli(
+      ["spawn", "hang", "wait me", "--name", "test-session"],
+      env,
+    );
     expect(spawned.exitCode).toBe(0);
     const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
       .sessionId;
@@ -274,15 +293,21 @@ describe("CLI 进程边界（缝 D）", () => {
 
   test("--pretty spawn 输出人类可读英文", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "spawn", "fake", "hi"], env);
+    const result = await runCli(
+      ["--pretty", "spawn", "fake", "hi", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("Created session s1\n");
-    await runCli(["kill", "s1"], env);
+    expect(result.stdout).toBe("Created session test-session@g0\n");
+    await runCli(["kill", "test-session@g0"], env);
   });
 
   test("attach pretty 权限交互并随决议结束", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(["spawn", "permission", "do it"], env);
+    const spawned = await runCli(
+      ["spawn", "permission", "do it", "--name", "test-session"],
+      env,
+    );
     expect(spawned.exitCode).toBe(0);
     const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
       .sessionId;
@@ -300,7 +325,10 @@ describe("CLI 进程边界（缝 D）", () => {
 
   test("attach pretty 显示 caller/worker 角色", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(["spawn", "fake", "hello"], env);
+    const spawned = await runCli(
+      ["spawn", "fake", "hello", "--name", "test-session"],
+      env,
+    );
     expect(spawned.exitCode).toBe(0);
     const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
       .sessionId;
@@ -350,11 +378,11 @@ function sampleForArg(arg: CommandArg): string {
     case "message":
       return "hi";
     case "sessionId":
-      return "s1";
+      return "test-session@g0";
     case "permissionId":
       return "p1";
     case "ids":
-      return "s1";
+      return "test-session@g0";
     default:
       return "x";
   }
@@ -462,7 +490,7 @@ function invalidEnumCases(): UsageCase[] {
 const specialValueCases: UsageCase[] = [
   {
     name: "wait invalid timeout",
-    args: ["wait", "s1", "--timeout", "abc"],
+    args: ["wait", "test-session@g0", "--timeout", "abc"],
     issue: "invalid_value",
     field: "--timeout",
     value: "abc",
@@ -472,7 +500,7 @@ const specialValueCases: UsageCase[] = [
   },
   {
     name: "attach invalid replay",
-    args: ["attach", "s1", "--replay", "-1"],
+    args: ["attach", "test-session@g0", "--replay", "-1"],
     issue: "invalid_value",
     field: "--replay",
     value: "-1",
@@ -482,7 +510,15 @@ const specialValueCases: UsageCase[] = [
   },
   {
     name: "spawn invalid meta",
-    args: ["spawn", "fake", "hi", "--meta", "not-json"],
+    args: [
+      "spawn",
+      "fake",
+      "hi",
+      "--name",
+      "test-session",
+      "--meta",
+      "not-json",
+    ],
     issue: "invalid_value",
     field: "--meta",
     value: "not-json",
@@ -513,7 +549,7 @@ const unknownCommandCase: UsageCase = {
 const unknownOptionSpec = commandSpecForName("spawn");
 const unknownOptionCase: UsageCase = {
   name: "unknown option",
-  args: ["spawn", "fake", "hi", "--nope"],
+  args: ["spawn", "fake", "hi", "--name", "test-session", "--nope"],
   issue: "unknown_option",
   value: "--nope",
   valid: [
@@ -527,7 +563,7 @@ const unknownOptionCase: UsageCase = {
 
 const removedInterruptMessageOptionCase: UsageCase = {
   name: "interrupt removed message option",
-  args: ["interrupt", "s1", "--message", "legacy explanation"],
+  args: ["interrupt", "test-session@g0", "--message", "legacy explanation"],
   issue: "unknown_option",
   value: "--message",
   valid: ["--pretty"],
@@ -572,31 +608,29 @@ describe("CLI 错误矩阵（缝 D，从命令规范派生）", () => {
         const parsed = JSON.parse(result.stdout) as {
           code: string;
           message: string;
-          context: {
-            issue?: string;
-            target?: string;
-            field?: string;
-            value?: string;
-            valid?: string[];
-            hint?: string;
-          };
+          issue?: string;
+          target?: string;
+          field?: string;
+          value?: string;
+          valid?: string[];
+          hint?: string;
         };
         expect(parsed.code).toBe("usage_error");
-        expect(parsed.context.issue).toBe(usageCase.issue);
+        expect(parsed.issue).toBe(usageCase.issue);
         if (usageCase.target !== undefined) {
-          expect(parsed.context.target).toBe(usageCase.target);
+          expect(parsed.target).toBe(usageCase.target);
         }
         if (usageCase.field !== undefined) {
-          expect(parsed.context.field).toBe(usageCase.field);
+          expect(parsed.field).toBe(usageCase.field);
         }
         if (usageCase.value !== undefined) {
-          expect(parsed.context.value).toBe(usageCase.value);
+          expect(parsed.value).toBe(usageCase.value);
         }
         if (usageCase.valid !== undefined) {
-          expect(parsed.context.valid).toEqual([...usageCase.valid]);
+          expect(parsed.valid).toEqual([...usageCase.valid]);
         }
         if (usageCase.hint !== undefined) {
-          expect(parsed.context.hint).toBe(usageCase.hint);
+          expect(parsed.hint).toBe(usageCase.hint);
         }
         for (const fragment of usageCase.suggestionContains ?? []) {
           expect(parsed.message, usageCase.name).toContain(fragment);
@@ -609,31 +643,32 @@ describe("CLI 错误矩阵（缝 D，从命令规范派生）", () => {
 describe("CLI 输出金样（逐字节）", () => {
   test("缺 harness 的 pretty 错误块", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "spawn"], env);
+    const result = await runCli(
+      ["--pretty", "spawn", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(64);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
       "error: Missing required argument 'harness'\n" +
         "suggestion: Run 'reins capabilities' to list valid harnesses\n" +
-        "usage: reins spawn <harness> <message...> [options]\n",
+        "usage: reins spawn <harness> <message...> --name <session-name> [options]\n",
     );
   });
 
   test("缺 harness 的 JSON 机器错误", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["spawn"], env);
+    const result = await runCli(["spawn", "--name", "test-session"], env);
     expect(result.exitCode).toBe(64);
     expect(result.stderr).toBe("");
     expect(result.stdout).toBe(
       `${JSON.stringify({
         code: "usage_error",
+        issue: "missing_argument",
+        target: "argument",
+        field: "harness",
         message:
           "Missing required argument 'harness'. Run 'reins capabilities' to list valid harnesses",
-        context: {
-          issue: "missing_argument",
-          target: "argument",
-          field: "harness",
-        },
       })}\n`,
     );
   });
@@ -664,13 +699,16 @@ describe("CLI 输出金样（逐字节）", () => {
 
   test("未知 harness 的 pretty 错误块（能力矩阵内联）", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "spawn", "nope", "x"], env);
+    const result = await runCli(
+      ["--pretty", "spawn", "nope", "x", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(64);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
       "error: Unknown harness 'nope'\n" +
         "suggestion: Allowed: fake, hang, permission\n" +
-        "usage: reins spawn <harness> <message...> [options]\n",
+        "usage: reins spawn <harness> <message...> --name <session-name> [options]\n",
     );
   });
 });
@@ -678,41 +716,57 @@ describe("CLI 输出金样（逐字节）", () => {
 describe("CLI 动态值错误（能力矩阵一次往返）", () => {
   test("unknown harness JSON 内联合法列表", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["spawn", "nope", "x"], env);
+    const result = await runCli(
+      ["spawn", "nope", "x", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(64);
     expect(result.stderr).toBe("");
     const parsed = JSON.parse(result.stdout) as {
       code: string;
       message: string;
-      context?: { valid?: { harness?: string[] }; value?: string };
+      harness?: string;
+      availableHarnesses?: string[];
     };
     expect(parsed.code).toBe("unknown_harness");
-    expect(parsed.context?.value).toBe("nope");
-    expect(parsed.context?.valid?.harness).toContain("fake");
+    expect(parsed.harness).toBe("nope");
+    expect(parsed.availableHarnesses).toContain("fake");
     expect(parsed.message).toContain("Unknown harness 'nope'");
     expect(parsed.message).toContain("Allowed: fake");
   });
 
   test("invalid model JSON 内联合法模型", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["spawn", "fake", "x", "--model", "nope"], env);
+    const result = await runCli(
+      ["spawn", "fake", "x", "--model", "nope", "--name", "test-session"],
+      env,
+    );
     expect(result.exitCode).toBe(64);
     expect(result.stderr).toBe("");
     const parsed = JSON.parse(result.stdout) as {
       code: string;
       message: string;
-      context?: { valid?: { models?: Array<{ id: string }> } };
+      issues?: Array<{ path: string; reason: string }>;
     };
     expect(parsed.code).toBe("invalid_params");
-    expect(parsed.context?.valid?.models?.[0]?.id).toBe("fake-model");
-    expect(parsed.message).toContain("Invalid model 'nope' for harness 'fake'");
-    expect(parsed.message).toContain("Allowed models: fake-model (low, high)");
+    expect(parsed.issues?.[0]?.path).toBe("model");
+    expect(parsed.message).toBe("Invalid parameter value: model");
   });
 
   test("invalid reasoning JSON 内联合法强度", async () => {
     const { env } = await freshEnv();
     const result = await runCli(
-      ["spawn", "fake", "x", "--model", "fake-model", "--reasoning", "bogus"],
+      [
+        "spawn",
+        "fake",
+        "x",
+        "--model",
+        "fake-model",
+        "--reasoning",
+        "bogus",
+        "--name",
+        "test-session",
+      ],
       env,
     );
     expect(result.exitCode).toBe(64);
@@ -722,28 +776,30 @@ describe("CLI 动态值错误（能力矩阵一次往返）", () => {
       message: string;
     };
     expect(parsed.code).toBe("invalid_params");
-    expect(parsed.message).toContain(
-      "Invalid reasoning effort 'bogus' for model 'fake-model'",
-    );
-    expect(parsed.message).toContain("Allowed: low, high");
+    expect(parsed.message).toBe("Invalid parameter value: reasoning");
   });
 
   test("pretty invalid model 内联合法模型与 usage", async () => {
     const { env } = await freshEnv();
     const result = await runCli(
-      ["--pretty", "spawn", "fake", "x", "--model", "nope"],
+      [
+        "--pretty",
+        "spawn",
+        "fake",
+        "x",
+        "--model",
+        "nope",
+        "--name",
+        "test-session",
+      ],
       env,
     );
     expect(result.exitCode).toBe(64);
     expect(result.stdout).toBe("");
+    expect(result.stderr).toContain("error: Invalid parameter value: model");
+    expect(result.stderr).not.toContain("suggestion:");
     expect(result.stderr).toContain(
-      "error: Invalid model 'nope' for harness 'fake'",
-    );
-    expect(result.stderr).toContain(
-      "suggestion: Allowed models: fake-model (low, high)",
-    );
-    expect(result.stderr).toContain(
-      "usage: reins spawn <harness> <message...> [options]",
+      "usage: reins spawn <harness> <message...> --name <session-name> [options]",
     );
   });
 });
@@ -751,7 +807,7 @@ describe("CLI 动态值错误（能力矩阵一次往返）", () => {
 describe("CLI 域错误（不夹带 usage）", () => {
   test("send 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["send", "s999", "hi"], env);
+    const result = await runCli(["send", "missing@g0", "hi"], env);
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
@@ -760,7 +816,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("wait 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["wait", "s999"], env);
+    const result = await runCli(["wait", "missing@g0"], env);
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
@@ -769,14 +825,14 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("kill 未知会话返回 not_found 而非报错", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["kill", "s999"], env);
+    const result = await runCli(["kill", "missing@g0"], env);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual([
-      { sessionId: "s999", status: "not_found" },
+      { sessionId: "missing@g0", status: "not_found" },
     ]);
   });
 
-  test("daemon 不可达返回 internal_error", async () => {
+  test("daemon 不可达返回 daemon_start_failed", async () => {
     const { env } = await freshEnv();
     const result = await runCli(["capabilities"], {
       ...env,
@@ -784,15 +840,15 @@ describe("CLI 域错误（不夹带 usage）", () => {
     });
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
-      code: "internal_error",
+      code: "daemon_start_failed",
     });
   });
 
   test("pretty 域错误不输出 suggestion 与 usage", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "send", "s999", "hi"], env);
+    const result = await runCli(["--pretty", "send", "missing@g0", "hi"], env);
     expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("error: Session not found: s999\n");
+    expect(result.stderr).toBe("error: Session not found: missing@g0\n");
     expect(result.stderr).not.toContain("suggestion:");
     expect(result.stderr).not.toContain("usage:");
   });

@@ -1,7 +1,11 @@
-import type { DomainEvent } from "@reins/protocol";
+import type { DomainEvent, SessionId, TurnId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { HarnessSession } from "#/harness-session";
+
+const sessionId = "reviewer@g1" as SessionId;
+const firstTurnId = "t1" as TurnId;
+const secondTurnId = "t2" as TurnId;
 
 function setup(cleared: string[] = []): {
   events: DomainEvent[];
@@ -10,7 +14,7 @@ function setup(cleared: string[] = []): {
 } {
   const events: DomainEvent[] = [];
   const session = new HarnessSession<string>({
-    sessionId: "s1",
+    sessionId,
     emit: (event) => events.push(event),
     onClearPending: (attachments) => cleared.push(...attachments),
   });
@@ -20,14 +24,14 @@ function setup(cleared: string[] = []): {
 describe("HarnessSession", () => {
   test("endTurn(end_turn) 携带 finalText 与 usage 并复位", () => {
     const { session } = setup();
-    session.beginTurn("s1:t1");
+    session.beginTurn(firstTurnId);
     session.setFinalText("完成");
     session.setUsage({ input_tokens: 5 });
 
     expect(session.endTurn("end_turn")).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "end_turn",
       finalReply: "完成",
       usage: { input_tokens: 5 },
@@ -38,7 +42,7 @@ describe("HarnessSession", () => {
 
   test("cancelled 终态 finalReply 为 null", () => {
     const { session } = setup();
-    session.beginTurn("s1:t1");
+    session.beginTurn(firstTurnId);
     expect(session.endTurn("cancelled")).toMatchObject({
       stopReason: "cancelled",
       finalReply: null,
@@ -47,7 +51,7 @@ describe("HarnessSession", () => {
 
   test("requestPermission 发事件并登记 pending，takePending 取走", () => {
     const { events, session } = setup();
-    session.beginTurn("s1:t1");
+    session.beginTurn(firstTurnId);
     const id = session.requestPermission(
       "tool:Bash",
       { command: "ls" },
@@ -58,8 +62,8 @@ describe("HarnessSession", () => {
     expect(events).toEqual([
       {
         type: "permission.requested",
-        sessionId: "s1",
-        turnId: "s1:t1",
+        sessionId,
+        turnId: firstTurnId,
         permissionId: id,
         kind: "tool:Bash",
         input: { command: "ls" },
@@ -72,7 +76,7 @@ describe("HarnessSession", () => {
 
   test("endTurn 清空 pending 并把附件交给 onClearPending", () => {
     const { session, cleared } = setup();
-    session.beginTurn("s1:t1");
+    session.beginTurn(firstTurnId);
     session.requestPermission("tool:Bash", {}, [], "a");
     session.requestPermission("tool:Bash", {}, [], "b");
 
@@ -82,14 +86,14 @@ describe("HarnessSession", () => {
 
   test("failActiveTurn 发 failed 并复位清空", () => {
     const { events, session, cleared } = setup();
-    session.beginTurn("s1:t1");
+    session.beginTurn(firstTurnId);
     session.requestPermission("tool:Bash", {}, [], "a");
 
     session.failActiveTurn();
     expect(events.at(-1)).toEqual({
       type: "turn.completed",
-      sessionId: "s1",
-      turnId: "s1:t1",
+      sessionId,
+      turnId: firstTurnId,
       stopReason: "failed",
       finalReply: null,
     });
@@ -99,10 +103,10 @@ describe("HarnessSession", () => {
 
   test("setTurnId 只改回合号，不复位 finalText", () => {
     const { session } = setup();
-    session.beginTurn("s1:t1");
+    session.beginTurn(firstTurnId);
     session.setFinalText("保留");
-    session.setTurnId("s1:t2");
-    expect(session.turnId).toBe("s1:t2");
+    session.setTurnId(secondTurnId);
+    expect(session.turnId).toBe(secondTurnId);
     expect(session.finalText).toBe("保留");
   });
 });

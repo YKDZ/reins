@@ -1,8 +1,12 @@
 import type {
   HarnessCapability,
+  SessionId,
+  TurnId,
   WorkerDriver,
   WorkerDriverFactory,
 } from "@reins/protocol";
+import { messageIdSchema, permissionIdSchema } from "@reins/protocol";
+import * as v from "valibot";
 
 function capability(harness: string, modelId: string): HarnessCapability {
   return {
@@ -27,7 +31,7 @@ function fakeAdapter(options: {
 } {
   const { harness, modelId, behavior } = options;
   const factory: WorkerDriverFactory = (emit) => {
-    let current: { sessionId: string; turnId: string } | null = null;
+    let current: { sessionId: SessionId; turnId: TurnId } | null = null;
     const driver: WorkerDriver = {
       start(spec) {
         current = { sessionId: spec.sessionId, turnId: spec.turnId };
@@ -37,7 +41,7 @@ function fakeAdapter(options: {
               type: "message",
               sessionId: spec.sessionId,
               turnId: spec.turnId,
-              messageId: "w1",
+              messageId: v.parse(messageIdSchema, "w1"),
               role: "worker",
               content: "interim",
             });
@@ -55,7 +59,7 @@ function fakeAdapter(options: {
             type: "permission.requested",
             sessionId: spec.sessionId,
             turnId: spec.turnId,
-            permissionId: "p1",
+            permissionId: v.parse(permissionIdSchema, "p1"),
             kind: "tool:Bash",
             input: { command: "ls" },
             options: [
@@ -67,10 +71,11 @@ function fakeAdapter(options: {
       },
       deliver(_sessionId, turnId) {
         if (current === null) return;
+        const sessionId = current.sessionId;
         queueMicrotask(() => {
           emit({
             type: "turn.completed",
-            sessionId: current?.sessionId ?? "",
+            sessionId,
             turnId,
             stopReason: "end_turn",
             finalReply: "ok",

@@ -3,6 +3,7 @@ import { existsSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 import type { ProtocolMessage } from "@reins/protocol";
+import { makeErrorCause } from "@reins/protocol";
 import {
   createUnixSocketClient,
   resolveReinsSocketPath,
@@ -74,7 +75,11 @@ export async function ensureDaemon(
     await sleep(50);
   }
   child.kill();
-  throw machineError("internal_error", {
-    message: `daemon failed to start within ${timeoutMs}ms (run reins-daemon in the foreground to see the error)`,
+  throw machineError({
+    code: "daemon_start_failed",
+    cause: makeErrorCause(
+      "timeout",
+      `daemon failed to start within ${timeoutMs}ms (run reins-daemon in the foreground to see the error)`,
+    ),
   });
 }

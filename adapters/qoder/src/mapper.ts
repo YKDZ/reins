@@ -59,7 +59,7 @@ function mapStreamEvent(
         type: "text.delta",
         sessionId: session.sessionId,
         turnId,
-        messageId: message.uuid,
+        messageId: session.messageId(message.uuid),
         delta: event.delta.text,
       },
     ];
@@ -78,7 +78,7 @@ function mapStreamEvent(
         type: "tool.requested",
         sessionId: session.sessionId,
         turnId,
-        toolCallId: block.id,
+        toolCallId: session.toolCallId(block.id),
         name: block.name,
       },
     ];
@@ -113,7 +113,7 @@ function mapAssistant(
         type: "tool.requested",
         sessionId: session.sessionId,
         turnId,
-        toolCallId: block.id,
+        toolCallId: session.toolCallId(block.id),
         name: block.name,
       });
       continue;
@@ -123,7 +123,7 @@ function mapAssistant(
         type: "tool.completed",
         sessionId: session.sessionId,
         turnId,
-        toolCallId: block.tool_use_id,
+        toolCallId: session.toolCallId(block.tool_use_id),
         name: session.toolNames.get(block.tool_use_id) ?? "",
         result: stringifyToolResult(block.content),
         isError: block.is_error === true,
@@ -141,7 +141,7 @@ function mapAssistant(
       type: "message",
       sessionId: session.sessionId,
       turnId,
-      messageId: message.uuid,
+      messageId: session.messageId(message.uuid),
       role: "worker",
       content: text,
     });
@@ -177,7 +177,7 @@ function mapUserMessage(
           type: "tool.completed",
           sessionId: session.sessionId,
           turnId: session.turnId,
-          toolCallId: block.tool_use_id,
+          toolCallId: session.toolCallId(block.tool_use_id),
           name: session.toolNames.get(block.tool_use_id) ?? "",
           result: stringifyToolResult(block.content),
           isError: block.is_error === true,
@@ -192,7 +192,7 @@ function mapUserMessage(
     type: "tool.completed",
     sessionId: session.sessionId,
     turnId: session.turnId,
-    toolCallId,
+    toolCallId: session.toolCallId(toolCallId),
     name: session.toolNames.get(toolCallId) ?? "",
     result: stringifyToolResult(message.tool_use_result),
     isError: meta?.non_execution_kind !== undefined,

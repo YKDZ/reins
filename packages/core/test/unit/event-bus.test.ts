@@ -3,12 +3,14 @@ import { describe, expect, test } from "vitest";
 
 import { createEventBus } from "#/event-bus";
 
+import { ids } from "./ids.ts";
+
 function makeEvent(seq: number): DomainEvent {
   return {
     type: "text.delta",
-    sessionId: "s1",
-    turnId: "s1:t1",
-    messageId: `m${seq}`,
+    sessionId: ids.session("event@g0"),
+    turnId: ids.turn("t1"),
+    messageId: ids.message(`m${seq}`),
     delta: `${seq}`,
   };
 }

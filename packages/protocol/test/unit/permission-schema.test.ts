@@ -95,8 +95,8 @@ describe("决议菜单 schema", () => {
 
 describe("权限事件", () => {
   const base = {
-    sessionId: "s1",
-    turnId: "s1:t1",
+    sessionId: "reviewer@g7",
+    turnId: "t1",
     permissionId: "p1",
     kind: "tool:Bash",
   };
@@ -125,24 +125,29 @@ describe("权限事件", () => {
   });
 
   test("permission.resolved 携带决议而非二值 decision", () => {
+    const resolvedBase = {
+      sessionId: base.sessionId,
+      turnId: base.turnId,
+      permissionId: base.permissionId,
+    };
     ok(domainEventSchema, {
       type: "permission.resolved",
-      ...base,
+      ...resolvedBase,
       resolution: { outcome: "allow", scope: "session" },
     });
     ok(domainEventSchema, {
       type: "permission.resolved",
-      ...base,
+      ...resolvedBase,
       resolution: { outcome: "deny", feedback: "不要用 sudo" },
     });
     bad(domainEventSchema, {
       type: "permission.resolved",
-      ...base,
+      ...resolvedBase,
       decision: "allow",
     });
     bad(domainEventSchema, {
       type: "permission.resolved",
-      ...base,
+      ...resolvedBase,
       resolution: { outcome: "allow" },
     });
   });
@@ -150,8 +155,8 @@ describe("权限事件", () => {
 
 describe("工具生命周期事件", () => {
   const base = {
-    sessionId: "s1",
-    turnId: "s1:t1",
+    sessionId: "reviewer@g7",
+    turnId: "t1",
     toolCallId: "c1",
     name: "Bash",
   };
@@ -178,11 +183,13 @@ describe("授权模式与决议命令", () => {
     ok(spawnParamsSchema, {
       harness: "codex",
       message: "x",
+      sessionName: "reviewer",
       authorizationMode: "interactive",
     });
     ok(spawnParamsSchema, {
       harness: "codex",
       message: "x",
+      sessionName: "reviewer",
       authorizationMode: "allowAll",
     });
     bad(spawnParamsSchema, {
@@ -199,16 +206,16 @@ describe("授权模式与决议命令", () => {
 
   test("resolvePermission 参数必须携带完整决议", () => {
     ok(resolvePermissionParamsSchema, {
-      sessionId: "s1",
+      sessionId: "reviewer@g7",
       permissionId: "p1",
       resolution: { outcome: "allow", scope: "once" },
     });
     bad(resolvePermissionParamsSchema, {
-      sessionId: "s1",
+      sessionId: "reviewer@g7",
       permissionId: "p1",
     });
     bad(resolvePermissionParamsSchema, {
-      sessionId: "s1",
+      sessionId: "reviewer@g7",
       permissionId: "p1",
       resolution: { outcome: "allow" },
     });

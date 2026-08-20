@@ -1,5 +1,6 @@
 import type {
   CapabilitiesResult,
+  CapabilityFailure,
   HarnessCapability,
   MachineError,
   SpawnParams,
@@ -10,7 +11,7 @@ import { machineError } from "./errors.ts";
 
 type Store = {
   capabilities: Map<string, HarnessCapability>;
-  failures: Map<string, string>;
+  failures: Map<string, CapabilityFailure>;
 };
 
 // 能力矩阵缓存：CLI 进程生命周期内只查询一次；失败面保留 harness 名，
@@ -36,7 +37,7 @@ export class CapabilityStore {
         ]),
       ),
       failures: new Map(
-        result.failures.map((failure) => [failure.harness, failure.message]),
+        result.failures.map((failure) => [failure.harness, failure]),
       ),
     };
     return this.store;
@@ -46,11 +47,7 @@ export class CapabilityStore {
     const store = await this.load();
     return {
       capabilities: [...store.capabilities.values()],
-      failures: [...store.failures.entries()].map(([harness, message]) => ({
-        harness,
-        code: "capability_query_failed",
-        message,
-      })),
+      failures: [...store.failures.values()],
     };
   }
 
@@ -63,10 +60,10 @@ export class CapabilityStore {
       ...store.failures.keys(),
     ]);
     if (!known.has(params.harness)) {
-      return machineError("unknown_harness", {
-        field: "harness",
-        value: params.harness,
-        valid: { harness: [...known] },
+      return machineError({
+        code: "unknown_harness",
+        harness: params.harness,
+        availableHarnesses: [...known],
       });
     }
     const capability = store.capabilities.get(params.harness);
@@ -76,39 +73,28 @@ export class CapabilityStore {
       (candidate) => candidate.id === params.model,
     );
     if (model === undefined) {
-      return machineError("invalid_params", {
-        field: "model",
-        value: params.model,
-        harness: params.harness,
-        valid: {
-          models: capability.models.map(
-            ({ id, displayName, reasoningEfforts }) => ({
-              id,
-              displayName,
-              reasoningEfforts,
-            }),
-          ),
-        },
+      return machineError({
+        code: "invalid_params",
+        issues: [
+          {
+            issue: "invalid_value",
+            path: "model",
+          },
+        ],
       });
     }
     if (
       params.reasoning !== undefined &&
       !model.reasoningEfforts.includes(params.reasoning)
     ) {
-      return machineError("invalid_params", {
-        field: "reasoning",
-        value: params.reasoning,
-        harness: params.harness,
-        model: model.id,
-        valid: {
-          models: [
-            {
-              id: model.id,
-              displayName: model.displayName,
-              reasoningEfforts: model.reasoningEfforts,
-            },
-          ],
-        },
+      return machineError({
+        code: "invalid_params",
+        issues: [
+          {
+            issue: "invalid_value",
+            path: "reasoning",
+          },
+        ],
       });
     }
     return null;

@@ -133,9 +133,10 @@ const commandSpecData = [
         kind: { type: "text" },
       },
       {
-        name: "label",
-        flags: "--label <text>",
-        description: "session label",
+        name: "name",
+        flags: "--name <session-name>",
+        required: true,
+        description: "caller-authored session name",
         kind: { type: "text" },
       },
       {
@@ -229,9 +230,9 @@ const commandSpecData = [
         kind: { type: "enum", values: ["busy", "idle", "killed"] },
       },
       {
-        name: "label",
-        flags: "--label <text>",
-        description: "filter by label",
+        name: "name",
+        flags: "--name <session-name>",
+        description: "filter by session name",
         kind: { type: "text" },
       },
       {
@@ -337,9 +338,10 @@ const commandSpecData = [
         kind: { type: "text" },
       },
       {
-        name: "label",
-        flags: "--label <text>",
-        description: "session label",
+        name: "name",
+        flags: "--name <session-name>",
+        required: true,
+        description: "caller-authored session name",
         kind: { type: "text" },
       },
     ],

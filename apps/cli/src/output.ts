@@ -3,6 +3,7 @@ import type {
   DomainEvent,
   KillResult,
   SessionInfo,
+  SendAck,
   WaitResult,
 } from "@reins/protocol";
 
@@ -28,15 +29,20 @@ export function printError(
   const rendered = renderCliError(error, spec);
   if (mode === "json") {
     printJsonLine({
-      code: error.code,
+      ...error,
       message: jsonErrorMessage(rendered),
-      context: error.context,
     });
     return;
   }
   process.stderr.write(`error: ${rendered.message}\n`);
   if (rendered.suggestion !== undefined) {
     process.stderr.write(`suggestion: ${rendered.suggestion}\n`);
+  }
+  if ("diagnosticId" in error && error.diagnosticId !== undefined) {
+    process.stderr.write(`diagnostic: ${error.diagnosticId}\n`);
+    process.stderr.write(
+      `suggestion: reins diagnostics --id ${error.diagnosticId}\n`,
+    );
   }
   if (isUsageClassError(error)) {
     process.stderr.write(`usage: reins ${fullUsageFor(spec)}\n`);
@@ -54,10 +60,7 @@ export function printSpawnResult(
   }
 }
 
-export function printSendAck(
-  ack: { messageId: string; deliveryPoint: string },
-  mode: OutputMode,
-): void {
+export function printSendAck(ack: SendAck, mode: OutputMode): void {
   if (mode === "json") {
     printJsonLine(ack);
   } else {
@@ -195,8 +198,13 @@ export function printCapabilitiesResult(
     }
   }
   for (const failure of result.failures) {
+    const cause = failure.cause?.message ?? "no cause provided";
+    const diagnostic =
+      failure.diagnosticId === undefined
+        ? ""
+        : ` (diagnostic: ${failure.diagnosticId})`;
     process.stderr.write(
-      `warning: capability query failed for ${failure.harness}: ${failure.message}\n`,
+      `warning: capability query failed for ${failure.harness}: ${cause}${diagnostic}\n`,
     );
   }
 }

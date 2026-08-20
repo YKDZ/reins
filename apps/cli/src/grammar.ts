@@ -22,10 +22,7 @@ function rendered(message: string, suggestion?: string): RenderedError {
 export function isUsageClassError(error: CliError): boolean {
   if (error.code === "usage_error") return true;
   if (error.code === "unknown_harness") return true;
-  if (error.code === "invalid_params") {
-    const context = error.context ?? {};
-    return typeof context.field === "string" && "value" in context;
-  }
+  if (error.code === "invalid_params") return true;
   return false;
 }
 
@@ -110,7 +107,7 @@ function renderUsageError(
   spec: CommandSpec | undefined,
 ): RenderedError {
   const { issue, target, field, value, valid, hint, detail, didYouMean } =
-    error.context;
+    error;
   switch (issue) {
     case "missing_argument": {
       const message =
@@ -172,83 +169,33 @@ function findSpecItem(
 }
 
 function renderUnknownHarness(error: MachineError): RenderedError {
-  const context = error.context ?? {};
-  const value = typeof context.value === "string" ? context.value : "";
-  const harnesses = validStringList(
-    (context.valid as { harness?: unknown } | undefined)?.harness,
-  );
+  if (!("availableHarnesses" in error) || !("harness" in error))
+    return { message: "Unknown harness" };
+  const harnesses = error.availableHarnesses;
   return rendered(
-    `Unknown harness '${value}'`,
+    `Unknown harness '${error.harness}'`,
     harnesses.length === 0 ? undefined : `Allowed: ${harnesses.join(", ")}`,
   );
 }
 
-type CapabilityModel = {
-  readonly id: string;
-  readonly displayName: string;
-  readonly reasoningEfforts: readonly string[];
-};
-
-function isCapabilityModel(value: unknown): value is CapabilityModel {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as {
-    id?: unknown;
-    displayName?: unknown;
-    reasoningEfforts?: unknown;
-  };
-  return (
-    typeof candidate.id === "string" &&
-    typeof candidate.displayName === "string" &&
-    Array.isArray(candidate.reasoningEfforts) &&
-    candidate.reasoningEfforts.every((effort) => typeof effort === "string")
-  );
-}
-
-function validListOfModels(value: unknown): CapabilityModel[] {
-  return Array.isArray(value) ? value.filter(isCapabilityModel) : [];
-}
-
 function renderInvalidParams(error: MachineError): RenderedError | null {
-  const context = error.context ?? {};
-  const field = context.field;
-  if (typeof field !== "string" || !("value" in context)) return null;
-  const value =
-    typeof context.value === "string" ? context.value : String(context.value);
-  if (field === "model") {
-    const harness = typeof context.harness === "string" ? context.harness : "";
-    const models = validListOfModels(
-      (context.valid as { models?: unknown } | undefined)?.models,
-    );
-    return rendered(
-      `Invalid model '${value}' for harness '${harness}'`,
-      models.length === 0
-        ? undefined
-        : `Allowed models: ${models
-            .map(
-              (model) => `${model.id} (${model.reasoningEfforts.join(", ")})`,
-            )
-            .join("; ")}`,
-    );
+  if (!("issues" in error)) return null;
+  const issue = error.issues[0];
+  if (issue === undefined) return { message: "Invalid parameters" };
+  switch (issue.issue) {
+    case "missing_required":
+      return { message: `Missing required parameter: ${issue.path}` };
+    case "invalid_type":
+      return {
+        message: `Invalid parameter type at ${issue.path}; expected ${issue.expected}`,
+      };
+    case "invalid_value":
+      return { message: `Invalid parameter value: ${issue.path}` };
+    case "invalid_combination":
+      return {
+        message: `Invalid parameter combination: ${issue.paths.join(", ")}`,
+      };
   }
-  if (field === "reasoning") {
-    const model = typeof context.model === "string" ? context.model : "";
-    const models = validListOfModels(
-      (context.valid as { models?: unknown } | undefined)?.models,
-    );
-    const efforts =
-      models[0] === undefined ? [] : [...models[0].reasoningEfforts];
-    return rendered(
-      `Invalid reasoning effort '${value}' for model '${model}'`,
-      efforts.length === 0 ? undefined : `Allowed: ${efforts.join(", ")}`,
-    );
-  }
-  return { message: `Invalid value '${value}' for '${field}'` };
-}
-
-function validStringList(value: unknown): string[] {
-  return Array.isArray(value)
-    ? value.filter((item): item is string => typeof item === "string")
-    : [];
 }
 
 function allowedText(valid: readonly string[] | undefined): string | undefined {
@@ -266,36 +213,52 @@ function longFlagsFor(spec: CommandSpec | undefined): string[] {
 }
 
 function domainMessage(error: MachineError): string {
-  const context = error.context ?? {};
-  const text = (value: unknown): string =>
-    typeof value === "string" ? value : JSON.stringify(value);
-  const sessionId = context.sessionId;
-  const harness = context.harness;
-
   switch (error.code) {
     case "session_not_found":
-      return `Session not found${sessionId === undefined ? "" : `: ${text(sessionId)}`}`;
+      return `Session not found${"sessionId" in error ? `: ${error.sessionId}` : ""}`;
     case "session_killed":
-      return `Session is already killed${sessionId === undefined ? "" : `: ${text(sessionId)}`}`;
+      return `Session is already killed${"sessionId" in error ? `: ${error.sessionId}` : ""}`;
     case "invalid_params":
-      return `Invalid parameters${harness === undefined ? "" : ` for harness ${text(harness)}`}`;
-    case "permission_not_pending":
-      return "Permission request is no longer pending";
-    case "permission_resolution_mismatch":
-      return "Resolution is not allowed by the request menu";
+      return "Invalid parameters";
     case "unknown_harness":
-      return `Unknown harness${harness === undefined ? "" : `: ${text(harness)}`}`;
+      return `Unknown harness${"harness" in error ? `: ${error.harness}` : ""}`;
     case "method_not_found":
-      return `Unknown protocol method: ${context.method === undefined ? "" : text(context.method)}`;
+      return `Unknown protocol method${"method" in error ? `: ${error.method}` : ""}`;
     case "protocol_error":
       return "Protocol error";
     case "capability_query_failed":
-      return `Capability query failed for harness ${harness === undefined ? "" : text(harness)}`;
+      return !("cause" in error) || error.cause === undefined
+        ? "Capability query failed"
+        : error.cause.message;
     case "internal_error":
-      return context.message === undefined
+      return !("cause" in error) || error.cause === undefined
         ? "Internal error"
-        : text(context.message);
-    default:
-      return `Unknown error: ${String(error.code)}`;
+        : error.cause.message;
+    case "permission_not_pending":
+      return `Permission request is no longer pending${"permissionId" in error ? `: ${error.permissionId}` : ""}`;
+    case "permission_resolution_mismatch":
+      return `Resolution is not allowed by the request menu${"permissionId" in error ? `: ${error.permissionId}` : ""}`;
+    case "diagnostic_not_found":
+      return `Diagnostic not found${"diagnosticId" in error ? `: ${error.diagnosticId}` : ""}`;
+    case "session_name_conflict":
+      return `Session name is already in use${"sessionName" in error ? `: ${error.sessionName}` : ""}`;
+    case "unsupported_feature":
+      return `Unsupported feature${"feature" in error ? `: ${error.feature}` : ""}`;
+    case "daemon_timeout":
+      return "Daemon request timed out";
+    case "invalid_daemon_response":
+      return "Daemon returned an invalid response";
+    case "daemon_start_failed":
+      return "cause" in error && error.cause !== undefined
+        ? error.cause.message
+        : "Daemon failed to start";
+    case "daemon_disconnected":
+      return "Daemon disconnected";
+    case "diagnostics_unavailable":
+      return "Diagnostics are unavailable";
+    case "diagnostics_store_corrupt":
+      return !("cause" in error) || error.cause === undefined
+        ? "Diagnostics store is corrupt"
+        : error.cause.message;
   }
 }

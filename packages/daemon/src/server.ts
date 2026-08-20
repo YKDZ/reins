@@ -10,6 +10,7 @@ import type {
   MachineError,
   ProtocolMessage,
   ProtocolRequest,
+  RequestId,
   ResolvePermissionParams,
   SendParams,
   SessionId,
@@ -19,9 +20,11 @@ import type {
 } from "@reins/protocol";
 import {
   machineErrorSchema,
+  makeErrorCause,
   protocolMethodSchema,
   protocolParamsSchemaFor,
   protocolRequestSchema,
+  requestIdSchema,
 } from "@reins/protocol";
 import type { TransportConnection, TransportServer } from "@reins/transport";
 import * as v from "valibot";
@@ -37,7 +40,7 @@ type AttachSubscription = {
   readonly connection: TransportConnection<ProtocolMessage>;
 };
 
-function assertNever(value: never): never {
+function unsupportedProtocolMethod(value: ProtocolRequest["method"]): never {
   throw new Error(`unexpected protocol method: ${String(value)}`);
 }
 
@@ -71,13 +74,6 @@ export function createProtocolServer(options: {
     startedResolve = resolve;
   });
 
-  function machineError(
-    code: MachineError["code"],
-    context?: MachineError["context"],
-  ): MachineError {
-    return context === undefined ? { code } : { code, context };
-  }
-
   function isMachineError(value: unknown): value is MachineError {
     return (
       typeof value === "object" &&
@@ -89,7 +85,10 @@ export function createProtocolServer(options: {
   function toMachineError(error: unknown): MachineError {
     return isMachineError(error)
       ? error
-      : machineError("internal_error", { message: String(error) });
+      : {
+          code: "internal_error",
+          cause: makeErrorCause("exception", String(error)),
+        };
   }
 
   function sendSafe(
@@ -183,10 +182,11 @@ export function createProtocolServer(options: {
     scheduleIdleExit();
   }
 
-  function requestIdOf(raw: unknown): string | null {
+  function requestIdOf(raw: unknown): RequestId | null {
     if (typeof raw !== "object" || raw === null) return null;
     const value = (raw as { requestId?: unknown }).requestId;
-    return typeof value === "string" && value.length > 0 ? value : null;
+    const parsed = v.safeParse(requestIdSchema, value);
+    return parsed.success ? parsed.output : null;
   }
 
   function isKnownMethod(method: unknown): boolean {
@@ -209,9 +209,9 @@ export function createProtocolServer(options: {
           ? (raw as { method?: unknown }).method
           : undefined;
       const methodText = typeof method === "string" ? method : "";
-      const error = isKnownMethod(method)
-        ? machineError("protocol_error")
-        : machineError("method_not_found", { method: methodText });
+      const error: MachineError = isKnownMethod(method)
+        ? { code: "protocol_error" }
+        : { code: "method_not_found", method: methodText || "unknown" };
       sendSafe(connection, { kind: "response", requestId, error });
       return;
     }
@@ -221,12 +221,21 @@ export function createProtocolServer(options: {
       request.params,
     );
     if (!paramsParsed.success) {
+      const issues = paramsParsed.issues.map((issue) => ({
+        issue: "invalid_value" as const,
+        path: issue.path?.map((item) => String(item.key)).join(".") ?? "",
+      }));
+      const error: MachineError = {
+        code: "invalid_params",
+        issues: [
+          issues[0] ?? { issue: "invalid_value", path: "" },
+          ...issues.slice(1),
+        ],
+      };
       sendSafe(connection, {
         kind: "response",
         requestId: request.requestId,
-        error: machineError("invalid_params", {
-          method: request.method,
-        }),
+        error,
       });
       return;
     }
@@ -264,7 +273,7 @@ export function createProtocolServer(options: {
         failures.push({
           harness,
           code: "capability_query_failed",
-          message: String(result.reason),
+          cause: makeErrorCause("exception", String(result.reason)),
         });
       }
     });
@@ -276,9 +285,10 @@ export function createProtocolServer(options: {
     params: AttachParams,
   ): { sessionId: SessionId; replayed: number } {
     if (!knownSessions.has(params.sessionId)) {
-      throw machineError("session_not_found", {
+      throw {
+        code: "session_not_found",
         sessionId: params.sessionId,
-      });
+      } satisfies MachineError;
     }
     const history = eventLog.get(params.sessionId) ?? [];
     const replayedCount =
@@ -347,7 +357,7 @@ export function createProtocolServer(options: {
         );
         return {};
       default:
-        return assertNever(request.method);
+        return unsupportedProtocolMethod(request.method);
     }
   }
 

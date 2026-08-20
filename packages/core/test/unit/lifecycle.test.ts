@@ -4,9 +4,11 @@ import { describe, expect, test } from "vitest";
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
+import { ids } from "./ids.ts";
 
 function spawnBusy(machine: ReturnType<typeof createSessionMachine>) {
   const id = machine.spawn({
+    sessionName: ids.sessionName("fixture-7"),
     harness: "codex",
     message: "分析",
     cwd: "/tmp/demo",
@@ -25,22 +27,22 @@ describe("回合生命周期", () => {
     fake.controls.emit({
       type: "text.delta",
       sessionId: id,
-      turnId: "s1:t1",
-      messageId: "m1",
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m1"),
       delta: "思考中",
     });
     fake.controls.emit({
       type: "tool.requested",
       sessionId: id,
-      turnId: "s1:t1",
-      toolCallId: "c1",
+      turnId: ids.turn("t1"),
+      toolCallId: ids.toolCall("c1"),
       name: "Read",
     });
     fake.controls.emit({
       type: "tool.completed",
       sessionId: id,
-      turnId: "s1:t1",
-      toolCallId: "c1",
+      turnId: ids.turn("t1"),
+      toolCallId: ids.toolCall("c1"),
       name: "Read",
       result: "app.ts",
       isError: false,
@@ -48,15 +50,15 @@ describe("回合生命周期", () => {
     fake.controls.emit({
       type: "message",
       sessionId: id,
-      turnId: "s1:t1",
-      messageId: "m2",
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m2"),
       role: "worker",
       content: "结论",
     });
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
-      turnId: "s1:t1",
+      turnId: ids.turn("t1"),
       stopReason: "end_turn",
       finalReply: "完成",
       usage: { durationMs: 1200 },
@@ -90,7 +92,7 @@ describe("回合生命周期", () => {
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
-      turnId: "s1:t1",
+      turnId: ids.turn("t1"),
       stopReason: "end_turn",
       finalReply: "完成",
       usage: { durationMs: 1200 },
@@ -104,7 +106,7 @@ describe("回合生命周期", () => {
           status: "completed",
           turn: {
             sessionId: id,
-            turnId: "s1:t1",
+            turnId: ids.turn("t1"),
             stopReason: "end_turn",
             finalReply: "完成",
             usage: { durationMs: 1200 },

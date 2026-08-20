@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
+import { ids } from "./ids.ts";
 
 describe("权限与事件", () => {
   test("权限请求与决议按序透传，期间会话保持 busy", () => {
@@ -12,6 +13,7 @@ describe("权限与事件", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-8"),
       harness: "codex",
       message: "跑测试",
       cwd: "/tmp/demo",
@@ -20,8 +22,8 @@ describe("权限与事件", () => {
     fake.controls.emit({
       type: "permission.requested",
       sessionId: id,
-      turnId: "s1:t1",
-      permissionId: "p1",
+      turnId: ids.turn("t1"),
+      permissionId: ids.permission("p1"),
       kind: "Bash(npm test)",
       options: [{ outcome: "allow", scope: "once" }],
     });
@@ -29,7 +31,7 @@ describe("权限与事件", () => {
 
     machine.resolvePermission({
       sessionId: id,
-      permissionId: "p1",
+      permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },
     });
 
@@ -49,6 +51,7 @@ describe("权限与事件", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-9"),
       harness: "codex",
       message: "跑测试",
       cwd: "/tmp/demo",
@@ -56,8 +59,8 @@ describe("权限与事件", () => {
     fake.controls.emit({
       type: "permission.requested",
       sessionId: id,
-      turnId: "s1:t1",
-      permissionId: "p1",
+      turnId: ids.turn("t1"),
+      permissionId: ids.permission("p1"),
       kind: "Bash(npm test)",
       options: [{ outcome: "allow", scope: "once" }],
     });
@@ -66,7 +69,7 @@ describe("权限与事件", () => {
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
-      turnId: "s1:t1",
+      turnId: ids.turn("t1"),
       stopReason: "cancelled",
       finalReply: null,
       usage: {},
@@ -84,6 +87,7 @@ describe("权限与事件", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-10"),
       harness: "dsh",
       message: "跑构建",
       cwd: "/tmp/demo",
@@ -92,7 +96,7 @@ describe("权限与事件", () => {
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
-      turnId: "s1:t1",
+      turnId: ids.turn("t1"),
       stopReason: "failed",
       finalReply: "构建失败",
       usage: {},
@@ -109,7 +113,7 @@ describe("权限与事件", () => {
           status: "completed",
           turn: {
             sessionId: id,
-            turnId: "s1:t1",
+            turnId: ids.turn("t1"),
             stopReason: "failed",
             finalReply: "构建失败",
             usage: {},
@@ -125,6 +129,7 @@ describe("权限与事件", () => {
     const events: DomainEvent[] = [];
     const unsubscribe = machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-11"),
       harness: "codex",
       message: "开始",
       cwd: "/tmp/demo",
@@ -135,8 +140,8 @@ describe("权限与事件", () => {
     fake.controls.emit({
       type: "text.delta",
       sessionId: id,
-      turnId: "s1:t1",
-      messageId: "m1",
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m1"),
       delta: "继续",
     });
 
@@ -155,6 +160,7 @@ describe("权限与事件", () => {
     });
 
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-12"),
       harness: "codex",
       message: "开始",
       cwd: "/tmp/demo",
@@ -169,12 +175,30 @@ describe("list 过滤与参数校验", () => {
   test("按 harness 过滤会话", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
-    machine.spawn({ harness: "codex", message: "a", cwd: "/tmp/demo" });
-    machine.spawn({ harness: "qoder", message: "b", cwd: "/tmp/demo" });
-    machine.spawn({ harness: "dsh", message: "c", cwd: "/tmp/demo" });
+    machine.spawn({
+      sessionName: ids.sessionName("fixture-inline-1"),
+      harness: "codex",
+      message: "a",
+      cwd: "/tmp/demo",
+    });
+    machine.spawn({
+      sessionName: ids.sessionName("fixture-inline-2"),
+      harness: "qoder",
+      message: "b",
+      cwd: "/tmp/demo",
+    });
+    machine.spawn({
+      sessionName: ids.sessionName("fixture-inline-3"),
+      harness: "dsh",
+      message: "c",
+      cwd: "/tmp/demo",
+    });
 
     expect(machine.list({ harness: "qoder" })).toEqual([
-      expect.objectContaining({ sessionId: "s2", harness: "qoder" }),
+      expect.objectContaining({
+        sessionId: ids.session("fixture-inline-2@g0"),
+        harness: "qoder",
+      }),
     ]);
   });
 
@@ -182,12 +206,26 @@ describe("list 过滤与参数校验", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
 
-    expect(() =>
-      machine.spawn({ harness: "", message: "x", cwd: "/tmp/demo" }),
-    ).toThrowError(expect.objectContaining({ code: "invalid_params" }));
+    try {
+      machine.spawn({
+        sessionName: ids.sessionName("fixture-inline-4"),
+        harness: "",
+        message: "x",
+        cwd: "/tmp/demo",
+      });
+      throw new Error("Expected invalid_params");
+    } catch (error) {
+      expect(error).toEqual({
+        code: "invalid_params",
+        issues: [{ issue: "invalid_value", path: "harness" }],
+      });
+    }
     expect(() =>
       // @ts-expect-error 故意省略必填字段，验证运行时校验
-      machine.spawn({ harness: "codex" }),
+      machine.spawn({
+        sessionName: ids.sessionName("fixture-inline-5"),
+        harness: "codex",
+      }),
     ).toThrowError(expect.objectContaining({ code: "invalid_params" }));
   });
 });

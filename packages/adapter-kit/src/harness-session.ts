@@ -1,4 +1,12 @@
-import type { DomainEvent, PermissionOption, SessionId } from "@reins/protocol";
+import type {
+  DomainEvent,
+  MessageId,
+  PermissionId,
+  PermissionOption,
+  SessionId,
+  ToolCallId,
+  TurnId,
+} from "@reins/protocol";
 
 import { noopTranscript, type TranscriptSink } from "./transcript.ts";
 
@@ -13,15 +21,17 @@ export type HarnessSessionOptions<TAttachment> = {
 // mapper 可见的非泛型视图：只暴露回合簿记与转录，不暴露附件类型。
 export type TurnJournal = {
   readonly sessionId: SessionId;
-  turnId: string | null;
+  turnId: TurnId | null;
   finalText: string | null;
   readonly toolNames: Map<string, string>;
   cancelling: boolean;
-  beginTurn(turnId: string): void;
-  setTurnId(turnId: string): void;
+  beginTurn(turnId: TurnId): void;
+  setTurnId(turnId: TurnId): void;
   setFinalText(text: string): void;
   setUsage(usage: Record<string, unknown>): void;
   transcript(kind: string, payload: unknown): void;
+  messageId(nativeId: string): MessageId;
+  toolCallId(nativeId: string): ToolCallId;
   endTurn(stopReason: "end_turn" | "cancelled" | "failed"): DomainEvent;
   failActiveTurn(): void;
 };
@@ -30,7 +40,7 @@ export type TurnJournal = {
 // failed 合成与转录管线。harness 专属逻辑（消息映射、决议翻译）留在各 adapter。
 export class HarnessSession<TAttachment = unknown> implements TurnJournal {
   readonly sessionId: SessionId;
-  turnId: string | null = null;
+  turnId: TurnId | null = null;
   finalText: string | null = null;
   lastUsage: Record<string, unknown> | null = null;
   cancelling = false;
@@ -43,6 +53,10 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     | undefined;
   private readonly pending = new Map<string, { attachment: TAttachment }>();
   private permissionSeq = 0;
+  private messageSeq = 0;
+  private toolCallSeq = 0;
+  private readonly messageIds = new Map<string, MessageId>();
+  private readonly toolCallIds = new Map<string, ToolCallId>();
 
   constructor(options: HarnessSessionOptions<TAttachment>) {
     this.sessionId = options.sessionId;
@@ -51,14 +65,14 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     this.onClearPending = options.onClearPending;
   }
 
-  beginTurn(turnId: string): void {
+  beginTurn(turnId: TurnId): void {
     this.turnId = turnId;
     this.finalText = null;
     this.lastUsage = null;
     this.cancelling = false;
   }
 
-  setTurnId(turnId: string): void {
+  setTurnId(turnId: TurnId): void {
     this.turnId = turnId;
   }
 
@@ -79,14 +93,14 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     input: unknown,
     options: PermissionOption[],
     attachment: TAttachment,
-  ): string {
+  ): PermissionId {
     this.permissionSeq += 1;
-    const permissionId = `p${this.permissionSeq}`;
+    const permissionId = `p${this.permissionSeq}` as PermissionId;
     this.pending.set(permissionId, { attachment });
     this.emit({
       type: "permission.requested",
       sessionId: this.sessionId,
-      turnId: this.turnId ?? "",
+      turnId: this.requireTurnId(),
       permissionId,
       kind,
       input,
@@ -95,7 +109,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     return permissionId;
   }
 
-  takePending(permissionId: string): TAttachment | undefined {
+  takePending(permissionId: PermissionId): TAttachment | undefined {
     const entry = this.pending.get(permissionId);
     if (entry === undefined) return undefined;
     this.pending.delete(permissionId);
@@ -112,8 +126,33 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     }
   }
 
+  messageId(nativeId: string): MessageId {
+    const existing = this.messageIds.get(nativeId);
+    if (existing !== undefined) return existing;
+    this.messageSeq += 1;
+    const messageId = `m${this.messageSeq}` as MessageId;
+    this.messageIds.set(nativeId, messageId);
+    return messageId;
+  }
+
+  toolCallId(nativeId: string): ToolCallId {
+    const existing = this.toolCallIds.get(nativeId);
+    if (existing !== undefined) return existing;
+    this.toolCallSeq += 1;
+    const toolCallId = `c${this.toolCallSeq}` as ToolCallId;
+    this.toolCallIds.set(nativeId, toolCallId);
+    return toolCallId;
+  }
+
+  private requireTurnId(): TurnId {
+    if (this.turnId === null) {
+      throw new Error("permission requested without an active turn");
+    }
+    return this.turnId;
+  }
+
   endTurn(stopReason: "end_turn" | "cancelled" | "failed"): DomainEvent {
-    const turnId = this.turnId ?? "";
+    const turnId = this.requireTurnId();
     const event: DomainEvent = {
       type: "turn.completed",
       sessionId: this.sessionId,

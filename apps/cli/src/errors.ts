@@ -1,5 +1,5 @@
 import type { MachineError, StopReason } from "@reins/protocol";
-import { machineErrorSchema } from "@reins/protocol";
+import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
 import * as v from "valibot";
 
 export const EXIT_OK = 0;
@@ -10,11 +10,8 @@ export const EXIT_TIMEOUT = 4;
 export const EXIT_USAGE = 64;
 export const EXIT_RESOURCE = 65;
 
-export function machineError(
-  code: MachineError["code"],
-  context?: MachineError["context"],
-): MachineError {
-  return context === undefined ? { code } : { code, context };
+export function machineError(error: MachineError): MachineError {
+  return error;
 }
 
 export function isMachineError(value: unknown): value is MachineError {
@@ -31,7 +28,8 @@ export type UsageIssue =
   | "unknown_option"
   | "invalid_value";
 
-export type UsageErrorContext = {
+export type UsageError = {
+  readonly code: "usage_error";
   readonly issue: UsageIssue;
   readonly target?: "argument" | "option";
   readonly field?: string;
@@ -42,18 +40,13 @@ export type UsageErrorContext = {
   readonly didYouMean?: string;
 };
 
-export type UsageError = {
-  readonly code: "usage_error";
-  readonly context: UsageErrorContext;
-};
-
 export type CliError = MachineError | UsageError;
 
 export function usageError(
   issue: UsageIssue,
-  extra: Omit<UsageErrorContext, "issue">,
+  extra: Omit<UsageError, "code" | "issue">,
 ): UsageError {
-  return { code: "usage_error", context: { issue, ...extra } };
+  return { code: "usage_error", issue, ...extra };
 }
 
 export function isUsageError(value: unknown): value is UsageError {
@@ -74,9 +67,15 @@ export function toCliError(error: unknown): CliError {
     } catch {
       // 非 JSON 错误体，按内部错误包装
     }
-    return machineError("internal_error", { message: error.message });
+    return machineError({
+      code: "internal_error",
+      cause: makeErrorCause("exception", error.message),
+    });
   }
-  return machineError("internal_error", { message: String(error) });
+  return machineError({
+    code: "internal_error",
+    cause: makeErrorCause("exception", String(error)),
+  });
 }
 
 export function exitCodeForError(error: CliError): number {

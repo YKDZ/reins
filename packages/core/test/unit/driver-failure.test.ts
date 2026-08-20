@@ -4,6 +4,7 @@ import { describe, expect, test } from "vitest";
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
+import { ids } from "./ids.ts";
 
 describe("driver 抛错时动作整体回滚", () => {
   test("spawn：driver.start 抛错则不产生会话、事件与孤儿状态", () => {
@@ -18,6 +19,7 @@ describe("driver 抛错时动作整体回滚", () => {
 
     expect(() =>
       machine.spawn({
+        sessionName: ids.sessionName("fixture-1"),
         harness: "codex",
         message: "开始",
         cwd: "/tmp/demo",
@@ -38,6 +40,7 @@ describe("driver 抛错时动作整体回滚", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-2"),
       harness: "codex",
       message: "第一步",
       cwd: "/tmp/demo",
@@ -45,7 +48,7 @@ describe("driver 抛错时动作整体回滚", () => {
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
-      turnId: "s1:t1",
+      turnId: ids.turn("t1"),
       stopReason: "end_turn",
       finalReply: null,
       usage: {},
@@ -73,6 +76,7 @@ describe("driver 抛错时动作整体回滚", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const id = machine.spawn({
+      sessionName: ids.sessionName("fixture-3"),
       harness: "codex",
       message: "进行中",
       cwd: "/tmp/demo",

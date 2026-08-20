@@ -1,21 +1,23 @@
-import type { DomainEvent, PermissionOption } from "@reins/protocol";
+import type { DomainEvent, PermissionOption, SessionId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
+import { ids } from "./ids.ts";
 
 function spawnInteractive(): {
   machine: ReturnType<typeof createSessionMachine>;
   fake: ReturnType<typeof createFakeDriver>;
   events: DomainEvent[];
-  sessionId: string;
+  sessionId: SessionId;
 } {
   const fake = createFakeDriver();
   const machine = createSessionMachine({ driverFactory: fake.factory });
   const events: DomainEvent[] = [];
   machine.subscribe((event) => events.push(event));
   const sessionId = machine.spawn({
+    sessionName: ids.sessionName("fixture-13"),
     harness: "codex",
     message: "审查这个 PR",
     cwd: "/tmp/demo",
@@ -26,14 +28,14 @@ function spawnInteractive(): {
 
 function request(
   fake: ReturnType<typeof createFakeDriver>,
-  sessionId: string,
+  sessionId: SessionId,
   options: PermissionOption[],
 ): void {
   fake.controls.emit({
     type: "permission.requested",
     sessionId,
-    turnId: "s1:t1",
-    permissionId: "p1",
+    turnId: ids.turn("t1"),
+    permissionId: ids.permission("p1"),
     kind: "tool:Bash",
     options,
   });
@@ -44,8 +46,14 @@ describe("spawn 与授权模式", () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({ driverFactory: fake.factory });
 
-    machine.spawn({ harness: "codex", message: "a", cwd: "/tmp/demo" });
     machine.spawn({
+      sessionName: ids.sessionName("fixture-inline-6"),
+      harness: "codex",
+      message: "a",
+      cwd: "/tmp/demo",
+    });
+    machine.spawn({
+      sessionName: ids.sessionName("fixture-14"),
       harness: "qoder",
       message: "b",
       cwd: "/tmp/demo",
@@ -68,7 +76,7 @@ describe("resolvePermission", () => {
 
     machine.resolvePermission({
       sessionId,
-      permissionId: "p1",
+      permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },
     });
 
@@ -78,15 +86,15 @@ describe("resolvePermission", () => {
       {
         type: "permission.resolved",
         sessionId,
-        turnId: "s1:t1",
-        permissionId: "p1",
+        turnId: ids.turn("t1"),
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       },
     ]);
     expect(fake.controls.resolved).toEqual([
       {
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       },
     ]);
@@ -102,7 +110,7 @@ describe("resolvePermission", () => {
     expect(() =>
       machine.resolvePermission({
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "session" },
       }),
     ).toThrowError(
@@ -111,7 +119,7 @@ describe("resolvePermission", () => {
     expect(() =>
       machine.resolvePermission({
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "deny", feedback: "换个命令" },
       }),
     ).toThrowError(
@@ -130,7 +138,7 @@ describe("resolvePermission", () => {
     expect(() =>
       machine.resolvePermission({
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "deny" },
       }),
     ).toThrowError(
@@ -138,7 +146,7 @@ describe("resolvePermission", () => {
     );
     machine.resolvePermission({
       sessionId,
-      permissionId: "p1",
+      permissionId: ids.permission("p1"),
       resolution: { outcome: "deny", feedback: "不要用 sudo" },
     });
     expect(fake.controls.resolved[0]?.resolution).toEqual({
@@ -155,7 +163,7 @@ describe("resolvePermission", () => {
     fake.controls.emit({
       type: "turn.completed",
       sessionId,
-      turnId: "s1:t1",
+      turnId: ids.turn("t1"),
       stopReason: "cancelled",
       finalReply: null,
       usage: {},
@@ -164,7 +172,7 @@ describe("resolvePermission", () => {
     expect(() =>
       machine.resolvePermission({
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       }),
     ).toThrowError(expect.objectContaining({ code: "permission_not_pending" }));
@@ -178,8 +186,8 @@ describe("resolvePermission", () => {
 
     expect(() =>
       machine.resolvePermission({
-        sessionId: "nope",
-        permissionId: "p1",
+        sessionId: ids.session("missing@g0"),
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       }),
     ).toThrowError(expect.objectContaining({ code: "session_not_found" }));
@@ -188,7 +196,7 @@ describe("resolvePermission", () => {
     expect(() =>
       machine.resolvePermission({
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       }),
     ).toThrowError(expect.objectContaining({ code: "session_killed" }));
@@ -201,7 +209,7 @@ describe("resolvePermission", () => {
     expect(() =>
       machine.resolvePermission({
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         // @ts-expect-error 故意传缺字段的决议，验证运行时校验
         resolution: { outcome: "allow" },
       }),
@@ -220,6 +228,7 @@ describe("resolvePermission", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const sessionId = machine.spawn({
+      sessionName: ids.sessionName("fixture-15"),
       harness: "codex",
       message: "审查这个 PR",
       cwd: "/tmp/demo",
@@ -230,7 +239,7 @@ describe("resolvePermission", () => {
     expect(() =>
       machine.resolvePermission({
         sessionId,
-        permissionId: "p1",
+        permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       }),
     ).toThrow("adapter 复验失败");
@@ -240,7 +249,7 @@ describe("resolvePermission", () => {
 
     machine.resolvePermission({
       sessionId,
-      permissionId: "p1",
+      permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },
     });
     expect(
@@ -253,9 +262,9 @@ describe("resolvePermission", () => {
       resolvePermission: () => {
         fake.controls.emit({
           type: "text.delta",
-          sessionId: "s1",
-          turnId: "s1:t1",
-          messageId: "m1",
+          sessionId: ids.session("event@g0"),
+          turnId: ids.turn("t1"),
+          messageId: ids.message("m1"),
           delta: "收到",
         });
       },
@@ -264,6 +273,7 @@ describe("resolvePermission", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const sessionId = machine.spawn({
+      sessionName: ids.sessionName("fixture-16"),
       harness: "codex",
       message: "审查这个 PR",
       cwd: "/tmp/demo",
@@ -273,7 +283,7 @@ describe("resolvePermission", () => {
 
     machine.resolvePermission({
       sessionId,
-      permissionId: "p1",
+      permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },
     });
 
