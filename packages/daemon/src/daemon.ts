@@ -1,14 +1,15 @@
+import { createSessionMachine, type SessionIdentity } from "@reins/core";
 import {
-  createSessionMachine,
-  type DiagnosticEmitter,
-  type SessionIdentity,
-} from "@reins/core";
-import type { ProtocolMessage } from "@reins/protocol";
+  type DomainEvent,
+  type ProtocolMessage,
+  type SessionId,
+} from "@reins/protocol";
 import type { TransportServer } from "@reins/transport";
 
+import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 import { createRoutingDriverFactory } from "./routing-driver.ts";
-import { createProtocolServer } from "./server.ts";
+import { createProtocolServerInternal } from "./server.ts";
 
 export type Daemon = {
   start(): Promise<void>;
@@ -34,32 +35,55 @@ export function createDaemon(options: {
   transport: TransportServer<ProtocolMessage>;
   adapters: AdapterRegistry;
   identity: SessionIdentity;
-  diagnostics: DiagnosticEmitter;
+  diagnostics: DiagnosticsRuntime;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 }): Daemon {
+  return createDaemonInternal(options, {});
+}
+
+export function createDaemonInternal(
+  options: {
+    transport: TransportServer<ProtocolMessage>;
+    adapters: AdapterRegistry;
+    identity: SessionIdentity;
+    diagnostics: DiagnosticsRuntime;
+    idleTimeoutMs?: number;
+    eventLogLimit?: number;
+  },
+  testing: {
+    beforeAttachReplay?: (sessionId: SessionId) => void;
+    onEvent?: (event: DomainEvent) => void;
+  },
+): Daemon {
   const machine = createSessionMachine({
     driverFactory: createRoutingDriverFactory(options.adapters),
     identity: options.identity,
     diagnostics: options.diagnostics,
-    onListenerError(error, event) {
-      console.error("daemon event subscriber error", error, event);
+  });
+  const server = createProtocolServerInternal(
+    {
+      transport: options.transport,
+      adapters: options.adapters,
+      machine,
+      diagnostics: options.diagnostics,
+      ...(options.idleTimeoutMs === undefined
+        ? {}
+        : { idleTimeoutMs: options.idleTimeoutMs }),
+      ...(options.eventLogLimit === undefined
+        ? {}
+        : { eventLogLimit: options.eventLogLimit }),
     },
-  });
-  const server = createProtocolServer({
-    transport: options.transport,
-    adapters: options.adapters,
-    machine,
-    ...(options.idleTimeoutMs === undefined
+    testing.beforeAttachReplay === undefined
       ? {}
-      : { idleTimeoutMs: options.idleTimeoutMs }),
-    ...(options.eventLogLimit === undefined
-      ? {}
-      : { eventLogLimit: options.eventLogLimit }),
-  });
+      : { beforeAttachReplay: testing.beforeAttachReplay },
+  );
   machine.subscribe((event) => {
     server.forwardEvent(event);
   });
+  if (testing.onEvent !== undefined) {
+    machine.subscribe(testing.onEvent);
+  }
   return {
     start: () => server.start(),
     stop: () => server.stop(),

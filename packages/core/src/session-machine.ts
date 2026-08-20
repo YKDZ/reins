@@ -737,6 +737,9 @@ export function createSessionMachine(options: {
                 ...(spec.sandbox === undefined
                   ? {}
                   : { sandbox: spec.sandbox }),
+                ...(spec.captureHarnessStderr === undefined
+                  ? {}
+                  : { captureHarnessStderr: spec.captureHarnessStderr }),
                 sessionName: spec.sessionName,
               });
             } finally {

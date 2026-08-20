@@ -189,6 +189,7 @@ export const spawnParamsSchema = v.strictObject({
   cwd: v.optional(v.string()),
   authorizationMode: v.optional(authorizationModeSchema),
   sandbox: v.optional(v.string()),
+  captureHarnessStderr: v.optional(v.boolean()),
   meta: v.optional(v.record(v.string(), v.unknown())),
 });
 export type SpawnParams = v.InferOutput<typeof spawnParamsSchema>;
@@ -1498,6 +1499,23 @@ export function makeErrorCause(
   }
   return v.parse(errorCauseSchema, { kind, message: truncated });
 }
+
+export function makeTextEvidence(message: string): TextEvidence {
+  const originalBytes = Buffer.byteLength(message, "utf8");
+  let bytes = 0;
+  let text = "";
+  for (const character of message) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > 64 * 1024) break;
+    text += character;
+    bytes += characterBytes;
+  }
+  return v.parse(textEvidenceSchema, {
+    text,
+    truncated: bytes < originalBytes,
+    originalBytes,
+  });
+}
 export const invalidParamIssueSchema = v.union([
   v.strictObject({
     issue: v.literal("missing_required"),
@@ -1603,6 +1621,7 @@ export type WorkerSpec = {
   readonly cwd: string;
   readonly authorizationMode: AuthorizationMode;
   readonly sandbox?: string;
+  readonly captureHarnessStderr?: boolean;
   readonly sessionName: SessionName;
 };
 

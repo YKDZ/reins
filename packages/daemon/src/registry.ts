@@ -4,6 +4,7 @@ import type { HarnessCapability, WorkerDriverFactory } from "@reins/protocol";
 export type HarnessAdapter = {
   driverFactory: WorkerDriverFactory;
   capabilities(): Promise<HarnessCapability>;
+  canCaptureHarnessStderr?: boolean;
 };
 
 export type AdapterRegistry = ReadonlyMap<string, HarnessAdapter>;

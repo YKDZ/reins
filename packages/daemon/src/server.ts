@@ -3,6 +3,7 @@ import type {
   AttachParams,
   CapabilitiesResult,
   DomainEvent,
+  DiagnosticsParams,
   HarnessCapability,
   InterruptParams,
   KillParams,
@@ -14,13 +15,16 @@ import type {
   ResolvePermissionParams,
   SendParams,
   SessionId,
+  TurnId,
   SpawnParams,
   StopReason,
   WaitParams,
 } from "@reins/protocol";
 import {
   machineErrorSchema,
+  harnessCapabilitySchema,
   makeErrorCause,
+  makeTextEvidence,
   protocolMethodSchema,
   protocolParamsSchemaFor,
   protocolRequestSchema,
@@ -29,6 +33,7 @@ import {
 import type { TransportConnection, TransportServer } from "@reins/transport";
 import * as v from "valibot";
 
+import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
@@ -37,7 +42,17 @@ export const DEFAULT_EVENT_LOG_LIMIT = 1000;
 type AttachSubscription = {
   readonly sessionId: SessionId;
   readonly exitOn: readonly StopReason[];
+  targetTurnId?: TurnId;
+  replaying: boolean;
+  pendingEvents: DomainEvent[];
+  active: boolean;
   readonly connection: TransportConnection<ProtocolMessage>;
+};
+
+type Observation = {
+  activeTurnId?: TurnId;
+  lastCompleted?: Extract<DomainEvent, { type: "turn.completed" }>;
+  killed: boolean;
 };
 
 function unsupportedProtocolMethod(value: ProtocolRequest["method"]): never {
@@ -50,13 +65,30 @@ export type ProtocolServer = {
   forwardEvent(event: DomainEvent): void;
 };
 
-export function createProtocolServer(options: {
+type ProtocolServerOptions = {
   transport: TransportServer<ProtocolMessage>;
   machine: SessionMachine;
   adapters: AdapterRegistry;
+  diagnostics: DiagnosticsRuntime;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
-}): ProtocolServer {
+};
+
+type ProtocolServerTestingOptions = {
+  beforeAttachReplay?: (sessionId: SessionId) => void;
+};
+
+export function createProtocolServer(
+  options: ProtocolServerOptions,
+): ProtocolServer {
+  return createProtocolServerInternal(options, {});
+}
+
+// 包内测试缝；不从 @reins/daemon 的公共入口导出。
+export function createProtocolServerInternal(
+  options: ProtocolServerOptions,
+  testing: ProtocolServerTestingOptions,
+): ProtocolServer {
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
   const eventLogLimit = options.eventLogLimit ?? DEFAULT_EVENT_LOG_LIMIT;
   const connections = new Set<TransportConnection<ProtocolMessage>>();
@@ -66,7 +98,11 @@ export function createProtocolServer(options: {
     Set<() => void>
   >();
   const eventLog = new Map<SessionId, DomainEvent[]>();
+  const observations = new Map<SessionId, Observation>();
   const knownSessions = new Set<SessionId>();
+  const transportFailureConnections = new WeakSet<
+    TransportConnection<ProtocolMessage>
+  >();
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let shuttingDown = false;
   let startedResolve: (() => void) | null = null;
@@ -82,13 +118,28 @@ export function createProtocolServer(options: {
     );
   }
 
-  function toMachineError(error: unknown): MachineError {
-    return isMachineError(error)
-      ? error
-      : {
-          code: "internal_error",
-          cause: makeErrorCause("exception", String(error)),
-        };
+  async function toMachineError(error: unknown): Promise<MachineError> {
+    if (isMachineError(error)) return error;
+    const cause = makeErrorCause("exception", String(error));
+    const diagnosticId = await recordDiagnostic({
+      source: "daemon",
+      kind: "lifecycle",
+      operation: "diagnostics_store",
+      reason: "invariant_failed",
+      message: makeTextEvidence(String(error)),
+    });
+    return {
+      code: "internal_error",
+      cause,
+      ...(diagnosticId === undefined ? {} : { diagnosticId }),
+    };
+  }
+
+  async function recordDiagnostic(
+    input: Parameters<DiagnosticsRuntime["record"]>[0],
+  ) {
+    if (options.diagnostics.health().status === "degraded") return undefined;
+    return await options.diagnostics.record(input);
   }
 
   function sendSafe(
@@ -97,9 +148,26 @@ export function createProtocolServer(options: {
   ): void {
     try {
       connection.send(message);
-    } catch {
+    } catch (error) {
+      recordTransportFailure(connection, "write", error);
       cleanupConnection(connection);
     }
+  }
+
+  function recordTransportFailure(
+    connection: TransportConnection<ProtocolMessage>,
+    operation: "read" | "write",
+    error: unknown,
+  ): void {
+    if (transportFailureConnections.has(connection)) return;
+    transportFailureConnections.add(connection);
+    void recordDiagnostic({
+      source: "daemon",
+      kind: "transport_failure",
+      operation,
+      reason: "io_error",
+      message: makeTextEvidence(String(error)),
+    }).catch(() => undefined);
   }
 
   function hasLiveSessions(): boolean {
@@ -153,6 +221,8 @@ export function createProtocolServer(options: {
     subscription: AttachSubscription,
     reason: StopReason | "session_killed",
   ): void {
+    if (!subscription.active) return;
+    subscription.active = false;
     attachSubscriptions.delete(subscription);
     sendSafe(subscription.connection, {
       kind: "notification",
@@ -166,23 +236,41 @@ export function createProtocolServer(options: {
       knownSessions.add(event.sessionId);
     }
     appendLog(event);
+    const observation = observations.get(event.sessionId) ?? { killed: false };
+    if (event.type === "turn.started") observation.activeTurnId = event.turnId;
+    if (event.type === "turn.completed") {
+      delete observation.activeTurnId;
+      observation.lastCompleted = event;
+    }
+    if (event.type === "session.killed") observation.killed = true;
+    observations.set(event.sessionId, observation);
     for (const subscription of Array.from(attachSubscriptions)) {
       if (subscription.sessionId !== event.sessionId) continue;
-      sendSafe(subscription.connection, {
-        kind: "notification",
-        method: "event",
-        params: event,
-      });
-      if (event.type === "session.killed") {
-        endAttach(subscription, "session_killed");
-      } else if (
-        event.type === "turn.completed" &&
-        subscription.exitOn.includes(event.stopReason)
-      ) {
-        endAttach(subscription, event.stopReason);
-      }
+      if (subscription.replaying) subscription.pendingEvents.push(event);
+      else forwardToSubscription(subscription, event);
     }
     scheduleIdleExit();
+  }
+
+  function forwardToSubscription(
+    subscription: AttachSubscription,
+    event: DomainEvent,
+  ): void {
+    if (!subscription.active) return;
+    sendSafe(subscription.connection, {
+      kind: "notification",
+      method: "event",
+      params: event,
+    });
+    if (event.type === "session.killed") {
+      endAttach(subscription, "session_killed");
+    } else if (
+      event.type === "turn.completed" &&
+      subscription.targetTurnId === event.turnId &&
+      subscription.exitOn.includes(event.stopReason)
+    ) {
+      endAttach(subscription, event.stopReason);
+    }
   }
 
   function requestIdOf(raw: unknown): RequestId | null {
@@ -250,11 +338,11 @@ export function createProtocolServer(options: {
           result,
         });
       },
-      (error: unknown) => {
+      async (error: unknown) => {
         sendSafe(connection, {
           kind: "response",
           requestId: request.requestId,
-          error: toMachineError(error),
+          error: await toMachineError(error),
         });
       },
     );
@@ -267,19 +355,51 @@ export function createProtocolServer(options: {
     );
     const capabilities: HarnessCapability[] = [];
     const failures: CapabilitiesResult["failures"] = [];
-    results.forEach((result, index) => {
+    for (const [index, result] of results.entries()) {
       const harness = entries[index]?.[0];
-      if (harness === undefined) return;
+      if (harness === undefined) continue;
       if (result.status === "fulfilled") {
-        capabilities.push(result.value);
-      } else {
+        const parsed = v.safeParse(harnessCapabilitySchema, result.value);
+        if (parsed.success && parsed.output.harness === harness) {
+          capabilities.push(parsed.output);
+          continue;
+        }
+        const reason = new Error("Capability result did not match its harness");
+        const cause = makeErrorCause("exception", String(reason));
+        const diagnosticId = await recordDiagnostic({
+          source: "daemon",
+          harness,
+          kind: "request_failure",
+          operation: "capabilities",
+          stage: "query",
+          reason: "upstream_error",
+          message: makeTextEvidence(String(reason)),
+        });
         failures.push({
           harness,
           code: "capability_query_failed",
-          cause: makeErrorCause("exception", String(result.reason)),
+          cause,
+          ...(diagnosticId === undefined ? {} : { diagnosticId }),
+        });
+      } else {
+        const cause = makeErrorCause("exception", String(result.reason));
+        const diagnosticId = await recordDiagnostic({
+          source: "daemon",
+          kind: "request_failure",
+          operation: "capabilities",
+          stage: "query",
+          reason: "upstream_error",
+          harness,
+          message: makeTextEvidence(String(result.reason)),
+        });
+        failures.push({
+          harness,
+          code: "capability_query_failed",
+          cause,
+          ...(diagnosticId === undefined ? {} : { diagnosticId }),
         });
       }
-    });
+    }
     return { capabilities, failures };
   }
 
@@ -294,36 +414,57 @@ export function createProtocolServer(options: {
       } satisfies MachineError;
     }
     const history = eventLog.get(params.sessionId) ?? [];
+    const observation = observations.get(params.sessionId) ?? { killed: false };
     const replayedCount =
       params.replay === undefined
         ? history.length
         : Math.min(params.replay, history.length);
+    const replayEvents = history.slice(
+      replayedCount === 0 ? history.length : -replayedCount,
+    );
+    const targetTurnId =
+      params.exitOn === undefined || params.exitOn.length === 0
+        ? undefined
+        : (observation.activeTurnId ?? observation.lastCompleted?.turnId);
     const subscription: AttachSubscription = {
       sessionId: params.sessionId,
       exitOn: params.exitOn ?? [],
+      ...(targetTurnId === undefined ? {} : { targetTurnId }),
       connection,
+      replaying: true,
+      pendingEvents: [],
+      active: true,
     };
     attachSubscriptions.add(subscription);
+    try {
+      testing.beforeAttachReplay?.(params.sessionId);
+    } catch (error) {
+      subscription.active = false;
+      attachSubscriptions.delete(subscription);
+      subscription.pendingEvents.length = 0;
+      throw error;
+    }
     // 回放先于响应，保证事件顺序与"响应确认 attach 建立"之间无交叉。
-    for (const event of history.slice(-replayedCount)) {
+    for (const event of replayEvents) {
       sendSafe(connection, {
         kind: "notification",
         method: "event",
         params: event,
       });
     }
-    const lastTurn = [...history]
-      .reverse()
-      .find(
-        (event): event is Extract<DomainEvent, { type: "turn.completed" }> =>
-          event.type === "turn.completed",
-      );
+    subscription.replaying = false;
+    for (const event of subscription.pendingEvents.splice(0)) {
+      forwardToSubscription(subscription, event);
+      if (!subscription.active) break;
+    }
+    const lastTurn = observation.lastCompleted;
     if (
       lastTurn !== undefined &&
+      subscription.targetTurnId === lastTurn.turnId &&
       subscription.exitOn.includes(lastTurn.stopReason)
     ) {
       endAttach(subscription, lastTurn.stopReason);
-    } else if (history.some((event) => event.type === "session.killed")) {
+    } else if (observation.killed) {
       endAttach(subscription, "session_killed");
     }
     return { sessionId: params.sessionId, replayed: replayedCount };
@@ -339,8 +480,20 @@ export function createProtocolServer(options: {
       case "capabilities":
         return await aggregateCapabilities();
       case "spawn":
+        const spawnParams = request.params as SpawnParams;
+        if (
+          spawnParams.captureHarnessStderr === true &&
+          options.adapters.has(spawnParams.harness) &&
+          options.adapters.get(spawnParams.harness)?.canCaptureHarnessStderr !==
+            true
+        ) {
+          throw {
+            code: "unsupported_feature",
+            feature: "capture_harness_stderr",
+          } satisfies MachineError;
+        }
         return {
-          sessionId: await options.machine.spawn(request.params as SpawnParams),
+          sessionId: await options.machine.spawn(spawnParams),
         };
       case "send":
         return await options.machine.send(request.params as SendParams);
@@ -361,6 +514,28 @@ export function createProtocolServer(options: {
           request.params as ResolvePermissionParams,
         );
         return {};
+      case "diagnostics":
+        if (options.diagnostics.health().status === "degraded") {
+          throw { code: "diagnostics_unavailable" } satisfies MachineError;
+        }
+        const diagnosticsParams = request.params as DiagnosticsParams;
+        try {
+          return await options.diagnostics.query(diagnosticsParams);
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "diagnostic_not_found"
+          ) {
+            if ("diagnosticId" in diagnosticsParams) {
+              throw {
+                code: "diagnostic_not_found",
+                diagnosticId: diagnosticsParams.diagnosticId,
+              } satisfies MachineError;
+            }
+          }
+          throw { code: "diagnostics_unavailable" } satisfies MachineError;
+        }
       default:
         return unsupportedProtocolMethod(request.method);
     }
@@ -374,6 +549,10 @@ export function createProtocolServer(options: {
     cleanupByConnection.set(connection, cleanup);
     const unsubscribe = connection.onEvent((event) => {
       if (event.kind === "message") handleMessage(connection, event.message);
+      if (event.kind === "error") {
+        recordTransportFailure(connection, "read", event.error);
+        cleanupConnection(connection);
+      }
       if (event.kind === "closed") cleanupConnection(connection);
     });
     cleanup.add(unsubscribe);
