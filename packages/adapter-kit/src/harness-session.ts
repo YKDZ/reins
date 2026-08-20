@@ -1,4 +1,5 @@
 import type {
+  DiagnosticInput,
   DomainEvent,
   MessageId,
   PermissionId,
@@ -8,17 +9,23 @@ import type {
   TurnId,
 } from "@reins/protocol";
 
-import { noopTranscript, type TranscriptSink } from "./transcript.ts";
+import { noopDiagnosticSink, type DiagnosticSink } from "./diagnostic.ts";
+
+type AdapterDiagnosticFact = DiagnosticInput extends infer TInput
+  ? TInput extends { source: "adapter"; harness: string }
+    ? Omit<TInput, "sessionId" | "turnId">
+    : never
+  : never;
 
 export type HarnessSessionOptions<TAttachment> = {
   sessionId: SessionId;
   emit: (event: DomainEvent) => void;
-  transcript?: TranscriptSink;
+  diagnostics?: DiagnosticSink;
   // 回合终态清空 pending 时，把附件交还 adapter 处置 harness 侧挂起请求。
   onClearPending?: (attachments: TAttachment[]) => void;
 };
 
-// mapper 可见的非泛型视图：只暴露回合簿记与转录，不暴露附件类型。
+// mapper 可见的非泛型视图：只暴露回合簿记与诊断，不暴露附件类型。
 export type TurnJournal = {
   readonly sessionId: SessionId;
   turnId: TurnId | null;
@@ -29,7 +36,7 @@ export type TurnJournal = {
   setTurnId(turnId: TurnId): void;
   setFinalText(text: string): void;
   setUsage(usage: Record<string, unknown>): void;
-  transcript(kind: string, payload: unknown): void;
+  diagnostic(input: AdapterDiagnosticFact): Promise<void>;
   messageId(nativeId: string): MessageId;
   toolCallId(nativeId: string): ToolCallId;
   endTurn(stopReason: "end_turn" | "cancelled" | "failed"): DomainEvent;
@@ -37,7 +44,7 @@ export type TurnJournal = {
 };
 
 // adapter 共用的会话骨架：回合簿记、turn.completed 构造、pending 决议结算、
-// failed 合成与转录管线。harness 专属逻辑（消息映射、决议翻译）留在各 adapter。
+// failed 合成与诊断管线。harness 专属逻辑（消息映射、决议翻译）留在各 adapter。
 export class HarnessSession<TAttachment = unknown> implements TurnJournal {
   readonly sessionId: SessionId;
   turnId: TurnId | null = null;
@@ -47,7 +54,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
   readonly toolNames = new Map<string, string>();
 
   private readonly emit: (event: DomainEvent) => void;
-  private readonly transcriptSink: TranscriptSink;
+  private readonly diagnosticSink: DiagnosticSink;
   private readonly onClearPending:
     | ((attachments: TAttachment[]) => void)
     | undefined;
@@ -61,7 +68,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
   constructor(options: HarnessSessionOptions<TAttachment>) {
     this.sessionId = options.sessionId;
     this.emit = options.emit;
-    this.transcriptSink = options.transcript ?? noopTranscript;
+    this.diagnosticSink = options.diagnostics ?? noopDiagnosticSink;
     this.onClearPending = options.onClearPending;
   }
 
@@ -84,8 +91,16 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     this.lastUsage = usage;
   }
 
-  transcript(kind: string, payload: unknown): void {
-    this.transcriptSink(kind, payload);
+  async diagnostic(input: AdapterDiagnosticFact): Promise<void> {
+    try {
+      await this.diagnosticSink({
+        ...input,
+        sessionId: this.sessionId,
+        ...(this.turnId === null ? {} : { turnId: this.turnId }),
+      } as DiagnosticInput);
+    } catch {
+      // 诊断存储故障不能改变 adapter 的控制流。
+    }
   }
 
   requestPermission(

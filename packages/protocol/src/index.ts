@@ -1646,6 +1646,12 @@ export type WorkerDriverFactory = (
   emit: (event: DomainEvent) => void,
 ) => WorkerDriver;
 
+// adapter 构造只在 daemon 路由层发生；上下文只含控制面的领域事件与类型化诊断。
+export type AdapterDriverFactory = (context: {
+  emit: (event: DomainEvent) => void;
+  diagnostics: (input: DiagnosticInput) => Promise<DiagnosticId | undefined>;
+}) => WorkerDriver;
+
 // —— capabilities 能力矩阵（实时查询；default 字段不进矩阵，最小干扰原则） ——
 
 export const capabilityModelSchema = v.strictObject({

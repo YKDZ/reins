@@ -3,7 +3,7 @@ import type {
   SessionId,
   TurnId,
   WorkerDriver,
-  WorkerDriverFactory,
+  AdapterDriverFactory,
 } from "@reins/protocol";
 import { messageIdSchema, permissionIdSchema } from "@reins/protocol";
 import * as v from "valibot";
@@ -26,11 +26,11 @@ function fakeAdapter(options: {
   modelId: string;
   behavior: "complete" | "hang" | "permission";
 }): {
-  driverFactory: WorkerDriverFactory;
+  driverFactory: AdapterDriverFactory;
   capabilities(): Promise<HarnessCapability>;
 } {
   const { harness, modelId, behavior } = options;
-  const factory: WorkerDriverFactory = (emit) => {
+  const factory: AdapterDriverFactory = ({ emit }) => {
     let current: { sessionId: SessionId; turnId: TurnId } | null = null;
     const driver: WorkerDriver = {
       start(spec) {

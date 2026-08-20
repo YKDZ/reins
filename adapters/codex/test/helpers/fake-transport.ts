@@ -1,6 +1,11 @@
 import { createAsyncQueue } from "@reins/adapter-kit";
 
-import type { CodexTransport, InboundMessage } from "#/transport";
+import type {
+  CodexRequestMethod,
+  CodexRequestResultMap,
+  CodexTransport,
+  InboundMessage,
+} from "#/transport";
 
 type FakeRequest = { method: string; params: unknown };
 type FakeResponse = { id: number; result: unknown };
@@ -9,11 +14,18 @@ type FakeErrorResponse = { id: number; code: number; message: string };
 export type FakeCodexControls = {
   pushInbound(message: InboundMessage): void;
   end(): void;
+  fail(error: unknown): void;
   requests(): Array<FakeRequest>;
   responded(): Array<FakeResponse>;
   respondErrors(): Array<FakeErrorResponse>;
   closed(): boolean;
-  setResponse(method: string, value: unknown): void;
+  setResponse<TMethod extends CodexRequestMethod>(
+    method: TMethod,
+    value:
+      | CodexRequestResultMap[TMethod]
+      | PromiseLike<CodexRequestResultMap[TMethod]>,
+  ): void;
+  setCloseError(error: unknown): void;
 };
 
 export function createFakeTransport(): {
@@ -27,18 +39,18 @@ export function createFakeTransport(): {
   let closedFlag = false;
   let nextId = 0;
   let turnSeq = 0;
-  const overrides = new Map<string, unknown>();
-
-  function defaultResponse(method: string, _params: unknown): unknown {
-    if (method === "thread/start") {
-      return { thread: { id: "thr1", ephemeral: true } };
-    }
-    if (method === "turn/start") {
-      turnSeq += 1;
-      return { turn: { id: `turn${turnSeq}` } };
-    }
-    return {};
-  }
+  const overrides = new Map<CodexRequestMethod, unknown>();
+  let closeError: unknown;
+  let streamError: unknown;
+  const defaults: CodexRequestResultMap = {
+    initialize: {},
+    "thread/start": { thread: { id: "thr1" } },
+    "turn/start": { turn: { id: "turn0" } },
+    "turn/steer": {},
+    "turn/interrupt": {},
+    "thread/delete": {},
+    "model/list": { data: [] },
+  };
 
   const transport: CodexTransport = {
     start() {},
@@ -48,11 +60,14 @@ export function createFakeTransport(): {
       }
       nextId += 1;
       requests.push({ method, params });
-      return Promise.resolve(
-        overrides.has(method)
-          ? overrides.get(method)
-          : defaultResponse(method, params),
-      );
+      if (method === "turn/start") {
+        turnSeq += 1;
+        defaults["turn/start"] = { turn: { id: `turn${turnSeq}` } };
+      }
+      const response = overrides.has(method)
+        ? overrides.get(method)
+        : defaults[method];
+      return Promise.resolve(response as CodexRequestResultMap[typeof method]);
     },
     notify(_method, _params) {},
     respond(id, result) {
@@ -62,13 +77,15 @@ export function createFakeTransport(): {
       respondErrors.push({ id, code, message });
     },
     messages: {
-      [Symbol.asyncIterator]() {
-        return inbox[Symbol.asyncIterator]();
+      async *[Symbol.asyncIterator]() {
+        for await (const message of inbox) yield message;
+        if (streamError !== undefined) throw streamError;
       },
     },
-    close() {
+    async close() {
       closedFlag = true;
       inbox.end();
+      if (closeError !== undefined) throw closeError;
     },
   };
 
@@ -82,12 +99,20 @@ export function createFakeTransport(): {
         closedFlag = true;
         inbox.end();
       },
+      fail(error) {
+        streamError = error;
+        closedFlag = true;
+        inbox.end();
+      },
       requests: () => [...requests],
       responded: () => [...responded],
       respondErrors: () => [...respondErrors],
       closed: () => closedFlag,
       setResponse: (method, value) => {
         overrides.set(method, value);
+      },
+      setCloseError: (error) => {
+        closeError = error;
       },
     },
   };

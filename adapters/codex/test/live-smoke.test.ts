@@ -23,17 +23,20 @@ live("codex live smoke", () => {
     const factory = createCodexDriver({
       transportFactory: () => createCodexTransport({}),
     });
-    const driver = factory((event) => {
-      events.push(event);
-      if (event.type === "permission.requested") {
-        driver.resolvePermission(event.sessionId, event.permissionId, {
-          outcome: "allow",
-          scope: "once",
-        });
-      }
-      if (event.type === "turn.completed" && resolveTurn !== null) {
-        resolveTurn(event);
-      }
+    const driver = factory({
+      emit: (event) => {
+        events.push(event);
+        if (event.type === "permission.requested") {
+          driver.resolvePermission(event.sessionId, event.permissionId, {
+            outcome: "allow",
+            scope: "once",
+          });
+        }
+        if (event.type === "turn.completed" && resolveTurn !== null) {
+          resolveTurn(event);
+        }
+      },
+      diagnostics: async () => undefined,
     });
 
     driver.start({

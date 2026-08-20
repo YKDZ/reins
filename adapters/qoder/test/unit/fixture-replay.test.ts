@@ -28,13 +28,12 @@ describe("录制 fixture 回放", () => {
       .split("\n")
       .map((line) => JSON.parse(line) as SDKMessage);
     const fake = createFakeSdk();
-    const transcript: Array<[string, unknown]> = [];
-    const factory = createQoderDriver({
-      sdk: fake.sdk,
-      transcript: (kind, payload) => transcript.push([kind, payload]),
-    });
+    const factory = createQoderDriver({ sdk: fake.sdk });
     const events: DomainEvent[] = [];
-    const driver = factory((event) => events.push(event));
+    const driver = factory({
+      emit: (event) => events.push(event),
+      diagnostics: async () => undefined,
+    });
     driver.start({
       sessionId: "reviewer@g1" as SessionId,
       turnId: "t1" as TurnId,
@@ -60,6 +59,5 @@ describe("录制 fixture 回放", () => {
       stopReason: "end_turn",
       finalReply: expect.any(String),
     });
-    expect(transcript.some(([kind]) => kind === "thinking")).toBe(true);
   });
 });

@@ -15,7 +15,7 @@ import type {
   TurnId,
   MessageId,
   WorkerDriver,
-  WorkerDriverFactory,
+  AdapterDriverFactory,
   WorkerSpec,
 } from "@reins/protocol";
 import {
@@ -287,11 +287,11 @@ function createFakeHarness(options: {
   };
 
   const adapter: HarnessAdapter = {
-    driverFactory: ((emit: (event: DomainEvent) => void) => {
+    driverFactory: (({ emit }) => {
       calls.factoryCalls += 1;
       emitEvent = emit;
       return driver;
-    }) satisfies WorkerDriverFactory,
+    }) satisfies AdapterDriverFactory,
     async capabilities() {
       return options.capability;
     },

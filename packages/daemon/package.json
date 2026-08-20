@@ -35,6 +35,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@reins/adapter-kit": "workspace:*",
     "@reins/codex": "workspace:*",
     "@reins/core": "workspace:*",
     "@reins/protocol": "workspace:*",
@@ -54,6 +55,9 @@
     "vitest": "catalog:"
   },
   "dependenciesMeta": {
+    "@reins/adapter-kit": {
+      "injected": false
+    },
     "@reins/codex": {
       "injected": false
     },

@@ -1,14 +1,10 @@
-import {
-  createAsyncQueue,
-  HarnessSession,
-  noopTranscript,
-  type TranscriptSink,
-} from "@reins/adapter-kit";
+import { createAsyncQueue, HarnessSession } from "@reins/adapter-kit";
 import type {
   WorkerDriver,
-  WorkerDriverFactory,
+  AdapterDriverFactory,
   WorkerSpec,
 } from "@reins/protocol";
+import { makeTextEvidence } from "@reins/protocol";
 
 import { derivePermissionOptions, mapSdkMessage } from "./mapper.ts";
 import type {
@@ -44,16 +40,15 @@ function userMessage(
 
 export function createQoderDriver(deps: {
   sdk: QoderSdk;
-  transcript?: TranscriptSink;
-}): WorkerDriverFactory {
-  const transcript = deps.transcript ?? noopTranscript;
-
-  return (emit) => {
+}): AdapterDriverFactory {
+  return ({ emit, diagnostics: runtimeDiagnostics }) => {
+    const diagnosticSink = runtimeDiagnostics;
     let stream: ReturnType<typeof createAsyncQueue<SDKUserMessage>> | null =
       null;
     let query: ReturnType<QoderSdk["query"]> | null = null;
     let abortController: AbortController | null = null;
     let session: HarnessSession<PendingEntry> | null = null;
+    let terminating = false;
 
     function makeCanUseTool(): CanUseTool {
       return async (toolName, input, options) => {
@@ -91,28 +86,47 @@ export function createQoderDriver(deps: {
 
     async function run(): Promise<void> {
       if (query === null || stream === null || session === null) return;
+      let readFailed = false;
       try {
         for await (const message of query) {
-          if (message.type === "result") {
-            session.transcript("result", message);
-          }
           const events = mapSdkMessage(session, message);
           for (const event of events) {
             emit(event);
           }
         }
       } catch (error) {
-        session.transcript("stream_error", { message: String(error) });
+        readFailed = true;
+        void session.diagnostic({
+          source: "adapter",
+          harness: "qoder",
+          kind: "stream_failure",
+          operation: "receive_worker_stream",
+          reason: "read_error",
+          message: makeTextEvidence(String(error)),
+        });
+      }
+      if (!readFailed && !terminating && session.turnId !== null) {
+        void session.diagnostic({
+          source: "adapter",
+          harness: "qoder",
+          kind: "stream_failure",
+          operation: "receive_worker_stream",
+          reason: "closed_unexpectedly",
+          message: makeTextEvidence(
+            "worker stream ended before turn completion",
+          ),
+        });
       }
       session.failActiveTurn();
     }
 
     const driver: WorkerDriver = {
       start(spec: WorkerSpec) {
+        terminating = false;
         session = new HarnessSession<PendingEntry>({
           sessionId: spec.sessionId,
           emit,
-          transcript,
+          diagnostics: diagnosticSink,
           onClearPending: () => {
             // 回合终态作废未决请求：直接丢弃，不结算、不写文案。
           },
@@ -120,15 +134,22 @@ export function createQoderDriver(deps: {
         session.beginTurn(spec.turnId);
         abortController = new AbortController();
         stream = createAsyncQueue<SDKUserMessage>();
-        if (
-          spec.reasoning !== undefined ||
-          spec.sandbox !== undefined ||
-          spec.agent !== undefined
-        ) {
-          session.transcript("unmapped_spawn_fields", {
-            reasoning: spec.reasoning,
-            sandbox: spec.sandbox,
-            agent: spec.agent,
+        const unsupportedFields = [
+          ...(spec.agent === undefined ? [] : (["agent"] as const)),
+          ...(spec.reasoning === undefined ? [] : (["reasoning"] as const)),
+          ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
+        ];
+        if (unsupportedFields.length > 0) {
+          void session.diagnostic({
+            source: "adapter",
+            harness: "qoder",
+            kind: "mapping_gap",
+            operation: "spawn",
+            reason: "unsupported_input",
+            fields: unsupportedFields as [
+              "agent" | "reasoning" | "sandbox",
+              ...("agent" | "reasoning" | "sandbox")[],
+            ],
           });
         }
         const options: QoderOptions = {
@@ -148,7 +169,21 @@ export function createQoderDriver(deps: {
             ? { canUseTool: makeCanUseTool() }
             : {}),
         };
-        query = deps.sdk.query({ prompt: stream, options });
+        try {
+          query = deps.sdk.query({ prompt: stream, options });
+        } catch (error) {
+          void session.diagnostic({
+            source: "adapter",
+            harness: "qoder",
+            kind: "request_failure",
+            operation: "spawn",
+            stage: "start_session",
+            reason: "upstream_error",
+            message: makeTextEvidence(String(error)),
+          });
+          session.failActiveTurn();
+          return;
+        }
         stream.push(userMessage(spec.message, "next", true));
         void run();
       },
@@ -161,13 +196,32 @@ export function createQoderDriver(deps: {
         void sessionId;
         if (session !== null) session.cancelling = true;
         query?.interrupt().catch((error: unknown) => {
-          session?.transcript("interrupt_error", { message: String(error) });
+          if (session === null) return;
+          void session.diagnostic({
+            source: "adapter",
+            harness: "qoder",
+            kind: "request_failure",
+            operation: "interrupt",
+            stage: "interrupt",
+            reason: "upstream_error",
+            message: makeTextEvidence(String(error)),
+          });
         });
       },
       resolvePermission(sessionId, permissionId, resolution) {
         const entry = session?.takePending(permissionId);
         if (entry === undefined) {
-          transcript("permission_resolution_lost", { permissionId, sessionId });
+          if (session !== null) {
+            void session.diagnostic({
+              source: "adapter",
+              harness: "qoder",
+              kind: "authorization_failure",
+              operation: "resolve_permission",
+              stage: "lookup",
+              reason: "target_lost",
+              permissionId,
+            });
+          }
           return;
         }
         if (resolution.outcome === "allow") {
@@ -207,6 +261,7 @@ export function createQoderDriver(deps: {
       },
       terminate(sessionId) {
         void sessionId;
+        terminating = true;
         abortController?.abort();
       },
     };

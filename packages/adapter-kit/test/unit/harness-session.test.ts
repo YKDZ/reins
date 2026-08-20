@@ -1,4 +1,9 @@
-import type { DomainEvent, SessionId, TurnId } from "@reins/protocol";
+import type {
+  DiagnosticInput,
+  DomainEvent,
+  SessionId,
+  TurnId,
+} from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { HarnessSession } from "#/harness-session";
@@ -22,6 +27,65 @@ function setup(cleared: string[] = []): {
 }
 
 describe("HarnessSession", () => {
+  test("diagnostic 自动关联当前 session 与 turn", async () => {
+    const inputs: DiagnosticInput[] = [];
+    const session = new HarnessSession({
+      sessionId,
+      emit: () => {},
+      diagnostics: async (input) => {
+        inputs.push(input);
+        return undefined;
+      },
+    });
+    session.beginTurn(firstTurnId);
+
+    await session.diagnostic({
+      source: "adapter",
+      harness: "qoder",
+      kind: "mapping_gap",
+      operation: "spawn",
+      reason: "unsupported_input",
+      fields: ["reasoning"],
+    });
+
+    expect(inputs).toEqual([
+      {
+        source: "adapter",
+        harness: "qoder",
+        sessionId,
+        turnId: firstTurnId,
+        kind: "mapping_gap",
+        operation: "spawn",
+        reason: "unsupported_input",
+        fields: ["reasoning"],
+      },
+    ]);
+  });
+
+  test("diagnostic 在回合外不伪造 turn，且 sink 失败不穿透控制流", async () => {
+    const inputs: DiagnosticInput[] = [];
+    const session = new HarnessSession({
+      sessionId,
+      emit: () => {},
+      diagnostics: async (input) => {
+        inputs.push(input);
+        throw new Error("store unavailable");
+      },
+    });
+
+    await expect(
+      session.diagnostic({
+        source: "adapter",
+        harness: "codex",
+        kind: "compatibility_gap",
+        operation: "receive_worker_request",
+        reason: "unsupported_request",
+      }),
+    ).resolves.toBeUndefined();
+    expect(inputs[0]).toMatchObject({ sessionId });
+    expect(inputs[0]).not.toHaveProperty("turnId");
+  });
+
   test("endTurn(end_turn) 携带 finalText 与 usage 并复位", () => {
     const { session } = setup();
     session.beginTurn(firstTurnId);

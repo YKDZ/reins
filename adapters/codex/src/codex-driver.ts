@@ -1,42 +1,66 @@
 import {
   HarnessSession,
-  noopTranscript,
-  type TranscriptSink,
+  isAlreadyDiagnosedError,
+  type DiagnosticSink,
 } from "@reins/adapter-kit";
-import type {
-  WorkerDriver,
-  WorkerDriverFactory,
-  WorkerSpec,
-  PermissionId,
+import {
+  makeTextEvidence,
+  type WorkerDriver,
+  type AdapterDriverFactory,
+  type WorkerSpec,
+  type PermissionId,
 } from "@reins/protocol";
 
 import type { UserInput } from "#/generated/v2/UserInput";
 
 import {
   derivePermissionOptions,
-  isApprovalRequest,
   mapNotification,
   resolutionToResponse,
 } from "./mapper.ts";
-import type { CodexTransport, InboundMessage } from "./transport.ts";
+import {
+  type CodexApprovalRequest,
+  type CodexTransport,
+  type InboundMessage,
+} from "./transport.ts";
 
-type CodexApproval = {
-  requestId: number;
-  method: string;
-  params: Record<string, unknown>;
-};
+type CodexApproval = CodexApprovalRequest;
 
 function textInput(text: string): UserInput {
   return { type: "text", text, text_elements: [] };
 }
 
-export function createCodexDriver(deps: {
-  transportFactory: () => CodexTransport;
-  transcript?: TranscriptSink;
-}): WorkerDriverFactory {
-  const transcript = deps.transcript ?? noopTranscript;
+class TerminateTimeoutError extends Error {}
 
-  return (emit) => {
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) return `${error.name}: ${error.message}`;
+  if (typeof error === "string") return error;
+  return "Unknown upstream failure";
+}
+
+function withTerminateTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const timer = setTimeout(
+      () => reject(new TerminateTimeoutError("thread delete timed out")),
+      ms,
+    );
+    void promise.then(resolve, reject).finally(() => clearTimeout(timer));
+  });
+}
+
+export function createCodexDriver(deps: {
+  transportFactory: (options: {
+    captureHarnessStderr?: boolean;
+    diagnostics: DiagnosticSink;
+    diagnosticContext: () => {
+      sessionId: WorkerSpec["sessionId"];
+      turnId: WorkerSpec["turnId"] | null;
+    } | null;
+  }) => CodexTransport;
+  terminateTimeoutMs?: number;
+}): AdapterDriverFactory {
+  return ({ emit, diagnostics: runtimeDiagnostics }) => {
+    const diagnosticSink = runtimeDiagnostics;
     let transport: CodexTransport | null = null;
     let session: HarnessSession<CodexApproval> | null = null;
     let threadId = "";
@@ -44,16 +68,43 @@ export function createCodexDriver(deps: {
     let ended = false;
     const pendingByRequest = new Map<number, PermissionId>();
 
-    async function startTurn(message: string): Promise<void> {
+    async function startTurn(
+      message: string,
+      context:
+        | { operation: "spawn"; stage: "start_turn" }
+        | { operation: "send"; stage: "deliver" },
+    ): Promise<void> {
       if (transport === null || threadId === "") return;
       try {
-        const turn = (await transport.request("turn/start", {
+        const turn = await transport.request("turn/start", {
           threadId,
           input: [textInput(message)],
-        })) as { turn?: { id?: unknown } };
-        activeTurnId = typeof turn.turn?.id === "string" ? turn.turn.id : null;
+        });
+        activeTurnId = turn.turn.id;
       } catch (error) {
-        session?.transcript("turn_start_error", { message: String(error) });
+        if (isAlreadyDiagnosedError(error)) {
+          session?.failActiveTurn();
+        } else if (session !== null && context.operation === "spawn") {
+          void session.diagnostic({
+            source: "adapter",
+            harness: "codex",
+            kind: "request_failure",
+            operation: "spawn",
+            stage: "start_turn",
+            reason: "upstream_error",
+            message: makeTextEvidence(String(error)),
+          });
+        } else if (session !== null) {
+          void session.diagnostic({
+            source: "adapter",
+            harness: "codex",
+            kind: "request_failure",
+            operation: "send",
+            stage: "deliver",
+            reason: "upstream_error",
+            message: makeTextEvidence(String(error)),
+          });
+        }
         session?.failActiveTurn();
       }
     }
@@ -62,54 +113,51 @@ export function createCodexDriver(deps: {
       message: Extract<InboundMessage, { kind: "request" }>,
     ): void {
       if (session === null) return;
-      if (!isApprovalRequest(message.method)) {
-        session.transcript("unhandled_server_request", {
-          id: message.id,
-          method: message.method,
+      if (message.method === "unsupported") {
+        void session.diagnostic({
+          source: "adapter",
+          harness: "codex",
+          kind: "compatibility_gap",
+          operation: "receive_worker_request",
+          reason: "unsupported_request",
+          message: makeTextEvidence(message.nativeMethod),
         });
         transport?.respondError(
           message.id,
           -32601,
-          `Unhandled server request: ${message.method}`,
+          `Unhandled server request: ${message.nativeMethod}`,
         );
         return;
       }
-      const params = (message.params ?? {}) as Record<string, unknown>;
       const permissionId = session.requestPermission(
         message.method === "item/commandExecution/requestApproval"
           ? "tool:commandExecution"
           : message.method === "item/fileChange/requestApproval"
             ? "tool:fileChange"
             : "tool:permissions",
-        params,
-        derivePermissionOptions(message.method, params),
-        { requestId: message.id, method: message.method, params },
+        message.input,
+        derivePermissionOptions(message),
+        message,
       );
       pendingByRequest.set(message.id, permissionId);
     }
 
     async function run(): Promise<void> {
       if (transport === null || session === null) return;
+      let readFailed = false;
       try {
         for await (const message of transport.messages) {
           if (message.kind === "notification") {
             if (message.method === "serverRequest/resolved") {
-              const requestId = (message.params as { requestId?: number })
-                .requestId;
-              if (requestId !== undefined) {
-                const permissionId = pendingByRequest.get(requestId);
-                if (permissionId !== undefined) {
-                  session.takePending(permissionId);
-                  pendingByRequest.delete(requestId);
-                }
+              const requestId = message.params.requestId;
+              const permissionId = pendingByRequest.get(requestId);
+              if (permissionId !== undefined) {
+                session.takePending(permissionId);
+                pendingByRequest.delete(requestId);
               }
               continue;
             }
-            const events = mapNotification(
-              session,
-              message.method,
-              message.params,
-            );
+            const events = mapNotification(session, message);
             for (const event of events) {
               if (event.type === "turn.completed") {
                 activeTurnId = null;
@@ -122,7 +170,27 @@ export function createCodexDriver(deps: {
           }
         }
       } catch (error) {
-        session.transcript("stream_error", { message: String(error) });
+        readFailed = true;
+        void session.diagnostic({
+          source: "adapter",
+          harness: "codex",
+          kind: "stream_failure",
+          operation: "receive_worker_stream",
+          reason: "read_error",
+          message: makeTextEvidence(String(error)),
+        });
+      }
+      if (!readFailed && !ended && session.turnId !== null) {
+        void session.diagnostic({
+          source: "adapter",
+          harness: "codex",
+          kind: "stream_failure",
+          operation: "receive_worker_stream",
+          reason: "closed_unexpectedly",
+          message: makeTextEvidence(
+            "worker stream ended before turn completion",
+          ),
+        });
       }
       if (!ended) session.failActiveTurn();
     }
@@ -132,20 +200,36 @@ export function createCodexDriver(deps: {
         session = new HarnessSession<CodexApproval>({
           sessionId: spec.sessionId,
           emit,
-          transcript,
+          diagnostics: diagnosticSink,
         });
         session.beginTurn(spec.turnId);
-        transport = deps.transportFactory();
+        transport = deps.transportFactory({
+          diagnostics: diagnosticSink,
+          diagnosticContext: () =>
+            session === null
+              ? null
+              : { sessionId: session.sessionId, turnId: session.turnId },
+          ...(spec.captureHarnessStderr === true
+            ? { captureHarnessStderr: true }
+            : {}),
+        });
         transport.start();
-        if (
-          spec.reasoning !== undefined ||
-          spec.sandbox !== undefined ||
-          spec.agent !== undefined
-        ) {
-          session.transcript("unmapped_spawn_fields", {
-            reasoning: spec.reasoning,
-            sandbox: spec.sandbox,
-            agent: spec.agent,
+        const unsupportedFields = [
+          ...(spec.agent === undefined ? [] : (["agent"] as const)),
+          ...(spec.reasoning === undefined ? [] : (["reasoning"] as const)),
+          ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
+        ];
+        if (unsupportedFields.length > 0) {
+          void session.diagnostic({
+            source: "adapter",
+            harness: "codex",
+            kind: "mapping_gap",
+            operation: "spawn",
+            reason: "unsupported_input",
+            fields: unsupportedFields as [
+              "agent" | "reasoning" | "sandbox",
+              ...("agent" | "reasoning" | "sandbox")[],
+            ],
           });
         }
         void (async () => {
@@ -155,7 +239,7 @@ export function createCodexDriver(deps: {
               capabilities: null,
             });
             transport?.notify("initialized", {});
-            const thread = (await transport?.request("thread/start", {
+            const thread = await transport?.request("thread/start", {
               ephemeral: true,
               cwd: spec.cwd,
               approvalPolicy:
@@ -164,12 +248,24 @@ export function createCodexDriver(deps: {
               ...(spec.authorizationMode === "allowAll"
                 ? { sandbox: "danger-full-access" }
                 : {}),
-            })) as { thread?: { id?: unknown } };
-            threadId =
-              typeof thread.thread?.id === "string" ? thread.thread.id : "";
-            await startTurn(spec.message);
+            });
+            threadId = thread?.thread.id ?? "";
+            await startTurn(spec.message, {
+              operation: "spawn",
+              stage: "start_turn",
+            });
           } catch (error) {
-            session?.transcript("start_error", { message: String(error) });
+            if (session !== null && !isAlreadyDiagnosedError(error)) {
+              void session.diagnostic({
+                source: "adapter",
+                harness: "codex",
+                kind: "request_failure",
+                operation: "spawn",
+                stage: "start_session",
+                reason: "upstream_error",
+                message: makeTextEvidence(String(error)),
+              });
+            }
             session?.failActiveTurn();
           }
           await run();
@@ -180,7 +276,7 @@ export function createCodexDriver(deps: {
         session?.setTurnId(turnId);
         if (ended) return;
         if (activeTurnId === null) {
-          void startTurn(message);
+          void startTurn(message, { operation: "send", stage: "deliver" });
         } else {
           void transport
             ?.request("turn/steer", {
@@ -189,7 +285,17 @@ export function createCodexDriver(deps: {
               expectedTurnId: activeTurnId,
             })
             .catch((error: unknown) => {
-              session?.transcript("steer_error", { message: String(error) });
+              if (session !== null && !isAlreadyDiagnosedError(error)) {
+                void session.diagnostic({
+                  source: "adapter",
+                  harness: "codex",
+                  kind: "request_failure",
+                  operation: "send",
+                  stage: "steer",
+                  reason: "upstream_error",
+                  message: makeTextEvidence(String(error)),
+                });
+              }
             });
         }
       },
@@ -200,36 +306,81 @@ export function createCodexDriver(deps: {
           void transport
             ?.request("turn/interrupt", { threadId, turnId: activeTurnId })
             .catch((error: unknown) => {
-              session?.transcript("interrupt_error", {
-                message: String(error),
-              });
+              if (session !== null && !isAlreadyDiagnosedError(error)) {
+                void session.diagnostic({
+                  source: "adapter",
+                  harness: "codex",
+                  kind: "request_failure",
+                  operation: "interrupt",
+                  stage: "interrupt",
+                  reason: "upstream_error",
+                  message: makeTextEvidence(String(error)),
+                });
+              }
             });
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {
         const entry = session?.takePending(permissionId);
         if (entry === undefined) {
-          transcript("permission_resolution_lost", {
-            sessionId,
-            permissionId,
-          });
+          if (session !== null) {
+            void session.diagnostic({
+              source: "adapter",
+              harness: "codex",
+              kind: "authorization_failure",
+              operation: "resolve_permission",
+              stage: "lookup",
+              reason: "target_lost",
+              permissionId,
+            });
+          }
           return;
         }
-        pendingByRequest.delete(entry.requestId);
-        transport?.respond(
-          entry.requestId,
-          resolutionToResponse(entry.method, resolution, entry.params),
-        );
+        pendingByRequest.delete(entry.id);
+        transport?.respond(entry.id, resolutionToResponse(entry, resolution));
       },
       terminate(sessionId) {
         void sessionId;
         ended = true;
-        void transport
-          ?.request("thread/delete", { threadId })
-          .catch((error: unknown) => {
-            session?.transcript("delete_error", { message: String(error) });
-          });
-        transport?.close();
+        void (async () => {
+          const closingTransport = transport;
+          let failure: unknown;
+          try {
+            if (closingTransport !== null) {
+              await withTerminateTimeout(
+                closingTransport.request("thread/delete", { threadId }),
+                deps.terminateTimeoutMs ?? 5_000,
+              );
+            }
+          } catch (error) {
+            failure = error;
+          }
+          try {
+            await closingTransport?.close();
+          } catch (error) {
+            if (failure === undefined) {
+              failure = error;
+            }
+          }
+          if (
+            failure !== undefined &&
+            session !== null &&
+            !isAlreadyDiagnosedError(failure)
+          ) {
+            void session.diagnostic({
+              source: "adapter",
+              harness: "codex",
+              kind: "request_failure",
+              operation: "kill",
+              stage: "terminate",
+              reason:
+                failure instanceof TerminateTimeoutError
+                  ? "timeout"
+                  : "upstream_error",
+              message: makeTextEvidence(errorMessage(failure)),
+            });
+          }
+        })();
       },
     };
     return driver;

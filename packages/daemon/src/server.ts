@@ -1,3 +1,4 @@
+import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
@@ -351,7 +352,9 @@ export function createProtocolServerInternal(
   async function aggregateCapabilities(): Promise<CapabilitiesResult> {
     const entries = Array.from(options.adapters.entries());
     const results = await Promise.allSettled(
-      entries.map(async ([, adapter]) => adapter.capabilities()),
+      entries.map(async ([, adapter]) =>
+        adapter.capabilities((input) => options.diagnostics.record(input)),
+      ),
     );
     const capabilities: HarnessCapability[] = [];
     const failures: CapabilitiesResult["failures"] = [];
@@ -383,15 +386,17 @@ export function createProtocolServerInternal(
         });
       } else {
         const cause = makeErrorCause("exception", String(result.reason));
-        const diagnosticId = await recordDiagnostic({
-          source: "daemon",
-          kind: "request_failure",
-          operation: "capabilities",
-          stage: "query",
-          reason: "upstream_error",
-          harness,
-          message: makeTextEvidence(String(result.reason)),
-        });
+        const diagnosticId = isAlreadyDiagnosedError(result.reason)
+          ? result.reason.diagnosticId
+          : await recordDiagnostic({
+              source: "daemon",
+              kind: "request_failure",
+              operation: "capabilities",
+              stage: "query",
+              reason: "upstream_error",
+              harness,
+              message: makeTextEvidence(String(result.reason)),
+            });
         failures.push({
           harness,
           code: "capability_query_failed",

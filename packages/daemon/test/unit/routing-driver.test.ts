@@ -1,3 +1,7 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import {
   sessionIdSchema,
   sessionNameSchema,
@@ -8,12 +12,81 @@ import {
 import * as v from "valibot";
 import { describe, expect, test } from "vitest";
 
+import { openDiagnosticsRuntimeForTest } from "../../src/diagnostics-recorder.testing.ts";
+import { openDiagnosticsStore } from "../../src/diagnostics-store.ts";
+import { daemonGenerationSchema } from "../../src/generation.ts";
 import type { HarnessAdapter } from "../../src/registry.ts";
 import { createRoutingDriverFactory } from "../../src/routing-driver.ts";
 
 describe("routing driver invariants", () => {
+  test("binds real RecorderRuntime so adapter diagnostics are immediately exact-queryable", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-routing-diagnostics-"));
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => ({
+        directory: root,
+        diagnosticsDirectory: join(root, "diagnostics"),
+        durable: true,
+        retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+      }),
+      openStore: async (state) =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () =>
+        v.parse(daemonGenerationSchema, "routing"),
+    });
+    let accepted: ReturnType<typeof runtime.record> | undefined;
+    const adapter: HarnessAdapter = {
+      driverFactory: ({ diagnostics }) => ({
+        start() {
+          accepted = diagnostics({
+            source: "adapter",
+            harness: "diagnostic-fake",
+            kind: "mapping_gap",
+            operation: "spawn",
+            reason: "unsupported_input",
+            fields: ["reasoning"],
+          });
+        },
+        deliver() {},
+        interrupt() {},
+        resolvePermission() {},
+        terminate() {},
+      }),
+      capabilities: async () => ({ harness: "diagnostic-fake", models: [] }),
+    };
+    const driver = createRoutingDriverFactory(
+      new Map([["diagnostic-fake", adapter]]),
+      runtime,
+    )(() => {});
+    const spec: WorkerSpec = {
+      sessionId: v.parse(sessionIdSchema, "diagnostic@groute"),
+      turnId: v.parse(turnIdSchema, "turn-diagnostic"),
+      harness: "diagnostic-fake",
+      message: "start",
+      cwd: "/tmp",
+      authorizationMode: "allowAll",
+      sessionName: v.parse(sessionNameSchema, "diagnostic"),
+    };
+
+    driver.start(spec);
+    const diagnosticId = await accepted;
+    expect(diagnosticId).toBeDefined();
+    await expect(
+      runtime.query({ diagnosticId: diagnosticId! }),
+    ).resolves.toMatchObject({
+      record: {
+        source: "adapter",
+        harness: "diagnostic-fake",
+        kind: "mapping_gap",
+      },
+    });
+    await runtime.close();
+    await rm(root, { recursive: true, force: true });
+  });
+
   test("does not silently drop delivery with no session routing entry", () => {
-    const driver = createRoutingDriverFactory(new Map())(() => {});
+    const driver = createRoutingDriverFactory(new Map(), {
+      record: async () => undefined,
+    })(() => {});
 
     expect(() =>
       driver.deliver(
@@ -44,9 +117,9 @@ describe("routing driver invariants", () => {
       driverFactory: () => worker,
       capabilities: async () => ({ harness: "fake", models: [] }),
     };
-    const driver = createRoutingDriverFactory(new Map([["fake", adapter]]))(
-      () => {},
-    );
+    const driver = createRoutingDriverFactory(new Map([["fake", adapter]]), {
+      record: async () => undefined,
+    })(() => {});
     const sessionId = v.parse(sessionIdSchema, "retry@groute");
     const spec: WorkerSpec = {
       sessionId,

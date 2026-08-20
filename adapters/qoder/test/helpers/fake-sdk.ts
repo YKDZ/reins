@@ -10,6 +10,7 @@ import type { QoderOptions, QoderQuery, QoderSdk } from "#/sdk-seam";
 export type FakeQoderControls = {
   push(message: SDKMessage): void;
   end(): void;
+  fail(error: unknown): void;
   delivered(): SDKUserMessage[];
   lastOptions(): QoderOptions | null;
   interruptCount(): number;
@@ -21,7 +22,9 @@ export function createFakeSdk(): {
   sdk: QoderSdk;
   controls: FakeQoderControls;
 } {
-  const queue = createAsyncQueue<SDKMessage>();
+  const failureMarker = Symbol("failure");
+  const queue = createAsyncQueue<SDKMessage | typeof failureMarker>();
+  let queryFailure: unknown;
   const delivered: SDKUserMessage[] = [];
   let lastOptions: QoderOptions | null = null;
   let interruptCount = 0;
@@ -36,7 +39,16 @@ export function createFakeSdk(): {
       })();
       const q: QoderQuery = {
         [Symbol.asyncIterator]() {
-          return queue[Symbol.asyncIterator]();
+          const iterator = queue[Symbol.asyncIterator]();
+          return {
+            async next() {
+              const result = await iterator.next();
+              if (!result.done && result.value === failureMarker) {
+                throw queryFailure;
+              }
+              return result as IteratorResult<SDKMessage, undefined>;
+            },
+          };
         },
         interrupt: async () => {
           interruptCount += 1;
@@ -55,6 +67,10 @@ export function createFakeSdk(): {
     controls: {
       push: (message) => queue.push(message),
       end: () => queue.end(),
+      fail: (error) => {
+        queryFailure = error;
+        queue.push(failureMarker);
+      },
       delivered: () => [...delivered],
       lastOptions: () => lastOptions,
       interruptCount: () => interruptCount,

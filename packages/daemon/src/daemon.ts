@@ -57,7 +57,10 @@ export function createDaemonInternal(
   },
 ): Daemon {
   const machine = createSessionMachine({
-    driverFactory: createRoutingDriverFactory(options.adapters),
+    driverFactory: createRoutingDriverFactory(
+      options.adapters,
+      options.diagnostics,
+    ),
     identity: options.identity,
     diagnostics: options.diagnostics,
   });

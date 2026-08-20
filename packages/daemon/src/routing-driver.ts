@@ -6,12 +6,14 @@ import type {
   WorkerSpec,
 } from "@reins/protocol";
 
+import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 
 // SessionMachine 只接受单一 driverFactory；路由 driver 按 harness 懒实例化
 // 各家 factory，并按 sessionId→harness 表路由（ADR-0009 adapter 表落地）。
 export function createRoutingDriverFactory(
   adapters: AdapterRegistry,
+  diagnostics: Pick<DiagnosticsRuntime, "record">,
 ): WorkerDriverFactory {
   return (emit) => {
     const drivers = new Map<string, WorkerDriver>();
@@ -41,7 +43,10 @@ export function createRoutingDriverFactory(
         }
         let driver = drivers.get(spec.harness);
         if (driver === undefined) {
-          driver = adapter.driverFactory(emit);
+          driver = adapter.driverFactory({
+            emit,
+            diagnostics: (input) => diagnostics.record(input),
+          });
           drivers.set(spec.harness, driver);
         }
         try {

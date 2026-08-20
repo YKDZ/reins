@@ -1,5 +1,9 @@
 import type { TurnJournal } from "@reins/adapter-kit";
-import type { DomainEvent, PermissionOption } from "@reins/protocol";
+import {
+  makeTextEvidence,
+  type DomainEvent,
+  type PermissionOption,
+} from "@reins/protocol";
 
 import type {
   PermissionUpdate,
@@ -96,10 +100,6 @@ function mapAssistant(
 
   for (const block of message.message.content) {
     if (block.type === "thinking") {
-      session.transcript("thinking", {
-        uuid: message.uuid,
-        thinking: block.thinking,
-      });
       continue;
     }
     if (
@@ -151,6 +151,14 @@ function mapAssistant(
   }
 
   if (message.isApiErrorMessage === true) {
+    void session.diagnostic({
+      source: "adapter",
+      harness: "qoder",
+      kind: "turn_failure",
+      operation: "run_turn",
+      reason: "worker_reported_failure",
+      message: makeTextEvidence("worker reported a failed turn"),
+    });
     events.push(session.endTurn("failed"));
   } else if (message.aborted === true && session.cancelling) {
     events.push(session.endTurn("cancelled"));
@@ -215,6 +223,14 @@ function mapResult(
 ): DomainEvent[] {
   if (session.turnId === null) return [];
   if (message.is_error || message.subtype.startsWith("error")) {
+    void session.diagnostic({
+      source: "adapter",
+      harness: "qoder",
+      kind: "turn_failure",
+      operation: "run_turn",
+      reason: "worker_reported_failure",
+      message: makeTextEvidence("worker reported a failed turn"),
+    });
     return [session.endTurn("failed")];
   }
   return [];

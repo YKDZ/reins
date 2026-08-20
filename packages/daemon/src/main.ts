@@ -35,15 +35,17 @@ function builtInAdapters(): Map<string, HarnessAdapter> {
       {
         driverFactory: createQoderDriver({ sdk: qoderSdk }),
         capabilities: createQoderCapabilities(qoderSdk),
+        canCaptureHarnessStderr: false,
       },
     ],
     [
       "codex",
       {
         driverFactory: createCodexDriver({
-          transportFactory: () => createCodexTransport({}),
+          transportFactory: (options) => createCodexTransport(options),
         }),
         capabilities: createCodexCapabilities(),
+        canCaptureHarnessStderr: true,
       },
     ],
   ]);

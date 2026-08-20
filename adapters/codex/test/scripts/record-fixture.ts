@@ -12,7 +12,7 @@ transport.start();
 const lines: unknown[] = [];
 const timeout = setTimeout(() => {
   console.error("录制超时，中止");
-  transport.close();
+  void transport.close();
 }, 120_000);
 
 try {
@@ -63,6 +63,6 @@ try {
   console.log(`已录制 ${lines.length} 条消息 → test/fixtures/${name}.jsonl`);
 } finally {
   clearTimeout(timeout);
-  transport.close();
+  await transport.close();
   process.exit(0);
 }

@@ -1,11 +1,18 @@
+import { EventEmitter } from "node:events";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { PassThrough } from "node:stream";
 
+import {
+  createCodexCapabilities,
+  createCodexTransport,
+  type CodexChild,
+} from "@reins/codex";
 import type {
   ProtocolMessage,
   ProtocolResponse,
-  WorkerDriverFactory,
+  AdapterDriverFactory,
 } from "@reins/protocol";
 import {
   diagnosticsResultSchema,
@@ -138,7 +145,7 @@ describe("daemon diagnostic error dispatch", () => {
       allocateGeneration: async () =>
         v.parse(daemonGenerationSchema, "dispatch"),
     });
-    const driverFactory: WorkerDriverFactory = () => ({
+    const driverFactory: AdapterDriverFactory = () => ({
       start() {
         throw new Error("worker start failed");
       },
@@ -360,7 +367,7 @@ describe("daemon diagnostic error dispatch", () => {
         await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
       allocateGeneration: async () => v.parse(daemonGenerationSchema, "caps"),
     });
-    const driverFactory: WorkerDriverFactory = () => ({
+    const driverFactory: AdapterDriverFactory = () => ({
       start() {},
       deliver() {},
       interrupt() {},
@@ -449,6 +456,133 @@ describe("daemon diagnostic error dispatch", () => {
           operation: "capabilities",
           harness: "mismatch",
         },
+      });
+    } finally {
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+
+  test("Codex malformed model/list keeps the transport protocol_violation as the sole cause", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-codex-caps-"));
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () => v.parse(daemonGenerationSchema, "caps"),
+    });
+    const stdin = new PassThrough();
+    const stdout = new PassThrough();
+    const emitter = new EventEmitter();
+    const child: CodexChild = {
+      stdin,
+      stdout,
+      on: (event, listener) => emitter.on(event, listener),
+      kill: () => {
+        emitter.emit("exit");
+        stdout.end();
+        return true;
+      },
+    };
+    let outbound = "";
+    stdin.on("data", (chunk) => {
+      outbound += String(chunk);
+      for (;;) {
+        const newline = outbound.indexOf("\n");
+        if (newline < 0) break;
+        const request = JSON.parse(outbound.slice(0, newline)) as {
+          id?: number;
+          method?: string;
+        };
+        outbound = outbound.slice(newline + 1);
+        if (request.id === undefined) continue;
+        stdout.write(
+          `${JSON.stringify({
+            id: request.id,
+            result:
+              request.method === "model/list"
+                ? { data: [{ model: "broken" }] }
+                : {},
+          })}\n`,
+        );
+      }
+    });
+    const driverFactory: AdapterDriverFactory = () => ({
+      start() {},
+      deliver() {},
+      interrupt() {},
+      resolvePermission() {},
+      terminate() {},
+    });
+    const transport = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport,
+      adapters: new Map([
+        [
+          "codex",
+          {
+            driverFactory,
+            capabilities: createCodexCapabilities({
+              transportFactory: (options) =>
+                createCodexTransport({
+                  ...options,
+                  spawnChild: () => child,
+                }),
+            }),
+          },
+        ],
+      ]),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: runtime,
+    });
+    const running = daemon.start();
+    const client = transport.connect();
+    await Promise.resolve();
+    try {
+      const response = new Promise<ProtocolResponse>((resolve) => {
+        client.onEvent((event) => {
+          if (event.kind === "message" && event.message.kind === "response")
+            resolve(event.message);
+        });
+      });
+      client.send({
+        kind: "request",
+        requestId: v.parse(requestIdSchema, "codex-capabilities"),
+        method: "capabilities",
+        params: {},
+      });
+      const result = await response;
+      if (!("result" in result)) throw new Error("Expected capability result");
+      const failure = (
+        result.result as {
+          failures: Array<{ diagnosticId?: unknown }>;
+        }
+      ).failures[0];
+      if (typeof failure?.diagnosticId !== "string")
+        throw new Error("Expected a diagnostic id");
+
+      await expect(
+        runtime.query({
+          diagnosticId: v.parse(diagnosticIdSchema, failure.diagnosticId),
+        }),
+      ).resolves.toMatchObject({
+        record: {
+          source: "adapter",
+          harness: "codex",
+          kind: "protocol_violation",
+          operation: "validate_worker_response",
+        },
+      });
+      await expect(runtime.query({ limit: 100 })).resolves.toMatchObject({
+        records: [expect.objectContaining({ kind: "protocol_violation" })],
       });
     } finally {
       await daemon.stop();

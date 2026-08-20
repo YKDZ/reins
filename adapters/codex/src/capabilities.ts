@@ -1,10 +1,13 @@
+import { noopDiagnosticSink, type DiagnosticSink } from "@reins/adapter-kit";
 import type { HarnessCapability } from "@reins/protocol";
 
-import type { Model } from "#/generated/v2/Model";
+import {
+  createCodexTransport,
+  type CodexModel,
+  type CodexTransport,
+} from "./transport.ts";
 
-import { createCodexTransport, type CodexTransport } from "./transport.ts";
-
-function mapModel(model: Model): {
+function mapModel(model: CodexModel): {
   id: string;
   displayName: string;
   reasoningEfforts: string[];
@@ -22,10 +25,14 @@ function mapModel(model: Model): {
 // 实时查询 app-server 的 model/list；defaultReasoningEffort / isDefault
 // 不进矩阵（最小干扰原则）。
 export function createCodexCapabilities(options?: {
-  transportFactory?: () => CodexTransport;
-}): () => Promise<HarnessCapability> {
-  return async () => {
-    const transport = options?.transportFactory?.() ?? createCodexTransport({});
+  transportFactory?: (options: {
+    diagnostics: DiagnosticSink;
+  }) => CodexTransport;
+}): (diagnostics?: DiagnosticSink) => Promise<HarnessCapability> {
+  return async (diagnostics = noopDiagnosticSink) => {
+    const transport =
+      options?.transportFactory?.({ diagnostics }) ??
+      createCodexTransport({ diagnostics });
     transport.start();
     try {
       await transport.request("initialize", {
@@ -33,17 +40,13 @@ export function createCodexCapabilities(options?: {
         capabilities: null,
       });
       transport.notify("initialized", {});
-      const response = (await transport.request("model/list", {})) as {
-        data?: Model[];
-      };
+      const response = await transport.request("model/list", {});
       return {
         harness: "codex",
-        models: (response.data ?? [])
-          .filter((model) => !model.hidden)
-          .map(mapModel),
+        models: response.data.filter((model) => !model.hidden).map(mapModel),
       };
     } finally {
-      transport.close();
+      await transport.close();
     }
   };
 }

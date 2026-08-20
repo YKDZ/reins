@@ -4,4 +4,9 @@ export {
   type HarnessSessionOptions,
   type TurnJournal,
 } from "./harness-session.ts";
-export { noopTranscript, type TranscriptSink } from "./transcript.ts";
+export {
+  AlreadyDiagnosedError,
+  isAlreadyDiagnosedError,
+  noopDiagnosticSink,
+  type DiagnosticSink,
+} from "./diagnostic.ts";

@@ -1,5 +1,7 @@
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
+import type { DiagnosticSink } from "@reins/adapter-kit";
 import type {
+  DiagnosticInput,
   DomainEvent,
   PermissionId,
   SessionId,
@@ -9,7 +11,6 @@ import type {
 import { describe, expect, test } from "vitest";
 
 import { createQoderDriver } from "#/qoder-driver";
-import type { TranscriptSink } from "#/transcript";
 
 import { createFakeSdk } from "../helpers/fake-sdk.ts";
 
@@ -23,17 +24,22 @@ const sessionName = "reviewer" as SessionName;
 
 function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
   events: DomainEvent[];
-  transcript: Array<[string, unknown]>;
+  diagnostics: DiagnosticInput[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
 } {
   const fake = createFakeSdk();
-  const transcript: Array<[string, unknown]> = [];
-  const sink: TranscriptSink = (kind, payload) =>
-    transcript.push([kind, payload]);
-  const factory = createQoderDriver({ sdk: fake.sdk, transcript: sink });
+  const diagnostics: DiagnosticInput[] = [];
+  const sink: DiagnosticSink = async (input) => {
+    diagnostics.push(input);
+    return undefined;
+  };
+  const factory = createQoderDriver({ sdk: fake.sdk });
   const events: DomainEvent[] = [];
-  const driver = factory((event) => events.push(event));
+  const driver = factory({
+    emit: (event) => events.push(event),
+    diagnostics: sink,
+  });
   driver.start({
     sessionId,
     turnId: firstTurnId,
@@ -43,7 +49,7 @@ function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
     cwd: "/tmp/demo",
     authorizationMode,
   });
-  return { events, transcript, fake, driver };
+  return { events, diagnostics, fake, driver };
 }
 
 const textDelta = (uuid: string, text: string): SDKMessage => ({
@@ -252,13 +258,13 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
-  test("thinking 块进调试转录，不进 message 内容", async () => {
-    const { events, fake, transcript } = setup();
+  test("thinking 块不进入消息或诊断", async () => {
+    const { events, fake, diagnostics } = setup();
     fake.controls.push(assistantThinking("a4"));
     await flush();
 
     expect(events.filter((event) => event.type === "message")).toEqual([]);
-    expect(transcript.some(([kind]) => kind === "thinking")).toBe(true);
+    expect(diagnostics).toEqual([]);
   });
 
   test("工具生命周期：tool.requested 与 tool.completed(isError)", async () => {
@@ -324,8 +330,8 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
-  test("assistant.isApiErrorMessage 合成 turn.completed(failed)", async () => {
-    const { events, fake } = setup();
+  test("worker reported failure 合成终态并记录类型化 turn_failure", async () => {
+    const { events, fake, diagnostics } = setup();
     fake.controls.push({
       type: "assistant",
       message: { role: "assistant", content: [] },
@@ -343,6 +349,15 @@ describe("qoder driver 事件映射", () => {
       stopReason: "failed",
       finalReply: null,
     });
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        kind: "turn_failure",
+        operation: "run_turn",
+        reason: "worker_reported_failure",
+        sessionId,
+        turnId: firstTurnId,
+      }),
+    ]);
   });
 });
 
@@ -470,7 +485,7 @@ describe("interrupt 与 kill", () => {
   });
 
   test("terminate 中止底层会话；流结束后进行中回合兜底 failed", async () => {
-    const { events, fake, driver } = setup();
+    const { events, diagnostics, fake, driver } = setup();
     driver.terminate(sessionId);
     expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
       true,
@@ -485,5 +500,21 @@ describe("interrupt 与 kill", () => {
       stopReason: "failed",
       finalReply: null,
     });
+    expect(diagnostics).toEqual([]);
+  });
+
+  test("terminate 后底层流抛错只记录一条 read_error", async () => {
+    const { diagnostics, fake, driver } = setup();
+    driver.terminate(sessionId);
+    fake.controls.fail(new Error("stream rejected during termination"));
+    await flush();
+
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        kind: "stream_failure",
+        operation: "receive_worker_stream",
+        reason: "read_error",
+      }),
+    ]);
   });
 });
