@@ -3,6 +3,7 @@ import type {
   PermissionMode,
   PermissionResult,
   PermissionUpdate,
+  ModelInfo,
   SDKAssistantMessage,
   SDKMessage,
   SDKPartialAssistantMessage,
@@ -13,6 +14,7 @@ import type {
 
 export type {
   CanUseTool,
+  ModelInfo,
   PermissionMode,
   PermissionResult,
   PermissionUpdate,
@@ -45,4 +47,9 @@ export type QoderSdk = {
     prompt: AsyncIterable<SDKUserMessage>;
     options?: QoderOptions;
   }): QoderQuery;
+  // 实时模型目录：发送 get_models 控制请求，由 qodercli 响应。
+  getAvailableModels(options?: {
+    fetchStrategy?: "live" | "cache";
+    uid?: string;
+  }): Promise<ModelInfo[]>;
 };

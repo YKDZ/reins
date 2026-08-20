@@ -1,2 +1,9 @@
-// daemon 占位：内部协议服务、adapter 注册表、会话表与事件转发将在此实现。
-export type { SessionId } from "@reins/protocol";
+export { createDaemon, type Daemon } from "./daemon.ts";
+export {
+  createProtocolServer,
+  DEFAULT_EVENT_LOG_LIMIT,
+  DEFAULT_IDLE_TIMEOUT_MS,
+  type ProtocolServer,
+} from "./server.ts";
+export { createRoutingDriverFactory } from "./routing-driver.ts";
+export type { AdapterRegistry, HarnessAdapter } from "./registry.ts";

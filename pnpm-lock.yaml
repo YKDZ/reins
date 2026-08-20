@@ -177,6 +177,9 @@ importers:
       commander:
         specifier: 'catalog:'
         version: 15.0.0
+      valibot:
+        specifier: 'catalog:'
+        version: 1.4.2(typescript@7.0.2)
     dependenciesMeta:
       '@reins/protocol':
         injected: false
@@ -201,6 +204,9 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@24.13.3)
 
   packages/adapter-kit:
     dependencies:
@@ -269,12 +275,18 @@ importers:
 
   packages/daemon:
     dependencies:
+      '@reins/codex':
+        specifier: workspace:*
+        version: link:../../adapters/codex
       '@reins/core':
         specifier: workspace:*
         version: link:../core
       '@reins/protocol':
         specifier: workspace:*
         version: link:../protocol
+      '@reins/qoder':
+        specifier: workspace:*
+        version: link:../../adapters/qoder
       '@reins/transport':
         specifier: workspace:*
         version: link:../transport
@@ -282,9 +294,13 @@ importers:
         specifier: 'catalog:'
         version: 1.4.2(typescript@7.0.2)
     dependenciesMeta:
+      '@reins/codex':
+        injected: false
       '@reins/core':
         injected: false
       '@reins/protocol':
+        injected: false
+      '@reins/qoder':
         injected: false
       '@reins/transport':
         injected: false
@@ -307,6 +323,9 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@24.13.3)
 
   packages/protocol:
     dependencies:
@@ -363,6 +382,9 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@24.13.3)
 
   packages/typescript-config:
     devDependencies:

@@ -1,2 +1,19 @@
-// 传输层占位：Transport 接缝与 v1 的 NDJSON 分帧、Unix socket、in-memory 实现将在此落地。
-export type { SessionId } from "@reins/protocol";
+export {
+  createInMemoryTransportPair,
+  createInMemoryTransportServer,
+} from "./in-memory.ts";
+export { createNdjsonDecoder, encodeNdjson } from "./ndjson.ts";
+export { resolveReinsSocketPath } from "./socket-path.ts";
+export type { SocketPathEnvironment } from "./socket-path.ts";
+export { createTransportError, isTransportError } from "./transport.ts";
+export {
+  createUnixSocketClient,
+  createUnixSocketServer,
+} from "./unix-socket.ts";
+export type {
+  TransportConnection,
+  TransportError,
+  TransportErrorCode,
+  TransportEvent,
+  TransportServer,
+} from "./transport.ts";

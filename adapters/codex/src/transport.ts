@@ -1,7 +1,38 @@
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
 
 import { createAsyncQueue } from "@reins/adapter-kit";
+
+const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
+
+export type CodexChild = {
+  readonly stdin: NodeJS.WritableStream;
+  readonly stdout: NodeJS.ReadableStream;
+  on(event: "exit" | "error", listener: () => void): void;
+  kill(signal?: NodeJS.Signals): void;
+};
+
+export type SpawnChild = (
+  command: string,
+  args: readonly string[],
+  options: { readonly stdio: readonly ("pipe" | "inherit")[] },
+) => CodexChild;
+
+function spawnRealChild(
+  command: string,
+  args: readonly string[],
+  options: { readonly stdio: readonly ("pipe" | "inherit")[] },
+): CodexChild {
+  const child = spawn(command, [...args], { stdio: [...options.stdio] });
+  return {
+    stdin: child.stdin as NodeJS.WritableStream,
+    stdout: child.stdout as NodeJS.ReadableStream,
+    on: (event, listener) => {
+      child.on(event, listener);
+    },
+    kill: (signal) => child.kill(signal),
+  };
+}
 
 export type InboundMessage =
   | { kind: "notification"; method: string; params: unknown }
@@ -20,13 +51,21 @@ export type CodexTransport = {
 
 export function createCodexTransport(options: {
   binaryPath?: string;
+  spawnChild?: SpawnChild;
+  requestTimeoutMs?: number;
 }): CodexTransport {
-  let child: ChildProcess | null = null;
+  let child: CodexChild | null = null;
   let nextId = 0;
   let closed = false;
+  const requestTimeoutMs =
+    options.requestTimeoutMs ?? DEFAULT_REQUEST_TIMEOUT_MS;
   const pending = new Map<
     number,
-    { resolve: (value: unknown) => void; reject: (error: unknown) => void }
+    {
+      resolve: (value: unknown) => void;
+      reject: (error: unknown) => void;
+      timer: ReturnType<typeof setTimeout>;
+    }
   >();
   const inbox = createAsyncQueue<InboundMessage>();
 
@@ -39,26 +78,28 @@ export function createCodexTransport(options: {
     closed = true;
     inbox.end();
     for (const [, entry] of pending) {
-      entry.reject(new Error("codex app-server 已关闭"));
+      clearTimeout(entry.timer);
+      entry.reject(new Error("codex app-server closed"));
     }
     pending.clear();
   }
 
   function write(payload: unknown): void {
     if (child === null || closed) return;
-    child.stdin?.write(`${JSON.stringify(payload)}\n`);
+    child.stdin.write(`${JSON.stringify(payload)}\n`);
   }
 
   return {
     start() {
-      child = spawn(
+      const doSpawn = options.spawnChild ?? spawnRealChild;
+      child = doSpawn(
         options.binaryPath ?? "codex",
         ["app-server", "--listen", "stdio://"],
         { stdio: ["pipe", "pipe", "inherit"] },
       );
       child.on("exit", end);
       child.on("error", end);
-      const lines = createInterface({ input: child.stdout ?? process.stdin });
+      const lines = createInterface({ input: child.stdout });
       lines.on("line", (line) => {
         let parsed: unknown;
         try {
@@ -91,6 +132,7 @@ export function createCodexTransport(options: {
           const entry = pending.get(message.id);
           if (entry === undefined) return;
           pending.delete(message.id);
+          clearTimeout(entry.timer);
           if (message.error !== undefined && message.error !== null) {
             entry.reject(new Error(JSON.stringify(message.error)));
           } else {
@@ -100,11 +142,18 @@ export function createCodexTransport(options: {
       });
     },
     request(method, params) {
+      if (closed) {
+        return Promise.reject(new Error("codex app-server closed"));
+      }
       nextId += 1;
       const id = nextId;
       write({ id, method, params });
       return new Promise<unknown>((resolve, reject) => {
-        pending.set(id, { resolve, reject });
+        const timer = setTimeout(() => {
+          pending.delete(id);
+          reject(new Error(`codex app-server request timed out: ${method}`));
+        }, requestTimeoutMs);
+        pending.set(id, { resolve, reject, timer });
       });
     },
     notify(method, params) {
@@ -122,7 +171,7 @@ export function createCodexTransport(options: {
       },
     },
     close() {
-      child?.kill("SIGTERM");
+      child?.kill();
       end();
     },
   };

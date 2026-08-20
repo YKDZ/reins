@@ -53,14 +53,13 @@ export function createQoderDriver(deps: {
       null;
     let query: ReturnType<QoderSdk["query"]> | null = null;
     let abortController: AbortController | null = null;
-    let interruptMessage: string | null = null;
     let session: HarnessSession<PendingEntry> | null = null;
 
     function makeCanUseTool(): CanUseTool {
       return async (toolName, input, options) => {
         if (session === null) {
           // 不变式失败：回调只在 start 注册后才可达。
-          throw new Error("canUseTool 在会话建立前被调用");
+          throw new Error("canUseTool called before session creation");
         }
         const entry: PendingEntry = {
           resolve: () => {},
@@ -98,15 +97,8 @@ export function createQoderDriver(deps: {
             session.transcript("result", message);
           }
           const events = mapSdkMessage(session, message);
-          let turnEnded = false;
           for (const event of events) {
-            if (event.type === "turn.completed") turnEnded = true;
             emit(event);
-          }
-          if (turnEnded && interruptMessage !== null) {
-            const text = interruptMessage;
-            interruptMessage = null;
-            stream.push(userMessage(text, "later", false));
           }
         }
       } catch (error) {
@@ -165,10 +157,9 @@ export function createQoderDriver(deps: {
         session?.setTurnId(turnId);
         stream?.push(userMessage(message, "next", true));
       },
-      interrupt(sessionId, message) {
+      interrupt(sessionId) {
         void sessionId;
         if (session !== null) session.cancelling = true;
-        if (message !== undefined) interruptMessage = message;
         query?.interrupt().catch((error: unknown) => {
           session?.transcript("interrupt_error", { message: String(error) });
         });
@@ -200,7 +191,9 @@ export function createQoderDriver(deps: {
           });
         } else {
           if (resolution.feedback === undefined) {
-            entry.reject(new Error("deny 决议缺少调用方文本"));
+            entry.reject(
+              new Error("deny resolution missing caller-provided text"),
+            );
             return;
           }
           entry.resolve({

@@ -15,10 +15,7 @@ export type FakeDriverControls = {
     turnId: string;
     message: string;
   }>;
-  readonly interrupted: ReadonlyArray<{
-    sessionId: SessionId;
-    message?: string;
-  }>;
+  readonly interrupted: ReadonlyArray<{ sessionId: SessionId }>;
   readonly terminated: readonly SessionId[];
   readonly resolved: ReadonlyArray<{
     sessionId: SessionId;
@@ -50,7 +47,7 @@ export function createFakeDriver(options?: {
     turnId: string;
     message: string;
   }[] = [];
-  const interrupted: { sessionId: SessionId; message?: string }[] = [];
+  const interrupted: { sessionId: SessionId }[] = [];
   const terminated: SessionId[] = [];
   const resolved: {
     sessionId: SessionId;
@@ -75,10 +72,8 @@ export function createFakeDriver(options?: {
           options.deliver(sessionId, turnId, message);
         }
       },
-      interrupt(sessionId, message) {
-        interrupted.push(
-          message === undefined ? { sessionId } : { sessionId, message },
-        );
+      interrupt(sessionId) {
+        interrupted.push({ sessionId });
       },
       resolvePermission(sessionId, permissionId, resolution) {
         if (options?.resolvePermission === undefined) {

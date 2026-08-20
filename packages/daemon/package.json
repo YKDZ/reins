@@ -2,6 +2,9 @@
   "name": "@reins/daemon",
   "version": "0.0.0",
   "private": true,
+  "bin": {
+    "reins-daemon": "./dist/main.js"
+  },
   "type": "module",
   "imports": {
     "#/*": {
@@ -23,11 +26,15 @@
     "format:write": "oxfmt --write --config ../../oxfmt.config.ts .",
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
+    "postbuild": "node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/main.js', 0o755)\"",
+    "test": "vitest run test/unit --reporter=agent",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@reins/codex": "workspace:*",
     "@reins/core": "workspace:*",
     "@reins/protocol": "workspace:*",
+    "@reins/qoder": "workspace:*",
     "@reins/transport": "workspace:*",
     "valibot": "catalog:"
   },
@@ -37,13 +44,20 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
-    "typescript-7": "catalog:"
+    "typescript-7": "catalog:",
+    "vitest": "catalog:"
   },
   "dependenciesMeta": {
+    "@reins/codex": {
+      "injected": false
+    },
     "@reins/core": {
       "injected": false
     },
     "@reins/protocol": {
+      "injected": false
+    },
+    "@reins/qoder": {
       "injected": false
     },
     "@reins/transport": {

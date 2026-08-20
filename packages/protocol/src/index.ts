@@ -148,9 +148,8 @@ export const waitResultSchema = v.object({
 });
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 
-export const interruptParamsSchema = v.object({
+export const interruptParamsSchema = v.strictObject({
   ids: v.array(sessionIdSchema),
-  message: v.optional(v.string()),
 });
 export type InterruptParams = v.InferOutput<typeof interruptParamsSchema>;
 
@@ -241,7 +240,7 @@ export const domainEventSchema = v.union([
     sessionId: sessionIdSchema,
     turnId: v.string(),
     messageId: v.string(),
-    role: v.union([v.literal("driver"), v.literal("worker")]),
+    role: v.union([v.literal("caller"), v.literal("worker")]),
     content: v.string(),
   }),
   v.object({
@@ -310,6 +309,11 @@ export const errorCodeSchema = v.union([
   v.literal("invalid_params"),
   v.literal("permission_not_pending"),
   v.literal("permission_resolution_mismatch"),
+  v.literal("unknown_harness"),
+  v.literal("method_not_found"),
+  v.literal("protocol_error"),
+  v.literal("capability_query_failed"),
+  v.literal("internal_error"),
 ]);
 export type ErrorCode = v.InferOutput<typeof errorCodeSchema>;
 
@@ -341,7 +345,7 @@ export interface WorkerDriver {
   // 把消息交给 worker；turnId 标识它所属的回合。
   deliver(sessionId: SessionId, turnId: string, message: string): void;
   // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
-  interrupt(sessionId: SessionId, message?: string): void;
+  interrupt(sessionId: SessionId): void;
   // 把控制面的授权决议交还 adapter，翻译为 harness 原生回答。
   resolvePermission(
     sessionId: SessionId,
@@ -355,3 +359,166 @@ export interface WorkerDriver {
 export type WorkerDriverFactory = (
   emit: (event: DomainEvent) => void,
 ) => WorkerDriver;
+
+// —— capabilities 能力矩阵（实时查询；default 字段不进矩阵，最小干扰原则） ——
+
+export const capabilityModelSchema = v.strictObject({
+  id: v.pipe(v.string(), v.minLength(1)),
+  displayName: v.pipe(v.string(), v.minLength(1)),
+  reasoningEfforts: v.array(v.pipe(v.string(), v.minLength(1))),
+});
+export type CapabilityModel = v.InferOutput<typeof capabilityModelSchema>;
+
+export const harnessCapabilitySchema = v.strictObject({
+  harness: v.pipe(v.string(), v.minLength(1)),
+  models: v.array(capabilityModelSchema),
+});
+export type HarnessCapability = v.InferOutput<typeof harnessCapabilitySchema>;
+
+export const capabilityFailureSchema = v.strictObject({
+  harness: v.pipe(v.string(), v.minLength(1)),
+  code: errorCodeSchema,
+  message: v.string(),
+});
+export type CapabilityFailure = v.InferOutput<typeof capabilityFailureSchema>;
+
+export const capabilitiesResultSchema = v.strictObject({
+  capabilities: v.array(harnessCapabilitySchema),
+  failures: v.array(capabilityFailureSchema),
+});
+export type CapabilitiesResult = v.InferOutput<typeof capabilitiesResultSchema>;
+
+// —— 内部协议 envelope（typed-union，双端 valibot 校验） ——
+
+export const protocolMethodSchema = v.union([
+  v.literal("initialize"),
+  v.literal("spawn"),
+  v.literal("send"),
+  v.literal("wait"),
+  v.literal("interrupt"),
+  v.literal("kill"),
+  v.literal("list"),
+  v.literal("attach"),
+  v.literal("resolvePermission"),
+  v.literal("capabilities"),
+]);
+export type ProtocolMethod = v.InferOutput<typeof protocolMethodSchema>;
+
+export const protocolRequestSchema = v.strictObject({
+  kind: v.literal("request"),
+  requestId: v.pipe(v.string(), v.minLength(1)),
+  method: protocolMethodSchema,
+  params: v.unknown(),
+});
+export type ProtocolRequest = v.InferOutput<typeof protocolRequestSchema>;
+
+export const protocolResponseSchema = v.union([
+  v.strictObject({
+    kind: v.literal("response"),
+    requestId: v.pipe(v.string(), v.minLength(1)),
+    result: v.unknown(),
+  }),
+  v.strictObject({
+    kind: v.literal("response"),
+    requestId: v.pipe(v.string(), v.minLength(1)),
+    error: machineErrorSchema,
+  }),
+]);
+export type ProtocolResponse = v.InferOutput<typeof protocolResponseSchema>;
+
+export const attachEndedSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  reason: v.union([stopReasonSchema, v.literal("session_killed")]),
+});
+export type AttachEnded = v.InferOutput<typeof attachEndedSchema>;
+
+export const protocolEventNotificationSchema = v.strictObject({
+  kind: v.literal("notification"),
+  method: v.literal("event"),
+  params: domainEventSchema,
+});
+export type ProtocolEventNotification = v.InferOutput<
+  typeof protocolEventNotificationSchema
+>;
+
+export const protocolAttachEndedNotificationSchema = v.strictObject({
+  kind: v.literal("notification"),
+  method: v.literal("attach.ended"),
+  params: attachEndedSchema,
+});
+export type ProtocolAttachEndedNotification = v.InferOutput<
+  typeof protocolAttachEndedNotificationSchema
+>;
+
+export const protocolNotificationSchema = v.union([
+  protocolEventNotificationSchema,
+  protocolAttachEndedNotificationSchema,
+]);
+export type ProtocolNotification = v.InferOutput<
+  typeof protocolNotificationSchema
+>;
+
+export const protocolMessageSchema = v.union([
+  protocolRequestSchema,
+  protocolResponseSchema,
+  protocolNotificationSchema,
+]);
+export type ProtocolMessage = v.InferOutput<typeof protocolMessageSchema>;
+
+export const initializeParamsSchema = v.strictObject({});
+export const initializeResultSchema = v.strictObject({});
+
+export const attachResultSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
+});
+export type AttachResult = v.InferOutput<typeof attachResultSchema>;
+
+export const interruptAckSchema = v.array(interruptOutcomeSchema);
+
+// 每个方法的参数 / 结果 schema 由方法名静态确定，双端共用同一契约。
+const protocolParamsSchemas = {
+  initialize: initializeParamsSchema,
+  spawn: spawnParamsSchema,
+  send: sendParamsSchema,
+  wait: waitParamsSchema,
+  interrupt: interruptParamsSchema,
+  kill: killParamsSchema,
+  list: listFilterSchema,
+  attach: attachParamsSchema,
+  resolvePermission: resolvePermissionParamsSchema,
+  capabilities: v.strictObject({}),
+} as const satisfies Record<ProtocolMethod, v.GenericSchema>;
+
+export type ProtocolParams<M extends ProtocolMethod> = v.InferOutput<
+  (typeof protocolParamsSchemas)[M]
+>;
+
+export function protocolParamsSchemaFor<M extends ProtocolMethod>(
+  method: M,
+): (typeof protocolParamsSchemas)[M] {
+  return protocolParamsSchemas[method];
+}
+
+const protocolResultSchemas = {
+  initialize: initializeResultSchema,
+  spawn: v.strictObject({ sessionId: sessionIdSchema }),
+  send: sendAckSchema,
+  wait: waitResultSchema,
+  interrupt: interruptAckSchema,
+  kill: v.array(killResultSchema),
+  list: v.array(sessionInfoSchema),
+  attach: attachResultSchema,
+  resolvePermission: v.strictObject({}),
+  capabilities: capabilitiesResultSchema,
+} as const satisfies Record<ProtocolMethod, v.GenericSchema>;
+
+export type ProtocolResult<M extends ProtocolMethod> = v.InferOutput<
+  (typeof protocolResultSchemas)[M]
+>;
+
+export function protocolResultSchemaFor<M extends ProtocolMethod>(
+  method: M,
+): (typeof protocolResultSchemas)[M] {
+  return protocolResultSchemas[method];
+}

@@ -281,15 +281,12 @@ describe("codex driver", () => {
   });
 
   test("interrupt 走 turn/interrupt，interrupted 合成 cancelled", async () => {
-    const { events, fake, driver, transcript } = setup();
+    const { events, fake, driver } = setup();
     await flush();
 
-    driver.interrupt("s1", "换个思路");
+    driver.interrupt("s1");
     await flush();
     expect(fake.controls.requests().at(-1)?.method).toBe("turn/interrupt");
-    expect(
-      transcript.some(([kind]) => kind === "interrupt_message_unmapped"),
-    ).toBe(true);
 
     fake.controls.pushInbound({
       kind: "notification",
@@ -320,5 +317,36 @@ describe("codex driver", () => {
     expect(events.filter((event) => event.type === "turn.completed")).toEqual(
       [],
     );
+  });
+
+  test("transport 关闭后 deliver 补发 failed 而不是挂死", async () => {
+    const { events, fake, driver } = setup();
+    await flush();
+
+    // 第一轮正常结束，随后传输关闭（等价于 codex 子进程退出）。
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { threadId: "thr1", turn: { id: "turn1", status: "completed" } },
+    });
+    await flush();
+    fake.controls.end();
+
+    driver.deliver("s1", "s1:t2", "继续");
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "turn.completed" && event.turnId === "s1:t2",
+      ),
+    ).toEqual([
+      {
+        type: "turn.completed",
+        sessionId: "s1",
+        turnId: "s1:t2",
+        stopReason: "failed",
+        finalReply: null,
+      },
+    ]);
   });
 });

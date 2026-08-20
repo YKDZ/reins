@@ -22,6 +22,7 @@ const roots = [
   "v2/PermissionGrantScope.ts",
   "v2/GrantedPermissionProfile.ts",
   "v2/UserInput.ts",
+  "v2/ModelListResponse.ts",
 ];
 
 const output = fileURLToPath(new URL("../src/generated/", import.meta.url));
@@ -81,4 +82,6 @@ for (const file of copied) {
     rewriteImports(readFileSync(join(tmp, file), "utf8"), sourceDir),
   );
 }
-console.log(`已从 ${version} 生成 ${copied.size} 个文件到 src/generated/`);
+console.log(
+  `Generated ${copied.size} file(s) from ${version} into src/generated/`,
+);

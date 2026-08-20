@@ -23,7 +23,14 @@
       },
       "daemon": {
         "dependencies": {
-          "allow": ["protocol", "core", "adapter", "transport", "library"]
+          "allow": [
+            "protocol",
+            "core",
+            "adapter",
+            "adapter-kit",
+            "transport",
+            "library"
+          ]
         }
       },
       "library": {
@@ -46,6 +53,9 @@
   "globalPassThroughEnv": ["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"],
   "tasks": {
     "//#boundaries": {
+      "cache": false
+    },
+    "//#language": {
       "cache": false
     },
     "//#format:check": {

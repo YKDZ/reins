@@ -1,4 +1,8 @@
-import type { SDKMessage, SDKUserMessage } from "@qodercn-ai/qodercn-agent-sdk";
+import type {
+  ModelInfo,
+  SDKMessage,
+  SDKUserMessage,
+} from "@qodercn-ai/qodercn-agent-sdk";
 import { createAsyncQueue } from "@reins/adapter-kit";
 
 import type { QoderOptions, QoderQuery, QoderSdk } from "#/sdk-seam";
@@ -9,6 +13,8 @@ export type FakeQoderControls = {
   delivered(): SDKUserMessage[];
   lastOptions(): QoderOptions | null;
   interruptCount(): number;
+  setAvailableModels(models: ModelInfo[]): void;
+  modelsCalls(): number;
 };
 
 export function createFakeSdk(): {
@@ -19,6 +25,8 @@ export function createFakeSdk(): {
   const delivered: SDKUserMessage[] = [];
   let lastOptions: QoderOptions | null = null;
   let interruptCount = 0;
+  let availableModels: ModelInfo[] = [];
+  let modelsCallsCount = 0;
 
   const sdk: QoderSdk = {
     query({ prompt, options }) {
@@ -36,6 +44,10 @@ export function createFakeSdk(): {
       };
       return q;
     },
+    async getAvailableModels() {
+      modelsCallsCount += 1;
+      return availableModels;
+    },
   };
 
   return {
@@ -46,6 +58,10 @@ export function createFakeSdk(): {
       delivered: () => [...delivered],
       lastOptions: () => lastOptions,
       interruptCount: () => interruptCount,
+      setAvailableModels: (models) => {
+        availableModels = models;
+      },
+      modelsCalls: () => modelsCallsCount,
     },
   };
 }

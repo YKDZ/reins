@@ -117,7 +117,7 @@ describe("send", () => {
     ]);
     expect(
       events
-        .filter((event) => event.type === "message" && event.role === "driver")
+        .filter((event) => event.type === "message" && event.role === "caller")
         .map((event) => ({
           messageId: event.type === "message" ? event.messageId : "",
           content: event.type === "message" ? event.content : "",

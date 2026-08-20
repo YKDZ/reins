@@ -17,14 +17,12 @@ describe("interrupt", () => {
       cwd: "/tmp/demo",
     });
 
-    const ack = machine.interrupt({ ids: [id], message: "改用方案 B" });
+    const ack = machine.interrupt({ ids: [id] });
 
     expect(ack).toEqual([
       { sessionId: id, status: "requested", turnId: "s1:t1" },
     ]);
-    expect(fake.controls.interrupted).toEqual([
-      { sessionId: id, message: "改用方案 B" },
-    ]);
+    expect(fake.controls.interrupted).toEqual([{ sessionId: id }]);
 
     fake.controls.emit({
       type: "turn.completed",

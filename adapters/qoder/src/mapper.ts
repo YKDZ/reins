@@ -17,7 +17,7 @@ function stringifyToolResult(result: unknown): string | null {
   try {
     return JSON.stringify(result);
   } catch {
-    return "「不可序列化」";
+    return "[unserializable]";
   }
 }
 
@@ -40,7 +40,7 @@ function mapStreamEvent(
   const turnId = session.turnId;
   if (event.type === "message_delta") {
     if (event.usage !== undefined) {
-      session.setUsage(event.usage as Record<string, unknown>);
+      session.setUsage(event.usage);
     }
     const delta = event.delta;
     if (
@@ -147,7 +147,7 @@ function mapAssistant(
     });
   }
   if (message.message.usage !== undefined) {
-    session.setUsage(message.message.usage as Record<string, unknown>);
+    session.setUsage(message.message.usage);
   }
 
   if (message.isApiErrorMessage === true) {

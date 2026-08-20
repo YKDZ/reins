@@ -434,9 +434,9 @@ describe("permission 桥", () => {
 });
 
 describe("interrupt 与 kill", () => {
-  test("interrupt 后 aborted 合成 cancelled，并注入 later 上下文消息", async () => {
+  test("interrupt 后 aborted 合成 cancelled", async () => {
     const { events, fake, driver } = setup();
-    driver.interrupt("s1", "换个思路");
+    driver.interrupt("s1");
     expect(fake.controls.interruptCount()).toBe(1);
 
     fake.controls.push({
@@ -455,13 +455,6 @@ describe("interrupt 与 kill", () => {
       turnId: "s1:t1",
       stopReason: "cancelled",
       finalReply: null,
-    });
-    expect(fake.controls.delivered().at(-1)).toEqual({
-      type: "user",
-      message: { role: "user", content: "换个思路" },
-      parent_tool_use_id: null,
-      priority: "later",
-      shouldQuery: false,
     });
   });
 

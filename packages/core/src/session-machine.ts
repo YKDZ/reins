@@ -164,7 +164,7 @@ export function createSessionMachine(options: {
                   sessionId: session.id,
                   turnId,
                   messageId: item.messageId,
-                  role: "driver",
+                  role: "caller",
                   content: item.text,
                 },
               ],
@@ -317,7 +317,7 @@ export function createSessionMachine(options: {
               sessionId,
               turnId,
               messageId,
-              role: "driver",
+              role: "caller",
               content: message,
             },
           ],
@@ -374,7 +374,7 @@ export function createSessionMachine(options: {
           throw machineError("session_killed", { sessionId: id });
         }
         if (session.state === "busy") {
-          driver.interrupt(id, parsed.output.message);
+          driver.interrupt(id);
           outcomes.push({
             sessionId: id,
             status: "requested",

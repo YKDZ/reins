@@ -69,7 +69,7 @@ export function createCodexDriver(deps: {
         transport?.respondError(
           message.id,
           -32601,
-          `未处理的请求: ${message.method}`,
+          `Unhandled server request: ${message.method}`,
         );
         return;
       }
@@ -192,12 +192,9 @@ export function createCodexDriver(deps: {
             });
         }
       },
-      interrupt(sessionId, message) {
+      interrupt(sessionId) {
         void sessionId;
         if (session !== null) session.cancelling = true;
-        if (message !== undefined) {
-          session?.transcript("interrupt_message_unmapped", { message });
-        }
         if (activeTurnId !== null) {
           void transport
             ?.request("turn/interrupt", { threadId, turnId: activeTurnId })

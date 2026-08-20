@@ -27,7 +27,7 @@ export function createEventBus(options: {
     if (options.onListenerError !== undefined) {
       options.onListenerError(error, event);
     } else {
-      console.error("事件订阅者抛错", error, event);
+      console.error("event subscriber error", error, event);
     }
   }
 
