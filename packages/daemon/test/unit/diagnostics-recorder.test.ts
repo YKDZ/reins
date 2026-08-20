@@ -1,3 +1,7 @@
+import { appendFile, mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
 import type {
   DiagnosticRecord,
   DiagnosticsParams,
@@ -32,6 +36,12 @@ const state: DaemonState = {
 };
 const temporaryDirectories: string[] = [];
 
+async function temporaryDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "reins-recorder-test-"));
+  temporaryDirectories.push(directory);
+  return directory;
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -54,6 +64,8 @@ class MemoryStore implements DiagnosticsStore {
   closed = 0;
   appendError: Error | undefined;
   queryError: Error | undefined;
+  closeError: Error | undefined;
+  appendGate: Promise<void> | undefined;
   readonly repairs: DiagnosticsStoreHealth["repairs"];
 
   constructor(repairs: DiagnosticsStoreHealth["repairs"] = []) {
@@ -62,6 +74,7 @@ class MemoryStore implements DiagnosticsStore {
 
   async append(record: DiagnosticRecord): Promise<void> {
     if (this.appendError !== undefined) throw this.appendError;
+    await this.appendGate;
     this.records.push(record);
   }
 
@@ -88,11 +101,12 @@ class MemoryStore implements DiagnosticsStore {
 
   async close(): Promise<void> {
     this.closed += 1;
+    if (this.closeError !== undefined) throw this.closeError;
   }
 }
 
 async function openRuntime(
-  store = new MemoryStore(),
+  store: DiagnosticsStore = new MemoryStore(),
 ): Promise<DiagnosticsRuntime> {
   return await openDiagnosticsRuntimeForTest({
     resolveState: async () => state,
@@ -127,6 +141,108 @@ describe("DiagnosticsRuntime", () => {
     await runtime.close();
   });
 
+  test("close commits one diagnostics store closed record before releasing storage", async () => {
+    const store = new MemoryStore();
+    const runtime = await openRuntime(store);
+
+    await runtime.close();
+
+    expect(store.records).toEqual([
+      expect.objectContaining({
+        severity: "info",
+        source: "daemon",
+        kind: "lifecycle",
+        operation: "diagnostics_store",
+        reason: "closed",
+      }),
+    ]);
+    expect(store.closed).toBe(1);
+    await expect(runtime.record(input())).resolves.toBeUndefined();
+  });
+
+  test("close rejects new records and flushes already accepted work before closed", async () => {
+    const store = new MemoryStore();
+    let releaseAppend!: () => void;
+    store.appendGate = new Promise<void>((resolve) => {
+      releaseAppend = resolve;
+    });
+    const runtime = await openRuntime(store);
+
+    const accepted = runtime.record(input());
+    await Promise.resolve();
+    const closing = runtime.close();
+    await expect(runtime.record(input())).resolves.toBeUndefined();
+    expect(store.records).toEqual([]);
+
+    releaseAppend();
+    await expect(accepted).resolves.toBeDefined();
+    await expect(closing).resolves.toBeUndefined();
+    expect(store.records.map((record) => record.reason)).toEqual([
+      "started",
+      "closed",
+    ]);
+  });
+
+  test("close failure before the logical commit does not pre-report closed", async () => {
+    const store = new MemoryStore();
+    store.appendError = new Error("closed append failed");
+    const runtime = await openRuntime(store);
+
+    await expect(runtime.close()).rejects.toThrow(
+      "Diagnostics store close lifecycle was not accepted",
+    );
+    expect(store.records).toEqual([]);
+    expect(store.closed).toBe(0);
+  });
+
+  test("close retry releases storage without duplicating the logical closed commit", async () => {
+    const store = new MemoryStore();
+    store.closeError = new Error("lease release failed");
+    const runtime = await openRuntime(store);
+
+    await expect(runtime.close()).rejects.toThrow("lease release failed");
+    expect(
+      store.records.filter((record) => record.reason === "closed"),
+    ).toHaveLength(1);
+    store.closeError = undefined;
+    await expect(runtime.close()).resolves.toBeUndefined();
+    expect(
+      store.records.filter((record) => record.reason === "closed"),
+    ).toHaveLength(1);
+    expect(store.closed).toBe(2);
+  });
+
+  test.skipIf(process.platform !== "linux")(
+    "close retries a real writer lease without duplicating the logical closed commit",
+    async () => {
+      const directory = await temporaryDirectory();
+      const store = await openDiagnosticsStoreForTest({ directory });
+      const runtime = await openRuntime(store);
+      const blocker = join(directory, "writer-lease.lock", "blocks-rmdir");
+      await appendFile(blocker, "failure");
+
+      await expect(runtime.close()).rejects.toMatchObject({
+        code: "LOCK_SYSTEM_ERROR",
+      });
+      await rm(blocker);
+      await expect(runtime.close()).resolves.toBeUndefined();
+      await expect(runtime.close()).resolves.toBeUndefined();
+
+      const reopened = await openDiagnosticsStoreForTest({ directory });
+      const result = await reopened.query({
+        sources: ["daemon"],
+        kinds: ["lifecycle"],
+      });
+      expect("records" in result ? result.records : []).toEqual([
+        expect.objectContaining({
+          operation: "diagnostics_store",
+          reason: "closed",
+        }),
+      ]);
+      await reopened.close();
+    },
+  );
+
   test("keeps diagnostic counter monotonic across rejected records", async () => {
     const store = new MemoryStore();
     const runtime = await openRuntime(store);
@@ -139,6 +255,70 @@ describe("DiagnosticsRuntime", () => {
     const diagnosticId = await runtime.record(input());
 
     expect(diagnosticId).toMatch(/^da-2/);
+    await runtime.close();
+  });
+
+  test("reports each schema rejection once without degrading healthy storage", async () => {
+    const store = new MemoryStore();
+    const stderr: string[] = [];
+    let validEnvelope = false;
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () => store,
+      allocateGeneration: async () => v.parse(daemonGenerationSchema, "a"),
+      now: () =>
+        validEnvelope
+          ? new Date("2026-08-20T00:00:00.000Z")
+          : ({ toISOString: () => "not-a-timestamp" } as Date),
+      stderr: (message) => stderr.push(message),
+    });
+
+    expect(
+      await Reflect.apply(runtime.record.bind(runtime), undefined, [
+        { source: "daemon" },
+      ]),
+    ).toBeUndefined();
+    expect(
+      await Reflect.apply(runtime.record.bind(runtime), undefined, [
+        { source: "daemon" },
+      ]),
+    ).toBeUndefined();
+    expect(await runtime.record(input())).toBeUndefined();
+    expect(await runtime.record(input())).toBeUndefined();
+    validEnvelope = true;
+    await expect(runtime.record(input())).resolves.toBeDefined();
+
+    expect(stderr).toEqual([
+      "Diagnostics recorder rejected invalid diagnostic input",
+      "Diagnostics recorder rejected invalid diagnostic record",
+    ]);
+    expect(stderr.every((message) => Buffer.byteLength(message) <= 4096)).toBe(
+      true,
+    );
+    expect(store.records).toHaveLength(1);
+    expect(runtime.health()).toEqual({ status: "healthy", repairs: [] });
+    await runtime.close();
+  });
+
+  test("schema reporting failure is isolated from recorder control flow", async () => {
+    const store = new MemoryStore();
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () => store,
+      allocateGeneration: async () => v.parse(daemonGenerationSchema, "a"),
+      stderr: () => {
+        throw new Error("stderr unavailable");
+      },
+    });
+
+    await expect(
+      Reflect.apply(runtime.record.bind(runtime), undefined, [
+        { source: "daemon" },
+      ]),
+    ).resolves.toBeUndefined();
+    await expect(runtime.record(input())).resolves.toBeDefined();
+    expect(runtime.health()).toEqual({ status: "healthy", repairs: [] });
+    expect(store.records).toHaveLength(1);
     await runtime.close();
   });
 
@@ -303,6 +483,3 @@ describe("DiagnosticsRuntime", () => {
     expect(store.closed).toBe(1);
   });
 });
-import { appendFile, mkdtemp, rm } from "node:fs/promises";
-import { tmpdir } from "node:os";
-import { join } from "node:path";

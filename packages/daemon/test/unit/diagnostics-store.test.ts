@@ -1,6 +1,7 @@
 import {
   appendFile,
   chmod,
+  mkdir,
   mkdtemp,
   readFile,
   readdir,
@@ -9,7 +10,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -432,16 +433,22 @@ describe("DiagnosticsStore contract", () => {
     await pidReuseContentIgnored.close();
   });
 
-  test("a lost writer lease fails closed before another append", async () => {
+  test("a replaced writer lease prevents append and preserves the replacement inode", async () => {
     const directory = await temporaryStoreDirectory();
     const messages: string[] = [];
+    let armed = false;
     const store = await openDiagnosticsStoreForTest({
       directory,
       stderr: (message) => messages.push(message),
+      beforeFileOperation: async (operation) => {
+        if (!armed || operation !== "appendFile") return;
+        armed = false;
+        await replaceWriterLease(directory);
+      },
     });
     const activePath = join(directory, "active.ndjson");
     const before = await readFile(activePath);
-    await rm(join(directory, "writer-lease.lock"), { recursive: true });
+    armed = true;
 
     await expect(
       store.append(record("1", "2026-08-20T00:00:00.000Z")),
@@ -452,6 +459,137 @@ describe("DiagnosticsStore contract", () => {
       operation: "append",
     });
     await store.close().catch(() => undefined);
+    await expect(replacementMarker(directory)).resolves.toBe("owned elsewhere");
+  });
+
+  test("a replaced bootstrap lease prevents initial directory creation", async () => {
+    const directory = await temporaryStoreDirectory();
+
+    await expect(
+      openDiagnosticsStoreForTest({
+        directory,
+        beforeFileOperation: async (operation, path) => {
+          if (operation === "mkdir" && path === directory) {
+            await replaceLockDirectory(bootstrapLockDirectory(directory));
+          }
+        },
+      }),
+    ).rejects.toMatchObject({ code: "LOCK_COMPROMISED" });
+    await expect(stat(directory)).rejects.toMatchObject({ code: "ENOENT" });
+    await expect(
+      readFile(join(bootstrapLockDirectory(directory), "replacement"), "utf8"),
+    ).resolves.toBe("owned elsewhere");
+  });
+
+  test("a replaced writer lease prevents rotation rename", async () => {
+    const directory = await temporaryStoreDirectory();
+    let armed = false;
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      segmentBytes: 1,
+      stderr: () => {},
+      beforeFileOperation: async (operation) => {
+        if (!armed || operation !== "rename") return;
+        armed = false;
+        await replaceWriterLease(directory);
+      },
+    });
+    const first = record("1", "2026-08-20T00:00:00.000Z");
+    await store.append(first);
+    armed = true;
+
+    await expect(
+      store.append(record("2", "2026-08-20T00:00:01.000Z")),
+    ).rejects.toMatchObject({ code: "diagnostics_unavailable" });
+    expect(await readFile(join(directory, "active.ndjson"), "utf8")).toBe(
+      `${JSON.stringify(first)}\n`,
+    );
+    expect(
+      (await readdir(directory)).filter((name) => name.startsWith("segment-")),
+    ).toEqual([]);
+    await store.close().catch(() => undefined);
+    await expect(replacementMarker(directory)).resolves.toBe("owned elsewhere");
+  });
+
+  test("a replaced writer lease prevents retention unlink", async () => {
+    const directory = await temporaryStoreDirectory();
+    let now = new Date("2026-08-20T00:00:00.000Z");
+    let armed = false;
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      segmentBytes: 1,
+      maxAgeMs: 1_000,
+      now: () => now,
+      stderr: () => {},
+      beforeFileOperation: async (operation) => {
+        if (!armed || operation !== "unlink") return;
+        armed = false;
+        await replaceWriterLease(directory);
+      },
+    });
+    const oldest = record("1", "2026-08-20T00:00:00.000Z");
+    await store.append(oldest);
+    await store.append(record("2", "2026-08-20T00:00:00.500Z"));
+    const oldestSegment = (await readdir(directory)).find((name) =>
+      name.startsWith("segment-"),
+    )!;
+    now = new Date("2026-08-20T00:00:02.000Z");
+    armed = true;
+
+    await expect(
+      store.append(record("3", "2026-08-20T00:00:02.000Z")),
+    ).rejects.toMatchObject({ code: "diagnostics_unavailable" });
+    expect(await readFile(join(directory, oldestSegment), "utf8")).toBe(
+      `${JSON.stringify(oldest)}\n`,
+    );
+    await store.close().catch(() => undefined);
+    await expect(replacementMarker(directory)).resolves.toBe("owned elsewhere");
+  });
+
+  test("a replaced writer lease prevents startup repair truncate", async () => {
+    const directory = await temporaryStoreDirectory();
+    const initial = await openDiagnosticsStore({ directory });
+    await initial.close();
+    const activePath = join(directory, "active.ndjson");
+    await appendFile(activePath, '{"v":1');
+    const before = await readFile(activePath);
+
+    await expect(
+      openDiagnosticsStoreForTest({
+        directory,
+        stderr: () => {},
+        beforeFileOperation: async (operation) => {
+          if (operation === "truncate") await replaceWriterLease(directory);
+        },
+      }),
+    ).rejects.toMatchObject({ code: "LOCK_COMPROMISED" });
+    expect(await readFile(activePath)).toEqual(before);
+    await expect(replacementMarker(directory)).resolves.toBe("owned elsewhere");
+  });
+
+  test("a replaced writer lease stops startup loading before the next read", async () => {
+    const directory = await temporaryStoreDirectory();
+    const first = record("1", "2026-08-20T00:00:00.000Z");
+    const initial = await openDiagnosticsStore({ directory });
+    await initial.append(first);
+    await initial.close();
+    const activePath = join(directory, "active.ndjson");
+    const before = await readFile(activePath);
+    let replaced = false;
+
+    await expect(
+      openDiagnosticsStoreForTest({
+        directory,
+        beforeFileOperation: async (operation, path) => {
+          if (replaced || operation !== "readFile" || path !== activePath)
+            return;
+          replaced = true;
+          await replaceWriterLease(directory);
+        },
+      }),
+    ).rejects.toMatchObject({ code: "LOCK_COMPROMISED" });
+    expect(await readFile(activePath)).toEqual(before);
+    await expect(replacementMarker(directory)).resolves.toBe("owned elsewhere");
   });
 
   test("writer lease excludes another process and is released by process death", async () => {
@@ -690,4 +828,32 @@ async function retryOpen(
       retryDelayMs: 25,
     },
   });
+}
+
+function writerLockDirectory(directory: string): string {
+  return join(directory, "writer-lease.lock");
+}
+
+function bootstrapLockDirectory(directory: string): string {
+  return join(
+    dirname(directory),
+    `.${basename(directory)}.diagnostics-bootstrap-lease.lock`,
+  );
+}
+
+async function replaceWriterLease(directory: string): Promise<void> {
+  await replaceLockDirectory(writerLockDirectory(directory));
+}
+
+async function replaceLockDirectory(lockDirectory: string): Promise<void> {
+  await rm(lockDirectory, { recursive: true });
+  await mkdir(lockDirectory);
+  await writeFile(join(lockDirectory, "replacement"), "owned elsewhere");
+}
+
+async function replacementMarker(directory: string): Promise<string> {
+  return await readFile(
+    join(writerLockDirectory(directory), "replacement"),
+    "utf8",
+  );
 }

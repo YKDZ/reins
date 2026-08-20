@@ -1,3 +1,4 @@
+import { AlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
   DomainEvent,
@@ -20,6 +21,7 @@ import type {
 } from "@reins/protocol";
 import {
   machineErrorSchema,
+  makeDiagnosticId,
   sessionIdSchema,
   sessionNameSchema,
 } from "@reins/protocol";
@@ -71,8 +73,10 @@ const testIdentity = {
 const testDiagnostics: DiagnosticsRuntime = {
   generation: v.parse(daemonGenerationSchema, "test"),
   sessionId: testIdentity.session,
-  async record() {
-    return undefined;
+  async record(input) {
+    return input.kind === "lifecycle" && input.operation === "daemon"
+      ? makeDiagnosticId("test", "1")
+      : undefined;
   },
   async query() {
     return { records: [], truncated: false };
@@ -229,6 +233,7 @@ function createFakeHarness(options: {
   capability: HarnessCapability;
   autoPermission?: { options: PermissionOption[] };
   canCaptureHarnessStderr?: boolean;
+  terminate?: (sessionId: SessionId) => Promise<void>;
 }): {
   adapter: HarnessAdapter;
   calls: FakeCalls;
@@ -281,8 +286,9 @@ function createFakeHarness(options: {
       void permissionId;
       calls.resolved.push(resolution);
     },
-    terminate(sessionId) {
+    async terminate(sessionId) {
       calls.terminated.push(sessionId);
+      await options.terminate?.(sessionId);
     },
   };
 
@@ -1150,7 +1156,7 @@ describe("daemon 协议面（缝 C）", () => {
       deliver() {},
       interrupt() {},
       resolvePermission() {},
-      terminate() {},
+      async terminate() {},
     };
     const badAdapter: HarnessAdapter = {
       driverFactory: () => dummyDriver,
@@ -1184,13 +1190,145 @@ describe("daemon 协议面（缝 C）", () => {
     });
   });
 
+  test("伪造 AlreadyDiagnosed 结构不会污染 capability response", async () => {
+    const adapter: HarnessAdapter = {
+      driverFactory: () => ({
+        start() {},
+        deliver() {},
+        interrupt() {},
+        resolvePermission() {},
+        async terminate() {},
+      }),
+      async capabilities() {
+        throw { alreadyDiagnosed: true, diagnosticId: "not-a-diagnostic-id" };
+      },
+    };
+    const { server } = startDaemon(new Map([["forged", adapter]]));
+    const client = server.connect();
+    await flush();
+
+    const response = await makeRequester(client).request("capabilities", {});
+    expect(response).toMatchObject({
+      kind: "response",
+      result: {
+        failures: [
+          {
+            harness: "forged",
+            code: "capability_query_failed",
+          },
+        ],
+      },
+    });
+    const result = resultOf(response) as CapabilitiesResult;
+    expect(result.failures[0]).not.toHaveProperty("diagnosticId");
+  });
+
+  test("公开 AlreadyDiagnosed constructor 的悬空 ID 不成为 capability authority", async () => {
+    const adapter: HarnessAdapter = {
+      driverFactory: () => ({
+        start() {},
+        deliver() {},
+        interrupt() {},
+        resolvePermission() {},
+        async terminate() {},
+      }),
+      async capabilities() {
+        throw new AlreadyDiagnosedError(
+          "supplied",
+          makeDiagnosticId("test", "1"),
+        );
+      },
+    };
+    const { server } = startDaemon(new Map([["supplied", adapter]]));
+    const client = server.connect();
+    await flush();
+
+    const response = await makeRequester(client).request("capabilities", {});
+    const result = resultOf(response) as CapabilitiesResult;
+    expect(result.failures[0]).toMatchObject({
+      harness: "supplied",
+      code: "capability_query_failed",
+    });
+    expect(result.failures[0]).not.toHaveProperty("diagnosticId");
+  });
+
+  test("capabilities rejects an existing unrelated diagnostic id and records one fallback", async () => {
+    const suppliedId = makeDiagnosticId("test", "2");
+    const fallbackId = makeDiagnosticId("test", "3");
+    const capabilityRecords: unknown[] = [];
+    const diagnostics: DiagnosticsRuntime = {
+      ...testDiagnostics,
+      async record(input) {
+        if (
+          input.kind === "request_failure" &&
+          input.operation === "capabilities"
+        ) {
+          capabilityRecords.push(input);
+          return fallbackId;
+        }
+        return makeDiagnosticId("test", "1");
+      },
+      async query(params) {
+        if ("diagnosticId" in params && params.diagnosticId === suppliedId) {
+          return {
+            record: {
+              v: 1,
+              diagnosticId: suppliedId,
+              recordedAt: "2026-08-20T00:00:00.000Z",
+              severity: "warning",
+              source: "adapter",
+              harness: "unrelated-capability",
+              kind: "mapping_gap",
+              operation: "spawn",
+              reason: "unsupported_input",
+              fields: ["reasoning"],
+            },
+          };
+        }
+        return { records: [], truncated: false };
+      },
+    };
+    const adapter: HarnessAdapter = {
+      driverFactory: () => ({
+        start() {},
+        deliver() {},
+        interrupt() {},
+        resolvePermission() {},
+        async terminate() {},
+      }),
+      async capabilities() {
+        throw new AlreadyDiagnosedError("unrelated", suppliedId);
+      },
+    };
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemonForTest({
+      transport: server,
+      adapters: new Map([["unrelated-capability", adapter]]),
+      identity: testIdentity,
+      diagnostics,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    void daemon.start();
+    const client = server.connect();
+    await flush();
+
+    const response = await makeRequester(client).request("capabilities", {});
+    const result = resultOf(response) as CapabilitiesResult;
+    expect(result.failures[0]).toMatchObject({
+      harness: "unrelated-capability",
+      diagnosticId: fallbackId,
+    });
+    expect(capabilityRecords).toHaveLength(1);
+  });
+
   test("capability failure causes are UTF-8 bounded", async () => {
     const dummyDriver: WorkerDriver = {
       start() {},
       deliver() {},
       interrupt() {},
       resolvePermission() {},
-      terminate() {},
+      async terminate() {},
     };
     const makeFailingAdapter = (message: string): HarnessAdapter => ({
       driverFactory: () => dummyDriver,
@@ -1230,7 +1368,7 @@ describe("daemon 协议面（缝 C）", () => {
       deliver() {},
       interrupt() {},
       resolvePermission() {},
-      terminate() {},
+      async terminate() {},
     };
     const adapter: HarnessAdapter = {
       driverFactory: () => failingDriver,
@@ -1402,5 +1540,239 @@ describe("daemon 空闲退出", () => {
     } finally {
       vi.useRealTimers();
     }
+  });
+
+  test("显式停止等待所有 worker 清理完成后才关闭 transport", async () => {
+    let releaseTermination!: () => void;
+    const termination = new Promise<void>((resolve) => {
+      releaseTermination = resolve;
+    });
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+      terminate: async () => await termination,
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const events: DomainEvent[] = [];
+    const daemon = createDaemonForTest({
+      transport: server,
+      adapters: new Map([["fake", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      idleTimeoutMs: 60_000,
+      onEvent: (event) => events.push(event),
+    });
+    const lifetime = daemon.start();
+    const client = server.connect();
+    await flush();
+    await makeRequester(client).request("spawn", {
+      sessionName: "shutdown-owner",
+      harness: "fake",
+      message: "hi",
+    });
+
+    let stopped = false;
+    const stopping = daemon.stop().then(() => {
+      stopped = true;
+    });
+    await flush();
+    expect(stopped).toBe(false);
+    expect(events.some((event) => event.type === "session.killed")).toBe(false);
+
+    const rejected = await makeRequester(client).request("spawn", {
+      sessionName: "must-not-start",
+      harness: "fake",
+      message: "late",
+    });
+    expect(rejected).toMatchObject({
+      error: { code: "daemon_shutting_down" },
+    });
+    expect(fake.calls.starts).toBe(1);
+
+    releaseTermination();
+    await stopping;
+    await lifetime;
+    expect(events.at(-1)).toMatchObject({ type: "session.killed" });
+  });
+
+  test("启动诊断尚未接受时 stop 等待并保持 started→stopped 顺序", async () => {
+    let releaseStarted!: () => void;
+    const startedGate = new Promise<void>((resolve) => {
+      releaseStarted = resolve;
+    });
+    let enteredStarted!: () => void;
+    const startedEntered = new Promise<void>((resolve) => {
+      enteredStarted = resolve;
+    });
+    const lifecycle: string[] = [];
+    const diagnostics: DiagnosticsRuntime = {
+      ...testDiagnostics,
+      async record(input) {
+        if (
+          input.kind === "lifecycle" &&
+          input.operation === "daemon" &&
+          input.reason === "started"
+        ) {
+          enteredStarted();
+          await startedGate;
+        }
+        if (input.kind === "lifecycle" && input.operation === "daemon") {
+          lifecycle.push(input.reason);
+        }
+        return makeDiagnosticId("test", "1");
+      },
+    };
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map(),
+      identity: testIdentity,
+      diagnostics,
+      idleTimeoutMs: 60_000,
+    });
+
+    const lifetime = daemon.start();
+    await startedEntered;
+    let stopped = false;
+    const stopping = daemon.stop().then(() => {
+      stopped = true;
+    });
+    await flush();
+    expect(stopped).toBe(false);
+    expect(lifecycle).toEqual([]);
+
+    releaseStarted();
+    await stopping;
+    await lifetime;
+    expect(lifecycle).toEqual(["started", "stopped"]);
+  });
+
+  test("started 未被接受则启动失败，queued spawn 不会创建 worker", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const diagnostics: DiagnosticsRuntime = {
+      ...testDiagnostics,
+      async record(input) {
+        if (
+          input.kind === "lifecycle" &&
+          input.operation === "daemon" &&
+          input.reason === "started"
+        ) {
+          return undefined;
+        }
+        return makeDiagnosticId("test", "1");
+      },
+    };
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["fake", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics,
+      idleTimeoutMs: 60_000,
+    });
+    const startup = daemon.start();
+    const client = server.connect();
+    const response = makeRequester(client).request("spawn", {
+      sessionName: "queued-start",
+      harness: "fake",
+      message: "must not start",
+    });
+
+    await expect(startup).rejects.toThrow(
+      "Daemon start lifecycle was not accepted",
+    );
+    await daemon.stop();
+    await expect(response).resolves.toMatchObject({
+      error: { code: "daemon_shutting_down" },
+    });
+    expect(fake.calls.starts).toBe(0);
+  });
+
+  test("transport close 拒绝不撤销已建立的 daemon stopped logical commit", async () => {
+    const backing = createInMemoryTransportServer<ProtocolMessage>();
+    const lifecycle: string[] = [];
+    const diagnostics: DiagnosticsRuntime = {
+      ...testDiagnostics,
+      async record(input) {
+        if (input.kind === "lifecycle" && input.operation === "daemon") {
+          lifecycle.push(input.reason);
+        }
+        return makeDiagnosticId("test", "1");
+      },
+    };
+    let rejectClose = true;
+    const daemon = createDaemon({
+      transport: {
+        listen: () => backing.listen(),
+        onConnection: (listener) => backing.onConnection(listener),
+        async close() {
+          if (rejectClose) throw new Error("transport close rejected");
+          await backing.close();
+        },
+      },
+      adapters: new Map(),
+      identity: testIdentity,
+      diagnostics,
+      idleTimeoutMs: 60_000,
+    });
+    const lifetime = daemon.start();
+    const lifetimeFailure = expect(lifetime).rejects.toThrow(
+      "transport close rejected",
+    );
+    await vi.waitFor(() => expect(lifecycle).toEqual(["started"]));
+
+    await expect(daemon.stop()).rejects.toThrow("transport close rejected");
+    await lifetimeFailure;
+    expect(lifecycle).toEqual(["started", "stopped"]);
+    rejectClose = false;
+    await expect(daemon.stop()).resolves.toBeUndefined();
+    expect(lifecycle).toEqual(["started", "stopped"]);
+  });
+
+  test("worker 清理失败不关闭 daemon，下一次 stop 可精确重试", async () => {
+    let attempts = 0;
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+      terminate: async () => {
+        attempts += 1;
+        if (attempts === 1) throw new Error("cleanup rejected");
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const events: DomainEvent[] = [];
+    const daemon = createDaemonForTest({
+      transport: server,
+      adapters: new Map([["fake", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      idleTimeoutMs: 60_000,
+      onEvent: (event) => events.push(event),
+    });
+    const lifetime = daemon.start();
+    const client = server.connect();
+    await flush();
+    await makeRequester(client).request("spawn", {
+      sessionName: "retry-shutdown",
+      harness: "fake",
+      message: "hi",
+    });
+
+    await expect(daemon.stop()).rejects.toThrow("Worker cleanup failed");
+    expect(events.some((event) => event.type === "session.killed")).toBe(false);
+    let lifetimeSettled = false;
+    void lifetime.then(() => {
+      lifetimeSettled = true;
+    });
+    await flush();
+    expect(lifetimeSettled).toBe(false);
+
+    await expect(daemon.stop()).resolves.toBeUndefined();
+    await lifetime;
+    expect(attempts).toBe(2);
+    expect(events.at(-1)).toMatchObject({ type: "session.killed" });
   });
 });

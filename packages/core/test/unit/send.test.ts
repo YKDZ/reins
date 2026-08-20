@@ -1,6 +1,6 @@
 import {
   makeDiagnosticId,
-  type DiagnosticInput,
+  type CoreDiagnosticFact,
   type DomainEvent,
 } from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
@@ -17,7 +17,7 @@ describe("send", () => {
         throw new Error("steer failed");
       },
     });
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -48,7 +48,6 @@ describe("send", () => {
     await vi.waitFor(() => expect(diagnostics).toHaveLength(1));
     expect(diagnostics).toEqual([
       expect.objectContaining({
-        source: "core",
         sessionId: id,
         turnId: ids.turn("t1"),
         kind: "request_failure",

@@ -34,6 +34,7 @@ import { afterEach, describe, expect, test } from "vitest";
 import { createDaemonForTest } from "../../src/daemon.testing.ts";
 import { createDaemon } from "../../src/daemon.ts";
 import { openDiagnosticsRuntimeForTest } from "../../src/diagnostics-recorder.testing.ts";
+import type { DiagnosticsRuntime } from "../../src/diagnostics-recorder.ts";
 import { openDiagnosticsStoreForTest } from "../../src/diagnostics-store.testing.ts";
 import { openDiagnosticsStore } from "../../src/diagnostics-store.ts";
 import { daemonGenerationSchema } from "../../src/generation.ts";
@@ -41,6 +42,19 @@ import type { HarnessAdapter } from "../../src/registry.ts";
 import type { DaemonState } from "../../src/state.ts";
 
 const directories: string[] = [];
+
+async function waitForDaemonLifecycle(
+  runtime: DiagnosticsRuntime,
+): Promise<void> {
+  for (;;) {
+    const result = await runtime.query({
+      kinds: ["lifecycle"],
+      sources: ["daemon"],
+    });
+    if ("records" in result && result.records.length > 0) return;
+    await Promise.resolve();
+  }
+}
 
 afterEach(async () => {
   await Promise.all(
@@ -118,7 +132,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
       expect(filtered).toMatchObject({
         result: {
-          records: [{ kind: "lifecycle", reason: "stopped" }],
+          records: [{ kind: "lifecycle", reason: "started" }],
           truncated: true,
         },
       });
@@ -152,7 +166,7 @@ describe("daemon diagnostic error dispatch", () => {
       deliver() {},
       interrupt() {},
       resolvePermission() {},
-      terminate() {},
+      async terminate() {},
     });
     const adapter: HarnessAdapter = {
       driverFactory,
@@ -229,12 +243,14 @@ describe("daemon diagnostic error dispatch", () => {
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
+    let rejectAppend = false;
     const runtime = await openDiagnosticsRuntimeForTest({
       resolveState: async () => state,
       openStore: async () =>
         await openDiagnosticsStoreForTest({
           directory: state.diagnosticsDirectory,
-          failAppend: () => new Error("append rejected"),
+          failAppend: () =>
+            rejectAppend ? new Error("append rejected") : undefined,
         }),
       allocateGeneration: async () => v.parse(daemonGenerationSchema, "append"),
     });
@@ -246,7 +262,7 @@ describe("daemon diagnostic error dispatch", () => {
         deliver() {},
         interrupt() {},
         resolvePermission() {},
-        terminate() {},
+        async terminate() {},
       }),
       capabilities: async () => ({
         harness: "fake",
@@ -264,7 +280,8 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const running = daemon.start();
     const client = transport.connect();
-    await Promise.resolve();
+    await waitForDaemonLifecycle(runtime);
+    rejectAppend = true;
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -306,12 +323,14 @@ describe("daemon diagnostic error dispatch", () => {
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
+    let rejectQuery = false;
     const runtime = await openDiagnosticsRuntimeForTest({
       resolveState: async () => state,
       openStore: async () =>
         await openDiagnosticsStoreForTest({
           directory: state.diagnosticsDirectory,
-          failQuery: () => new Error("query rejected"),
+          failQuery: () =>
+            rejectQuery ? new Error("query rejected") : undefined,
         }),
       allocateGeneration: async () =>
         v.parse(daemonGenerationSchema, "queryfail"),
@@ -325,7 +344,8 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const running = daemon.start();
     const client = transport.connect();
-    await Promise.resolve();
+    await waitForDaemonLifecycle(runtime);
+    rejectQuery = true;
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -372,7 +392,7 @@ describe("daemon diagnostic error dispatch", () => {
       deliver() {},
       interrupt() {},
       resolvePermission() {},
-      terminate() {},
+      async terminate() {},
     });
     const transport = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemon({
@@ -464,7 +484,7 @@ describe("daemon diagnostic error dispatch", () => {
     }
   });
 
-  test("Codex malformed model/list keeps the transport protocol_violation as the sole cause", async () => {
+  test("Codex malformed model/list does not reuse an unrelated protocol diagnostic for capabilities", async () => {
     const root = await mkdtemp(join(tmpdir(), "reins-daemon-codex-caps-"));
     directories.push(root);
     const state: DaemonState = {
@@ -520,7 +540,7 @@ describe("daemon diagnostic error dispatch", () => {
       deliver() {},
       interrupt() {},
       resolvePermission() {},
-      terminate() {},
+      async terminate() {},
     });
     const transport = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemon({
@@ -575,14 +595,31 @@ describe("daemon diagnostic error dispatch", () => {
         }),
       ).resolves.toMatchObject({
         record: {
-          source: "adapter",
+          source: "daemon",
           harness: "codex",
-          kind: "protocol_violation",
-          operation: "validate_worker_response",
+          kind: "request_failure",
+          operation: "capabilities",
+          stage: "query",
         },
       });
-      await expect(runtime.query({ limit: 100 })).resolves.toMatchObject({
+      await expect(
+        runtime.query({ kinds: ["protocol_violation"], limit: 100 }),
+      ).resolves.toMatchObject({
         records: [expect.objectContaining({ kind: "protocol_violation" })],
+      });
+      await expect(
+        runtime.query({
+          harness: "codex",
+          kinds: ["request_failure"],
+          limit: 100,
+        }),
+      ).resolves.toMatchObject({
+        records: [
+          expect.objectContaining({
+            operation: "capabilities",
+            stage: "query",
+          }),
+        ],
       });
     } finally {
       await daemon.stop();
@@ -649,6 +686,25 @@ describe("daemon diagnostic error dispatch", () => {
     const client = transport.connect();
     await Promise.resolve();
     try {
+      const ready = new Promise<void>((resolve) => {
+        const unsubscribe = client.onEvent((event) => {
+          if (
+            event.kind === "message" &&
+            event.message.kind === "response" &&
+            event.message.requestId === "snapshot-ready"
+          ) {
+            unsubscribe();
+            resolve();
+          }
+        });
+      });
+      client.send({
+        kind: "request",
+        requestId: v.parse(requestIdSchema, "snapshot-ready"),
+        method: "initialize",
+        params: {},
+      });
+      await ready;
       blockQueries = true;
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -673,7 +729,10 @@ describe("daemon diagnostic error dispatch", () => {
       releaseQueries();
       await late;
       await expect(response).resolves.toMatchObject({
-        result: { records: [{ reason: "started" }], truncated: false },
+        result: {
+          records: [{ reason: "started" }, { reason: "started" }],
+          truncated: false,
+        },
       });
     } finally {
       releaseQueries();
@@ -757,6 +816,11 @@ describe("daemon diagnostic error dispatch", () => {
       });
       await Promise.resolve();
       await Promise.resolve();
+      for (let attempt = 0; attempt < 20; attempt += 1) {
+        const result = await runtime.query({ kinds: ["transport_failure"] });
+        if ("records" in result && result.records.length > 0) break;
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      }
       receive?.({
         kind: "error",
         error: Object.assign(new Error("read failed"), {
@@ -866,7 +930,7 @@ describe("daemon diagnostic error dispatch", () => {
         deliver() {},
         interrupt() {},
         resolvePermission() {},
-        terminate() {},
+        async terminate() {},
       }),
       capabilities: async () => ({ harness: "fake", models: [] }),
     };
@@ -956,7 +1020,7 @@ describe("daemon diagnostic error dispatch", () => {
       turnId,
       kind: "lifecycle",
       operation: "worker",
-      reason: "started",
+      reason: "initialized",
     });
     now = new Date("2026-08-20T00:00:02.000Z");
     const failed = await runtime.record({
@@ -1014,6 +1078,7 @@ describe("daemon diagnostic error dispatch", () => {
             { source: "daemon" },
             { source: "adapter" },
             { source: "adapter" },
+            { source: "daemon" },
           ],
         },
       });
@@ -1029,16 +1094,19 @@ describe("daemon diagnostic error dispatch", () => {
       });
       await expect(
         request({
+          sources: ["adapter"],
           since: "2026-08-20T00:00:01.000Z",
           until: "2026-08-20T00:00:02.000Z",
         }),
       ).resolves.toMatchObject({
         result: { records: [{ harness: "one" }, { harness: "two" }] },
       });
-      await expect(request({ limit: 2 })).resolves.toMatchObject({
+      await expect(
+        request({ sources: ["adapter"], limit: 2 }),
+      ).resolves.toMatchObject({
         result: {
           records: [{ harness: "one" }, { harness: "two" }],
-          truncated: true,
+          truncated: false,
         },
       });
       await expect(

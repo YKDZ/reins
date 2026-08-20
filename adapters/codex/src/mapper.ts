@@ -123,8 +123,6 @@ export function mapNotification(
       if (turn.status === "interrupted") return [session.endTurn("cancelled")];
       if (turn.status === "failed") {
         void session.diagnostic({
-          source: "adapter",
-          harness: "codex",
           kind: "turn_failure",
           operation: "run_turn",
           reason: "worker_reported_failure",

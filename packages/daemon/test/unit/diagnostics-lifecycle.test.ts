@@ -62,6 +62,7 @@ describe("daemon diagnostics lifecycle ownership", () => {
       },
     };
     await runDaemonLifecycle(daemon, {
+      record: (input) => runtime.record(input),
       async close() {
         order.push("close");
         await runtime.close();
@@ -71,6 +72,15 @@ describe("daemon diagnostics lifecycle ownership", () => {
     expect(order).toEqual(["start", "stop", "close"]);
     const reopened = await openDiagnosticsStore({
       directory: state.diagnosticsDirectory,
+    });
+    await expect(
+      reopened.query({ kinds: ["lifecycle"] }),
+    ).resolves.toMatchObject({
+      records: [
+        { operation: "daemon", reason: "started" },
+        { operation: "diagnostics_store", reason: "initialized" },
+        { operation: "diagnostics_store", reason: "closed" },
+      ],
     });
     await expect(
       reopened.query({ diagnosticId: diagnosticId! }),
@@ -93,6 +103,7 @@ describe("daemon diagnostics lifecycle ownership", () => {
           },
         },
         {
+          record: (input) => runtime.record(input),
           async close() {
             order.push("close");
             await runtime.close();
@@ -105,6 +116,38 @@ describe("daemon diagnostics lifecycle ownership", () => {
       directory: state.diagnosticsDirectory,
     });
     await reopened.close();
+  });
+
+  test("stop failure keeps the diagnostics runtime open for cleanup retry", async () => {
+    const { runtime } = await realRuntime();
+    let closes = 0;
+    await expect(
+      runDaemonLifecycle(
+        {
+          async start() {},
+          async stop() {
+            throw new Error("worker cleanup failed");
+          },
+        },
+        {
+          record: (input) => runtime.record(input),
+          async close() {
+            closes += 1;
+            await runtime.close();
+          },
+        },
+      ),
+    ).rejects.toThrow("worker cleanup failed");
+    expect(closes).toBe(0);
+    await expect(
+      runtime.record({
+        source: "daemon",
+        kind: "lifecycle",
+        operation: "diagnostics_store",
+        reason: "invariant_failed",
+      }),
+    ).resolves.toBeDefined();
+    await runtime.close();
   });
 
   test("repeated signal shutdown closes exactly once after stop", async () => {
@@ -130,6 +173,7 @@ describe("daemon diagnostics lifecycle ownership", () => {
     };
     let closes = 0;
     const lifecycle = runDaemonLifecycle(ownedDaemon, {
+      record: (input) => runtime.record(input),
       async close() {
         closes += 1;
         await runtime.close();

@@ -8,5 +8,6 @@ export {
   AlreadyDiagnosedError,
   isAlreadyDiagnosedError,
   noopDiagnosticSink,
+  type AdapterDiagnosticSink,
   type DiagnosticSink,
 } from "./diagnostic.ts";

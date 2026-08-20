@@ -131,8 +131,13 @@ async function main(): Promise<void> {
   });
   let shutdownPromise: Promise<void> | undefined;
   const shutdown = (): Promise<void> => {
-    shutdownPromise ??= daemon.stop();
-    return shutdownPromise;
+    if (shutdownPromise !== undefined) return shutdownPromise;
+    const attempt = daemon.stop();
+    shutdownPromise = attempt;
+    void attempt.catch(() => {
+      if (shutdownPromise === attempt) shutdownPromise = undefined;
+    });
+    return attempt;
   };
   process.on("SIGINT", () => {
     void shutdown().catch(() => undefined);

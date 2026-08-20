@@ -1,7 +1,11 @@
 import { EventEmitter } from "node:events";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { PassThrough } from "node:stream";
+import { fileURLToPath } from "node:url";
 
-import type { DiagnosticInput, SessionId, TurnId } from "@reins/protocol";
+import type { DriverDiagnosticFact, SessionId, TurnId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createCodexTransport, type CodexChild } from "#/transport";
@@ -46,10 +50,26 @@ function fakeChild(): {
 const tick = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
 
+async function waitUntil(predicate: () => boolean | Promise<boolean>) {
+  const deadline = Date.now() + 2_000;
+  while (!(await predicate())) {
+    if (Date.now() > deadline) throw new Error("condition timed out");
+    await tick(10);
+  }
+}
+
+function signalIfAlive(pid: number): void {
+  try {
+    process.kill(pid, "SIGKILL");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
 describe("codex transport", () => {
   test("缺省时保持 harness stderr 继承且不采集", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     let stdio: readonly ("pipe" | "inherit")[] | undefined;
     const transport = createCodexTransport({
       diagnostics: async (input) => {
@@ -73,7 +93,7 @@ describe("codex transport", () => {
 
   test("显式采集 stderr 时按 UTF-8 边界分块并在流尾写出余量", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const sessionId = "s-test" as SessionId;
     const turnId = "t-test" as TurnId;
     let stdio: readonly ("pipe" | "inherit")[] | undefined;
@@ -98,8 +118,6 @@ describe("codex transport", () => {
     expect(stdio).toEqual(["pipe", "pipe", "pipe"]);
     expect(diagnostics).toEqual([
       expect.objectContaining({
-        source: "harness",
-        harness: "codex",
         sessionId,
         turnId,
         kind: "harness_stderr",
@@ -123,7 +141,7 @@ describe("codex transport", () => {
 
   test("stderr 每块读取当时上下文，不串用前一回合", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const firstSession = "s-first" as SessionId;
     const secondSession = "s-second" as SessionId;
     const firstTurn = "t-first" as TurnId;
@@ -195,7 +213,7 @@ describe("codex transport", () => {
 
   test("子进程先 exit 也等待 stderr 尾部完成 UTF-8 解码后再关闭", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const transport = createCodexTransport({
       captureHarnessStderr: true,
       diagnostics: async (input) => {
@@ -231,9 +249,42 @@ describe("codex transport", () => {
     ]);
   });
 
+  test.each([
+    { name: "invalid byte", bytes: [0xff] },
+    { name: "overlong", bytes: [0xc0, 0xaf] },
+    { name: "bad continuation", bytes: [0xe2, 0x28, 0xa1] },
+    { name: "incomplete tail", bytes: [0xf0, 0x9f] },
+  ])("$name 生成字节账本诚实的 schema-valid 截断证据", async ({ bytes }) => {
+    const fake = fakeChild();
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const transport = createCodexTransport({
+      captureHarnessStderr: true,
+      diagnostics: async (input) => {
+        diagnostics.push(input);
+        return undefined;
+      },
+      diagnosticContext: () => ({
+        sessionId: "s-test" as SessionId,
+        turnId: null,
+      }),
+      spawnChild: () => fake.child,
+    });
+    transport.start();
+
+    fake.stderr.end(Buffer.from(bytes));
+    await transport.close();
+
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        kind: "harness_stderr",
+        text: { text: "", truncated: true, originalBytes: bytes.length },
+      }),
+    ]);
+  });
+
   test("close 对持有 stdout/stderr fd 的后代进程有界并强制刷出 UTF-8 尾部", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const signals: Array<NodeJS.Signals | undefined> = [];
     const transport = createCodexTransport({
       captureHarnessStderr: true,
@@ -269,13 +320,80 @@ describe("codex transport", () => {
       expect.objectContaining({
         kind: "harness_stderr",
         text: {
-          text: "�",
-          truncated: false,
+          text: "",
+          truncated: true,
           originalBytes: 2,
         },
       }),
     ]);
   });
+
+  test.runIf(process.platform !== "win32")(
+    "真实进程组在 TERM deadline 后连同 descendant 一起被 KILL",
+    async () => {
+      const directory = await mkdtemp(join(tmpdir(), "reins-codex-tree-"));
+      const pidFile = join(directory, "pids.json");
+      let pids: { parent: number; descendant: number } | undefined;
+      const transport = createCodexTransport({
+        binaryPath: process.execPath,
+        binaryArgs: [
+          fileURLToPath(
+            new URL("../fixtures/process-tree.mjs", import.meta.url),
+          ),
+          pidFile,
+        ],
+        shutdownGraceMs: 25,
+      });
+      try {
+        transport.start();
+        await waitUntil(async () => {
+          try {
+            await readFile(pidFile);
+            return true;
+          } catch {
+            return false;
+          }
+        });
+        pids = JSON.parse(await readFile(pidFile, "utf8")) as {
+          parent: number;
+          descendant: number;
+        };
+
+        await transport.close();
+        expect(
+          [pids.parent, pids.descendant].every((pid) => {
+            try {
+              process.kill(pid, 0);
+              return false;
+            } catch (error) {
+              return (error as NodeJS.ErrnoException).code === "ESRCH";
+            }
+          }),
+        ).toBe(true);
+      } finally {
+        try {
+          if (pids !== undefined) {
+            signalIfAlive(-pids.parent);
+            for (const pid of [pids.parent, pids.descendant]) {
+              signalIfAlive(pid);
+            }
+            await waitUntil(() =>
+              [pids!.parent, pids!.descendant].every((pid) => {
+                try {
+                  process.kill(pid, 0);
+                  return false;
+                } catch (error) {
+                  return (error as NodeJS.ErrnoException).code === "ESRCH";
+                }
+              }),
+            );
+          }
+        } finally {
+          await rm(directory, { recursive: true, force: true });
+        }
+      }
+    },
+  );
 
   test.each([
     {
@@ -308,6 +426,30 @@ describe("codex transport", () => {
         tick(100).then(() => "timeout"),
       ]),
     ).resolves.toContain(message);
+  });
+
+  test("close 首次 signal 失败后可重试且不 memoize rejected promise", async () => {
+    const fake = fakeChild();
+    let attempts = 0;
+    const transport = createCodexTransport({
+      shutdownGraceMs: 5,
+      spawnChild: () => ({
+        ...fake.child,
+        kill: () => {
+          attempts += 1;
+          if (attempts === 1) throw new Error("transient signal failure");
+          fake.exit();
+          fake.stdout.end();
+          fake.stderr.end();
+          return true;
+        },
+      }),
+    });
+    transport.start();
+
+    await expect(transport.close()).rejects.toThrow("transient signal failure");
+    await expect(transport.close()).resolves.toBeUndefined();
+    expect(attempts).toBeGreaterThan(1);
   });
 
   test("子进程 error 且 stdout fd 未收口时有界结束 inbox", async () => {
@@ -350,7 +492,7 @@ describe("codex transport", () => {
 
   test("无效 JSON 会在 transport 边界记录 protocol violation", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const transport = createCodexTransport({
       diagnostics: async (input) => {
         diagnostics.push(input);
@@ -365,8 +507,6 @@ describe("codex transport", () => {
 
     expect(diagnostics).toEqual([
       expect.objectContaining({
-        source: "adapter",
-        harness: "codex",
         kind: "protocol_violation",
         operation: "decode_worker_message",
         reason: "invalid_json",
@@ -377,7 +517,7 @@ describe("codex transport", () => {
 
   test("无关未知 notification 忽略，已知 item 的非法 status 拒绝", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const transport = createCodexTransport({
       diagnostics: async (input) => {
         diagnostics.push(input);
@@ -430,7 +570,7 @@ describe("codex transport", () => {
 
   test("已知 item notification 中未知 variant 不得当作无关消息忽略", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const transport = createCodexTransport({
       diagnostics: async (input) => {
         diagnostics.push(input);
@@ -470,7 +610,7 @@ describe("codex transport", () => {
 
   test("已知审批请求的 availableDecisions 含未知值时整体拒绝", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     let written = "";
     fake.stdin.on("data", (chunk) => {
       written += String(chunk);
@@ -511,7 +651,7 @@ describe("codex transport", () => {
 
   test("非法 worker response 会在 transport 边界记录 protocol violation", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const transport = createCodexTransport({
       diagnostics: async (input) => {
         diagnostics.push(input);
@@ -526,8 +666,6 @@ describe("codex transport", () => {
 
     expect(diagnostics).toEqual([
       expect.objectContaining({
-        source: "adapter",
-        harness: "codex",
         kind: "protocol_violation",
         operation: "validate_worker_response",
         reason: "invalid_shape",
@@ -538,7 +676,7 @@ describe("codex transport", () => {
 
   test("畸形 thread/start result 拒绝请求并记录一次 protocol violation", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const transport = createCodexTransport({
       diagnostics: async (input) => {
         diagnostics.push(input);
@@ -562,7 +700,7 @@ describe("codex transport", () => {
 
   test("已知 server request 参数畸形时记录一次并立即回应错误", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     let written = "";
     fake.stdin.on("data", (chunk) => {
       written += String(chunk);
@@ -599,7 +737,7 @@ describe("codex transport", () => {
 
   test("在途请求的畸形 error 不等到超时且只记录一次", async () => {
     const fake = fakeChild();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const transport = createCodexTransport({
       diagnostics: async (input) => {
         diagnostics.push(input);

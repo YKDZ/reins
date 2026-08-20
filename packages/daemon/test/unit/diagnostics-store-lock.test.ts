@@ -113,7 +113,7 @@ describe("advisory file lease", () => {
     }
   });
 
-  test("fails closed and does not clean a replacement lock inode", async () => {
+  test("fails closed permanently and does not clean a replacement lock inode", async () => {
     const directory = await temporaryDirectory();
     const target = join(directory, "writer");
     const lease = await acquireAdvisoryFileLease(target, {
@@ -127,7 +127,12 @@ describe("advisory file lease", () => {
         AdvisoryLockCompromisedError,
       );
       expect(await descriptorsFor(`${target}.lock`)).toEqual([]);
-      await expect(lease.close()).resolves.toBeUndefined();
+      await expect(lease.close()).rejects.toBeInstanceOf(
+        AdvisoryLockCompromisedError,
+      );
+      await expect(lease.close()).rejects.toBeInstanceOf(
+        AdvisoryLockCompromisedError,
+      );
       expect(
         await readFile(join(`${target}.lock`, "replacement"), "utf8"),
       ).toBe("owned elsewhere");
@@ -137,22 +142,59 @@ describe("advisory file lease", () => {
   });
 
   test.skipIf(process.platform !== "linux")(
-    "closes its directory handle even when release fails",
+    "retries a failed release while retaining exact ownership proof",
     async () => {
       const directory = await temporaryDirectory();
       const target = join(directory, "writer");
+      const blocker = join(`${target}.lock`, "blocks-rmdir");
       const lease = await acquireAdvisoryFileLease(target);
       try {
         expect(await descriptorsFor(`${target}.lock`)).toHaveLength(1);
-        await writeFile(join(`${target}.lock`, "blocks-rmdir"), "failure");
+        await writeFile(blocker, "failure");
         await expect(lease.close()).rejects.toBeInstanceOf(
           AdvisoryLockSystemError,
         );
-        await lease.close();
+        expect(await descriptorsFor(`${target}.lock`)).toHaveLength(1);
+
+        await rm(blocker);
+        await expect(lease.close()).resolves.toBeUndefined();
+        await expect(lease.close()).resolves.toBeUndefined();
       } finally {
         await lease.close().catch(() => undefined);
       }
       expect(await descriptorsFor(`${target}.lock`)).toEqual([]);
+
+      const reacquired = await acquireAdvisoryFileLease(target);
+      await reacquired.close();
+    },
+  );
+
+  test.skipIf(process.platform !== "linux")(
+    "does not turn a failed release followed by replacement into success",
+    async () => {
+      const directory = await temporaryDirectory();
+      const target = join(directory, "writer");
+      const lockDirectory = `${target}.lock`;
+      const lease = await acquireAdvisoryFileLease(target);
+      await writeFile(join(lockDirectory, "blocks-rmdir"), "failure");
+      await expect(lease.close()).rejects.toBeInstanceOf(
+        AdvisoryLockSystemError,
+      );
+
+      await rm(lockDirectory, { recursive: true });
+      await mkdir(lockDirectory);
+      await writeFile(join(lockDirectory, "replacement"), "owned elsewhere");
+
+      await expect(lease.close()).rejects.toBeInstanceOf(
+        AdvisoryLockCompromisedError,
+      );
+      await expect(lease.close()).rejects.toBeInstanceOf(
+        AdvisoryLockCompromisedError,
+      );
+      expect(await readFile(join(lockDirectory, "replacement"), "utf8")).toBe(
+        "owned elsewhere",
+      );
+      expect(await descriptorsFor(lockDirectory)).toEqual([]);
     },
   );
 

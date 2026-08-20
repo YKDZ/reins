@@ -1,4 +1,4 @@
-import type { DiagnosticInput, DomainEvent } from "@reins/protocol";
+import type { CoreDiagnosticFact, DomainEvent } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createSessionMachine } from "#/session-machine";
@@ -13,7 +13,7 @@ describe("interrupt", () => {
         throw new Error("interrupt failed");
       },
     });
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -36,7 +36,6 @@ describe("interrupt", () => {
     );
     expect(diagnostics).toContainEqual(
       expect.objectContaining({
-        source: "core",
         sessionId: id,
         turnId: ids.turn("t1"),
         kind: "request_failure",

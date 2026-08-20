@@ -3,6 +3,7 @@ import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
   CapabilitiesResult,
+  DaemonDiagnosticFact,
   DomainEvent,
   DiagnosticsParams,
   HarnessCapability,
@@ -62,6 +63,7 @@ function unsupportedProtocolMethod(value: ProtocolRequest["method"]): never {
 
 export type ProtocolServer = {
   start(): Promise<void>;
+  quiesce(): void;
   stop(): Promise<void>;
   forwardEvent(event: DomainEvent): void;
 };
@@ -105,7 +107,18 @@ export function createProtocolServerInternal(
     TransportConnection<ProtocolMessage>
   >();
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
+  let quiescing = false;
   let shuttingDown = false;
+  let daemonStarted = false;
+  let daemonStopReason: "stopped" | "idle_exit" | undefined;
+  let acceptingRequests = false;
+  let startSetup: Promise<void> | undefined;
+  let shutdownPromise: Promise<void> | undefined;
+  let shutdownFailure: unknown;
+  const pendingMessages: Array<{
+    connection: TransportConnection<ProtocolMessage>;
+    message: ProtocolMessage;
+  }> = [];
   let startedResolve: (() => void) | null = null;
   const started = new Promise<void>((resolve) => {
     startedResolve = resolve;
@@ -123,7 +136,6 @@ export function createProtocolServerInternal(
     if (isMachineError(error)) return error;
     const cause = makeErrorCause("exception", String(error));
     const diagnosticId = await recordDiagnostic({
-      source: "daemon",
       kind: "lifecycle",
       operation: "diagnostics_store",
       reason: "invariant_failed",
@@ -136,11 +148,14 @@ export function createProtocolServerInternal(
     };
   }
 
-  async function recordDiagnostic(
-    input: Parameters<DiagnosticsRuntime["record"]>[0],
-  ) {
+  async function recordDiagnostic(input: DaemonDiagnosticFact) {
     if (options.diagnostics.health().status === "degraded") return undefined;
-    return await options.diagnostics.record(input);
+    const unsafe = input as unknown as Record<string, unknown>;
+    if ("source" in unsafe) return undefined;
+    return await options.diagnostics.record({
+      ...input,
+      source: "daemon",
+    } as Parameters<DiagnosticsRuntime["record"]>[0]);
   }
 
   function sendSafe(
@@ -155,6 +170,31 @@ export function createProtocolServerInternal(
     }
   }
 
+  function rejectDuringShutdown(
+    connection: TransportConnection<ProtocolMessage>,
+    message: ProtocolMessage,
+  ): void {
+    if (message.kind !== "request") return;
+    sendSafe(connection, {
+      kind: "response",
+      requestId: message.requestId,
+      error: { code: "daemon_shutting_down" },
+    });
+  }
+
+  function quiesce(): void {
+    if (quiescing) return;
+    quiescing = true;
+    acceptingRequests = false;
+    if (idleTimer !== null) {
+      clearTimeout(idleTimer);
+      idleTimer = null;
+    }
+    for (const pending of pendingMessages.splice(0)) {
+      rejectDuringShutdown(pending.connection, pending.message);
+    }
+  }
+
   function recordTransportFailure(
     connection: TransportConnection<ProtocolMessage>,
     operation: "read" | "write",
@@ -163,7 +203,6 @@ export function createProtocolServerInternal(
     if (transportFailureConnections.has(connection)) return;
     transportFailureConnections.add(connection);
     void recordDiagnostic({
-      source: "daemon",
       kind: "transport_failure",
       operation,
       reason: "io_error",
@@ -182,31 +221,58 @@ export function createProtocolServerInternal(
   function scheduleIdleExit(): void {
     if (idleTimer !== null) clearTimeout(idleTimer);
     idleTimer = null;
+    if (quiescing) return;
     if (!isIdle()) return;
     idleTimer = setTimeout(() => {
       idleTimer = null;
-      void shutdown();
+      void shutdown("idle_exit");
     }, idleTimeoutMs);
   }
 
-  async function shutdown(): Promise<void> {
-    if (shuttingDown) return;
+  function shutdown(reason: "stopped" | "idle_exit"): Promise<void> {
+    if (shutdownPromise !== undefined) return shutdownPromise;
+    quiesce();
     shuttingDown = true;
-    if (idleTimer !== null) {
-      clearTimeout(idleTimer);
-      idleTimer = null;
-    }
-    for (const unsubscribers of cleanupByConnection.values()) {
-      for (const unsubscribe of unsubscribers) unsubscribe();
-    }
-    cleanupByConnection.clear();
-    attachSubscriptions.clear();
-    try {
-      await options.transport.close();
-    } finally {
-      startedResolve?.();
-      startedResolve = null;
-    }
+    shutdownFailure = undefined;
+    const attempt = (async () => {
+      try {
+        await startSetup;
+      } catch {
+        // start 的原始失败由 start() 所有；shutdown 仍负责收口 transport。
+      }
+      if (idleTimer !== null) {
+        clearTimeout(idleTimer);
+        idleTimer = null;
+      }
+      for (const unsubscribers of cleanupByConnection.values()) {
+        for (const unsubscribe of unsubscribers) unsubscribe();
+      }
+      cleanupByConnection.clear();
+      attachSubscriptions.clear();
+      pendingMessages.length = 0;
+      try {
+        if (daemonStarted && daemonStopReason === undefined) {
+          await recordDiagnostic({
+            kind: "lifecycle",
+            operation: "daemon",
+            reason,
+          });
+          daemonStopReason = reason;
+        }
+        await options.transport.close();
+      } catch (error) {
+        shutdownFailure = error;
+        throw error;
+      } finally {
+        startedResolve?.();
+        startedResolve = null;
+      }
+    })();
+    shutdownPromise = attempt;
+    void attempt.catch(() => {
+      if (shutdownPromise === attempt) shutdownPromise = undefined;
+    });
+    return attempt;
   }
 
   function appendLog(event: DomainEvent): void {
@@ -350,10 +416,46 @@ export function createProtocolServerInternal(
   }
 
   async function aggregateCapabilities(): Promise<CapabilitiesResult> {
+    async function verifiedCapabilityDiagnostic(
+      error: unknown,
+      harness: string,
+    ) {
+      if (!isAlreadyDiagnosedError(error) || error.diagnosticId === undefined) {
+        return undefined;
+      }
+      try {
+        const result = await options.diagnostics.query({
+          diagnosticId: error.diagnosticId,
+        });
+        if (!("record" in result)) return undefined;
+        const record = result.record;
+        return record.diagnosticId === error.diagnosticId &&
+          record.source === "adapter" &&
+          record.harness === harness &&
+          record.kind === "request_failure" &&
+          record.operation === "capabilities" &&
+          record.stage === "query"
+          ? error.diagnosticId
+          : undefined;
+      } catch {
+        return undefined;
+      }
+    }
+
     const entries = Array.from(options.adapters.entries());
     const results = await Promise.allSettled(
-      entries.map(async ([, adapter]) =>
-        adapter.capabilities((input) => options.diagnostics.record(input)),
+      entries.map(async ([harness, adapter]) =>
+        adapter.capabilities(async (input) => {
+          const unsafe = input as unknown as Record<string, unknown>;
+          if ("source" in unsafe || "harness" in unsafe) {
+            return undefined;
+          }
+          return await options.diagnostics.record({
+            ...input,
+            source: "adapter",
+            harness,
+          } as Parameters<DiagnosticsRuntime["record"]>[0]);
+        }),
       ),
     );
     const capabilities: HarnessCapability[] = [];
@@ -370,7 +472,6 @@ export function createProtocolServerInternal(
         const reason = new Error("Capability result did not match its harness");
         const cause = makeErrorCause("exception", String(reason));
         const diagnosticId = await recordDiagnostic({
-          source: "daemon",
           harness,
           kind: "request_failure",
           operation: "capabilities",
@@ -386,17 +487,20 @@ export function createProtocolServerInternal(
         });
       } else {
         const cause = makeErrorCause("exception", String(result.reason));
-        const diagnosticId = isAlreadyDiagnosedError(result.reason)
-          ? result.reason.diagnosticId
-          : await recordDiagnostic({
-              source: "daemon",
-              kind: "request_failure",
-              operation: "capabilities",
-              stage: "query",
-              reason: "upstream_error",
-              harness,
-              message: makeTextEvidence(String(result.reason)),
-            });
+        const suppliedDiagnosticId = await verifiedCapabilityDiagnostic(
+          result.reason,
+          harness,
+        );
+        const diagnosticId =
+          suppliedDiagnosticId ??
+          (await recordDiagnostic({
+            kind: "request_failure",
+            operation: "capabilities",
+            stage: "query",
+            reason: "upstream_error",
+            harness,
+            message: makeTextEvidence(String(result.reason)),
+          }));
         failures.push({
           harness,
           code: "capability_query_failed",
@@ -553,7 +657,11 @@ export function createProtocolServerInternal(
     const cleanup = new Set<() => void>();
     cleanupByConnection.set(connection, cleanup);
     const unsubscribe = connection.onEvent((event) => {
-      if (event.kind === "message") handleMessage(connection, event.message);
+      if (event.kind === "message") {
+        if (quiescing) rejectDuringShutdown(connection, event.message);
+        else if (acceptingRequests) handleMessage(connection, event.message);
+        else pendingMessages.push({ connection, message: event.message });
+      }
       if (event.kind === "error") {
         recordTransportFailure(connection, "read", event.error);
         cleanupConnection(connection);
@@ -577,19 +685,78 @@ export function createProtocolServerInternal(
     });
     cleanupByConnection.delete(connection);
     connections.delete(connection);
+    for (let index = pendingMessages.length - 1; index >= 0; index -= 1) {
+      if (pendingMessages[index]?.connection === connection) {
+        pendingMessages.splice(index, 1);
+      }
+    }
     scheduleIdleExit();
   }
 
   return {
-    start() {
+    async start() {
+      if (quiescing) {
+        const activeShutdown = shutdownPromise;
+        if (activeShutdown !== undefined) await activeShutdown;
+        if (shutdownFailure !== undefined) throw shutdownFailure;
+        return;
+      }
       options.transport.onConnection(handleConnection);
-      return options.transport.listen().then(() => {
+      startSetup = (async () => {
+        try {
+          await options.transport.listen();
+        } catch (error) {
+          await recordDiagnostic({
+            kind: "transport_failure",
+            operation: "listen",
+            reason: "io_error",
+            message: makeTextEvidence(String(error)),
+          });
+          throw error;
+        }
+        const diagnosticId = await recordDiagnostic({
+          kind: "lifecycle",
+          operation: "daemon",
+          reason: "started",
+        });
+        if (diagnosticId === undefined) {
+          throw new Error("Daemon start lifecycle was not accepted");
+        }
+        daemonStarted = true;
+        if (shuttingDown) return;
+        acceptingRequests = true;
+        for (const pending of pendingMessages.splice(0)) {
+          if (connections.has(pending.connection)) {
+            handleMessage(pending.connection, pending.message);
+          }
+        }
         scheduleIdleExit();
-        return started;
-      });
+      })();
+      try {
+        await startSetup;
+      } catch (startError) {
+        try {
+          await shutdown("stopped");
+        } catch (closeError) {
+          throw new AggregateError(
+            [startError, closeError],
+            "Daemon startup and cleanup failed",
+          );
+        }
+        throw startError;
+      }
+      if (shuttingDown) {
+        const activeShutdown = shutdownPromise;
+        if (activeShutdown !== undefined) await activeShutdown;
+        if (shutdownFailure !== undefined) throw shutdownFailure;
+        return;
+      }
+      await started;
+      if (shutdownFailure !== undefined) throw shutdownFailure;
     },
+    quiesce,
     async stop() {
-      await shutdown();
+      await shutdown("stopped");
     },
     forwardEvent,
   };

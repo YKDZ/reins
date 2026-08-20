@@ -1,4 +1,8 @@
-import type { DiagnosticInput, DomainEvent, SessionId } from "@reins/protocol";
+import type {
+  CoreDiagnosticFact,
+  DomainEvent,
+  SessionId,
+} from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createSessionMachine } from "#/session-machine";
@@ -105,7 +109,7 @@ describe("spawn", () => {
   test("keeps reentrant spawn ingress isolated by session", async () => {
     let machine: ReturnType<typeof createSessionMachine>;
     let nestedSpawn: Promise<SessionId> | undefined;
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
       start: (spec) => {
         if (spec.sessionName === ids.sessionName("outer")) {

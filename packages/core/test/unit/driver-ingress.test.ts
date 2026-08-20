@@ -1,4 +1,4 @@
-import type { DiagnosticInput, DomainEvent } from "@reins/protocol";
+import type { CoreDiagnosticFact, DomainEvent } from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
 
 import { createSessionMachine } from "#/session-machine";
@@ -8,7 +8,7 @@ import { ids, testIdentity } from "./ids.ts";
 
 describe("driver event ingress ownership", () => {
   test("validates synchronous idle delivery against the projected new turn", async () => {
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
       deliver: (sessionId, turnId) => {
         fake.controls.emit({
@@ -60,7 +60,7 @@ describe("driver event ingress ownership", () => {
 
   test("rolls back action-local ownership when boundary delivery throws", async () => {
     let attempts = 0;
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
       deliver: (sessionId, turnId) => {
         attempts += 1;
@@ -196,7 +196,7 @@ describe("driver event ingress ownership", () => {
 
   test("scopes worker ids to their protocol parent and rejects only local conflicts", async () => {
     const fake = createFakeDriver();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -332,7 +332,6 @@ describe("driver event ingress ownership", () => {
     expect(diagnostics).toEqual(
       Array.from({ length: 5 }, () =>
         expect.objectContaining({
-          source: "core",
           kind: "protocol_violation",
           operation: "validate_worker_event",
           reason: "unexpected_message",
@@ -366,7 +365,7 @@ describe("driver event ingress ownership", () => {
 
   test("releases turn-local message and tool ids when each turn terminates", async () => {
     const fake = createFakeDriver();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -423,7 +422,7 @@ describe("driver event ingress ownership", () => {
 
   test("keeps permission ids session-local across turn boundaries", async () => {
     const fake = createFakeDriver();
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,

@@ -35,7 +35,7 @@ export function createFakeDriver(options?: {
     permissionId: PermissionId,
     resolution: PermissionResolution,
   ) => void;
-  terminate?: (sessionId: SessionId) => void;
+  terminate?: (sessionId: SessionId) => Promise<void>;
 }): {
   readonly factory: WorkerDriverFactory;
   readonly controls: FakeDriverControls;
@@ -89,11 +89,11 @@ export function createFakeDriver(options?: {
           options.resolvePermission(sessionId, permissionId, resolution);
         }
       },
-      terminate(sessionId) {
+      async terminate(sessionId) {
         if (options?.terminate === undefined) {
           terminated.push(sessionId);
         } else {
-          options.terminate(sessionId);
+          await options.terminate(sessionId);
         }
       },
     };

@@ -49,6 +49,7 @@ export function createQoderDriver(deps: {
     let abortController: AbortController | null = null;
     let session: HarnessSession<PendingEntry> | null = null;
     let terminating = false;
+    let runPromise: Promise<void> | null = null;
 
     function makeCanUseTool(): CanUseTool {
       return async (toolName, input, options) => {
@@ -95,29 +96,29 @@ export function createQoderDriver(deps: {
           }
         }
       } catch (error) {
-        readFailed = true;
-        void session.diagnostic({
-          source: "adapter",
-          harness: "qoder",
-          kind: "stream_failure",
-          operation: "receive_worker_stream",
-          reason: "read_error",
-          message: makeTextEvidence(String(error)),
-        });
+        if (!terminating) {
+          readFailed = true;
+          void session.diagnostic({
+            kind: "stream_failure",
+            operation: "receive_worker_stream",
+            reason: "read_error",
+            message: makeTextEvidence(String(error)),
+          });
+        }
       }
-      if (!readFailed && !terminating && session.turnId !== null) {
-        void session.diagnostic({
-          source: "adapter",
-          harness: "qoder",
-          kind: "stream_failure",
-          operation: "receive_worker_stream",
-          reason: "closed_unexpectedly",
+      if (!readFailed && !terminating) {
+        await session.diagnostic({
+          kind: "lifecycle",
+          operation: "worker",
+          reason: "exited_unexpectedly",
           message: makeTextEvidence(
-            "worker stream ended before turn completion",
+            session.turnId === null
+              ? "worker stream ended unexpectedly while idle"
+              : "worker stream ended before turn completion",
           ),
         });
       }
-      session.failActiveTurn();
+      if (!terminating) session.failActiveTurn();
     }
 
     const driver: WorkerDriver = {
@@ -141,8 +142,6 @@ export function createQoderDriver(deps: {
         ];
         if (unsupportedFields.length > 0) {
           void session.diagnostic({
-            source: "adapter",
-            harness: "qoder",
             kind: "mapping_gap",
             operation: "spawn",
             reason: "unsupported_input",
@@ -173,8 +172,6 @@ export function createQoderDriver(deps: {
           query = deps.sdk.query({ prompt: stream, options });
         } catch (error) {
           void session.diagnostic({
-            source: "adapter",
-            harness: "qoder",
             kind: "request_failure",
             operation: "spawn",
             stage: "start_session",
@@ -184,8 +181,15 @@ export function createQoderDriver(deps: {
           session.failActiveTurn();
           return;
         }
-        stream.push(userMessage(spec.message, "next", true));
-        void run();
+        runPromise = (async () => {
+          await session?.diagnostic({
+            kind: "lifecycle",
+            operation: "worker",
+            reason: "initialized",
+          });
+          stream?.push(userMessage(spec.message, "next", true));
+          await run();
+        })();
       },
       deliver(sessionId, turnId, message) {
         void sessionId;
@@ -198,8 +202,6 @@ export function createQoderDriver(deps: {
         query?.interrupt().catch((error: unknown) => {
           if (session === null) return;
           void session.diagnostic({
-            source: "adapter",
-            harness: "qoder",
             kind: "request_failure",
             operation: "interrupt",
             stage: "interrupt",
@@ -213,8 +215,6 @@ export function createQoderDriver(deps: {
         if (entry === undefined) {
           if (session !== null) {
             void session.diagnostic({
-              source: "adapter",
-              harness: "qoder",
               kind: "authorization_failure",
               operation: "resolve_permission",
               stage: "lookup",
@@ -259,10 +259,16 @@ export function createQoderDriver(deps: {
           });
         }
       },
-      terminate(sessionId) {
+      async terminate(sessionId) {
         void sessionId;
         terminating = true;
         abortController?.abort();
+        await runPromise;
+        await session?.diagnostic({
+          kind: "lifecycle",
+          operation: "worker",
+          reason: "closed",
+        });
       },
     };
     return driver;

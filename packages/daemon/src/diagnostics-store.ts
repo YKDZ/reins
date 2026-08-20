@@ -1,16 +1,4 @@
-import {
-  appendFile,
-  chmod,
-  mkdir,
-  open,
-  readFile,
-  readdir,
-  rename,
-  stat,
-  truncate,
-  unlink,
-} from "node:fs/promises";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 
 import {
   diagnosticRecordSchema,
@@ -21,11 +9,18 @@ import {
 import * as v from "valibot";
 
 import {
+  LeaseGuardedDiagnosticsFilesystem,
+  type BeforeDiagnosticsFileOperation,
+  type DiagnosticsFileOperation,
+} from "./diagnostics-store-filesystem.ts";
+import {
   acquireAdvisoryFileLease,
   AdvisoryLockUnavailableError,
   type AdvisoryFileLease,
   type AdvisoryFileLeaseOptions,
 } from "./diagnostics-store-lock.ts";
+
+export type { DiagnosticsFileOperation };
 
 const DEFAULT_MAX_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 const DEFAULT_MAX_BYTES = 64 * 1024 * 1024;
@@ -33,6 +28,7 @@ const DEFAULT_SEGMENT_BYTES = 4 * 1024 * 1024;
 const MAX_RECORD_BYTES = 256 * 1024;
 const ACTIVE_FILE = "active.ndjson";
 const LOCK_TARGET = "writer-lease";
+const BOOTSTRAP_LOCK_TARGET = "diagnostics-bootstrap-lease";
 const SEGMENT_PATTERN = /^segment-(\d{12})\.ndjson$/;
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
 
@@ -90,6 +86,7 @@ type InternalOptions = DiagnosticsStoreOptions & {
   failAppend?: () => Error | undefined;
   failQuery?: () => Error | undefined;
   beforeQueryRead?: () => Promise<void>;
+  beforeFileOperation?: BeforeDiagnosticsFileOperation;
   lock?: AdvisoryFileLeaseOptions;
 };
 
@@ -129,11 +126,14 @@ export async function openDiagnosticsStoreInternal(
     options.stderr ??
     ((message: string) => process.stderr.write(message + "\n"));
 
-  await ensurePrivateDirectory(options.directory);
-  const lock = await acquireLock(options.directory, options.lock);
+  const filesystem = await acquireStoreFilesystem(
+    options.directory,
+    options.lock,
+    options.beforeFileOperation,
+  );
   try {
-    await lock.assertHeld();
-    const loaded = await loadFiles(options.directory, stderr);
+    await ensurePrivateDirectory(options.directory, filesystem);
+    const loaded = await loadFiles(options.directory, stderr, filesystem);
     const store = new RollingDiagnosticsStore({
       ...options,
       maxAgeMs,
@@ -141,13 +141,13 @@ export async function openDiagnosticsStoreInternal(
       segmentBytes,
       now,
       stderr,
-      lock,
+      filesystem,
       ...loaded,
     });
     await store.initializeRetention();
     return store;
   } catch (error) {
-    await lock.close();
+    await filesystem.close().catch(() => undefined);
     throw error;
   }
 }
@@ -160,7 +160,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
   readonly #segmentBytes: number;
   readonly #now: () => Date;
   readonly #stderr: (message: string) => void;
-  readonly #lock: AdvisoryFileLease;
+  readonly #filesystem: LeaseGuardedDiagnosticsFilesystem;
   readonly #repairs: TailRepair[];
   readonly #failAppend: (() => Error | undefined) | undefined;
   readonly #failQuery: (() => Error | undefined) | undefined;
@@ -171,7 +171,9 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
   #nextSegment: number;
   #visibleRecords: DiagnosticRecord[];
   #degraded: { operation: "append" | "query"; cause: string } | undefined;
+  #closing = false;
   #closed = false;
+  #closePromise: Promise<void> | undefined;
   #writeTail: Promise<void> = Promise.resolve();
 
   constructor(
@@ -181,7 +183,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
       segmentBytes: number;
       now: () => Date;
       stderr: (message: string) => void;
-      lock: AdvisoryFileLease;
+      filesystem: LeaseGuardedDiagnosticsFilesystem;
       segments: Segment[];
       activeRecords: DiagnosticRecord[];
       activeBytes: number;
@@ -196,7 +198,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     this.#segmentBytes = options.segmentBytes;
     this.#now = options.now;
     this.#stderr = options.stderr;
-    this.#lock = options.lock;
+    this.#filesystem = options.filesystem;
     this.#segments = options.segments;
     this.#activeRecords = options.activeRecords;
     this.#activeBytes = options.activeBytes;
@@ -225,7 +227,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
   }
 
   append(record: DiagnosticRecord): Promise<void> {
-    if (this.#closed)
+    if (this.#closing || this.#closed)
       return Promise.reject(new Error("Diagnostics store is closed"));
     const operation = this.#writeTail.then(() => this.#append(record));
     this.#writeTail = operation.catch(() => undefined);
@@ -279,13 +281,23 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
 
   async close(): Promise<void> {
     if (this.#closed) return;
-    this.#closed = true;
-    await this.#writeTail;
-    await this.#lock.close();
+    if (this.#closePromise !== undefined) return await this.#closePromise;
+    this.#closing = true;
+    const attempt = (async () => {
+      await this.#writeTail;
+      await this.#filesystem.close();
+      this.#closed = true;
+    })();
+    this.#closePromise = attempt;
+    try {
+      await attempt;
+    } finally {
+      if (this.#closePromise === attempt) this.#closePromise = undefined;
+    }
   }
 
   async #append(record: DiagnosticRecord): Promise<void> {
-    await this.#assertAvailable("append");
+    await this.#assertAvailable("append", true);
     const injected = this.#failAppend?.();
     if (injected !== undefined) {
       this.#degrade("append", injected);
@@ -318,11 +330,13 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     }
 
     try {
-      await appendFile(this.#activePath, line, {
-        encoding: "utf8",
-        mode: 0o600,
-      });
-      await verifyMode(this.#activePath, 0o600, "diagnostics file");
+      await this.#filesystem.appendFile(this.#activePath, line, 0o600);
+      await verifyMode(
+        this.#filesystem,
+        this.#activePath,
+        0o600,
+        "diagnostics file",
+      );
     } catch (error) {
       this.#degrade("append", asError(error));
       throw unavailableError();
@@ -350,12 +364,21 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
       `segment-${String(this.#nextSegment).padStart(12, "0")}.ndjson`,
     );
     try {
-      await rename(this.#activePath, segmentPath);
-      await verifyMode(segmentPath, 0o600, "diagnostics segment");
-      const handle = await open(this.#activePath, "a", 0o600);
-      await handle.close();
-      await chmod(this.#activePath, 0o600);
-      await verifyMode(this.#activePath, 0o600, "diagnostics file");
+      await this.#filesystem.rename(this.#activePath, segmentPath);
+      await verifyMode(
+        this.#filesystem,
+        segmentPath,
+        0o600,
+        "diagnostics segment",
+      );
+      await this.#filesystem.touch(this.#activePath, 0o600);
+      await this.#filesystem.chmod(this.#activePath, 0o600);
+      await verifyMode(
+        this.#filesystem,
+        this.#activePath,
+        0o600,
+        "diagnostics file",
+      );
     } catch (error) {
       this.#degrade("append", asError(error));
       throw unavailableError();
@@ -380,7 +403,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
       const overBytes = this.#totalBytes() > this.#maxBytes;
       if (!hasExpired && !overBytes) break;
       try {
-        await unlink(oldest.path);
+        await this.#filesystem.unlink(oldest.path);
       } catch (error) {
         this.#degrade("append", asError(error));
         throw unavailableError();
@@ -410,11 +433,16 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     ];
   }
 
-  async #assertAvailable(operation: "append" | "query"): Promise<void> {
+  async #assertAvailable(
+    operation: "append" | "query",
+    acceptedBeforeClose = false,
+  ): Promise<void> {
     if (this.#degraded !== undefined) throw unavailableError();
-    if (this.#closed) throw new Error("Diagnostics store is closed");
+    if ((this.#closing && !acceptedBeforeClose) || this.#closed) {
+      throw new Error("Diagnostics store is closed");
+    }
     try {
-      await this.#lock.assertHeld();
+      await this.#filesystem.assertHeld();
     } catch (error) {
       this.#degrade(operation, asError(error));
       throw unavailableError();
@@ -457,6 +485,7 @@ function matches(
 async function loadFiles(
   directory: string,
   stderr: (message: string) => void,
+  filesystem: LeaseGuardedDiagnosticsFilesystem,
 ): Promise<{
   segments: Segment[];
   activeRecords: DiagnosticRecord[];
@@ -464,7 +493,7 @@ async function loadFiles(
   nextSegment: number;
   repairs: TailRepair[];
 }> {
-  const entries = await readdir(directory);
+  const entries = await filesystem.readdir(directory);
   const segmentNames = entries
     .filter((name) => SEGMENT_PATTERN.test(name))
     .sort();
@@ -472,9 +501,9 @@ async function loadFiles(
   let nextSegment = 0;
   for (const name of segmentNames) {
     const path = join(directory, name);
-    await chmod(path, 0o600);
-    await verifyMode(path, 0o600, "diagnostics segment");
-    const bytes = await readFile(path);
+    await filesystem.chmod(path, 0o600);
+    await verifyMode(filesystem, path, 0o600, "diagnostics segment");
+    const bytes = await filesystem.readFile(path);
     if (bytes.length > 0 && bytes.at(-1) !== 0x0a)
       corrupt("Immutable segment has an incomplete line");
     segments.push({
@@ -487,11 +516,10 @@ async function loadFiles(
   }
 
   const activePath = join(directory, ACTIVE_FILE);
-  const handle = await open(activePath, "a", 0o600);
-  await handle.close();
-  await chmod(activePath, 0o600);
-  await verifyMode(activePath, 0o600, "diagnostics file");
-  let activeBytes = await readFile(activePath);
+  await filesystem.touch(activePath, 0o600);
+  await filesystem.chmod(activePath, 0o600);
+  await verifyMode(filesystem, activePath, 0o600, "diagnostics file");
+  let activeBytes = await filesystem.readFile(activePath);
   const repairs: TailRepair[] = [];
   if (activeBytes.length > 0 && activeBytes.at(-1) !== 0x0a) {
     const lastNewline = activeBytes.lastIndexOf(0x0a);
@@ -501,7 +529,7 @@ async function loadFiles(
     try {
       complete = JSON.parse(strictUtf8.decode(tail));
     } catch {
-      await truncate(activePath, tailStart);
+      await filesystem.truncate(activePath, tailStart);
       const repair = {
         kind: "tail_repaired",
         affectedBytes: tail.length,
@@ -516,7 +544,7 @@ async function loadFiles(
     }
     if (complete !== undefined) {
       parseRecord(complete);
-      await appendFile(activePath, "\n", { mode: 0o600 });
+      await filesystem.appendFile(activePath, "\n", 0o600);
       repairs.push({ kind: "tail_repaired", affectedBytes: 0 });
       stderr("Diagnostics active record missing newline; newline restored");
       activeBytes = Buffer.concat([activeBytes, Buffer.from("\n")]);
@@ -567,21 +595,67 @@ function parseRecord(input: unknown): DiagnosticRecord {
   return parsed.output;
 }
 
-async function ensurePrivateDirectory(directory: string): Promise<void> {
-  await mkdir(directory, { recursive: true, mode: 0o700 });
-  await chmod(directory, 0o700);
-  await verifyMode(directory, 0o700, "diagnostics directory");
+async function ensurePrivateDirectory(
+  directory: string,
+  filesystem: LeaseGuardedDiagnosticsFilesystem,
+): Promise<void> {
+  await filesystem.mkdir(directory, 0o700);
+  await filesystem.chmod(directory, 0o700);
+  await verifyMode(filesystem, directory, 0o700, "diagnostics directory");
 }
 
 async function acquireLock(
   directory: string,
   options: AdvisoryFileLeaseOptions | undefined,
 ): Promise<AdvisoryFileLease> {
+  return await acquireNamedLock(join(directory, LOCK_TARGET), options);
+}
+
+async function acquireStoreFilesystem(
+  directory: string,
+  options: AdvisoryFileLeaseOptions | undefined,
+  beforeOperation: BeforeDiagnosticsFileOperation | undefined,
+): Promise<LeaseGuardedDiagnosticsFilesystem> {
+  const bootstrapLease = await acquireNamedLock(
+    join(
+      dirname(directory),
+      `.${basename(directory)}.${BOOTSTRAP_LOCK_TARGET}`,
+    ),
+    withoutAcquisitionHook(options),
+  );
+  const bootstrapFilesystem = new LeaseGuardedDiagnosticsFilesystem(
+    bootstrapLease,
+    beforeOperation,
+  );
+  let writerLease: AdvisoryFileLease | undefined;
   try {
-    return await acquireAdvisoryFileLease(
-      join(directory, LOCK_TARGET),
-      options,
-    );
+    await bootstrapFilesystem.mkdir(directory, 0o700);
+    writerLease = await acquireLock(directory, options);
+    await bootstrapFilesystem.assertHeld();
+    await bootstrapFilesystem.close();
+    return new LeaseGuardedDiagnosticsFilesystem(writerLease, beforeOperation);
+  } catch (error) {
+    await writerLease?.close().catch(() => undefined);
+    await bootstrapFilesystem.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+function withoutAcquisitionHook(
+  options: AdvisoryFileLeaseOptions | undefined,
+): AdvisoryFileLeaseOptions | undefined {
+  if (options?.afterLockAcquired === undefined) return options;
+  const { afterLockAcquired: _afterLockAcquired, ...bootstrapOptions } =
+    options;
+  return bootstrapOptions;
+}
+
+async function acquireNamedLock(
+  path: string,
+  options: AdvisoryFileLeaseOptions | undefined,
+): Promise<AdvisoryFileLease> {
+  try {
+    return await acquireAdvisoryFileLease(path, options);
   } catch (error) {
     if (error instanceof AdvisoryLockUnavailableError) {
       throw new DiagnosticsStoreError(
@@ -594,11 +668,12 @@ async function acquireLock(
 }
 
 async function verifyMode(
+  filesystem: LeaseGuardedDiagnosticsFilesystem,
   path: string,
   expected: number,
   label: string,
 ): Promise<void> {
-  const mode = (await stat(path)).mode & 0o777;
+  const mode = (await filesystem.mode(path)) & 0o777;
   if (mode !== expected)
     throw new Error(`${label} must have mode ${expected.toString(8)}`);
 }

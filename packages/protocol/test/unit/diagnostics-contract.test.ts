@@ -23,6 +23,7 @@ import {
   turnIdSchema,
   type DiagnosticId,
   type DiagnosticInput,
+  type DriverDiagnosticFact,
   type DiagnosticRecord,
   type DiagnosticsParams,
   type MessageId,
@@ -169,6 +170,25 @@ describe("typed identifiers", () => {
 });
 
 describe("strict diagnostic protocol", () => {
+  test("adapter driver facts cannot express source or harness authority", () => {
+    const fact = {
+      kind: "mapping_gap",
+      operation: "spawn",
+      reason: "unsupported_input",
+      fields: ["reasoning"],
+    } satisfies DriverDiagnosticFact;
+    expect(fact.kind).toBe("mapping_gap");
+    const forged = {
+      // @ts-expect-error daemon source is owned outside the adapter seam.
+      source: "daemon",
+      kind: "mapping_gap",
+      operation: "spawn",
+      reason: "unsupported_input",
+      fields: ["reasoning"],
+    } satisfies DriverDiagnosticFact;
+    expect(forged.source).toBe("daemon");
+  });
+
   const input = {
     source: "adapter",
     harness: "codex",
@@ -502,8 +522,8 @@ describe("strict diagnostic protocol", () => {
       ["daemon", "stopped", "info"],
       ["daemon", "idle_exit", "info"],
       ["daemon", "crashed", "error"],
-      ["worker", "started", "info"],
-      ["worker", "stopped", "info"],
+      ["worker", "initialized", "info"],
+      ["worker", "closed", "info"],
       ["worker", "exited_unexpectedly", "error"],
       ["diagnostics_store", "initialized", "info"],
       ["diagnostics_store", "closed", "info"],
@@ -584,7 +604,7 @@ describe("strict diagnostic protocol", () => {
         source: "daemon",
         kind: "lifecycle",
         operation: "diagnostics_store",
-        reason: "closed",
+        reason: "closing",
         stack: evidence,
       },
       {

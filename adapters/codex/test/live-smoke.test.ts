@@ -53,6 +53,6 @@ live("codex live smoke", () => {
     const completed = await turnDone;
     expect(completed.stopReason).toBe("end_turn");
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
-    driver.terminate("smoke@g1" as SessionId);
+    await driver.terminate("smoke@g1" as SessionId);
   }, 180_000);
 });

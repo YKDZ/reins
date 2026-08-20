@@ -1,5 +1,6 @@
 import type {
-  DiagnosticInput,
+  AdapterDiagnosticFact,
+  DiagnosticId,
   DomainEvent,
   MessageId,
   PermissionId,
@@ -11,8 +12,8 @@ import type {
 
 import { noopDiagnosticSink, type DiagnosticSink } from "./diagnostic.ts";
 
-type AdapterDiagnosticFact = DiagnosticInput extends infer TInput
-  ? TInput extends { source: "adapter"; harness: string }
+type SessionDiagnosticFact = AdapterDiagnosticFact extends infer TInput
+  ? TInput extends { kind: string }
     ? Omit<TInput, "sessionId" | "turnId">
     : never
   : never;
@@ -36,7 +37,7 @@ export type TurnJournal = {
   setTurnId(turnId: TurnId): void;
   setFinalText(text: string): void;
   setUsage(usage: Record<string, unknown>): void;
-  diagnostic(input: AdapterDiagnosticFact): Promise<void>;
+  diagnostic(input: SessionDiagnosticFact): Promise<DiagnosticId | undefined>;
   messageId(nativeId: string): MessageId;
   toolCallId(nativeId: string): ToolCallId;
   endTurn(stopReason: "end_turn" | "cancelled" | "failed"): DomainEvent;
@@ -91,15 +92,18 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     this.lastUsage = usage;
   }
 
-  async diagnostic(input: AdapterDiagnosticFact): Promise<void> {
+  async diagnostic(
+    input: SessionDiagnosticFact,
+  ): Promise<DiagnosticId | undefined> {
     try {
-      await this.diagnosticSink({
+      return await this.diagnosticSink({
         ...input,
         sessionId: this.sessionId,
         ...(this.turnId === null ? {} : { turnId: this.turnId }),
-      } as DiagnosticInput);
+      } as AdapterDiagnosticFact);
     } catch {
       // 诊断存储故障不能改变 adapter 的控制流。
+      return undefined;
     }
   }
 

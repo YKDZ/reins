@@ -1,6 +1,6 @@
 import {
   makeDiagnosticId,
-  type DiagnosticInput,
+  type CoreDiagnosticFact,
   type DomainEvent,
 } from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
@@ -17,7 +17,7 @@ describe("driver 抛错时动作整体回滚", () => {
     const failureAccepted = new Promise<void>((resolve) => {
       releaseFailure = resolve;
     });
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
       start: (spec) => {
         queueMicrotask(() => {
@@ -204,7 +204,6 @@ describe("driver 抛错时动作整体回滚", () => {
     expect(machine.list()).toEqual([]);
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
-        source: "core",
         sessionId: ids.session("fixture-1@gtest"),
         turnId: ids.turn("t1"),
         kind: "request_failure",
@@ -221,7 +220,7 @@ describe("driver 抛错时动作整体回滚", () => {
         throw new Error("投递失败");
       },
     });
-    const inputs: DiagnosticInput[] = [];
+    const inputs: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -266,7 +265,6 @@ describe("driver 抛错时动作整体回滚", () => {
     );
     expect(inputs).toEqual([
       expect.objectContaining({
-        source: "core",
         sessionId: id,
         turnId: ids.turn("t2"),
         kind: "request_failure",
@@ -276,13 +274,14 @@ describe("driver 抛错时动作整体回滚", () => {
     ]);
   });
 
-  test("kill：driver.terminate 抛错则不产生 session.killed，会话保持原状", async () => {
+  test("kill：driver.terminate 异步失败则不产生 session.killed，会话保持原状", async () => {
     const fake = createFakeDriver({
-      terminate: () => {
+      terminate: async () => {
+        await Promise.resolve();
         throw new Error("终止失败");
       },
     });
-    const inputs: DiagnosticInput[] = [];
+    const inputs: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -315,7 +314,6 @@ describe("driver 抛错时动作整体回滚", () => {
     );
     expect(inputs).toEqual([
       expect.objectContaining({
-        source: "core",
         sessionId: id,
         turnId: ids.turn("t1"),
         kind: "request_failure",
@@ -324,5 +322,91 @@ describe("driver 抛错时动作整体回滚", () => {
         reason: "upstream_error",
       }),
     ]);
+  });
+
+  test("并发 kill 共享 termination，期间动作严格拒绝且只提交一次 killed", async () => {
+    let releaseTermination!: () => void;
+    const termination = new Promise<void>((resolve) => {
+      releaseTermination = resolve;
+    });
+    let terminateCalls = 0;
+    const fake = createFakeDriver({
+      terminate: async () => {
+        terminateCalls += 1;
+        await termination;
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: { record: async () => undefined },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const sessionId = await machine.spawn({
+      sessionName: ids.sessionName("concurrent-kill"),
+      harness: "codex",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+
+    const first = machine.kill({ ids: [sessionId] });
+    await vi.waitFor(() => expect(terminateCalls).toBe(1));
+    const second = machine.kill({ ids: [sessionId] });
+    await expect(
+      machine.send({ sessionId, message: "must not enter driver" }),
+    ).rejects.toEqual({ code: "session_terminating", sessionId });
+    await expect(machine.interrupt({ ids: [sessionId] })).rejects.toEqual({
+      code: "session_terminating",
+      sessionId,
+    });
+    expect(fake.controls.delivered).toEqual([]);
+    expect(fake.controls.interrupted).toEqual([]);
+
+    releaseTermination();
+    await expect(Promise.all([first, second])).resolves.toEqual([
+      [{ sessionId, status: "killed" }],
+      [{ sessionId, status: "killed" }],
+    ]);
+    expect(terminateCalls).toBe(1);
+    expect(
+      events.filter((event) => event.type === "session.killed"),
+    ).toHaveLength(1);
+  });
+
+  test("routing 已验证的 diagnosticId 由 core 复用且不重复记录", async () => {
+    const diagnosticId = makeDiagnosticId("core", "1");
+    const fake = createFakeDriver({
+      terminate: async () => {
+        throw {
+          code: "internal_error",
+          cause: { kind: "upstream", message: "verified failure" },
+          diagnosticId,
+        };
+      },
+    });
+    const diagnostics: CoreDiagnosticFact[] = [];
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const sessionId = await machine.spawn({
+      sessionName: ids.sessionName("verified-failure"),
+      harness: "codex",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+
+    await expect(machine.kill({ ids: [sessionId] })).rejects.toMatchObject({
+      code: "internal_error",
+      diagnosticId,
+    });
+    expect(diagnostics).toEqual([]);
   });
 });

@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-import type { DiagnosticId, DiagnosticInput } from "@reins/protocol";
+import type { DiagnosticId, DriverDiagnosticFact } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createCodexCapabilities } from "#/capabilities";
@@ -104,7 +104,7 @@ describe("codex capabilities", () => {
         stdout.write(`${JSON.stringify({ id: request.id, result })}\n`);
       }
     });
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const diagnosticId = "d1-098" as DiagnosticId;
     const query = createCodexCapabilities({
       transportFactory: (options) =>

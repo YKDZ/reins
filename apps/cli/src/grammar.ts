@@ -222,6 +222,10 @@ function domainMessage(error: MachineError): string {
       return `Session not found${"sessionId" in error ? `: ${error.sessionId}` : ""}`;
     case "session_killed":
       return `Session is already killed${"sessionId" in error ? `: ${error.sessionId}` : ""}`;
+    case "session_terminating":
+      return `Session is terminating${"sessionId" in error ? `: ${error.sessionId}` : ""}`;
+    case "daemon_shutting_down":
+      return "Daemon is shutting down";
     case "invalid_params":
       return "Invalid parameters";
     case "unknown_harness":

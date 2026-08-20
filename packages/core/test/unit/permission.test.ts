@@ -1,5 +1,5 @@
 import type {
-  DiagnosticInput,
+  CoreDiagnosticFact,
   DomainEvent,
   PermissionOption,
   SessionId,
@@ -239,7 +239,7 @@ describe("resolvePermission", () => {
         if (calls === 1) throw new Error("adapter 复验失败");
       },
     });
-    const inputs: DiagnosticInput[] = [];
+    const inputs: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -278,7 +278,6 @@ describe("resolvePermission", () => {
     );
     expect(inputs).toEqual([
       expect.objectContaining({
-        source: "core",
         sessionId,
         turnId: ids.turn("t1"),
         permissionId: ids.permission("p1"),

@@ -136,6 +136,11 @@ class ProperLockLease implements AdvisoryFileLease {
   readonly #compromised: () => Error | undefined;
   readonly #closeTimeoutMs: number;
   #closed = false;
+  #terminalError: AdvisoryLockCompromisedError | undefined;
+  #closePromise: Promise<void> | undefined;
+  #releasePromise: Promise<void> | undefined;
+  #releaseState: "pending" | "succeeded" | "failed" | undefined;
+  #releaseError: unknown;
 
   constructor(
     guardedFs: GuardedLockFilesystem,
@@ -150,9 +155,9 @@ class ProperLockLease implements AdvisoryFileLease {
   }
 
   async assertHeld(): Promise<void> {
-    if (this.#closed || this.#compromised() !== undefined) {
-      await this.#throwCompromised();
-    }
+    if (this.#closed) throw new AdvisoryLockCompromisedError();
+    if (this.#terminalError !== undefined) throw this.#terminalError;
+    if (this.#compromised() !== undefined) await this.#throwCompromised();
     try {
       await this.#guardedFs.assertOwned();
     } catch (error: unknown) {
@@ -165,33 +170,91 @@ class ProperLockLease implements AdvisoryFileLease {
 
   async close(): Promise<void> {
     if (this.#closed) return;
-    if (this.#compromised() !== undefined) await this.#throwCompromised();
-    this.#closed = true;
+    if (this.#terminalError !== undefined) throw this.#terminalError;
+    if (this.#closePromise !== undefined) return await this.#closePromise;
+    const attempt = this.#closeAttempt();
+    this.#closePromise = attempt;
     try {
-      await this.#guardedFs.assertOwned();
-    } catch (error: unknown) {
-      await this.#guardedFs.closeDescriptor();
-      if (error instanceof AdvisoryLockCompromisedError) throw error;
-      throw new AdvisoryLockCompromisedError();
+      await attempt;
+    } finally {
+      if (this.#closePromise === attempt) this.#closePromise = undefined;
     }
+  }
+
+  async #closeAttempt(): Promise<void> {
+    if (this.#compromised() !== undefined) await this.#throwCompromised();
+
+    if (this.#releaseState === "failed") {
+      if (this.#releaseError instanceof AdvisoryLockCompromisedError) {
+        await this.#throwCompromised(this.#releaseError);
+      }
+      try {
+        await this.#guardedFs.removeOwned();
+        this.#closed = true;
+        return;
+      } catch (error: unknown) {
+        if (error instanceof AdvisoryLockCompromisedError) {
+          await this.#throwCompromised(error);
+        }
+        throw boundedLockError(error);
+      }
+    }
+
     try {
+      if (this.#releasePromise === undefined) {
+        try {
+          await this.#guardedFs.assertOwned();
+        } catch (error: unknown) {
+          await this.#throwCompromised(error);
+        }
+        if (this.#compromised() !== undefined) await this.#throwCompromised();
+      }
       await withTimeout(
-        this.#release(),
+        this.#ensureRelease(),
         this.#closeTimeoutMs,
         "Timed out while releasing exclusive writer lease",
       );
-    } catch (error: unknown) {
-      throw boundedLockError(error);
-    } finally {
+      this.#closed = true;
       await this.#guardedFs.closeDescriptor();
+    } catch (error: unknown) {
+      if (
+        error instanceof AdvisoryLockCompromisedError ||
+        this.#compromised() !== undefined
+      ) {
+        await this.#throwCompromised(error);
+      }
+      throw boundedLockError(error);
     }
   }
 
   async #throwCompromised(error?: unknown): Promise<never> {
-    this.#closed = true;
+    this.#terminalError ??=
+      error instanceof AdvisoryLockCompromisedError
+        ? error
+        : new AdvisoryLockCompromisedError();
+    await withTimeout(
+      this.#ensureRelease(),
+      this.#closeTimeoutMs,
+      "Timed out while stopping compromised exclusive writer lease",
+    ).catch(() => undefined);
     await this.#guardedFs.closeDescriptor();
-    if (error instanceof AdvisoryLockCompromisedError) throw error;
-    throw new AdvisoryLockCompromisedError();
+    throw this.#terminalError;
+  }
+
+  #ensureRelease(): Promise<void> {
+    if (this.#releasePromise !== undefined) return this.#releasePromise;
+    this.#releaseState = "pending";
+    this.#releasePromise = this.#release().then(
+      () => {
+        this.#releaseState = "succeeded";
+      },
+      (error: unknown) => {
+        this.#releaseState = "failed";
+        this.#releaseError = error;
+        throw error;
+      },
+    );
+    return this.#releasePromise;
   }
 }
 
@@ -268,6 +331,20 @@ class GuardedLockFilesystem {
     });
   }
 
+  async removeOwned(): Promise<void> {
+    await this.assertOwned();
+    await new Promise<void>((resolveRemoval, reject) => {
+      callbackFs.rmdir(this.#path, (error) => {
+        if (error !== null) {
+          reject(error);
+          return;
+        }
+        resolveRemoval();
+      });
+    });
+    await this.closeDescriptor();
+  }
+
   #mkdir(path: string, callback: callbackFs.NoParamCallback): void {
     callbackFs.mkdir(path, (error) => {
       if (error !== null) {
@@ -307,22 +384,16 @@ class GuardedLockFilesystem {
   }
 
   async #removeOwned(callback: callbackFs.NoParamCallback): Promise<void> {
-    let owned = false;
     try {
-      await this.assertOwned();
-      owned = true;
-    } catch {
-      // A replacement path belongs to another writer and must remain untouched.
-    }
-    if (!owned) {
-      await this.closeDescriptor();
+      await this.removeOwned();
       callback(null);
-      return;
+    } catch (error: unknown) {
+      callback(
+        error instanceof Error
+          ? error
+          : new Error("Unable to remove exclusive writer lease"),
+      );
     }
-    callbackFs.rmdir(this.#path, async (error) => {
-      await this.closeDescriptor();
-      callback(error);
-    });
   }
 
   #rmdirSync(path: string): void {

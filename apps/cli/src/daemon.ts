@@ -1,5 +1,7 @@
 import { spawn, type ChildProcess } from "node:child_process";
 import { existsSync } from "node:fs";
+import { mkdir } from "node:fs/promises";
+import { dirname } from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -10,6 +12,7 @@ import {
   resolveReinsSocketPath,
   type TransportConnection,
 } from "@reins/transport";
+import lockfile from "proper-lockfile";
 
 import { machineError } from "./errors.ts";
 
@@ -54,52 +57,85 @@ export async function ensureDaemon(
   const socketPath = resolveReinsSocketPath(env);
   const existing = await tryConnect(socketPath);
   if (existing !== null) return { connection: existing, child: null };
-
-  const args = resolveDaemonCommand(env);
-  const adaptersModule = env.REINS_ADAPTERS_MODULE;
-  if (adaptersModule !== undefined && adaptersModule !== "") {
-    args.push("--adapters", adaptersModule);
-  }
-  const child = spawn(args[0] ?? "reins-daemon", args.slice(1), {
-    // fd 3 只承载启动窗口的有界机器报告；正常后台 stdout/stderr 仍不进入 CLI。
-    stdio: ["ignore", "ignore", "ignore", "pipe"],
-    env: {
-      ...env,
-      REINS_SOCKET: socketPath,
-      REINS_STARTUP_FD: String(STARTUP_REPORT_FD),
-    },
-  });
-  options?.onSpawn?.(child);
-  const startup = collectStartupReport(
-    child.stdio[STARTUP_REPORT_FD] as Readable | null | undefined,
-  );
+  await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
   let spawnError: Error | undefined;
-  child.once("error", (error) => {
-    spawnError = error;
-  });
+  let launchError: Error | undefined;
+  let child: ChildProcess | undefined;
+  let startup: ReturnType<typeof collectStartupReport> | undefined;
+  let releaseLaunch: (() => Promise<void>) | undefined;
   const timeoutMs = options?.timeoutMs ?? 5000;
   const deadline = Date.now() + timeoutMs;
   while (Date.now() < deadline) {
     const connected = await tryConnect(socketPath);
     if (connected !== null) {
-      startup.close();
+      startup?.close();
+      await releaseLaunch?.();
       // 让 CLI 进程不被 daemon 子进程句柄拖住，daemon 自行空闲退出。
-      child.unref();
-      return { connection: connected, child };
+      child?.unref();
+      return { connection: connected, child: child ?? null };
     }
-    if (hasExited(child) || spawnError !== undefined) break;
+    if (releaseLaunch === undefined && child === undefined) {
+      try {
+        releaseLaunch = await lockfile.lock(socketPath, {
+          realpath: false,
+          retries: 0,
+          stale: 2_000,
+          update: 1_000,
+        });
+      } catch (error) {
+        if (!isLaunchLockContention(error)) {
+          launchError =
+            error instanceof Error ? error : new Error(String(error));
+        }
+      }
+      if (releaseLaunch !== undefined) {
+        launchError = undefined;
+        // 获得 launcher 所有权后复查：前一赢家可能刚在探测与加锁之间上线。
+        const winner = await tryConnect(socketPath);
+        if (winner !== null) {
+          await releaseLaunch();
+          return { connection: winner, child: null };
+        }
+        const args = resolveDaemonCommand(env);
+        const adaptersModule = env.REINS_ADAPTERS_MODULE;
+        if (adaptersModule !== undefined && adaptersModule !== "") {
+          args.push("--adapters", adaptersModule);
+        }
+        child = spawn(args[0] ?? "reins-daemon", args.slice(1), {
+          // fd 3 只承载启动窗口的有界机器报告；正常后台 stdout/stderr 仍不进入 CLI。
+          stdio: ["ignore", "ignore", "ignore", "pipe"],
+          env: {
+            ...env,
+            REINS_SOCKET: socketPath,
+            REINS_STARTUP_FD: String(STARTUP_REPORT_FD),
+          },
+        });
+        options?.onSpawn?.(child);
+        startup = collectStartupReport(
+          child.stdio[STARTUP_REPORT_FD] as Readable | null | undefined,
+        );
+        child.once("error", (error) => {
+          spawnError = error;
+        });
+      }
+    }
+    // 自己拉起的 child 可能输掉同 socket 的外部竞争；其退出不代表赢家
+    // 不会在总 deadline 内上线，因此继续连接同一 socket。
     await sleep(50);
   }
-  await terminateChild(child);
+  if (child !== undefined) await terminateChild(child);
   // 启动报告的排空窗口从失败已确定时开始；daemon 正常运行多久都不会
   // 提前耗尽这个窗口。stream 终态仍是完整报告的唯一完成信号。
-  await Promise.race([startup.done, sleep(STARTUP_REPORT_DRAIN_TIMEOUT_MS)]);
-  const reportedCause = startup.cause();
-  startup.close();
+  if (startup !== undefined) {
+    await Promise.race([startup.done, sleep(STARTUP_REPORT_DRAIN_TIMEOUT_MS)]);
+  }
+  const reportedCause = startup?.cause();
+  startup?.close();
+  await releaseLaunch?.();
   const cause =
     reportedCause ??
-    (spawnError === undefined
-      ? !hasExited(child)
+    (spawnError === undefined && launchError === undefined
+      ? child === undefined || !hasExited(child)
         ? makeErrorCause(
             "timeout",
             `daemon failed to start within ${timeoutMs}ms`,
@@ -113,11 +149,22 @@ export async function ensureDaemon(
               "upstream",
               `daemon exited before startup completed (code ${child.exitCode})`,
             )
-      : makeErrorCause("io", spawnError.message));
+      : makeErrorCause(
+          "io",
+          (spawnError ?? launchError)?.message ?? "unknown",
+        ));
   throw machineError({
     code: "daemon_start_failed",
     cause,
   });
+}
+
+function isLaunchLockContention(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    (error as { code?: unknown }).code === "ELOCKED"
+  );
 }
 
 function collectStartupReport(stream: Readable | null | undefined): {

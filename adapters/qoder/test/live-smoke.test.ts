@@ -52,6 +52,6 @@ live("qoder live smoke", () => {
     expect(completed.stopReason).toBe("end_turn");
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
     expect(events.some((event) => event.type === "tool.completed")).toBe(true);
-    driver.terminate("smoke@g1" as SessionId);
+    await driver.terminate("smoke@g1" as SessionId);
   }, 120_000);
 });

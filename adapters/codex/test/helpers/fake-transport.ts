@@ -54,6 +54,7 @@ export function createFakeTransport(): {
 
   const transport: CodexTransport = {
     start() {},
+    isClosed: () => closedFlag,
     request(method, params) {
       if (closedFlag) {
         return Promise.reject(new Error("codex app-server closed"));

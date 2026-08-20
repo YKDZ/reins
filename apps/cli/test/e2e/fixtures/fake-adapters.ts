@@ -44,8 +44,6 @@ function fakeAdapter(options: {
           if (spec.captureHarnessStderr === true) {
             for (const originalBytes of [20_000, 20_001, 20_002]) {
               void diagnostics({
-                source: "harness",
-                harness,
                 sessionId: spec.sessionId,
                 turnId: spec.turnId,
                 kind: "harness_stderr",
@@ -141,7 +139,7 @@ function fakeAdapter(options: {
           });
         });
       },
-      terminate() {},
+      async terminate() {},
     };
     return driver;
   };

@@ -1,4 +1,4 @@
-import type { DiagnosticInput, DomainEvent } from "@reins/protocol";
+import type { CoreDiagnosticFact, DomainEvent } from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
 
 import { createSessionMachine } from "#/session-machine";
@@ -167,7 +167,7 @@ describe("权限与事件", () => {
   test("订阅者抛错经 onListenerError 上报，不打断机器", async () => {
     const fake = createFakeDriver();
     const sink: Array<{ error: unknown; event: DomainEvent }> = [];
-    const diagnostics: DiagnosticInput[] = [];
+    const diagnostics: CoreDiagnosticFact[] = [];
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
@@ -195,7 +195,6 @@ describe("权限与事件", () => {
     await vi.waitFor(() => expect(diagnostics).toHaveLength(2));
     expect(diagnostics[0]).toEqual(
       expect.objectContaining({
-        source: "core",
         sessionId: id,
         kind: "lifecycle",
         operation: "event_delivery",

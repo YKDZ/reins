@@ -1,5 +1,5 @@
 import type {
-  DiagnosticInput,
+  DriverDiagnosticFact,
   DomainEvent,
   PermissionId,
   SessionId,
@@ -29,12 +29,12 @@ function setup(
   terminateTimeoutMs?: number,
 ): {
   events: DomainEvent[];
-  diagnostics: DiagnosticInput[];
+  diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeTransport>;
   driver: ReturnType<ReturnType<typeof createCodexDriver>>;
 } {
   const fake = createFakeTransport();
-  const diagnostics: DiagnosticInput[] = [];
+  const diagnostics: DriverDiagnosticFact[] = [];
   const factory = createCodexDriver({
     transportFactory: () => fake.transport,
     ...(terminateTimeoutMs === undefined ? {} : { terminateTimeoutMs }),
@@ -98,7 +98,7 @@ function setupWithMalformedResponse(method: "turn/steer" | "thread/delete") {
       });
     }
   });
-  const diagnostics: DiagnosticInput[] = [];
+  const diagnostics: DriverDiagnosticFact[] = [];
   const events: DomainEvent[] = [];
   const factory = createCodexDriver({
     transportFactory: (options) =>
@@ -304,10 +304,8 @@ describe("codex driver", () => {
     });
     await flush();
 
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
-        source: "adapter",
-        harness: "codex",
         sessionId,
         turnId: firstTurnId,
         kind: "compatibility_gap",
@@ -328,7 +326,7 @@ describe("codex driver", () => {
     });
     await flush();
 
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "turn_failure",
         operation: "run_turn",
@@ -417,7 +415,7 @@ describe("codex driver", () => {
     driver.deliver(sessionId, firstTurnId, "继续");
     await flush();
 
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "protocol_violation",
         operation: "validate_worker_response",
@@ -450,28 +448,36 @@ describe("codex driver", () => {
   });
 
   test("terminate 走 thread/delete 并关闭传输，不补发 failed", async () => {
-    const { events, fake, driver } = setup();
+    const { events, diagnostics, fake, driver } = setup();
     await flush();
 
-    driver.terminate(sessionId);
-    await flush();
+    await driver.terminate(sessionId);
     expect(fake.controls.requests().at(-1)?.method).toBe("thread/delete");
     expect(fake.controls.closed()).toBe(true);
     expect(events.filter((event) => event.type === "turn.completed")).toEqual(
       [],
     );
+    expect(
+      diagnostics
+        .filter((input) => input.kind === "lifecycle")
+        .map((input) => input.reason),
+    ).toEqual(["initialized", "closed"]);
   });
 
-  test("terminate 的 delete 永不响应时有界关闭且只记录一条失败", async () => {
+  test("terminate 的 delete 超时仍强制关闭资源树并成功完成 kill", async () => {
     const { diagnostics, fake, driver } = setup("interactive", 5);
     await flush();
     fake.controls.setResponse("thread/delete", new Promise(() => {}));
 
-    driver.terminate(sessionId);
-    await new Promise((resolve) => setTimeout(resolve, 20));
+    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
 
     expect(fake.controls.closed()).toBe(true);
-    expect(diagnostics).toEqual([
+    expect(
+      diagnostics
+        .filter((input) => input.kind === "lifecycle")
+        .map((input) => input.reason),
+    ).toEqual(["initialized", "closed"]);
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "request_failure",
         operation: "kill",
@@ -481,7 +487,7 @@ describe("codex driver", () => {
     ]);
   });
 
-  test("terminate 的 delete 拒绝映射 upstream_error，close 仍执行", async () => {
+  test("terminate 的 delete 拒绝仍关闭资源树且只记录一次失败", async () => {
     const { diagnostics, fake, driver } = setup();
     await flush();
     fake.controls.setResponse(
@@ -489,11 +495,10 @@ describe("codex driver", () => {
       Promise.reject(new Error("delete rejected")),
     );
 
-    driver.terminate(sessionId);
-    await flush();
+    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
 
     expect(fake.controls.closed()).toBe(true);
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "request_failure",
         operation: "kill",
@@ -501,6 +506,11 @@ describe("codex driver", () => {
         reason: "upstream_error",
       }),
     ]);
+    expect(
+      diagnostics
+        .filter((input) => input.kind === "lifecycle")
+        .map((input) => input.reason),
+    ).toEqual(["initialized", "closed"]);
   });
 
   test("thread/delete 成功但 close 拒绝时也只记录一条 terminate 失败", async () => {
@@ -508,10 +518,9 @@ describe("codex driver", () => {
     await flush();
     fake.controls.setCloseError(new Error("close rejected"));
 
-    driver.terminate(sessionId);
-    await flush();
+    await expect(driver.terminate(sessionId)).rejects.toThrow("close rejected");
 
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "request_failure",
         operation: "kill",
@@ -520,16 +529,23 @@ describe("codex driver", () => {
         message: expect.objectContaining({ text: "Error: close rejected" }),
       }),
     ]);
+
+    fake.controls.setCloseError(undefined);
+    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    expect(
+      diagnostics
+        .filter((input) => input.kind === "lifecycle")
+        .map((input) => input.reason),
+    ).toEqual(["initialized", "closed"]);
   });
 
   test("真实 transport 已记录的 thread/delete protocol error 不在 terminate 重复记录", async () => {
     const { diagnostics, driver } = setupWithMalformedResponse("thread/delete");
     await flush();
 
-    driver.terminate(sessionId);
-    await flush();
+    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
 
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "protocol_violation",
         operation: "validate_worker_response",
@@ -577,7 +593,7 @@ describe("codex driver", () => {
     fake.controls.fail(new Error("stdout read failed"));
     await flush();
 
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "stream_failure",
         operation: "receive_worker_stream",
@@ -597,17 +613,79 @@ describe("codex driver", () => {
     fake.controls.end();
     await flush();
 
-    expect(diagnostics).toEqual([
+    expect(
+      diagnostics.filter(
+        (input) =>
+          input.kind === "lifecycle" && input.reason === "exited_unexpectedly",
+      ),
+    ).toEqual([
       expect.objectContaining({
-        kind: "stream_failure",
-        operation: "receive_worker_stream",
-        reason: "closed_unexpectedly",
+        kind: "lifecycle",
+        operation: "worker",
+        reason: "exited_unexpectedly",
       }),
     ]);
     expect(events.at(-1)).toMatchObject({
       type: "turn.completed",
       stopReason: "failed",
     });
+  });
+
+  test("idle worker clean EOF 仍记录一次 exited_unexpectedly 且不伪造 turn", async () => {
+    const { diagnostics, events, fake, driver } = setup();
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { status: "completed" } },
+    });
+    await flush();
+    const completedBeforeEof = events.filter(
+      (event) => event.type === "turn.completed",
+    ).length;
+
+    fake.controls.end();
+    await flush();
+
+    expect(
+      diagnostics.filter(
+        (input) =>
+          input.kind === "lifecycle" && input.reason === "exited_unexpectedly",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        operation: "worker",
+        reason: "exited_unexpectedly",
+      }),
+    ]);
+    expect(
+      diagnostics.find(
+        (input) =>
+          input.kind === "lifecycle" && input.reason === "exited_unexpectedly",
+      ),
+    ).toMatchObject({
+      message: expect.objectContaining({
+        text: "worker stream ended unexpectedly while idle",
+      }),
+    });
+    expect(
+      diagnostics.find(
+        (input) =>
+          input.kind === "lifecycle" && input.reason === "exited_unexpectedly",
+      ),
+    ).not.toHaveProperty("turnId");
+    expect(
+      events.filter((event) => event.type === "turn.completed"),
+    ).toHaveLength(completedBeforeEof);
+
+    const requestsBeforeTerminate = fake.controls.requests().length;
+    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    expect(fake.controls.requests()).toHaveLength(requestsBeforeTerminate);
+    expect(
+      diagnostics
+        .filter((input) => input.kind === "lifecycle")
+        .map((input) => input.reason),
+    ).toEqual(["initialized", "exited_unexpectedly"]);
   });
 });
 import { EventEmitter } from "node:events";

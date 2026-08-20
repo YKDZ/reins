@@ -90,6 +90,10 @@ export const diagnosticIdSchema = v.pipe(
 );
 export type DiagnosticId = v.InferOutput<typeof diagnosticIdSchema>;
 
+export function isDiagnosticId(value: unknown): value is DiagnosticId {
+  return v.safeParse(diagnosticIdSchema, value).success;
+}
+
 export const sessionStateSchema = v.union([
   v.literal("busy"),
   v.literal("idle"),
@@ -727,7 +731,7 @@ const diagnosticDefinitions = [
     {
       kind: v.literal("lifecycle"),
       operation: v.literal("worker"),
-      reason: v.literal("started"),
+      reason: v.literal("initialized"),
     },
     "info",
   ),
@@ -735,7 +739,7 @@ const diagnosticDefinitions = [
     {
       kind: v.literal("lifecycle"),
       operation: v.literal("worker"),
-      reason: v.literal("stopped"),
+      reason: v.literal("closed"),
     },
     "info",
   ),
@@ -1156,7 +1160,7 @@ type LifecycleInput =
       turnId?: TurnId | undefined;
       kind: "lifecycle";
       operation: "worker";
-      reason: "started" | "stopped";
+      reason: "initialized" | "closed";
     }
   | {
       source: "adapter";
@@ -1334,6 +1338,42 @@ export type DiagnosticInput =
   | (DaemonAssociation & (StorageFailureFact | TailRepairedFact))
   | HarnessStderrFact;
 
+type WithoutDiagnosticAuthority<TInput> = TInput extends {
+  source: DiagnosticSource;
+}
+  ? Omit<TInput, "source" | "harness">
+  : never;
+type WithoutDiagnosticSource<TInput> = TInput extends {
+  source: DiagnosticSource;
+}
+  ? Omit<TInput, "source">
+  : never;
+type DiagnosticInputsForSource<TSource extends DiagnosticSource> =
+  DiagnosticInput extends infer TInput
+    ? TInput extends { source: infer TAllowedSource }
+      ? TSource extends TAllowedSource
+        ? TInput
+        : never
+      : never
+    : never;
+
+// Producer 只描述自己有权产生的事实；source 与 harness 由 daemon 注册表绑定。
+export type AdapterDiagnosticFact = WithoutDiagnosticAuthority<
+  DiagnosticInputsForSource<"adapter">
+>;
+export type HarnessDiagnosticFact = WithoutDiagnosticAuthority<
+  DiagnosticInputsForSource<"harness">
+>;
+export type DriverDiagnosticFact =
+  | AdapterDiagnosticFact
+  | HarnessDiagnosticFact;
+export type CoreDiagnosticFact = WithoutDiagnosticSource<
+  DiagnosticInputsForSource<"core">
+>;
+export type DaemonDiagnosticFact = WithoutDiagnosticSource<
+  DiagnosticInputsForSource<"daemon">
+>;
+
 type DiagnosticSeverityFor<TInput extends DiagnosticInput> = TInput extends {
   kind: "mapping_gap" | "compatibility_gap";
 }
@@ -1462,6 +1502,8 @@ export type AdapterCapabilities = v.InferOutput<
 export const errorCodeSchema = v.union([
   v.literal("session_not_found"),
   v.literal("session_killed"),
+  v.literal("session_terminating"),
+  v.literal("daemon_shutting_down"),
   v.literal("invalid_params"),
   v.literal("permission_not_pending"),
   v.literal("permission_resolution_mismatch"),
@@ -1563,6 +1605,11 @@ export const machineErrorSchema = v.union([
     sessionId: sessionIdSchema,
   }),
   v.strictObject({
+    code: v.literal("session_terminating"),
+    sessionId: sessionIdSchema,
+  }),
+  v.strictObject({ code: v.literal("daemon_shutting_down") }),
+  v.strictObject({
     code: v.literal("permission_not_pending"),
     sessionId: sessionIdSchema,
     permissionId: permissionIdSchema,
@@ -1614,6 +1661,23 @@ export type MachineError = v.InferOutput<typeof machineErrorSchema>;
 
 // —— worker driver 契约（缝 B：adapter 实现，core 调用） ——
 
+// adapter 可携带已接受诊断的候选引用；daemon 必须查询并核对归属后才信任。
+export class DriverFailure extends Error {
+  readonly diagnosticId: DiagnosticId | undefined;
+
+  constructor(message: string, diagnosticId?: DiagnosticId) {
+    super(message);
+    this.diagnosticId = diagnosticId;
+  }
+}
+
+export function isDriverFailure(error: unknown): error is DriverFailure {
+  return (
+    error instanceof DriverFailure &&
+    (error.diagnosticId === undefined || isDiagnosticId(error.diagnosticId))
+  );
+}
+
 export type WorkerSpec = {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
@@ -1643,7 +1707,8 @@ export interface WorkerDriver {
     resolution: PermissionResolution,
   ): void;
   // 终止 worker 进程；会话的 session.killed 事件由 core 发出。
-  terminate(sessionId: SessionId): void;
+  // 只有底层 worker 及其进程树已经终止后才 resolve；失败必须 reject。
+  terminate(sessionId: SessionId): Promise<void>;
 }
 
 export type WorkerDriverFactory = (
@@ -1653,7 +1718,9 @@ export type WorkerDriverFactory = (
 // adapter 构造只在 daemon 路由层发生；上下文只含控制面的领域事件与类型化诊断。
 export type AdapterDriverFactory = (context: {
   emit: (event: DomainEvent) => void;
-  diagnostics: (input: DiagnosticInput) => Promise<DiagnosticId | undefined>;
+  diagnostics: (
+    input: DriverDiagnosticFact,
+  ) => Promise<DiagnosticId | undefined>;
 }) => WorkerDriver;
 
 // —— capabilities 能力矩阵（实时查询；default 字段不进矩阵，最小干扰原则） ——

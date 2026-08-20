@@ -1,7 +1,7 @@
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
 import type { DiagnosticSink } from "@reins/adapter-kit";
 import type {
-  DiagnosticInput,
+  DriverDiagnosticFact,
   DomainEvent,
   PermissionId,
   SessionId,
@@ -24,12 +24,12 @@ const sessionName = "reviewer" as SessionName;
 
 function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
   events: DomainEvent[];
-  diagnostics: DiagnosticInput[];
+  diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
 } {
   const fake = createFakeSdk();
-  const diagnostics: DiagnosticInput[] = [];
+  const diagnostics: DriverDiagnosticFact[] = [];
   const sink: DiagnosticSink = async (input) => {
     diagnostics.push(input);
     return undefined;
@@ -264,7 +264,9 @@ describe("qoder driver 事件映射", () => {
     await flush();
 
     expect(events.filter((event) => event.type === "message")).toEqual([]);
-    expect(diagnostics).toEqual([]);
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual(
+      [],
+    );
   });
 
   test("工具生命周期：tool.requested 与 tool.completed(isError)", async () => {
@@ -349,7 +351,7 @@ describe("qoder driver 事件映射", () => {
       stopReason: "failed",
       finalReply: null,
     });
-    expect(diagnostics).toEqual([
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
         kind: "turn_failure",
         operation: "run_turn",
@@ -358,6 +360,35 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
       }),
     ]);
+  });
+
+  test("busy 与 idle 的 clean EOF 都各记录一次 exited_unexpectedly", async () => {
+    const busy = setup();
+    busy.fake.controls.end();
+    await flush();
+    expect(
+      busy.diagnostics.filter(
+        (input) =>
+          input.kind === "lifecycle" && input.reason === "exited_unexpectedly",
+      ),
+    ).toHaveLength(1);
+
+    const idleWorker = setup();
+    idleWorker.fake.controls.push(idle());
+    await flush();
+    idleWorker.fake.controls.end();
+    await flush();
+    const idleExit = idleWorker.diagnostics.filter(
+      (input) =>
+        input.kind === "lifecycle" && input.reason === "exited_unexpectedly",
+    );
+    expect(idleExit).toHaveLength(1);
+    expect(idleExit[0]).not.toHaveProperty("turnId");
+    expect(idleExit[0]).toMatchObject({
+      message: expect.objectContaining({
+        text: "worker stream ended unexpectedly while idle",
+      }),
+    });
   });
 });
 
@@ -484,37 +515,41 @@ describe("interrupt 与 kill", () => {
     });
   });
 
-  test("terminate 中止底层会话；流结束后进行中回合兜底 failed", async () => {
+  test("terminate 等到底层流关闭且不伪造 turn failure", async () => {
     const { events, diagnostics, fake, driver } = setup();
-    driver.terminate(sessionId);
+    const termination = driver.terminate(sessionId);
     expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
       true,
     );
 
     fake.controls.end();
-    await flush();
-    expect(events.find((event) => event.type === "turn.completed")).toEqual({
-      type: "turn.completed",
-      sessionId,
-      turnId: firstTurnId,
-      stopReason: "failed",
-      finalReply: null,
-    });
-    expect(diagnostics).toEqual([]);
+    await termination;
+    expect(
+      events.find((event) => event.type === "turn.completed"),
+    ).toBeUndefined();
+    expect(
+      diagnostics
+        .filter((input) => input.kind === "lifecycle")
+        .map((input) => input.reason),
+    ).toEqual(["initialized", "closed"]);
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual(
+      [],
+    );
   });
 
-  test("terminate 后底层流抛错只记录一条 read_error", async () => {
+  test("terminate 导致的底层流抛错不伪装成 stream failure", async () => {
     const { diagnostics, fake, driver } = setup();
-    driver.terminate(sessionId);
+    const termination = driver.terminate(sessionId);
     fake.controls.fail(new Error("stream rejected during termination"));
-    await flush();
+    await termination;
 
-    expect(diagnostics).toEqual([
-      expect.objectContaining({
-        kind: "stream_failure",
-        operation: "receive_worker_stream",
-        reason: "read_error",
-      }),
-    ]);
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual(
+      [],
+    );
+    expect(
+      diagnostics
+        .filter((input) => input.kind === "lifecycle")
+        .map((input) => input.reason),
+    ).toEqual(["initialized", "closed"]);
   });
 });

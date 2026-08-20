@@ -1,6 +1,5 @@
 import { spawn } from "node:child_process";
 import { createInterface } from "node:readline";
-import { StringDecoder } from "node:string_decoder";
 
 import {
   AlreadyDiagnosedError,
@@ -10,7 +9,7 @@ import {
 import {
   makeTextEvidence,
   type DiagnosticId,
-  type DiagnosticInput,
+  type DriverDiagnosticFact,
   type SessionId,
   type TurnId,
 } from "@reins/protocol";
@@ -18,6 +17,51 @@ import {
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const STDERR_CHUNK_BYTES = 16 * 1024;
+
+function validatedUtf8Prefix(bytes: Buffer): {
+  completeBytes: number;
+  invalidAt: number | null;
+} {
+  let index = 0;
+  while (index < bytes.byteLength) {
+    const first = bytes[index]!;
+    if (first <= 0x7f) {
+      index += 1;
+      continue;
+    }
+    let width: 2 | 3 | 4;
+    if (first >= 0xc2 && first <= 0xdf) width = 2;
+    else if (first >= 0xe0 && first <= 0xef) width = 3;
+    else if (first >= 0xf0 && first <= 0xf4) width = 4;
+    else return { completeBytes: index, invalidAt: index };
+    if (index + width > bytes.byteLength) {
+      return { completeBytes: index, invalidAt: null };
+    }
+    const second = bytes[index + 1]!;
+    const continuation = (value: number) => value >= 0x80 && value <= 0xbf;
+    const validSecond =
+      width === 2
+        ? continuation(second)
+        : first === 0xe0
+          ? second >= 0xa0 && second <= 0xbf
+          : first === 0xed
+            ? second >= 0x80 && second <= 0x9f
+            : first === 0xf0
+              ? second >= 0x90 && second <= 0xbf
+              : first === 0xf4
+                ? second >= 0x80 && second <= 0x8f
+                : continuation(second);
+    if (!validSecond) return { completeBytes: index, invalidAt: index };
+    if (width >= 3 && !continuation(bytes[index + 2]!)) {
+      return { completeBytes: index, invalidAt: index };
+    }
+    if (width === 4 && !continuation(bytes[index + 3]!)) {
+      return { completeBytes: index, invalidAt: index };
+    }
+    index += width;
+  }
+  return { completeBytes: index, invalidAt: null };
+}
 
 // adapter 私有：边界已写入 protocol_violation，调用方只需终止控制流。
 export class ProtocolBoundaryError extends AlreadyDiagnosedError {}
@@ -28,20 +72,43 @@ export type CodexChild = {
   readonly stderr?: NodeJS.ReadableStream;
   on(event: "exit" | "error", listener: (error?: Error) => void): void;
   kill(signal?: NodeJS.Signals): boolean | void;
+  treeAlive?(): boolean;
 };
 
 export type SpawnChild = (
   command: string,
   args: readonly string[],
-  options: { readonly stdio: readonly ("pipe" | "inherit")[] },
+  options: {
+    readonly stdio: readonly ("pipe" | "inherit")[];
+    readonly detached: boolean;
+  },
 ) => CodexChild;
 
 function spawnRealChild(
   command: string,
   args: readonly string[],
-  options: { readonly stdio: readonly ("pipe" | "inherit")[] },
+  options: {
+    readonly stdio: readonly ("pipe" | "inherit")[];
+    readonly detached: boolean;
+  },
 ): CodexChild {
-  const child = spawn(command, [...args], { stdio: [...options.stdio] });
+  const child = spawn(command, [...args], {
+    stdio: [...options.stdio],
+    detached: options.detached,
+  });
+  const processGroup = child.pid;
+  const signalTree = (signal: NodeJS.Signals = "SIGTERM"): boolean => {
+    if (process.platform === "win32" || processGroup === undefined) {
+      return child.kill(signal);
+    }
+    try {
+      process.kill(-processGroup, signal);
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+      throw error;
+    }
+  };
   return {
     stdin: child.stdin as NodeJS.WritableStream,
     stdout: child.stdout as NodeJS.ReadableStream,
@@ -50,7 +117,19 @@ function spawnRealChild(
       if (event === "error") child.on("error", listener);
       else child.on("exit", () => listener());
     },
-    kill: (signal) => child.kill(signal),
+    kill: signalTree,
+    treeAlive: () => {
+      if (process.platform === "win32" || processGroup === undefined) {
+        return child.exitCode === null && child.signalCode === null;
+      }
+      try {
+        process.kill(-processGroup, 0);
+        return true;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;
+        throw error;
+      }
+    },
   };
 }
 
@@ -189,6 +268,7 @@ export type CodexDiagnosticContext = {
 // app-server 的 JSON-RPC 2.0 传输（jsonrpc 头省略，stdio JSONL）。
 export type CodexTransport = {
   start(): void;
+  isClosed(): boolean;
   request<TMethod extends CodexRequestMethod>(
     method: TMethod,
     params: unknown,
@@ -202,6 +282,7 @@ export type CodexTransport = {
 
 export function createCodexTransport(options: {
   binaryPath?: string;
+  binaryArgs?: readonly string[];
   spawnChild?: SpawnChild;
   requestTimeoutMs?: number;
   shutdownGraceMs?: number;
@@ -212,8 +293,9 @@ export function createCodexTransport(options: {
   let child: CodexChild | null = null;
   let nextId = 0;
   let closed = false;
-  let childSettled = false;
   let shutdownTimer: ReturnType<typeof setTimeout> | null = null;
+  let resolveShutdownDeadline: (() => void) | null = null;
+  let shutdownDeadline: Promise<void> | null = null;
   let closePromise: Promise<void> | null = null;
   let closeFailure: unknown;
   const requestTimeoutMs =
@@ -230,8 +312,7 @@ export function createCodexTransport(options: {
   >();
   const inbox = createAsyncQueue<InboundMessage>();
   let inboxFailure: unknown;
-  const stderrDecoder = new StringDecoder("utf8");
-  let stderrDecoderBytes = 0;
+  let stderrPendingBytes = Buffer.alloc(0);
   let stderrStream: NodeJS.ReadableStream | null = null;
   let stderrWork = Promise.resolve();
   let stderrFinishing = false;
@@ -251,12 +332,16 @@ export function createCodexTransport(options: {
 
   function clearShutdownTimerWhenDrained(): void {
     if (!stdoutFinished || !stderrFinished || shutdownTimer === null) return;
+    if (child?.treeAlive?.() === true) return;
     clearTimeout(shutdownTimer);
     shutdownTimer = null;
+    resolveShutdownDeadline?.();
+    resolveShutdownDeadline = null;
+    shutdownDeadline = null;
   }
 
   async function record(
-    input: DiagnosticInput,
+    input: DriverDiagnosticFact,
   ): Promise<DiagnosticId | undefined> {
     if (options.diagnostics === undefined) return undefined;
     try {
@@ -284,8 +369,6 @@ export function createCodexTransport(options: {
     if (context === null) {
       if (operation === "decode_worker_message") {
         return record({
-          source: "adapter",
-          harness: "codex",
           kind: "protocol_violation",
           operation,
           reason,
@@ -293,8 +376,6 @@ export function createCodexTransport(options: {
         });
       } else {
         return record({
-          source: "adapter",
-          harness: "codex",
           kind: "protocol_violation",
           operation,
           reason,
@@ -304,8 +385,6 @@ export function createCodexTransport(options: {
     }
     if (operation === "decode_worker_message") {
       return record({
-        source: "adapter",
-        harness: "codex",
         sessionId: context.sessionId,
         ...(context.turnId === null ? {} : { turnId: context.turnId }),
         kind: "protocol_violation",
@@ -315,8 +394,6 @@ export function createCodexTransport(options: {
       });
     } else {
       return record({
-        source: "adapter",
-        harness: "codex",
         sessionId: context.sessionId,
         ...(context.turnId === null ? {} : { turnId: context.turnId }),
         kind: "protocol_violation",
@@ -346,8 +423,6 @@ export function createCodexTransport(options: {
           : Math.min(chunkBytes, sourceBytesRemaining);
       try {
         await options.diagnostics({
-          source: "harness",
-          harness: "codex",
           sessionId: context.sessionId,
           ...(context.turnId === null ? {} : { turnId: context.turnId }),
           kind: "harness_stderr",
@@ -380,6 +455,31 @@ export function createCodexTransport(options: {
     }
   }
 
+  async function emitInvalidHarnessStderr(
+    originalBytes: number,
+    context: CodexDiagnosticContext | null,
+  ): Promise<void> {
+    if (
+      originalBytes === 0 ||
+      context === null ||
+      options.diagnostics === undefined
+    ) {
+      return;
+    }
+    try {
+      await options.diagnostics({
+        sessionId: context.sessionId,
+        ...(context.turnId === null ? {} : { turnId: context.turnId }),
+        kind: "harness_stderr",
+        operation: "worker_process",
+        reason: "stderr_output",
+        text: { text: "", truncated: true, originalBytes },
+      });
+    } catch {
+      // 诊断 sink 的失败由其 owner 暴露，stderr 读取必须继续。
+    }
+  }
+
   function consumeHarnessStderr(value: Buffer | string): void {
     const stream = stderrStream;
     stream?.pause();
@@ -387,22 +487,29 @@ export function createCodexTransport(options: {
     const context = options.diagnosticContext?.() ?? null;
     stderrWork = stderrWork
       .then(async () => {
-        for (
-          let offset = 0;
-          offset < bytes.byteLength;
-          offset += STDERR_CHUNK_BYTES
-        ) {
-          const slice = bytes.subarray(
-            offset,
-            Math.min(offset + STDERR_CHUNK_BYTES, bytes.byteLength),
+        stderrPendingBytes = Buffer.concat([stderrPendingBytes, bytes]);
+        const validation = validatedUtf8Prefix(stderrPendingBytes);
+        if (validation.completeBytes > 0) {
+          const valid = stderrPendingBytes.subarray(
+            0,
+            validation.completeBytes,
           );
-          stderrDecoderBytes += slice.byteLength;
-          const decoded = stderrDecoder.write(slice);
-          const decodedBytes = Buffer.byteLength(decoded, "utf8");
-          if (decodedBytes > 0) {
-            await emitHarnessStderr(decoded, context, decodedBytes);
-            stderrDecoderBytes = Math.max(0, stderrDecoderBytes - decodedBytes);
-          }
+          await emitHarnessStderr(
+            valid.toString("utf8"),
+            context,
+            valid.length,
+          );
+        }
+        if (validation.invalidAt !== null) {
+          await emitInvalidHarnessStderr(
+            stderrPendingBytes.byteLength - validation.completeBytes,
+            context,
+          );
+          stderrPendingBytes = Buffer.alloc(0);
+        } else {
+          stderrPendingBytes = stderrPendingBytes.subarray(
+            validation.completeBytes,
+          );
         }
       })
       .catch(() => {})
@@ -417,10 +524,9 @@ export function createCodexTransport(options: {
     const context = options.diagnosticContext?.() ?? null;
     stderrWork = stderrWork
       .then(async () => {
-        const tail = stderrDecoder.end();
-        const originalBytes = stderrDecoderBytes;
-        stderrDecoderBytes = 0;
-        await emitHarnessStderr(tail, context, originalBytes);
+        const originalBytes = stderrPendingBytes.byteLength;
+        stderrPendingBytes = Buffer.alloc(0);
+        await emitInvalidHarnessStderr(originalBytes, context);
       })
       .catch(() => {})
       .finally(() => {
@@ -480,24 +586,49 @@ export function createCodexTransport(options: {
 
   function scheduleForcedDrain(): void {
     if (shutdownTimer !== null) return;
+    shutdownDeadline = new Promise<void>((resolve) => {
+      resolveShutdownDeadline = resolve;
+    });
     shutdownTimer = setTimeout(() => {
-      shutdownTimer = null;
-      if (!childSettled) {
+      try {
+        const killed = child?.kill("SIGKILL");
+        if (
+          killed === false &&
+          child?.treeAlive?.() === true &&
+          closeFailure === undefined
+        ) {
+          closeFailure = new Error("codex app-server rejected SIGKILL");
+        }
+      } catch (error) {
+        closeFailure ??= error;
+      }
+      forceDrain();
+      void (async () => {
         try {
-          const killed = child?.kill("SIGKILL");
-          if (killed === false && closeFailure === undefined) {
-            closeFailure = new Error("codex app-server rejected SIGKILL");
+          const treeExitDeadline =
+            Date.now() + Math.max(shutdownGraceMs, 1_000);
+          while (child?.treeAlive?.() === true) {
+            if (Date.now() >= treeExitDeadline) {
+              closeFailure ??= new Error(
+                "codex app-server process tree survived SIGKILL",
+              );
+              break;
+            }
+            await new Promise<void>((resolve) => setTimeout(resolve, 10));
           }
         } catch (error) {
           closeFailure ??= error;
+        } finally {
+          shutdownTimer = null;
+          resolveShutdownDeadline?.();
+          resolveShutdownDeadline = null;
+          shutdownDeadline = null;
         }
-      }
-      forceDrain();
+      })();
     }, shutdownGraceMs);
   }
 
   function settleChild(): void {
-    childSettled = true;
     if (closed) {
       scheduleForcedDrain();
       return;
@@ -1101,13 +1232,14 @@ export function createCodexTransport(options: {
       try {
         child = doSpawn(
           options.binaryPath ?? "codex",
-          ["app-server", "--listen", "stdio://"],
+          options.binaryArgs ?? ["app-server", "--listen", "stdio://"],
           {
             stdio: [
               "pipe",
               "pipe",
               options.captureHarnessStderr === true ? "pipe" : "inherit",
             ],
+            detached: process.platform !== "win32",
           },
         );
       } catch (error) {
@@ -1145,6 +1277,7 @@ export function createCodexTransport(options: {
         finishStdout();
       });
     },
+    isClosed: () => closed,
     request<TMethod extends CodexRequestMethod>(
       method: TMethod,
       params: unknown,
@@ -1184,11 +1317,13 @@ export function createCodexTransport(options: {
       },
     },
     async close() {
-      closePromise ??= (async () => {
+      if (closePromise !== null) return await closePromise;
+      const attempt = (async () => {
+        closeFailure = undefined;
         closed = true;
         try {
           const killed = child?.kill("SIGTERM");
-          if (killed === false) {
+          if (killed === false && child?.treeAlive?.() !== false) {
             closeFailure = new Error("codex app-server rejected SIGTERM");
           }
         } catch (error) {
@@ -1196,13 +1331,22 @@ export function createCodexTransport(options: {
         }
         scheduleForcedDrain();
         await Promise.all([stdoutDone, stderrDone]);
+        clearShutdownTimerWhenDrained();
+        const deadline = shutdownDeadline;
+        if (shutdownTimer !== null && deadline !== null) await deadline;
         if (shutdownTimer !== null) {
           clearTimeout(shutdownTimer);
           shutdownTimer = null;
         }
+        if (child?.treeAlive?.() === false) closeFailure = undefined;
         if (closeFailure !== undefined) throw closeFailure;
       })();
-      await closePromise;
+      closePromise = attempt;
+      try {
+        await attempt;
+      } finally {
+        if (closePromise === attempt) closePromise = null;
+      }
     },
   };
 }

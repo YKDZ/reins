@@ -1,5 +1,9 @@
-import { noopDiagnosticSink, type DiagnosticSink } from "@reins/adapter-kit";
-import type { HarnessCapability } from "@reins/protocol";
+import {
+  noopDiagnosticSink,
+  type AdapterDiagnosticSink,
+  type DiagnosticSink,
+} from "@reins/adapter-kit";
+import type { AdapterDiagnosticFact, HarnessCapability } from "@reins/protocol";
 
 import {
   createCodexTransport,
@@ -28,11 +32,15 @@ export function createCodexCapabilities(options?: {
   transportFactory?: (options: {
     diagnostics: DiagnosticSink;
   }) => CodexTransport;
-}): (diagnostics?: DiagnosticSink) => Promise<HarnessCapability> {
+}): (diagnostics?: AdapterDiagnosticSink) => Promise<HarnessCapability> {
   return async (diagnostics = noopDiagnosticSink) => {
+    const transportDiagnostics: DiagnosticSink = async (input) =>
+      input.kind === "harness_stderr"
+        ? undefined
+        : await diagnostics(input as AdapterDiagnosticFact);
     const transport =
-      options?.transportFactory?.({ diagnostics }) ??
-      createCodexTransport({ diagnostics });
+      options?.transportFactory?.({ diagnostics: transportDiagnostics }) ??
+      createCodexTransport({ diagnostics: transportDiagnostics });
     transport.start();
     try {
       await transport.request("initialize", {

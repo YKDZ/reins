@@ -363,6 +363,35 @@ describe("CLI 进程边界（缝 D）", () => {
       if (daemon.exitCode === null) await stopDaemon(daemon, socketPath);
     }
   });
+
+  test("two cold CLI launchers coordinate one daemon and both connect", async () => {
+    for (let round = 0; round < 10; round += 1) {
+      const { dir, env } = await freshEnv();
+      const fixtureEnv = fixtureDaemonEnv(env, dir, "cold-launch-barrier");
+      const first = startCli(["capabilities"], fixtureEnv);
+      const second = startCli(["capabilities"], fixtureEnv);
+      const firstExit = waitForExit(first.child, 7_000);
+      const secondExit = waitForExit(second.child, 7_000);
+      expect(await Promise.all([firstExit, secondExit])).toEqual([0, 0]);
+      expect(JSON.parse(first.stdout.join(""))).toMatchObject({
+        capabilities: [],
+      });
+      expect(JSON.parse(second.stdout.join(""))).toMatchObject({
+        capabilities: [],
+      });
+      const pidPath = fixtureEnv.REINS_FIXTURE_PID_FILE;
+      if (pidPath === undefined)
+        throw new Error("fixture pid file is required");
+      const pids = (await readFile(pidPath, "utf8"))
+        .trim()
+        .split("\n")
+        .filter(Boolean)
+        .map(Number);
+      expect(pids).toHaveLength(1);
+      await waitForFixtureExit(fixtureEnv);
+      expect(await pathExists(`${fixtureEnv.REINS_SOCKET}.lock`)).toBe(false);
+    }
+  }, 70_000);
   test("diagnostics returns one complete finite JSON response", async () => {
     const { env } = await freshEnv();
     const result = await runCli(["diagnostics"], env);
@@ -370,7 +399,10 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.stderr).toBe("");
     expect(result.stdout.trim().split("\n")).toHaveLength(1);
     expect(JSON.parse(result.stdout)).toMatchObject({
-      records: [],
+      records: [
+        { operation: "diagnostics_store", reason: "initialized" },
+        { operation: "daemon", reason: "started" },
+      ],
       truncated: false,
     });
   });
@@ -655,32 +687,44 @@ describe("CLI 进程边界（缝 D）", () => {
   });
 
   test("run observes a real second-connection kill as compact exit 3", async () => {
-    const { env } = await freshEnv();
+    const { env, socketPath } = await freshEnv();
+    const daemon = await startDaemon(env);
     const running = startCli(
       ["run", "hang", "hello", "--name", "run-killed"],
       env,
     );
-    await waitFor(async () => {
-      const listed = await runCli(["list", "--name", "run-killed"], env);
-      return JSON.parse(listed.stdout).length === 1;
-    });
-    const listed = await runCli(["list", "--name", "run-killed"], env);
-    const sessionId = (
-      JSON.parse(listed.stdout) as Array<{ sessionId: string }>
-    )[0]!.sessionId;
-    const exit = waitForExit(running.child, 10_000);
+    let sessionId: string | undefined;
     try {
+      await waitFor(async () => {
+        const listed = await runCli(["list", "--name", "run-killed"], env);
+        return JSON.parse(listed.stdout).length === 1;
+      });
+      const listed = await runCli(["list", "--name", "run-killed"], env);
+      sessionId = (JSON.parse(listed.stdout) as Array<{ sessionId: string }>)[0]
+        ?.sessionId;
+      if (sessionId === undefined) throw new Error("run session is missing");
+      const exit = waitForExit(running.child, 10_000);
       expect((await runCli(["kill", sessionId], env)).exitCode).toBe(0);
       expect(await exit).toBe(3);
+      const output = JSON.parse(running.stdout.join("")) as {
+        stopReason: string;
+      };
+      expect(output.stopReason).toBe("killed");
+      expect(running.stdout.join("")).not.toContain('"method":"event"');
+      expect(running.stderr.join("")).toBe("");
     } finally {
-      if (running.child.exitCode === null) running.child.kill("SIGKILL");
+      if (
+        running.child.exitCode === null &&
+        running.child.signalCode === null
+      ) {
+        running.child.kill("SIGKILL");
+      }
+      await waitForExit(running.child, 2_000);
+      if (sessionId !== undefined) await runCli(["kill", sessionId], env);
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        await stopDaemon(daemon, socketPath);
+      }
     }
-    const output = JSON.parse(running.stdout.join("")) as {
-      stopReason: string;
-    };
-    expect(output.stopReason).toBe("killed");
-    expect(running.stdout.join("")).not.toContain('"method":"event"');
-    expect(running.stderr.join("")).toBe("");
   }, 15_000);
 
   test("--pretty run 输出人类可读最终结果", async () => {
@@ -731,7 +775,9 @@ describe("CLI 进程边界（缝 D）", () => {
       await waitFor(() =>
         attached.stdout.join("").includes('"kind":"notification"'),
       );
-      daemon.kill("SIGTERM");
+      // SIGTERM 现在是有序清理，会发送 session.killed；SIGKILL 才模拟断线。
+      daemon.kill("SIGKILL");
+      await waitForExit(daemon);
       expect(await waitForExit(attached.child)).toBe(65);
       expect(attached.stderr.join("")).toBe("");
       const lines = attached.stdout.join("").trim().split("\n");
@@ -742,7 +788,9 @@ describe("CLI 进程边界（缝 D）", () => {
         ]),
       );
     } finally {
-      if (daemon.exitCode === null) await stopDaemon(daemon, socketPath);
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        await stopDaemon(daemon, socketPath);
+      }
     }
   });
 
@@ -760,12 +808,16 @@ describe("CLI 进程边界（缝 D）", () => {
         env,
       );
       await waitFor(() => attached.stdout.join("").includes("worker: interim"));
-      daemon.kill("SIGTERM");
+      // SIGTERM 现在是有序清理，会发送 session.killed；SIGKILL 才模拟断线。
+      daemon.kill("SIGKILL");
+      await waitForExit(daemon);
       expect(await waitForExit(attached.child)).toBe(65);
       expect(attached.stdout.join("")).toContain("worker: interim");
       expect(attached.stderr.join("")).toContain("error: Daemon disconnected");
     } finally {
-      if (daemon.exitCode === null) await stopDaemon(daemon, socketPath);
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        await stopDaemon(daemon, socketPath);
+      }
     }
   });
 
@@ -1849,7 +1901,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "startup-failure");
     const result = await runCli(["capabilities"], fixtureEnv, {
-      timeoutMs: 3_000,
+      timeoutMs: 7_000,
     });
     expect(result.exitCode).toBe(65);
     expect(result.stderr).toBe("");
@@ -1864,14 +1916,14 @@ describe("CLI 域错误（不夹带 usage）", () => {
       4 * 1024,
     );
     await waitForFixtureExit(fixtureEnv);
-  });
+  }, 10_000);
 
-  test("daemon 被 signal 终止视为已经退出并及时返回", async () => {
+  test("daemon 被 signal 终止后仍观察同 socket 到总 deadline", async () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "startup-signal");
     const started = Date.now();
     const result = await runCli(["capabilities"], fixtureEnv, {
-      timeoutMs: 3_000,
+      timeoutMs: 7_000,
     });
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
@@ -1881,15 +1933,16 @@ describe("CLI 域错误（不夹带 usage）", () => {
         message: expect.stringContaining("SIGTERM"),
       },
     });
-    expect(Date.now() - started).toBeLessThan(2_000);
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
+    expect(Date.now() - started).toBeLessThan(6_500);
     await waitForFixtureStopped(fixtureEnv);
-  });
+  }, 10_000);
 
   test("daemon 退出后仍排空 fd3 启动报告再解析 cause", async () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "startup-report-drain");
     const result = await runCli(["capabilities"], fixtureEnv, {
-      timeoutMs: 3_000,
+      timeoutMs: 7_000,
     });
     expect(result.exitCode).toBe(65);
     const error = JSON.parse(result.stdout) as {
@@ -1901,13 +1954,13 @@ describe("CLI 域错误（不夹带 usage）", () => {
       4 * 1024,
     );
     await waitForFixtureExit(fixtureEnv);
-  });
+  }, 10_000);
 
   test("daemon 运行超过一秒后写入的完整启动报告仍保留 cause", async () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "startup-report-late");
     const result = await runCli(["capabilities"], fixtureEnv, {
-      timeoutMs: 4_000,
+      timeoutMs: 7_000,
     });
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
@@ -1915,7 +1968,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
       cause: { kind: "upstream", message: "late complete startup report" },
     });
     await waitForFixtureExit(fixtureEnv);
-  });
+  }, 10_000);
 
   test("真实 daemon 的 fail-fast cause 经启动报告通道返回", async () => {
     const { env } = await freshEnv();
@@ -1933,8 +1986,9 @@ describe("CLI 域错误（不夹带 usage）", () => {
         message: expect.stringContaining("REINS_DIAGNOSTICS_MAX_BYTES"),
       },
     });
-    expect(Date.now() - started).toBeLessThan(2_000);
-  });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
+    expect(Date.now() - started).toBeLessThan(6_500);
+  }, 10_000);
 
   test("诊断 append 失败时 unexpected error 不产生悬空 diagnosticId", async () => {
     const { dir, env } = await freshEnv();
@@ -1993,7 +2047,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "daemon_start_failed",
     });
-  });
+  }, 10_000);
 
   test("pretty 域错误不输出 suggestion 与 usage", async () => {
     const { env } = await freshEnv();

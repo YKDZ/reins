@@ -1,4 +1,5 @@
 import {
+  AlreadyDiagnosedError,
   HarnessSession,
   isAlreadyDiagnosedError,
   type DiagnosticSink,
@@ -64,6 +65,10 @@ export function createCodexDriver(deps: {
     let transport: CodexTransport | null = null;
     let session: HarnessSession<CodexApproval> | null = null;
     let threadId = "";
+    let threadDeleted = false;
+    let workerInitialized = false;
+    let workerClosed = false;
+    let workerExitedUnexpectedly = false;
     let activeTurnId: string | null = null;
     let ended = false;
     const pendingByRequest = new Map<number, PermissionId>();
@@ -86,8 +91,6 @@ export function createCodexDriver(deps: {
           session?.failActiveTurn();
         } else if (session !== null && context.operation === "spawn") {
           void session.diagnostic({
-            source: "adapter",
-            harness: "codex",
             kind: "request_failure",
             operation: "spawn",
             stage: "start_turn",
@@ -96,8 +99,6 @@ export function createCodexDriver(deps: {
           });
         } else if (session !== null) {
           void session.diagnostic({
-            source: "adapter",
-            harness: "codex",
             kind: "request_failure",
             operation: "send",
             stage: "deliver",
@@ -115,8 +116,6 @@ export function createCodexDriver(deps: {
       if (session === null) return;
       if (message.method === "unsupported") {
         void session.diagnostic({
-          source: "adapter",
-          harness: "codex",
           kind: "compatibility_gap",
           operation: "receive_worker_request",
           reason: "unsupported_request",
@@ -170,25 +169,26 @@ export function createCodexDriver(deps: {
           }
         }
       } catch (error) {
-        readFailed = true;
-        void session.diagnostic({
-          source: "adapter",
-          harness: "codex",
-          kind: "stream_failure",
-          operation: "receive_worker_stream",
-          reason: "read_error",
-          message: makeTextEvidence(String(error)),
-        });
+        if (!ended) {
+          readFailed = true;
+          void session.diagnostic({
+            kind: "stream_failure",
+            operation: "receive_worker_stream",
+            reason: "read_error",
+            message: makeTextEvidence(String(error)),
+          });
+        }
       }
-      if (!readFailed && !ended && session.turnId !== null) {
-        void session.diagnostic({
-          source: "adapter",
-          harness: "codex",
-          kind: "stream_failure",
-          operation: "receive_worker_stream",
-          reason: "closed_unexpectedly",
+      if (!readFailed && !ended) {
+        workerExitedUnexpectedly = true;
+        await session.diagnostic({
+          kind: "lifecycle",
+          operation: "worker",
+          reason: "exited_unexpectedly",
           message: makeTextEvidence(
-            "worker stream ended before turn completion",
+            session.turnId === null
+              ? "worker stream ended unexpectedly while idle"
+              : "worker stream ended before turn completion",
           ),
         });
       }
@@ -221,8 +221,6 @@ export function createCodexDriver(deps: {
         ];
         if (unsupportedFields.length > 0) {
           void session.diagnostic({
-            source: "adapter",
-            harness: "codex",
             kind: "mapping_gap",
             operation: "spawn",
             reason: "unsupported_input",
@@ -250,6 +248,14 @@ export function createCodexDriver(deps: {
                 : {}),
             });
             threadId = thread?.thread.id ?? "";
+            workerInitialized = true;
+            if (session !== null) {
+              await session.diagnostic({
+                kind: "lifecycle",
+                operation: "worker",
+                reason: "initialized",
+              });
+            }
             await startTurn(spec.message, {
               operation: "spawn",
               stage: "start_turn",
@@ -257,8 +263,6 @@ export function createCodexDriver(deps: {
           } catch (error) {
             if (session !== null && !isAlreadyDiagnosedError(error)) {
               void session.diagnostic({
-                source: "adapter",
-                harness: "codex",
                 kind: "request_failure",
                 operation: "spawn",
                 stage: "start_session",
@@ -287,8 +291,6 @@ export function createCodexDriver(deps: {
             .catch((error: unknown) => {
               if (session !== null && !isAlreadyDiagnosedError(error)) {
                 void session.diagnostic({
-                  source: "adapter",
-                  harness: "codex",
                   kind: "request_failure",
                   operation: "send",
                   stage: "steer",
@@ -308,8 +310,6 @@ export function createCodexDriver(deps: {
             .catch((error: unknown) => {
               if (session !== null && !isAlreadyDiagnosedError(error)) {
                 void session.diagnostic({
-                  source: "adapter",
-                  harness: "codex",
                   kind: "request_failure",
                   operation: "interrupt",
                   stage: "interrupt",
@@ -325,8 +325,6 @@ export function createCodexDriver(deps: {
         if (entry === undefined) {
           if (session !== null) {
             void session.diagnostic({
-              source: "adapter",
-              harness: "codex",
               kind: "authorization_failure",
               operation: "resolve_permission",
               stage: "lookup",
@@ -339,48 +337,72 @@ export function createCodexDriver(deps: {
         pendingByRequest.delete(entry.id);
         transport?.respond(entry.id, resolutionToResponse(entry, resolution));
       },
-      terminate(sessionId) {
+      async terminate(sessionId) {
         void sessionId;
-        ended = true;
-        void (async () => {
-          const closingTransport = transport;
-          let failure: unknown;
-          try {
-            if (closingTransport !== null) {
-              await withTerminateTimeout(
-                closingTransport.request("thread/delete", { threadId }),
-                deps.terminateTimeoutMs ?? 5_000,
-              );
-            }
-          } catch (error) {
-            failure = error;
-          }
-          try {
-            await closingTransport?.close();
-          } catch (error) {
-            if (failure === undefined) {
-              failure = error;
-            }
-          }
+        if (workerClosed) return;
+        const closingTransport = transport;
+        const transportAlreadyClosed = closingTransport?.isClosed() ?? true;
+        let deletionFailure: unknown;
+        try {
           if (
-            failure !== undefined &&
-            session !== null &&
-            !isAlreadyDiagnosedError(failure)
+            closingTransport !== null &&
+            !transportAlreadyClosed &&
+            threadId !== "" &&
+            !threadDeleted
           ) {
-            void session.diagnostic({
-              source: "adapter",
-              harness: "codex",
-              kind: "request_failure",
-              operation: "kill",
-              stage: "terminate",
-              reason:
-                failure instanceof TerminateTimeoutError
-                  ? "timeout"
-                  : "upstream_error",
-              message: makeTextEvidence(errorMessage(failure)),
-            });
+            await withTerminateTimeout(
+              closingTransport.request("thread/delete", { threadId }),
+              deps.terminateTimeoutMs ?? 5_000,
+            );
+            threadDeleted = true;
           }
-        })();
+        } catch (error) {
+          deletionFailure = error;
+        }
+        ended = true;
+        let closeFailure: unknown;
+        try {
+          await closingTransport?.close();
+        } catch (error) {
+          closeFailure = error;
+        }
+        if (closeFailure !== undefined) {
+          if (isAlreadyDiagnosedError(closeFailure)) throw closeFailure;
+          const diagnosticId = await session?.diagnostic({
+            kind: "request_failure",
+            operation: "kill",
+            stage: "terminate",
+            reason: "upstream_error",
+            message: makeTextEvidence(errorMessage(closeFailure)),
+          });
+          throw new AlreadyDiagnosedError(
+            errorMessage(closeFailure),
+            diagnosticId,
+          );
+        }
+        if (
+          deletionFailure !== undefined &&
+          !isAlreadyDiagnosedError(deletionFailure)
+        ) {
+          await session?.diagnostic({
+            kind: "request_failure",
+            operation: "kill",
+            stage: "terminate",
+            reason:
+              deletionFailure instanceof TerminateTimeoutError
+                ? "timeout"
+                : "upstream_error",
+            message: makeTextEvidence(errorMessage(deletionFailure)),
+          });
+        }
+        workerClosed = true;
+        if (workerInitialized && !workerExitedUnexpectedly) {
+          await session?.diagnostic({
+            kind: "lifecycle",
+            operation: "worker",
+            reason: "closed",
+          });
+        }
       },
     };
     return driver;

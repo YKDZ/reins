@@ -1,11 +1,12 @@
 import type {
-  DiagnosticInput,
+  DriverDiagnosticFact,
   DomainEvent,
   SessionId,
   TurnId,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
+import { AlreadyDiagnosedError, isAlreadyDiagnosedError } from "#/diagnostic";
 import { HarnessSession } from "#/harness-session";
 
 const sessionId = "reviewer@g1" as SessionId;
@@ -27,8 +28,24 @@ function setup(cleared: string[] = []): {
 }
 
 describe("HarnessSession", () => {
+  test("AlreadyDiagnosed guard 只接受本模块实例与合法 DiagnosticId", () => {
+    expect(
+      isAlreadyDiagnosedError(
+        new AlreadyDiagnosedError("accepted", "d1-098" as never),
+      ),
+    ).toBe(true);
+    expect(
+      isAlreadyDiagnosedError({
+        alreadyDiagnosed: true,
+        diagnosticId: "d1-invalid",
+      }),
+    ).toBe(false);
+    const forged = new AlreadyDiagnosedError("invalid", "d1-invalid" as never);
+    expect(isAlreadyDiagnosedError(forged)).toBe(false);
+  });
+
   test("diagnostic 自动关联当前 session 与 turn", async () => {
-    const inputs: DiagnosticInput[] = [];
+    const inputs: DriverDiagnosticFact[] = [];
     const session = new HarnessSession({
       sessionId,
       emit: () => {},
@@ -40,8 +57,6 @@ describe("HarnessSession", () => {
     session.beginTurn(firstTurnId);
 
     await session.diagnostic({
-      source: "adapter",
-      harness: "qoder",
       kind: "mapping_gap",
       operation: "spawn",
       reason: "unsupported_input",
@@ -50,8 +65,6 @@ describe("HarnessSession", () => {
 
     expect(inputs).toEqual([
       {
-        source: "adapter",
-        harness: "qoder",
         sessionId,
         turnId: firstTurnId,
         kind: "mapping_gap",
@@ -63,7 +76,7 @@ describe("HarnessSession", () => {
   });
 
   test("diagnostic 在回合外不伪造 turn，且 sink 失败不穿透控制流", async () => {
-    const inputs: DiagnosticInput[] = [];
+    const inputs: DriverDiagnosticFact[] = [];
     const session = new HarnessSession({
       sessionId,
       emit: () => {},
@@ -75,8 +88,6 @@ describe("HarnessSession", () => {
 
     await expect(
       session.diagnostic({
-        source: "adapter",
-        harness: "codex",
         kind: "compatibility_gap",
         operation: "receive_worker_request",
         reason: "unsupported_request",

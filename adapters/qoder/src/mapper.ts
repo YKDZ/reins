@@ -152,8 +152,6 @@ function mapAssistant(
 
   if (message.isApiErrorMessage === true) {
     void session.diagnostic({
-      source: "adapter",
-      harness: "qoder",
       kind: "turn_failure",
       operation: "run_turn",
       reason: "worker_reported_failure",
@@ -224,8 +222,6 @@ function mapResult(
   if (session.turnId === null) return [];
   if (message.is_error || message.subtype.startsWith("error")) {
     void session.diagnostic({
-      source: "adapter",
-      harness: "qoder",
       kind: "turn_failure",
       operation: "run_turn",
       reason: "worker_reported_failure",

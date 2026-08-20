@@ -2,7 +2,7 @@ import {
   spawnParamsSchema,
   type DomainEvent,
   type DiagnosticId,
-  type DiagnosticInput,
+  type CoreDiagnosticFact,
   type InterruptAck,
   type InterruptOutcome,
   type InterruptParams,
@@ -128,7 +128,7 @@ function evidence(error: unknown): {
 
 async function recordedDiagnostic(
   diagnostics: DiagnosticEmitter,
-  input: DiagnosticInput,
+  input: CoreDiagnosticFact,
 ): Promise<DiagnosticId | undefined> {
   try {
     return await diagnostics.record(input);
@@ -140,7 +140,7 @@ async function recordedDiagnostic(
 async function unexpectedFailure(
   diagnostics: DiagnosticEmitter,
   error: unknown,
-  input: DiagnosticInput,
+  input: CoreDiagnosticFact,
 ): Promise<MachineError> {
   const known = v.safeParse(machineErrorSchema, error);
   if (known.success) return known.output;
@@ -157,7 +157,7 @@ async function unexpectedFailure(
 
 function recordBestEffort(
   diagnostics: DiagnosticEmitter,
-  input: DiagnosticInput,
+  input: CoreDiagnosticFact,
 ): void {
   void Promise.resolve()
     .then(async () => await diagnostics.record(input))
@@ -247,6 +247,7 @@ export function createSessionMachine(options: {
   let turnSeq = 0;
   let messageSeq = 0;
   const pendingSpawns = new Map<SessionId, PendingSpawn>();
+  const terminations = new Map<SessionId, Promise<void>>();
   const ingressActions: IngressActionFrame[] = [];
 
   let bus: EventBus;
@@ -254,6 +255,12 @@ export function createSessionMachine(options: {
   let ingestDriverEvent: (event: DomainEvent) => void = () => undefined;
 
   driver = options.driverFactory((event) => ingestDriverEvent(event));
+
+  function assertNotTerminating(sessionId: SessionId): void {
+    if (terminations.has(sessionId)) {
+      throw machineError({ code: "session_terminating", sessionId });
+    }
+  }
 
   // 事件折叠：只改状态，不做任何订阅通知；通知由总线在折叠前发出。
   const apply = (event: DomainEvent): void => {
@@ -376,7 +383,6 @@ export function createSessionMachine(options: {
       } catch (error) {
         if (!v.safeParse(machineErrorSchema, error).success) {
           recordBestEffort(options.diagnostics, {
-            source: "core",
             sessionId: session.id,
             turnId,
             kind: "request_failure",
@@ -513,7 +519,6 @@ export function createSessionMachine(options: {
     apply,
     onListenerError(error, event) {
       recordBestEffort(options.diagnostics, {
-        source: "core",
         sessionId: event.sessionId,
         ...("turnId" in event ? { turnId: event.turnId } : {}),
         kind: "lifecycle",
@@ -610,7 +615,6 @@ export function createSessionMachine(options: {
         ? event.turnId
         : undefined;
     recordBestEffort(options.diagnostics, {
-      source: "core",
       ...(session === undefined
         ? {}
         : {
@@ -753,7 +757,6 @@ export function createSessionMachine(options: {
           pendingSpawns.delete(sessionId);
         }
         throw await unexpectedFailure(options.diagnostics, error, {
-          source: "core",
           sessionId,
           turnId,
           kind: "request_failure",
@@ -781,6 +784,7 @@ export function createSessionMachine(options: {
       if (session.state === "killed") {
         throw machineError({ code: "session_killed", sessionId });
       }
+      assertNotTerminating(sessionId);
       messageSeq += 1;
       const messageId = v.parse(messageIdSchema, `m${messageSeq}`);
       if (session.state === "idle") {
@@ -805,7 +809,6 @@ export function createSessionMachine(options: {
           );
         } catch (error) {
           throw await unexpectedFailure(options.diagnostics, error, {
-            source: "core",
             sessionId,
             turnId,
             kind: "request_failure",
@@ -871,6 +874,7 @@ export function createSessionMachine(options: {
         if (session.state === "killed") {
           throw machineError({ code: "session_killed", sessionId: id });
         }
+        assertNotTerminating(id);
         if (session.state === "busy") {
           try {
             driverTransaction([], new Map([[id, projectSession(id)]]), () => {
@@ -878,7 +882,6 @@ export function createSessionMachine(options: {
             });
           } catch (error) {
             throw await unexpectedFailure(options.diagnostics, error, {
-              source: "core",
               sessionId: id,
               ...(session.currentTurnId === null
                 ? {}
@@ -916,6 +919,7 @@ export function createSessionMachine(options: {
       if (session.state === "killed") {
         throw machineError({ code: "session_killed", sessionId });
       }
+      assertNotTerminating(sessionId);
       const pending = session.pendingPermissions.get(permissionId);
       if (pending === undefined) {
         throw machineError({
@@ -954,7 +958,6 @@ export function createSessionMachine(options: {
         );
       } catch (error) {
         throw await unexpectedFailure(options.diagnostics, error, {
-          source: "core",
           sessionId,
           turnId: pending.turnId,
           kind: "authorization_failure",
@@ -982,28 +985,37 @@ export function createSessionMachine(options: {
           results.push({ sessionId: id, status: "killed" });
           continue;
         }
-        try {
-          driverTransaction(
-            [{ type: "session.killed", sessionId: id }],
-            new Map([[id, projectSession(id)]]),
-            () => {
-              driver.terminate(id);
-            },
-          );
-        } catch (error) {
-          throw await unexpectedFailure(options.diagnostics, error, {
-            source: "core",
-            sessionId: id,
-            ...(session.currentTurnId === null
-              ? {}
-              : { turnId: session.currentTurnId }),
-            kind: "request_failure",
-            operation: "kill",
-            stage: "terminate",
-            reason: "upstream_error",
-            message: evidence(error),
-          });
+        let termination = terminations.get(id);
+        if (termination === undefined) {
+          termination = (async () => {
+            try {
+              // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
+              await driver.terminate(id);
+              bus.transaction(
+                [{ type: "session.killed", sessionId: id }],
+                () => {},
+              );
+            } catch (error) {
+              throw await unexpectedFailure(options.diagnostics, error, {
+                sessionId: id,
+                ...(session.currentTurnId === null
+                  ? {}
+                  : { turnId: session.currentTurnId }),
+                kind: "request_failure",
+                operation: "kill",
+                stage: "terminate",
+                reason: "upstream_error",
+                message: evidence(error),
+              });
+            }
+          })();
+          terminations.set(id, termination);
+          const clearTermination = () => {
+            if (terminations.get(id) === termination) terminations.delete(id);
+          };
+          void termination.then(clearTermination, clearTermination);
         }
+        await termination;
         results.push({ sessionId: id, status: "killed" });
       }
       return results;

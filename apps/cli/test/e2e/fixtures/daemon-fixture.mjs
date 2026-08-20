@@ -9,7 +9,13 @@ const pidFile = process.env.REINS_FIXTURE_PID_FILE;
 const exitFile = process.env.REINS_FIXTURE_EXIT_FILE;
 const requestsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
 
-if (pidFile !== undefined) writeFileSync(pidFile, String(process.pid));
+if (pidFile !== undefined) {
+  if (mode === "cold-launch-barrier") {
+    appendFileSync(pidFile, `${process.pid}\n`);
+  } else {
+    writeFileSync(pidFile, String(process.pid));
+  }
+}
 process.on("exit", () => {
   if (exitFile !== undefined) writeFileSync(exitFile, "exited\n");
 });
@@ -61,6 +67,44 @@ if (mode === "startup-report-late") {
 
 if (socketPath === undefined) throw new Error("REINS_SOCKET is required");
 
+if (mode === "cold-launch-barrier") {
+  // 保证两个 CLI 都完成首次无 socket 探测后，唯一 launcher 才开始监听。
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  let served = 0;
+  const sockets = new Set();
+  const barrierServer = createServer((socket) => {
+    sockets.add(socket);
+    socket.setEncoding("utf8");
+    let input = "";
+    socket.on("data", (chunk) => {
+      input += chunk;
+      for (;;) {
+        const newline = input.indexOf("\n");
+        if (newline === -1) break;
+        const request = JSON.parse(input.slice(0, newline));
+        input = input.slice(newline + 1);
+        socket.write(
+          `${JSON.stringify({
+            kind: "response",
+            requestId: request.requestId,
+            result: { capabilities: [], failures: [] },
+          })}\n`,
+        );
+        served += 1;
+        if (served === 2) {
+          setTimeout(() => {
+            for (const peer of sockets) peer.end();
+            barrierServer.close(() => process.exit(0));
+          }, 20);
+        }
+      }
+    });
+    socket.on("close", () => sockets.delete(socket));
+  });
+  barrierServer.listen(socketPath);
+  await new Promise(() => {});
+}
+
 if (mode === "append-failure") {
   const { createDaemonForTest } =
     await import("../../../../../packages/daemon/dist/daemon.testing.js");
@@ -68,11 +112,22 @@ if (mode === "append-failure") {
     await import("../../../../../packages/daemon/dist/diagnostics-recorder.testing.js");
   const { createUnixSocketServer } =
     await import("../../../../../packages/transport/dist/index.js");
+  const accepted = [];
   const store = {
-    async append() {
+    async append(record) {
+      if (accepted.length === 0) {
+        accepted.push(record);
+        return;
+      }
       throw new Error("injected append failure");
     },
-    async query() {
+    async query(params) {
+      if ("diagnosticId" in params) {
+        const record = accepted.find(
+          (candidate) => candidate.diagnosticId === params.diagnosticId,
+        );
+        if (record !== undefined) return { record };
+      }
       return { records: [], truncated: false };
     },
     health() {
