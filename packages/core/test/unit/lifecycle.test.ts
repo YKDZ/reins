@@ -4,10 +4,10 @@ import { describe, expect, test } from "vitest";
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
-import { ids } from "./ids.ts";
+import { ids, testDiagnostics, testIdentity } from "./ids.ts";
 
-function spawnBusy(machine: ReturnType<typeof createSessionMachine>) {
-  const id = machine.spawn({
+async function spawnBusy(machine: ReturnType<typeof createSessionMachine>) {
+  const id = await machine.spawn({
     sessionName: ids.sessionName("fixture-7"),
     harness: "codex",
     message: "分析",
@@ -17,12 +17,16 @@ function spawnBusy(machine: ReturnType<typeof createSessionMachine>) {
 }
 
 describe("回合生命周期", () => {
-  test("事件按序推进到 end_turn，会话转 idle 并记录回合结果", () => {
+  test("事件按序推进到 end_turn，会话转 idle 并记录回合结果", async () => {
     const fake = createFakeDriver();
-    const machine = createSessionMachine({ driverFactory: fake.factory });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = spawnBusy(machine);
+    const id = await spawnBusy(machine);
 
     fake.controls.emit({
       type: "text.delta",
@@ -85,8 +89,12 @@ describe("回合生命周期", () => {
 
   test("wait 返回回合终态结果", async () => {
     const fake = createFakeDriver();
-    const machine = createSessionMachine({ driverFactory: fake.factory });
-    const id = spawnBusy(machine);
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
+    const id = await spawnBusy(machine);
 
     const waiting = machine.wait({ ids: [id] });
     fake.controls.emit({

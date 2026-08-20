@@ -20,7 +20,8 @@ import {
   resolveReinsSocketPath,
 } from "@reins/transport";
 
-import { createDaemon } from "./daemon.ts";
+import { createDaemon, runDaemonLifecycle } from "./daemon.ts";
+import { openDiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { HarnessAdapter } from "./registry.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS } from "./server.ts";
 
@@ -114,25 +115,34 @@ async function main(): Promise<void> {
   const transport = createUnixSocketServer<ProtocolMessage>({
     path: socketPath,
   });
+  const diagnosticsRuntime = await openDiagnosticsRuntime();
   const daemon = createDaemon({
     transport,
     adapters,
+    identity: {
+      session: (sessionName) => diagnosticsRuntime.sessionId(sessionName),
+    },
+    diagnostics: diagnosticsRuntime,
     idleTimeoutMs: idleTimeoutFromEnv(process.env),
   });
-  const shutdown = async (): Promise<void> => {
-    await daemon.stop();
-    process.exit(0);
+  let shutdownPromise: Promise<void> | undefined;
+  const shutdown = (): Promise<void> => {
+    shutdownPromise ??= daemon.stop();
+    return shutdownPromise;
   };
   process.on("SIGINT", () => {
-    void shutdown();
+    void shutdown().catch(() => undefined);
   });
   process.on("SIGTERM", () => {
-    void shutdown();
+    void shutdown().catch(() => undefined);
   });
-  await daemon.start();
+  await runDaemonLifecycle(
+    { start: () => daemon.start(), stop: shutdown },
+    diagnosticsRuntime,
+  );
 }
 
 void main().catch((error: unknown) => {
   console.error("reins-daemon failed to start", error);
-  process.exit(1);
+  process.exitCode = 1;
 });

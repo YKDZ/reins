@@ -4,6 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { sessionIdSchema } from "@reins/protocol";
+import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
@@ -96,6 +98,8 @@ async function waitFor(
 }
 
 const cleanupDirs: string[] = [];
+const fixtureSessionId = v.parse(sessionIdSchema, "test-session@gfixture");
+const missingSessionId = v.parse(sessionIdSchema, "missing@gfixture");
 
 afterEach(async () => {
   for (const dir of cleanupDirs.splice(0)) {
@@ -106,10 +110,36 @@ afterEach(async () => {
 function testEnv(dir: string): NodeJS.ProcessEnv {
   return {
     REINS_SOCKET: join(dir, "reins.sock"),
+    REINS_STATE_DIR: join(dir, "state"),
     REINS_DAEMON_BIN: daemonBin,
     REINS_ADAPTERS_MODULE: fixturesModule,
     REINS_IDLE_TIMEOUT_MS: "300",
   };
+}
+
+async function startDaemon(env: NodeJS.ProcessEnv): Promise<ChildProcess> {
+  const daemon = spawn(
+    process.execPath,
+    [daemonBin, "--adapters", fixturesModule],
+    {
+      env: { ...process.env, ...env },
+      stdio: "ignore",
+    },
+  );
+  await waitFor(() => pathExists(env.REINS_SOCKET ?? ""));
+  return daemon;
+}
+
+async function stopDaemon(
+  daemon: ChildProcess,
+  socketPath: string,
+): Promise<void> {
+  const exited = new Promise<void>((resolve) =>
+    daemon.once("close", () => resolve()),
+  );
+  daemon.kill("SIGTERM");
+  await exited;
+  await waitFor(async () => !(await pathExists(socketPath)));
 }
 
 async function freshEnv(): Promise<{
@@ -124,6 +154,13 @@ async function freshEnv(): Promise<{
     env: testEnv(dir),
     socketPath: join(dir, "reins.sock"),
   };
+}
+
+function sessionIdFrom(result: CliResult): string {
+  return v.parse(
+    sessionIdSchema,
+    (JSON.parse(result.stdout) as { sessionId: unknown }).sessionId,
+  );
 }
 
 describe("A 类：帮助（stdout + 退出 0）", () => {
@@ -198,8 +235,9 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ sessionId: "test-session@g0" });
-    await runCli(["kill", "test-session@g0"], env);
+    const sessionId = sessionIdFrom(result);
+    expect(sessionId).toMatch(/@g/u);
+    await runCli(["kill", sessionId], env);
   });
 
   test("spawn 接受合法 --authorization-mode 与 --meta", async () => {
@@ -219,8 +257,9 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({ sessionId: "test-session@g0" });
-    await runCli(["kill", "test-session@g0"], env);
+    const sessionId = sessionIdFrom(result);
+    expect(sessionId).toMatch(/@g/u);
+    await runCli(["kill", sessionId], env);
   });
 
   test("run 默认只返回紧凑最终结果，不流式回放事件", async () => {
@@ -230,13 +269,15 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({
-      sessionId: "test-session@g0",
-      stopReason: "end_turn",
-      finalReply: "ok",
-    });
+    const parsed = JSON.parse(result.stdout) as {
+      sessionId: string;
+      stopReason: string;
+      finalReply: string | null;
+    };
+    expect(parsed).toMatchObject({ stopReason: "end_turn", finalReply: "ok" });
+    expect(parsed.sessionId).toMatch(/@g/u);
     expect(result.stdout).not.toContain('"method":"event"');
-    await runCli(["kill", "test-session@g0"], env);
+    await runCli(["kill", parsed.sessionId], env);
   });
 
   test("--pretty run 输出人类可读最终结果", async () => {
@@ -246,10 +287,12 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe(
-      "Turn completed: end_turn (test-session@g0)\nok\n",
-    );
-    await runCli(["kill", "test-session@g0"], env);
+    const sessionId =
+      /^Turn completed: end_turn \((.+@g[a-z0-9]+)\)\nok\n$/u.exec(
+        result.stdout,
+      )?.[1];
+    expect(sessionId).toBeDefined();
+    await runCli(["kill", sessionId ?? ""], env);
   });
 
   test("attach 仍默认流式回放事件（JSON 诊断视图）", async () => {
@@ -259,8 +302,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(spawned.exitCode).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = sessionIdFrom(spawned);
     const attached = await runCli(
       ["attach", sessionId, "--exit-on", "end_turn"],
       env,
@@ -280,8 +322,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(spawned.exitCode).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = sessionIdFrom(spawned);
     const waited = await runCli(["wait", sessionId, "--timeout", "100"], env);
     expect(waited.exitCode).toBe(4);
     expect(JSON.parse(waited.stdout)).toEqual({
@@ -298,8 +339,9 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(result.exitCode).toBe(0);
-    expect(result.stdout).toBe("Created session test-session@g0\n");
-    await runCli(["kill", "test-session@g0"], env);
+    const sessionId = /^Created session (.+)\n$/u.exec(result.stdout)?.[1];
+    expect(sessionId).toBeDefined();
+    await runCli(["kill", sessionId ?? ""], env);
   });
 
   test("attach pretty 权限交互并随决议结束", async () => {
@@ -309,8 +351,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(spawned.exitCode).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = sessionIdFrom(spawned);
     const attached = await runCli(
       ["attach", sessionId, "--pretty", "--exit-on", "end_turn"],
       env,
@@ -330,8 +371,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(spawned.exitCode).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = sessionIdFrom(spawned);
     const sent = await runCli(["send", sessionId, "next"], env);
     expect(sent.exitCode).toBe(0);
     const attached = await runCli(
@@ -351,6 +391,44 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.exitCode).toBe(0);
     await waitFor(async () => pathExists(socketPath));
     await waitFor(async () => !(await pathExists(socketPath)), 5000);
+  });
+
+  test("daemon restart gives a new SessionId and rejects the old address", async () => {
+    const { env, socketPath } = await freshEnv();
+    const daemonA = await startDaemon(env);
+    try {
+      const first = await runCli(
+        ["spawn", "fake", "first", "--name", "restart-session"],
+        env,
+      );
+      expect(first.exitCode).toBe(0);
+      const oldSessionId = sessionIdFrom(first);
+
+      await stopDaemon(daemonA, socketPath);
+      const daemonB = await startDaemon(env);
+      try {
+        const second = await runCli(
+          ["spawn", "fake", "second", "--name", "restart-session"],
+          env,
+        );
+        expect(second.exitCode).toBe(0);
+        const newSessionId = sessionIdFrom(second);
+        expect(newSessionId).not.toBe(oldSessionId);
+
+        const oldAddress = await runCli(["send", oldSessionId, "stale"], env);
+        expect(oldAddress.exitCode).toBe(65);
+        expect(JSON.parse(oldAddress.stdout)).toMatchObject({
+          code: "session_not_found",
+          sessionId: oldSessionId,
+        });
+        await runCli(["kill", newSessionId], env);
+      } finally {
+        await stopDaemon(daemonB, socketPath);
+      }
+    } catch (error) {
+      if (daemonA.exitCode === null) await stopDaemon(daemonA, socketPath);
+      throw error;
+    }
   });
 });
 
@@ -378,11 +456,11 @@ function sampleForArg(arg: CommandArg): string {
     case "message":
       return "hi";
     case "sessionId":
-      return "test-session@g0";
+      return fixtureSessionId;
     case "permissionId":
       return "p1";
     case "ids":
-      return "test-session@g0";
+      return fixtureSessionId;
     default:
       return "x";
   }
@@ -490,7 +568,7 @@ function invalidEnumCases(): UsageCase[] {
 const specialValueCases: UsageCase[] = [
   {
     name: "wait invalid timeout",
-    args: ["wait", "test-session@g0", "--timeout", "abc"],
+    args: ["wait", fixtureSessionId, "--timeout", "abc"],
     issue: "invalid_value",
     field: "--timeout",
     value: "abc",
@@ -500,7 +578,7 @@ const specialValueCases: UsageCase[] = [
   },
   {
     name: "attach invalid replay",
-    args: ["attach", "test-session@g0", "--replay", "-1"],
+    args: ["attach", fixtureSessionId, "--replay", "-1"],
     issue: "invalid_value",
     field: "--replay",
     value: "-1",
@@ -563,7 +641,7 @@ const unknownOptionCase: UsageCase = {
 
 const removedInterruptMessageOptionCase: UsageCase = {
   name: "interrupt removed message option",
-  args: ["interrupt", "test-session@g0", "--message", "legacy explanation"],
+  args: ["interrupt", fixtureSessionId, "--message", "legacy explanation"],
   issue: "unknown_option",
   value: "--message",
   valid: ["--pretty"],
@@ -807,7 +885,7 @@ describe("CLI 动态值错误（能力矩阵一次往返）", () => {
 describe("CLI 域错误（不夹带 usage）", () => {
   test("send 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["send", "missing@g0", "hi"], env);
+    const result = await runCli(["send", missingSessionId, "hi"], env);
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
@@ -816,7 +894,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("wait 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["wait", "missing@g0"], env);
+    const result = await runCli(["wait", missingSessionId], env);
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
@@ -825,10 +903,10 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("kill 未知会话返回 not_found 而非报错", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["kill", "missing@g0"], env);
+    const result = await runCli(["kill", missingSessionId], env);
     expect(result.exitCode).toBe(0);
     expect(JSON.parse(result.stdout)).toEqual([
-      { sessionId: "missing@g0", status: "not_found" },
+      { sessionId: missingSessionId, status: "not_found" },
     ]);
   });
 
@@ -846,9 +924,14 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("pretty 域错误不输出 suggestion 与 usage", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "send", "missing@g0", "hi"], env);
+    const result = await runCli(
+      ["--pretty", "send", missingSessionId, "hi"],
+      env,
+    );
     expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("error: Session not found: missing@g0\n");
+    expect(result.stderr).toBe(
+      `error: Session not found: ${missingSessionId}\n`,
+    );
     expect(result.stderr).not.toContain("suggestion:");
     expect(result.stderr).not.toContain("usage:");
   });

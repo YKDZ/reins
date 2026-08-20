@@ -3,7 +3,7 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
-import { ids } from "./ids.ts";
+import { ids, testDiagnostics, testIdentity } from "./ids.ts";
 
 afterEach(() => {
   vi.useRealTimers();
@@ -13,8 +13,12 @@ describe("wait", () => {
   test("超时返回 timeout 且会话仍在运行", async () => {
     vi.useFakeTimers();
     const fake = createFakeDriver();
-    const machine = createSessionMachine({ driverFactory: fake.factory });
-    const id = machine.spawn({
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
+    const id = await machine.spawn({
       sessionName: ids.sessionName("fixture-22"),
       harness: "codex",
       message: "跑很久的任务",
@@ -32,14 +36,18 @@ describe("wait", () => {
 
   test("waitAny 在任一会话到达终态时返回", async () => {
     const fake = createFakeDriver();
-    const machine = createSessionMachine({ driverFactory: fake.factory });
-    const a = machine.spawn({
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
+    const a = await machine.spawn({
       sessionName: ids.sessionName("fixture-23"),
       harness: "codex",
       message: "甲",
       cwd: "/tmp/demo",
     });
-    const b = machine.spawn({
+    const b = await machine.spawn({
       sessionName: ids.sessionName("fixture-24"),
       harness: "qoder",
       message: "乙",
@@ -77,15 +85,19 @@ describe("wait", () => {
 
   test("对已 kill 的会话返回 per-id killed 状态而不是错误", async () => {
     const fake = createFakeDriver();
-    const machine = createSessionMachine({ driverFactory: fake.factory });
-    const id = machine.spawn({
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
+    const id = await machine.spawn({
       sessionName: ids.sessionName("fixture-25"),
       harness: "dsh",
       message: "临时任务",
       cwd: "/tmp/demo",
     });
 
-    expect(machine.kill({ ids: [id] })).toEqual([
+    await expect(machine.kill({ ids: [id] })).resolves.toEqual([
       { sessionId: id, status: "killed" },
     ]);
     await expect(machine.wait({ ids: [id] })).resolves.toEqual({
@@ -96,13 +108,17 @@ describe("wait", () => {
 
   test("对不存在的 id 抛 session_not_found", async () => {
     const fake = createFakeDriver();
-    const machine = createSessionMachine({ driverFactory: fake.factory });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
 
     await expect(
-      machine.wait({ ids: [ids.session("missing@g0")] }),
+      machine.wait({ ids: [ids.session("missing@gtest")] }),
     ).rejects.toEqual({
       code: "session_not_found",
-      sessionId: ids.session("missing@g0"),
+      sessionId: ids.session("missing@gtest"),
     });
   });
 });

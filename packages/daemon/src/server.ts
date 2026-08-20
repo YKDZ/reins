@@ -132,9 +132,12 @@ export function createProtocolServer(options: {
     }
     cleanupByConnection.clear();
     attachSubscriptions.clear();
-    await options.transport.close();
-    startedResolve?.();
-    startedResolve = null;
+    try {
+      await options.transport.close();
+    } finally {
+      startedResolve?.();
+      startedResolve = null;
+    }
   }
 
   function appendLog(event: DomainEvent): void {
@@ -337,22 +340,24 @@ export function createProtocolServer(options: {
         return await aggregateCapabilities();
       case "spawn":
         return {
-          sessionId: options.machine.spawn(request.params as SpawnParams),
+          sessionId: await options.machine.spawn(request.params as SpawnParams),
         };
       case "send":
-        return options.machine.send(request.params as SendParams);
+        return await options.machine.send(request.params as SendParams);
       case "wait":
         return await options.machine.wait(request.params as WaitParams);
       case "interrupt":
-        return options.machine.interrupt(request.params as InterruptParams);
+        return await options.machine.interrupt(
+          request.params as InterruptParams,
+        );
       case "kill":
-        return options.machine.kill(request.params as KillParams);
+        return await options.machine.kill(request.params as KillParams);
       case "list":
         return options.machine.list(request.params as ListFilter | undefined);
       case "attach":
         return attach(connection, request.params as AttachParams);
       case "resolvePermission":
-        options.machine.resolvePermission(
+        await options.machine.resolvePermission(
           request.params as ResolvePermissionParams,
         );
         return {};

@@ -1,3 +1,4 @@
+import { noopDiagnosticEmitter } from "@reins/core";
 import type {
   DomainEvent,
   CapabilitiesResult,
@@ -16,7 +17,7 @@ import type {
   WorkerDriver,
   WorkerDriverFactory,
 } from "@reins/protocol";
-import { machineErrorSchema } from "@reins/protocol";
+import { machineErrorSchema, sessionIdSchema } from "@reins/protocol";
 import {
   createInMemoryTransportServer,
   type TransportConnection,
@@ -49,6 +50,11 @@ async function waitFor(
 
 const daemons: Daemon[] = [];
 
+const testIdentity = {
+  session: (sessionName: string) =>
+    v.parse(sessionIdSchema, `${sessionName}@gdaemontest`),
+};
+
 afterEach(async () => {
   for (const daemon of daemons.splice(0)) {
     await daemon.stop();
@@ -66,6 +72,8 @@ function startDaemon(
   const daemon = createDaemon({
     transport: server,
     adapters,
+    identity: testIdentity,
+    diagnostics: noopDiagnosticEmitter,
     idleTimeoutMs: options?.idleTimeoutMs ?? 60_000,
     ...(options?.eventLogLimit === undefined
       ? {}
@@ -313,18 +321,18 @@ describe("daemon 协议面（缝 C）", () => {
     });
     expect(spawned).toMatchObject({
       kind: "response",
-      result: { sessionId: "reviewer@g0" },
+      result: { sessionId: "reviewer@gdaemontest" },
     });
     fake.controls.completeTurn("end_turn", "ok");
 
     const collector = collectNotifications(client);
     const attached = await requester("attach", {
-      sessionId: "reviewer@g0",
+      sessionId: "reviewer@gdaemontest",
       exitOn: ["end_turn"],
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId: "reviewer@g0", replayed: 3 },
+      result: { sessionId: "reviewer@gdaemontest", replayed: 3 },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
@@ -332,7 +340,7 @@ describe("daemon 协议面（缝 C）", () => {
       "turn.completed",
     ]);
     expect(collector.ended).toEqual([
-      { sessionId: "reviewer@g0", reason: "end_turn" },
+      { sessionId: "reviewer@gdaemontest", reason: "end_turn" },
     ]);
   });
 
@@ -604,7 +612,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
 
     const missing = await requester("wait", {
-      ids: ["missing@g0"],
+      ids: ["missing@gdaemontest"],
       timeoutMs: 1000,
     });
     expect(missing).toMatchObject({
@@ -672,7 +680,7 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("attach", {
-      sessionId: "missing@g0",
+      sessionId: "missing@gdaemontest",
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -913,6 +921,8 @@ describe("daemon 空闲退出", () => {
     const daemon = createDaemon({
       transport: server,
       adapters: new Map(),
+      identity: testIdentity,
+      diagnostics: noopDiagnosticEmitter,
       idleTimeoutMs: 100,
     });
     const started = daemon.start();
@@ -932,6 +942,8 @@ describe("daemon 空闲退出", () => {
     const daemon = createDaemon({
       transport: server,
       adapters: new Map([["fake", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: noopDiagnosticEmitter,
       idleTimeoutMs: 100,
     });
     const started = daemon.start();

@@ -8,6 +8,9 @@ import {
 } from "@reins/protocol";
 import * as v from "valibot";
 
+import { noopDiagnosticEmitter } from "#/diagnostic-emitter";
+import type { SessionIdentity } from "#/session-machine";
+
 // 测试夹具也经协议解析，避免用断言绕过独立 ID 的品牌和格式约束。
 export const ids = {
   sessionName: (value: string) => v.parse(sessionNameSchema, value),
@@ -17,3 +20,9 @@ export const ids = {
   permission: (value: string) => v.parse(permissionIdSchema, value),
   toolCall: (value: string) => v.parse(toolCallIdSchema, value),
 };
+
+export const testIdentity: SessionIdentity = {
+  session: (sessionName) => v.parse(sessionIdSchema, `${sessionName}@gtest`),
+};
+
+export const testDiagnostics = noopDiagnosticEmitter;

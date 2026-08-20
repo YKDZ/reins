@@ -8,7 +8,7 @@ import { ids } from "./ids.ts";
 function makeEvent(seq: number): DomainEvent {
   return {
     type: "text.delta",
-    sessionId: ids.session("event@g0"),
+    sessionId: ids.session("event@gtest"),
     turnId: ids.turn("t1"),
     messageId: ids.message(`m${seq}`),
     delta: `${seq}`,

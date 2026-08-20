@@ -1,6 +1,8 @@
 import {
   spawnParamsSchema,
   type DomainEvent,
+  type DiagnosticId,
+  type DiagnosticInput,
   type InterruptAck,
   type InterruptOutcome,
   type InterruptParams,
@@ -11,6 +13,8 @@ import {
   killParamsSchema,
   type ListFilter,
   type MachineError,
+  machineErrorSchema,
+  makeErrorCause,
   type MessageId,
   messageIdSchema,
   type PermissionId,
@@ -22,7 +26,7 @@ import {
   type SendParams,
   sendParamsSchema,
   type SessionId,
-  sessionIdSchema,
+  type ToolCallId,
   type TurnId,
   turnIdSchema,
   type SessionName,
@@ -37,6 +41,7 @@ import {
 } from "@reins/protocol";
 import * as v from "valibot";
 
+import type { DiagnosticEmitter } from "#/diagnostic-emitter";
 import { createEventBus, type EventBus } from "#/event-bus";
 
 type SessionRecord = {
@@ -49,13 +54,46 @@ type SessionRecord = {
   readonly spawnedAt: string;
   state: "busy" | "idle" | "killed";
   currentTurnId: TurnId | null;
+  activeTurn: TurnScope | null;
   inbox: Array<{ messageId: MessageId; text: string }>;
   pendingPermissions: Map<
     PermissionId,
     { turnId: TurnId; options: PermissionOption[] }
   >;
+  usedPermissionIds: Set<PermissionId>;
   turns: TurnCompleted[];
 };
+
+type TurnScope = {
+  readonly turnId: TurnId;
+  readonly messages: Map<MessageId, "streaming" | "complete">;
+  readonly tools: Map<ToolCallId, "requested" | "complete">;
+};
+
+type PendingSpawn = {
+  readonly token: symbol;
+  readonly turn: TurnScope;
+  readonly permissionIds: Set<PermissionId>;
+  readonly pendingPermissions: SessionRecord["pendingPermissions"];
+  accepting: boolean;
+};
+
+type IngressProjection = {
+  state: SessionRecord["state"];
+  currentTurnId: TurnId | null;
+  activeTurn: TurnScope | null;
+  readonly pendingPermissions: SessionRecord["pendingPermissions"];
+  readonly usedPermissionIds: Set<PermissionId>;
+};
+
+type IngressActionFrame = {
+  accepting: boolean;
+  readonly projections: Map<SessionId, IngressProjection>;
+};
+
+function createTurnScope(turnId: TurnId): TurnScope {
+  return { turnId, messages: new Map(), tools: new Map() };
+}
 
 type WaitOutcome = {
   sessionId: SessionId;
@@ -65,6 +103,65 @@ type WaitOutcome = {
 
 function machineError(error: MachineError): MachineError {
   return error;
+}
+
+function evidence(error: unknown): {
+  text: string;
+  truncated: boolean;
+  originalBytes: number;
+} {
+  const original = error instanceof Error ? error.message : String(error);
+  const originalBytes = Buffer.byteLength(original, "utf8");
+  if (originalBytes <= 64 * 1024) {
+    return { text: original, truncated: false, originalBytes };
+  }
+  let bytes = 0;
+  let text = "";
+  for (const character of original) {
+    const characterBytes = Buffer.byteLength(character, "utf8");
+    if (bytes + characterBytes > 64 * 1024) break;
+    text += character;
+    bytes += characterBytes;
+  }
+  return { text, truncated: true, originalBytes };
+}
+
+async function recordedDiagnostic(
+  diagnostics: DiagnosticEmitter,
+  input: DiagnosticInput,
+): Promise<DiagnosticId | undefined> {
+  try {
+    return await diagnostics.record(input);
+  } catch {
+    return undefined;
+  }
+}
+
+async function unexpectedFailure(
+  diagnostics: DiagnosticEmitter,
+  error: unknown,
+  input: DiagnosticInput,
+): Promise<MachineError> {
+  const known = v.safeParse(machineErrorSchema, error);
+  if (known.success) return known.output;
+  const diagnosticId = await recordedDiagnostic(diagnostics, input);
+  return {
+    code: "internal_error",
+    cause: makeErrorCause(
+      "exception",
+      error instanceof Error ? error.message : String(error),
+    ),
+    ...(diagnosticId === undefined ? {} : { diagnosticId }),
+  };
+}
+
+function recordBestEffort(
+  diagnostics: DiagnosticEmitter,
+  input: DiagnosticInput,
+): void {
+  void Promise.resolve()
+    .then(async () => await diagnostics.record(input))
+    .catch(() => undefined);
 }
 
 const invalidTypeExpectations = [
@@ -118,18 +215,25 @@ function toInfo(session: SessionRecord): SessionInfo {
 }
 
 export type SessionMachine = {
-  spawn(params: SpawnParams): SessionId;
-  send(params: SendParams): SendAck;
+  spawn(params: SpawnParams): Promise<SessionId>;
+  send(params: SendParams): Promise<SendAck>;
   wait(params: WaitParams): Promise<WaitResult>;
-  interrupt(params: InterruptParams): InterruptAck;
-  resolvePermission(params: ResolvePermissionParams): void;
-  kill(params: KillParams): KillResult[];
+  interrupt(params: InterruptParams): Promise<InterruptAck>;
+  resolvePermission(params: ResolvePermissionParams): Promise<void>;
+  kill(params: KillParams): Promise<KillResult[]>;
   list(filter?: ListFilter): SessionInfo[];
   subscribe(listener: (event: DomainEvent) => void): () => void;
 };
 
+// identity seam 由 daemon 世代持有者实现；核心只申请 caller-authored name 的地址。
+export type SessionIdentity = {
+  session(sessionName: SessionName): SessionId;
+};
+
 export function createSessionMachine(options: {
   driverFactory: WorkerDriverFactory;
+  identity: SessionIdentity;
+  diagnostics: DiagnosticEmitter;
   onListenerError?: (error: unknown, event: DomainEvent) => void;
 }): SessionMachine {
   const sessions = new Map<SessionId, SessionRecord>();
@@ -142,18 +246,21 @@ export function createSessionMachine(options: {
   let sessionSeq = 0;
   let turnSeq = 0;
   let messageSeq = 0;
+  const pendingSpawns = new Map<SessionId, PendingSpawn>();
+  const ingressActions: IngressActionFrame[] = [];
 
   let bus: EventBus;
   let driver: WorkerDriver;
+  let ingestDriverEvent: (event: DomainEvent) => void = () => undefined;
 
-  driver = options.driverFactory((event) => bus.publish(event));
+  driver = options.driverFactory((event) => ingestDriverEvent(event));
 
   // 事件折叠：只改状态，不做任何订阅通知；通知由总线在折叠前发出。
   const apply = (event: DomainEvent): void => {
     const session = sessions.get(event.sessionId);
     if (session !== undefined && session.state === "killed") return;
     switch (event.type) {
-      case "session.created":
+      case "session.created": {
         sessions.set(event.sessionId, {
           id: event.sessionId,
           harness: event.harness,
@@ -164,15 +271,39 @@ export function createSessionMachine(options: {
           spawnedAt: event.spawnedAt,
           state: "busy",
           currentTurnId: null,
+          activeTurn: null,
           inbox: [],
           pendingPermissions: new Map(),
+          usedPermissionIds: new Set(),
           turns: [],
         });
         break;
+      }
       case "turn.started":
         if (session !== undefined) {
           session.state = "busy";
           session.currentTurnId = event.turnId;
+          if (session.activeTurn?.turnId !== event.turnId) {
+            session.activeTurn = createTurnScope(event.turnId);
+          }
+        }
+        break;
+      case "text.delta":
+        session?.activeTurn?.messages.set(event.messageId, "streaming");
+        break;
+      case "message":
+        session?.activeTurn?.messages.set(event.messageId, "complete");
+        if (session !== undefined && session.inbox.length > 0) {
+          deliverInbox(session);
+        }
+        break;
+      case "tool.requested":
+        session?.activeTurn?.tools.set(event.toolCallId, "requested");
+        break;
+      case "tool.completed":
+        session?.activeTurn?.tools.set(event.toolCallId, "complete");
+        if (session !== undefined && session.inbox.length > 0) {
+          deliverInbox(session);
         }
         break;
       case "turn.completed":
@@ -186,49 +317,32 @@ export function createSessionMachine(options: {
           });
           session.state = "idle";
           session.currentTurnId = null;
+          session.activeTurn = null;
           session.pendingPermissions.clear();
-        }
-        break;
-      case "message":
-      case "tool.completed":
-        if (session !== undefined && session.inbox.length > 0) {
-          const pending = session.inbox.splice(0);
-          for (const item of pending) {
-            const turnId = session.currentTurnId;
-            if (turnId === null) continue;
-            bus.transaction(
-              [
-                {
-                  type: "message",
-                  sessionId: session.id,
-                  turnId,
-                  messageId: item.messageId,
-                  role: "caller",
-                  content: item.text,
-                },
-              ],
-              () => {
-                driver.deliver(session.id, turnId, item.text);
-              },
-            );
-          }
         }
         break;
       case "session.killed":
         if (session !== undefined) {
           session.state = "killed";
           session.currentTurnId = null;
+          session.activeTurn = null;
           session.inbox = [];
           session.pendingPermissions.clear();
+          session.usedPermissionIds.clear();
         }
+        pendingSpawns.delete(event.sessionId);
         break;
       case "permission.requested":
         if (session !== undefined) {
+          session.usedPermissionIds.add(event.permissionId);
           session.pendingPermissions.set(event.permissionId, {
             turnId: event.turnId,
             options: event.options,
           });
         }
+        break;
+      case "permission.resolved":
+        session?.pendingPermissions.delete(event.permissionId);
         break;
       default:
         break;
@@ -236,12 +350,291 @@ export function createSessionMachine(options: {
     settleWaiters();
   };
 
+  function deliverInbox(session: SessionRecord): void {
+    while (session.inbox.length > 0) {
+      const item = session.inbox[0]!;
+      const turnId = session.currentTurnId;
+      if (turnId === null) break;
+      try {
+        driverTransaction(
+          [
+            {
+              type: "message",
+              sessionId: session.id,
+              turnId,
+              messageId: item.messageId,
+              role: "caller",
+              content: item.text,
+            },
+          ],
+          new Map([[session.id, projectSession(session.id)]]),
+          () => {
+            driver.deliver(session.id, turnId, item.text);
+          },
+        );
+        session.inbox.shift();
+      } catch (error) {
+        if (!v.safeParse(machineErrorSchema, error).success) {
+          recordBestEffort(options.diagnostics, {
+            source: "core",
+            sessionId: session.id,
+            turnId,
+            kind: "request_failure",
+            operation: "send",
+            stage: "steer",
+            reason: "upstream_error",
+            message: evidence(error),
+          });
+        }
+        break;
+      }
+    }
+  }
+
+  function activeProjection(
+    sessionId: SessionId,
+  ): IngressProjection | undefined {
+    for (let index = ingressActions.length - 1; index >= 0; index -= 1) {
+      const frame = ingressActions[index];
+      if (frame?.accepting !== true) continue;
+      const projection = frame.projections.get(sessionId);
+      if (projection !== undefined) return projection;
+    }
+    return undefined;
+  }
+
+  function projectSession(sessionId: SessionId): IngressProjection {
+    const source = activeProjection(sessionId) ?? sessions.get(sessionId);
+    if (source === undefined) {
+      throw new Error("Cannot project an unknown session");
+    }
+    const activeTurn = source.activeTurn;
+    return {
+      state: source.state,
+      currentTurnId: source.currentTurnId,
+      activeTurn:
+        activeTurn === null
+          ? null
+          : {
+              turnId: activeTurn.turnId,
+              messages: new Map(activeTurn.messages),
+              tools: new Map(activeTurn.tools),
+            },
+      pendingPermissions: new Map(source.pendingPermissions),
+      usedPermissionIds: new Set(source.usedPermissionIds),
+    };
+  }
+
+  function driverTransaction(
+    lead: readonly DomainEvent[],
+    projections: Map<SessionId, IngressProjection>,
+    run: () => void,
+  ): void {
+    for (const event of lead) {
+      const projection = projections.get(event.sessionId);
+      if (projection !== undefined) projectEvent(projection, event);
+    }
+    const frame: IngressActionFrame = { accepting: true, projections };
+    ingressActions.push(frame);
+    let committed = false;
+    try {
+      bus.transaction(lead, () => {
+        try {
+          run();
+        } finally {
+          frame.accepting = false;
+        }
+      });
+      committed = true;
+    } finally {
+      ingressActions.pop();
+      if (committed) {
+        const parent = ingressActions.at(-1);
+        if (parent !== undefined) {
+          for (const [sessionId, projection] of frame.projections) {
+            parent.projections.set(sessionId, projection);
+          }
+        }
+      }
+    }
+  }
+
+  function projectEvent(
+    projection: IngressProjection,
+    event: DomainEvent,
+  ): void {
+    switch (event.type) {
+      case "turn.started":
+        projection.state = "busy";
+        projection.currentTurnId = event.turnId;
+        projection.activeTurn = createTurnScope(event.turnId);
+        break;
+      case "text.delta":
+        projection.activeTurn?.messages.set(event.messageId, "streaming");
+        break;
+      case "message":
+        projection.activeTurn?.messages.set(event.messageId, "complete");
+        break;
+      case "tool.requested":
+        projection.activeTurn?.tools.set(event.toolCallId, "requested");
+        break;
+      case "tool.completed":
+        projection.activeTurn?.tools.set(event.toolCallId, "complete");
+        break;
+      case "turn.completed":
+        projection.state = "idle";
+        projection.currentTurnId = null;
+        projection.activeTurn = null;
+        projection.pendingPermissions.clear();
+        break;
+      case "session.killed":
+        projection.state = "killed";
+        projection.currentTurnId = null;
+        projection.activeTurn = null;
+        projection.pendingPermissions.clear();
+        projection.usedPermissionIds.clear();
+        break;
+      case "permission.requested":
+        projection.usedPermissionIds.add(event.permissionId);
+        projection.pendingPermissions.set(event.permissionId, {
+          turnId: event.turnId,
+          options: event.options,
+        });
+        break;
+      case "permission.resolved":
+        projection.pendingPermissions.delete(event.permissionId);
+        break;
+      case "session.created":
+        break;
+    }
+  }
+
   bus = createEventBus({
     apply,
-    ...(options.onListenerError === undefined
-      ? {}
-      : { onListenerError: options.onListenerError }),
+    onListenerError(error, event) {
+      recordBestEffort(options.diagnostics, {
+        source: "core",
+        sessionId: event.sessionId,
+        ...("turnId" in event ? { turnId: event.turnId } : {}),
+        kind: "lifecycle",
+        operation: "event_delivery",
+        reason: "listener_failed",
+        message: evidence(error),
+      });
+      try {
+        options.onListenerError?.(error, event);
+      } catch {
+        // Listener-error observation has no response channel and is best effort.
+      }
+    },
   });
+
+  function validDriverEvent(event: DomainEvent): boolean {
+    const session = sessions.get(event.sessionId);
+    const projected = activeProjection(event.sessionId);
+    const current = projected ?? session;
+    const spawning =
+      current === undefined ? pendingSpawns.get(event.sessionId) : undefined;
+    if (
+      (current === undefined && spawning?.accepting !== true) ||
+      current?.state === "killed"
+    ) {
+      return false;
+    }
+    if (event.type === "session.created" || event.type === "turn.started") {
+      return false;
+    }
+    let turnScope: TurnScope | undefined;
+    if ("turnId" in event) {
+      if (
+        (current !== undefined &&
+          (current.state !== "busy" ||
+            current.currentTurnId === null ||
+            event.turnId !== current.currentTurnId)) ||
+        (spawning !== undefined && event.turnId !== spawning.turn.turnId)
+      ) {
+        return false;
+      }
+      turnScope = current?.activeTurn ?? spawning?.turn;
+      if (turnScope === undefined || turnScope.turnId !== event.turnId) {
+        return false;
+      }
+    }
+    if (event.type === "text.delta") {
+      if (turnScope?.messages.get(event.messageId) === "complete") return false;
+      turnScope?.messages.set(event.messageId, "streaming");
+    }
+    if (event.type === "message") {
+      if (turnScope?.messages.get(event.messageId) === "complete") return false;
+      turnScope?.messages.set(event.messageId, "complete");
+    }
+    if (event.type === "tool.requested") {
+      if (turnScope?.tools.has(event.toolCallId) === true) return false;
+      turnScope?.tools.set(event.toolCallId, "requested");
+    }
+    if (event.type === "tool.completed") {
+      if (turnScope?.tools.get(event.toolCallId) === "complete") return false;
+      turnScope?.tools.set(event.toolCallId, "complete");
+    }
+    if (event.type === "permission.requested") {
+      const used = current?.usedPermissionIds ?? spawning?.permissionIds;
+      if (used === undefined || used.has(event.permissionId)) return false;
+      used.add(event.permissionId);
+      const pendingPermissions =
+        current?.pendingPermissions ?? spawning?.pendingPermissions;
+      pendingPermissions?.set(event.permissionId, {
+        turnId: event.turnId,
+        options: event.options,
+      });
+      return true;
+    }
+    if (event.type === "permission.resolved") {
+      const pendingPermissions =
+        current?.pendingPermissions ?? spawning?.pendingPermissions;
+      if (pendingPermissions === undefined) return false;
+      const pending = pendingPermissions.get(event.permissionId);
+      if (pending === undefined || pending.turnId !== event.turnId)
+        return false;
+      pendingPermissions.delete(event.permissionId);
+      return true;
+    }
+    return true;
+  }
+
+  function protocolViolation(event: DomainEvent): void {
+    const session = sessions.get(event.sessionId);
+    const knownTurn =
+      session !== undefined &&
+      "turnId" in event &&
+      session.currentTurnId === event.turnId
+        ? event.turnId
+        : undefined;
+    recordBestEffort(options.diagnostics, {
+      source: "core",
+      ...(session === undefined
+        ? {}
+        : {
+            sessionId: session.id,
+            ...(knownTurn === undefined ? {} : { turnId: knownTurn }),
+          }),
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+      reason: "unexpected_message",
+      message: {
+        text: "Worker event does not belong to the active session state",
+        truncated: false,
+        originalBytes: 56,
+      },
+    });
+  }
+
+  ingestDriverEvent = (event) => {
+    if (!validDriverEvent(event)) {
+      protocolViolation(event);
+      return;
+    }
+    bus.publish(event);
+  };
 
   function collectOutcomes(ids: ReadonlySet<SessionId>): WaitOutcome[] {
     const outcomes: WaitOutcome[] = [];
@@ -287,7 +680,7 @@ export function createSessionMachine(options: {
   }
 
   return {
-    spawn(params) {
+    async spawn(params) {
       const parsed = v.safeParse(spawnParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -299,46 +692,80 @@ export function createSessionMachine(options: {
           sessionName: spec.sessionName,
         });
       }
+      usedSessionNames.add(spec.sessionName);
       sessionSeq += 1;
-      const sessionId = v.parse(sessionIdSchema, `${spec.sessionName}@g0`);
+      const sessionId = options.identity.session(spec.sessionName);
       const turnId = nextTurnId(sessionId);
       const cwd = spec.cwd ?? process.cwd();
-      bus.transaction(
-        [
-          {
-            type: "session.created",
-            sessionId,
-            harness: spec.harness,
-            model: spec.model ?? null,
-            reasoning: spec.reasoning ?? null,
-            cwd,
-            sessionName: spec.sessionName,
-            spawnedAt: new Date().toISOString(),
+      const spawnScope: PendingSpawn = {
+        token: Symbol(spec.sessionName),
+        turn: createTurnScope(turnId),
+        permissionIds: new Set(),
+        pendingPermissions: new Map(),
+        accepting: true,
+      };
+      pendingSpawns.set(sessionId, spawnScope);
+      try {
+        bus.transaction(
+          [
+            {
+              type: "session.created",
+              sessionId,
+              harness: spec.harness,
+              model: spec.model ?? null,
+              reasoning: spec.reasoning ?? null,
+              cwd,
+              sessionName: spec.sessionName,
+              spawnedAt: new Date().toISOString(),
+            },
+            { type: "turn.started", sessionId, turnId },
+          ],
+          () => {
+            try {
+              driver.start({
+                sessionId,
+                turnId,
+                harness: spec.harness,
+                message: spec.message,
+                cwd,
+                authorizationMode: spec.authorizationMode ?? "allowAll",
+                ...(spec.agent === undefined ? {} : { agent: spec.agent }),
+                ...(spec.model === undefined ? {} : { model: spec.model }),
+                ...(spec.reasoning === undefined
+                  ? {}
+                  : { reasoning: spec.reasoning }),
+                ...(spec.sandbox === undefined
+                  ? {}
+                  : { sandbox: spec.sandbox }),
+                sessionName: spec.sessionName,
+              });
+            } finally {
+              spawnScope.accepting = false;
+            }
           },
-          { type: "turn.started", sessionId, turnId },
-        ],
-        () => {
-          driver.start({
-            sessionId,
-            turnId,
-            harness: spec.harness,
-            message: spec.message,
-            cwd,
-            authorizationMode: spec.authorizationMode ?? "allowAll",
-            ...(spec.agent === undefined ? {} : { agent: spec.agent }),
-            ...(spec.model === undefined ? {} : { model: spec.model }),
-            ...(spec.reasoning === undefined
-              ? {}
-              : { reasoning: spec.reasoning }),
-            ...(spec.sandbox === undefined ? {} : { sandbox: spec.sandbox }),
-            sessionName: spec.sessionName,
-          });
-        },
-      );
-      usedSessionNames.add(spec.sessionName);
+        );
+      } catch (error) {
+        spawnScope.accepting = false;
+        if (pendingSpawns.get(sessionId)?.token === spawnScope.token) {
+          pendingSpawns.delete(sessionId);
+        }
+        throw await unexpectedFailure(options.diagnostics, error, {
+          source: "core",
+          sessionId,
+          turnId,
+          kind: "request_failure",
+          operation: "spawn",
+          stage: "start_session",
+          reason: "upstream_error",
+          message: evidence(error),
+        });
+      }
+      if (pendingSpawns.get(sessionId)?.token === spawnScope.token) {
+        pendingSpawns.delete(sessionId);
+      }
       return sessionId;
     },
-    send(params) {
+    async send(params) {
       const parsed = v.safeParse(sendParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -355,22 +782,36 @@ export function createSessionMachine(options: {
       const messageId = v.parse(messageIdSchema, `m${messageSeq}`);
       if (session.state === "idle") {
         const turnId = nextTurnId(sessionId);
-        bus.transaction(
-          [
-            { type: "turn.started", sessionId, turnId },
-            {
-              type: "message",
-              sessionId,
-              turnId,
-              messageId,
-              role: "caller",
-              content: message,
+        try {
+          driverTransaction(
+            [
+              { type: "turn.started", sessionId, turnId },
+              {
+                type: "message",
+                sessionId,
+                turnId,
+                messageId,
+                role: "caller",
+                content: message,
+              },
+            ],
+            new Map([[sessionId, projectSession(sessionId)]]),
+            () => {
+              driver.deliver(sessionId, turnId, message);
             },
-          ],
-          () => {
-            driver.deliver(sessionId, turnId, message);
-          },
-        );
+          );
+        } catch (error) {
+          throw await unexpectedFailure(options.diagnostics, error, {
+            source: "core",
+            sessionId,
+            turnId,
+            kind: "request_failure",
+            operation: "send",
+            stage: "deliver",
+            reason: "upstream_error",
+            message: evidence(error),
+          });
+        }
         return { sessionId, turnId, messageId, deliveryPoint: "new_turn" };
       }
       session.inbox.push({ messageId, text: message });
@@ -413,7 +854,7 @@ export function createSessionMachine(options: {
         waiters.push({ ids, resolve, timer });
       });
     },
-    interrupt(params) {
+    async interrupt(params) {
       const parsed = v.safeParse(interruptParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -428,7 +869,24 @@ export function createSessionMachine(options: {
           throw machineError({ code: "session_killed", sessionId: id });
         }
         if (session.state === "busy") {
-          driver.interrupt(id);
+          try {
+            driverTransaction([], new Map([[id, projectSession(id)]]), () => {
+              driver.interrupt(id);
+            });
+          } catch (error) {
+            throw await unexpectedFailure(options.diagnostics, error, {
+              source: "core",
+              sessionId: id,
+              ...(session.currentTurnId === null
+                ? {}
+                : { turnId: session.currentTurnId }),
+              kind: "request_failure",
+              operation: "interrupt",
+              stage: "interrupt",
+              reason: "upstream_error",
+              message: evidence(error),
+            });
+          }
           outcomes.push({
             sessionId: id,
             status: "requested",
@@ -442,7 +900,7 @@ export function createSessionMachine(options: {
       }
       return outcomes;
     },
-    resolvePermission(params) {
+    async resolvePermission(params) {
       const parsed = v.safeParse(resolvePermissionParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -475,40 +933,77 @@ export function createSessionMachine(options: {
         });
       }
       // 转交抛错时整个帧回滚：不产生 resolved、未决请求保留可重试。
-      bus.transaction(
-        [
-          {
-            type: "permission.resolved",
-            sessionId,
-            turnId: pending.turnId,
-            permissionId,
-            resolution,
+      try {
+        driverTransaction(
+          [
+            {
+              type: "permission.resolved",
+              sessionId,
+              turnId: pending.turnId,
+              permissionId,
+              resolution,
+            },
+          ],
+          new Map([[sessionId, projectSession(sessionId)]]),
+          () => {
+            driver.resolvePermission(sessionId, permissionId, resolution);
           },
-        ],
-        () => {
-          driver.resolvePermission(sessionId, permissionId, resolution);
-        },
-      );
+        );
+      } catch (error) {
+        throw await unexpectedFailure(options.diagnostics, error, {
+          source: "core",
+          sessionId,
+          turnId: pending.turnId,
+          kind: "authorization_failure",
+          operation: "resolve_permission",
+          stage: "deliver",
+          reason: "upstream_rejected",
+          permissionId,
+        });
+      }
       session.pendingPermissions.delete(permissionId);
     },
-    kill(params) {
+    async kill(params) {
       const parsed = v.safeParse(killParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
       }
-      return parsed.output.ids.map((id) => {
+      const results: KillResult[] = [];
+      for (const id of parsed.output.ids) {
         const session = sessions.get(id);
         if (session === undefined) {
-          return { sessionId: id, status: "not_found" };
+          results.push({ sessionId: id, status: "not_found" });
+          continue;
         }
         if (session.state === "killed") {
-          return { sessionId: id, status: "killed" };
+          results.push({ sessionId: id, status: "killed" });
+          continue;
         }
-        bus.transaction([{ type: "session.killed", sessionId: id }], () => {
-          driver.terminate(id);
-        });
-        return { sessionId: id, status: "killed" };
-      });
+        try {
+          driverTransaction(
+            [{ type: "session.killed", sessionId: id }],
+            new Map([[id, projectSession(id)]]),
+            () => {
+              driver.terminate(id);
+            },
+          );
+        } catch (error) {
+          throw await unexpectedFailure(options.diagnostics, error, {
+            source: "core",
+            sessionId: id,
+            ...(session.currentTurnId === null
+              ? {}
+              : { turnId: session.currentTurnId }),
+            kind: "request_failure",
+            operation: "kill",
+            stage: "terminate",
+            reason: "upstream_error",
+            message: evidence(error),
+          });
+        }
+        results.push({ sessionId: id, status: "killed" });
+      }
+      return results;
     },
     list(filter) {
       const matches =

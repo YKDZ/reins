@@ -1,4 +1,8 @@
-import { createSessionMachine } from "@reins/core";
+import {
+  createSessionMachine,
+  type DiagnosticEmitter,
+  type SessionIdentity,
+} from "@reins/core";
 import type { ProtocolMessage } from "@reins/protocol";
 import type { TransportServer } from "@reins/transport";
 
@@ -11,14 +15,33 @@ export type Daemon = {
   stop(): Promise<void>;
 };
 
+export async function runDaemonLifecycle(
+  daemon: Daemon,
+  diagnostics: { close(): Promise<void> },
+): Promise<void> {
+  try {
+    await daemon.start();
+  } finally {
+    try {
+      await daemon.stop();
+    } finally {
+      await diagnostics.close();
+    }
+  }
+}
+
 export function createDaemon(options: {
   transport: TransportServer<ProtocolMessage>;
   adapters: AdapterRegistry;
+  identity: SessionIdentity;
+  diagnostics: DiagnosticEmitter;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 }): Daemon {
   const machine = createSessionMachine({
     driverFactory: createRoutingDriverFactory(options.adapters),
+    identity: options.identity,
+    diagnostics: options.diagnostics,
     onListenerError(error, event) {
       console.error("daemon event subscriber error", error, event);
     },
