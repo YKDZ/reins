@@ -1,7 +1,9 @@
 import type {
   CapabilitiesResult,
+  DiagnosticsResult,
   DomainEvent,
   KillResult,
+  ProtocolResult,
   SessionInfo,
   SendAck,
   WaitResult,
@@ -30,7 +32,10 @@ export function printError(
   if (mode === "json") {
     printJsonLine({
       ...error,
-      message: jsonErrorMessage(rendered),
+      message:
+        "diagnosticId" in error && error.diagnosticId !== undefined
+          ? `${jsonErrorMessage(rendered)}. reins diagnostics --id ${error.diagnosticId}`
+          : jsonErrorMessage(rendered),
     });
     return;
   }
@@ -58,6 +63,22 @@ export function printSpawnResult(
   } else {
     process.stdout.write(`Created session ${result.sessionId}\n`);
   }
+}
+
+export function printDiagnosticsResult(
+  result: DiagnosticsResult,
+  mode: OutputMode,
+): void {
+  if (mode === "json") {
+    printJsonLine(result);
+    return;
+  }
+  if ("record" in result) {
+    process.stdout.write(`${JSON.stringify(result.record, null, 2)}\n`);
+    return;
+  }
+  process.stdout.write(`${JSON.stringify(result.records, null, 2)}\n`);
+  process.stdout.write(`truncated: ${result.truncated}\n`);
 }
 
 export function printSendAck(ack: SendAck, mode: OutputMode): void {
@@ -126,11 +147,7 @@ export function printRunResult(
 }
 
 export function printInterruptResult(
-  outcomes: Array<{
-    sessionId: string;
-    status: string;
-    turnId?: string;
-  }>,
+  outcomes: ProtocolResult<"interrupt">,
   mode: OutputMode,
 ): void {
   if (mode === "json") {

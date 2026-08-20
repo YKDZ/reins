@@ -98,12 +98,13 @@ export const sessionStateSchema = v.union([
 export type SessionState = v.InferOutput<typeof sessionStateSchema>;
 
 // 回合终态；wait 的超时是 wait 层结果，不是回合终态。
-export const stopReasonSchema = v.union([
-  v.literal("end_turn"),
-  v.literal("cancelled"),
-  v.literal("failed"),
-  v.literal("killed"),
-]);
+export const STOP_REASONS = [
+  "end_turn",
+  "cancelled",
+  "failed",
+  "killed",
+] as const;
+export const stopReasonSchema = v.picklist(STOP_REASONS);
 export type StopReason = v.InferOutput<typeof stopReasonSchema>;
 
 export const deliveryPointSchema = v.union([
@@ -379,21 +380,23 @@ export type DomainEvent = v.InferOutput<typeof domainEventSchema>;
 
 // —— 诊断（存储 envelope 与 producer input） ——
 
-export const diagnosticSourceSchema = v.picklist([
+export const DIAGNOSTIC_SOURCES = [
   "daemon",
   "core",
   "adapter",
   "harness",
-]);
+] as const;
+export const diagnosticSourceSchema = v.picklist(DIAGNOSTIC_SOURCES);
 export type DiagnosticSource = v.InferOutput<typeof diagnosticSourceSchema>;
-export const diagnosticSeveritySchema = v.picklist([
+export const DIAGNOSTIC_SEVERITIES = [
   "debug",
   "info",
   "warning",
   "error",
-]);
+] as const;
+export const diagnosticSeveritySchema = v.picklist(DIAGNOSTIC_SEVERITIES);
 export type DiagnosticSeverity = v.InferOutput<typeof diagnosticSeveritySchema>;
-export const diagnosticKindSchema = v.picklist([
+export const DIAGNOSTIC_KINDS = [
   "lifecycle",
   "mapping_gap",
   "compatibility_gap",
@@ -405,7 +408,8 @@ export const diagnosticKindSchema = v.picklist([
   "transport_failure",
   "storage_failure",
   "harness_stderr",
-]);
+] as const;
+export const diagnosticKindSchema = v.picklist(DIAGNOSTIC_KINDS);
 export type DiagnosticKind = v.InferOutput<typeof diagnosticKindSchema>;
 export const utcMillisecondTimestampSchema = v.pipe(
   v.string(),

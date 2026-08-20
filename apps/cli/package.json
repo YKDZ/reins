@@ -32,6 +32,7 @@
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
     "postbuild": "node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "test": "vitest run test/unit --reporter=agent",
     "test:e2e": "vitest run test/e2e --reporter=agent",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },

@@ -1,32 +1,31 @@
 import type {
   AttachParams,
-  KillResult,
+  DiagnosticsParams,
   ListFilter,
   PermissionResolution,
-  ProtocolResponse,
-  SendAck,
-  SessionId,
-  SessionInfo,
+  ProtocolMethod,
+  ProtocolResult,
   SpawnParams,
-  StopReason,
-  WaitResult,
 } from "@reins/protocol";
-import {
-  permissionIdSchema,
-  sessionIdSchema,
-  sessionNameSchema,
-} from "@reins/protocol";
-import * as v from "valibot";
 
 import { runAndWait, runAttach } from "./attach.ts";
 import { CapabilityStore } from "./capabilities.ts";
-import { createReinsClient, type ReinsClient } from "./client.ts";
-import type { CommandName, RunContext } from "./command-spec.ts";
+import {
+  createReinsClient,
+  type ProtocolResponseFor,
+  type ReinsClient,
+} from "./client.ts";
+import type {
+  CommandInvocation,
+  CommandInvocationFor,
+  CommandName,
+} from "./command-spec.ts";
 import { ensureDaemon } from "./daemon.ts";
 import { ExitError, EXIT_TIMEOUT } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 import {
   printCapabilitiesResult,
+  printDiagnosticsResult,
   printInterruptResult,
   printKillResult,
   printListResult,
@@ -48,15 +47,21 @@ async function withClient<T>(
   }
 }
 
-function requireResult(response: ProtocolResponse): unknown {
+function requireResult<M extends ProtocolMethod>(
+  response: ProtocolResponseFor<M>,
+): ProtocolResult<M> {
   if ("error" in response) throw response.error;
   return response.result;
 }
 
+type WorkerOptions =
+  | CommandInvocationFor<"spawn">["options"]
+  | CommandInvocationFor<"run">["options"];
+
 function spawnParamsFromOptions(
   harness: string,
   messageParts: readonly string[],
-  options: Record<string, unknown>,
+  options: WorkerOptions,
 ): SpawnParams {
   const authorizationMode =
     options.authorizationMode === "interactive"
@@ -64,143 +69,114 @@ function spawnParamsFromOptions(
       : options.authorizationMode === "allow-all"
         ? ("allowAll" as const)
         : undefined;
-  const params: SpawnParams = {
+  return {
     harness,
     message: messageParts.join(" "),
-    sessionName: v.parse(sessionNameSchema, options.name),
-    ...(options.agent === undefined ? {} : { agent: options.agent as string }),
-    ...(options.model === undefined ? {} : { model: options.model as string }),
+    sessionName: options.name,
+    ...(options.agent === undefined ? {} : { agent: options.agent }),
+    ...(options.model === undefined ? {} : { model: options.model }),
     ...(options.reasoning === undefined
       ? {}
-      : { reasoning: options.reasoning as string }),
-    ...(options.cwd === undefined ? {} : { cwd: options.cwd as string }),
+      : { reasoning: options.reasoning }),
+    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
     ...(authorizationMode === undefined ? {} : { authorizationMode }),
-    ...(options.sandbox === undefined
-      ? {}
-      : { sandbox: options.sandbox as string }),
+    ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
+    ...(options.captureHarnessStderr === true
+      ? { captureHarnessStderr: true }
+      : {}),
+    ...("meta" in options && options.meta !== undefined
+      ? { meta: options.meta }
+      : {}),
   };
-  if (options.meta !== undefined) {
-    params.meta = JSON.parse(options.meta as string) as Record<string, unknown>;
-  }
-  return params;
 }
 
-async function runSpawn(ctx: RunContext): Promise<void> {
-  const harness = ctx.args[0] as string;
-  const messageParts = ctx.args[1] as readonly string[];
+async function runSpawn(ctx: CommandInvocationFor<"spawn">): Promise<void> {
+  const [harness, messageParts] = ctx.args;
   const params = spawnParamsFromOptions(harness, messageParts, ctx.options);
   await withClient(ctx.mode, async (client) => {
     const validation = await new CapabilityStore(client).validateSpawn(params);
     if (validation !== null) throw validation;
     const response = await client.request("spawn", params);
-    printSpawnResult(
-      requireResult(response) as { sessionId: SessionId },
-      ctx.mode,
-    );
+    printSpawnResult(requireResult(response), ctx.mode);
   });
 }
 
-async function runSend(ctx: RunContext): Promise<void> {
-  const sessionId = v.parse(sessionIdSchema, ctx.args[0]);
-  const messageParts = ctx.args[1] as readonly string[];
+async function runSend(ctx: CommandInvocationFor<"send">): Promise<void> {
+  const [sessionId, messageParts] = ctx.args;
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("send", {
       sessionId,
       message: messageParts.join(" "),
     });
-    printSendAck(requireResult(response) as SendAck, ctx.mode);
+    printSendAck(requireResult(response), ctx.mode);
   });
 }
 
-async function runWait(ctx: RunContext): Promise<void> {
-  const ids = (ctx.args[0] as readonly string[]).map((id) =>
-    v.parse(sessionIdSchema, id),
-  );
-  const timeoutMs = Number(ctx.options.timeout);
+async function runWait(ctx: CommandInvocationFor<"wait">): Promise<void> {
+  const [ids] = ctx.args;
+  const timeoutMs = ctx.options.timeout;
   await withClient(ctx.mode, async (client) => {
     const response = await client.request(
       "wait",
-      {
-        ids: [...ids],
-        timeoutMs,
-      },
+      { ids: [...ids], timeoutMs },
       timeoutMs + 5000,
     );
-    const result = requireResult(response) as WaitResult;
+    const result = requireResult(response);
     printWaitResult(result, ctx.mode);
     if (result.status === "timeout") throw new ExitError(EXIT_TIMEOUT);
   });
 }
 
-async function runInterrupt(ctx: RunContext): Promise<void> {
-  const ids = (ctx.args[0] as readonly string[]).map((id) =>
-    v.parse(sessionIdSchema, id),
-  );
+async function runInterrupt(
+  ctx: CommandInvocationFor<"interrupt">,
+): Promise<void> {
+  const [ids] = ctx.args;
   await withClient(ctx.mode, async (client) => {
-    const response = await client.request("interrupt", {
-      ids: [...ids],
-    });
-    printInterruptResult(
-      requireResult(response) as Array<{
-        sessionId: string;
-        status: string;
-        turnId?: string;
-      }>,
-      ctx.mode,
-    );
+    const response = await client.request("interrupt", { ids: [...ids] });
+    printInterruptResult(requireResult(response), ctx.mode);
   });
 }
 
-async function runKill(ctx: RunContext): Promise<void> {
-  const ids = (ctx.args[0] as readonly string[]).map((id) =>
-    v.parse(sessionIdSchema, id),
-  );
+async function runKill(ctx: CommandInvocationFor<"kill">): Promise<void> {
+  const [ids] = ctx.args;
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("kill", { ids: [...ids] });
-    printKillResult(requireResult(response) as KillResult[], ctx.mode);
+    printKillResult(requireResult(response), ctx.mode);
   });
 }
 
-async function runList(ctx: RunContext): Promise<void> {
+async function runList(ctx: CommandInvocationFor<"list">): Promise<void> {
   const options = ctx.options;
   await withClient(ctx.mode, async (client) => {
     const params: ListFilter = {
-      ...(options.harness === undefined
-        ? {}
-        : { harness: options.harness as string }),
-      ...(options.state === undefined
-        ? {}
-        : { state: options.state as ListFilter["state"] }),
-      ...(options.name === undefined
-        ? {}
-        : { sessionName: v.parse(sessionNameSchema, options.name) }),
-      ...(options.model === undefined
-        ? {}
-        : { model: options.model as string }),
+      ...(options.harness === undefined ? {} : { harness: options.harness }),
+      ...(options.state === undefined ? {} : { state: options.state }),
+      ...(options.name === undefined ? {} : { sessionName: options.name }),
+      ...(options.model === undefined ? {} : { model: options.model }),
     };
     const response = await client.request("list", params);
-    printListResult(requireResult(response) as SessionInfo[], ctx.mode);
+    printListResult(requireResult(response), ctx.mode);
   });
 }
 
-async function runAttachCommand(ctx: RunContext): Promise<void> {
-  const sessionId = v.parse(sessionIdSchema, ctx.args[0]);
-  const options = ctx.options;
-  const params: AttachParams = { sessionId };
-  if (options.replay !== undefined) {
-    params.replay = Number(options.replay);
-  }
-  if (options.exitOn !== undefined) {
-    params.exitOn = [...(options.exitOn as readonly StopReason[])];
-  }
+async function runAttachCommand(
+  ctx: CommandInvocationFor<"attach">,
+): Promise<void> {
+  const [sessionId] = ctx.args;
+  const params: AttachParams = {
+    sessionId,
+    ...(ctx.options.replay === undefined ? {} : { replay: ctx.options.replay }),
+    ...(ctx.options.exitOn === undefined
+      ? {}
+      : { exitOn: [...ctx.options.exitOn] }),
+  };
   await withClient(ctx.mode, async (client) => {
     await runAttach(client, { params, mode: ctx.mode });
   });
 }
 
-async function runRun(ctx: RunContext): Promise<void> {
-  const harness = ctx.args[0] as string;
-  const messageParts = ctx.args[1] as readonly string[];
+async function runRun(ctx: CommandInvocationFor<"run">): Promise<void> {
+  const [harness, messageParts] = ctx.args;
   const params = spawnParamsFromOptions(harness, messageParts, ctx.options);
   await withClient(ctx.mode, async (client) => {
     const validation = await new CapabilityStore(client).validateSpawn(params);
@@ -209,32 +185,64 @@ async function runRun(ctx: RunContext): Promise<void> {
   });
 }
 
-async function runCapabilities(ctx: RunContext): Promise<void> {
+async function runDiagnostics(
+  ctx: CommandInvocationFor<"diagnostics">,
+): Promise<void> {
+  const options = ctx.options;
+  const filters = {
+    ...(options.harness === undefined ? {} : { harness: options.harness }),
+    ...(options.source === undefined ? {} : { sources: [...options.source] }),
+    ...(options.kind === undefined ? {} : { kinds: [...options.kind] }),
+    ...(options.minSeverity === undefined
+      ? {}
+      : { minSeverity: options.minSeverity }),
+    ...(options.since === undefined ? {} : { since: options.since }),
+    ...(options.until === undefined ? {} : { until: options.until }),
+    ...(options.limit === undefined ? {} : { limit: options.limit }),
+  };
+  let params: DiagnosticsParams;
+  if (options.id !== undefined) {
+    params = { diagnosticId: options.id };
+  } else if (options.turn === undefined) {
+    params = {
+      ...filters,
+      ...(options.session === undefined ? {} : { sessionId: options.session }),
+    };
+  } else {
+    if (options.session === undefined) {
+      throw new Error("Validated diagnostic turn filter is missing session");
+    }
+    params = {
+      ...filters,
+      sessionId: options.session,
+      turnId: options.turn,
+    };
+  }
+  await withClient(ctx.mode, async (client) => {
+    const response = await client.request("diagnostics", params);
+    printDiagnosticsResult(requireResult(response), ctx.mode);
+  });
+}
+
+async function runCapabilities(
+  ctx: CommandInvocationFor<"capabilities">,
+): Promise<void> {
   await withClient(ctx.mode, async (client) => {
     const store = new CapabilityStore(client);
     printCapabilitiesResult(await store.result(), ctx.mode);
   });
 }
 
-async function runResolvePermission(ctx: RunContext): Promise<void> {
-  const sessionId = v.parse(sessionIdSchema, ctx.args[0]);
-  const permissionId = v.parse(permissionIdSchema, ctx.args[1]);
-  const options = ctx.options;
-  const outcome = options.outcome as string;
-  let resolution: PermissionResolution;
-  if (outcome === "allow") {
-    const scope = (options.scope as string | undefined) ?? "once";
-    resolution = {
-      outcome: "allow",
-      scope: scope === "session" ? "session" : "once",
-    };
-  } else {
-    const feedback = options.feedback as string | undefined;
-    resolution =
-      feedback === undefined
+async function runResolvePermission(
+  ctx: CommandInvocationFor<"resolve-permission">,
+): Promise<void> {
+  const [sessionId, permissionId] = ctx.args;
+  const resolution: PermissionResolution =
+    ctx.options.outcome === "allow"
+      ? { outcome: "allow", scope: ctx.options.scope ?? "once" }
+      : ctx.options.feedback === undefined
         ? { outcome: "deny" }
-        : { outcome: "deny", feedback };
-  }
+        : { outcome: "deny", feedback: ctx.options.feedback };
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("resolvePermission", {
       sessionId,
@@ -242,15 +250,18 @@ async function runResolvePermission(ctx: RunContext): Promise<void> {
       resolution,
     });
     requireResult(response);
-    if (ctx.mode === "pretty") {
+    if (ctx.mode === "pretty")
       process.stdout.write(`Resolved ${permissionId}\n`);
-    }
   });
 }
 
-export const handlers: {
-  readonly [K in CommandName]: (ctx: RunContext) => Promise<void>;
-} = {
+type HandlerMap = {
+  readonly [N in CommandName]: (
+    invocation: CommandInvocationFor<N>,
+  ) => Promise<void>;
+};
+
+export const handlers = {
   spawn: runSpawn,
   send: runSend,
   wait: runWait,
@@ -259,6 +270,42 @@ export const handlers: {
   list: runList,
   attach: runAttachCommand,
   run: runRun,
+  diagnostics: runDiagnostics,
   capabilities: runCapabilities,
   "resolve-permission": runResolvePermission,
-};
+} satisfies HandlerMap;
+
+export async function dispatchInvocation(
+  invocation: CommandInvocation,
+): Promise<void> {
+  switch (invocation.command) {
+    case "spawn":
+      return handlers.spawn(invocation);
+    case "send":
+      return handlers.send(invocation);
+    case "wait":
+      return handlers.wait(invocation);
+    case "interrupt":
+      return handlers.interrupt(invocation);
+    case "kill":
+      return handlers.kill(invocation);
+    case "list":
+      return handlers.list(invocation);
+    case "attach":
+      return handlers.attach(invocation);
+    case "run":
+      return handlers.run(invocation);
+    case "diagnostics":
+      return handlers.diagnostics(invocation);
+    case "capabilities":
+      return handlers.capabilities(invocation);
+    case "resolve-permission":
+      return handlers["resolve-permission"](invocation);
+    default:
+      return assertNever(invocation);
+  }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled command invocation: ${String(value)}`);
+}

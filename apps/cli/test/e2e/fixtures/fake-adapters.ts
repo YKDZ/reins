@@ -1,3 +1,5 @@
+import { appendFileSync } from "node:fs";
+
 import type {
   HarnessCapability,
   SessionId,
@@ -24,18 +26,39 @@ function capability(harness: string, modelId: string): HarnessCapability {
 function fakeAdapter(options: {
   harness: string;
   modelId: string;
-  behavior: "complete" | "hang" | "permission";
+  behavior: "complete" | "hang" | "permission" | "failed" | "cancelled";
+  canCaptureHarnessStderr?: boolean;
 }): {
   driverFactory: AdapterDriverFactory;
   capabilities(): Promise<HarnessCapability>;
 } {
   const { harness, modelId, behavior } = options;
-  const factory: AdapterDriverFactory = ({ emit }) => {
+  const factory: AdapterDriverFactory = ({ emit, diagnostics }) => {
     let current: { sessionId: SessionId; turnId: TurnId } | null = null;
+    const resolvedPermissions = new Set<string>();
+    let expectedPermissionCount = 1;
     const driver: WorkerDriver = {
       start(spec) {
         current = { sessionId: spec.sessionId, turnId: spec.turnId };
         if (behavior === "complete") {
+          if (spec.captureHarnessStderr === true) {
+            for (const originalBytes of [20_000, 20_001, 20_002]) {
+              void diagnostics({
+                source: "harness",
+                harness,
+                sessionId: spec.sessionId,
+                turnId: spec.turnId,
+                kind: "harness_stderr",
+                operation: "worker_process",
+                reason: "stderr_output",
+                text: {
+                  text: "é".repeat(8_192),
+                  truncated: true,
+                  originalBytes,
+                },
+              });
+            }
+          }
           queueMicrotask(() => {
             emit({
               type: "message",
@@ -55,17 +78,33 @@ function fakeAdapter(options: {
           });
         }
         if (behavior === "permission") {
-          emit({
-            type: "permission.requested",
-            sessionId: spec.sessionId,
-            turnId: spec.turnId,
-            permissionId: v.parse(permissionIdSchema, "p1"),
-            kind: "tool:Bash",
-            input: { command: "ls" },
-            options: [
-              { outcome: "allow", scope: "once" },
-              { outcome: "deny", feedback: false },
-            ],
+          const permissionIds =
+            spec.message === "queue" ? (["p1", "p2"] as const) : ["p1"];
+          expectedPermissionCount = permissionIds.length;
+          for (const permissionId of permissionIds) {
+            emit({
+              type: "permission.requested",
+              sessionId: spec.sessionId,
+              turnId: spec.turnId,
+              permissionId: v.parse(permissionIdSchema, permissionId),
+              kind: "tool:Bash",
+              input: { command: permissionId },
+              options: [
+                { outcome: "allow", scope: "once" },
+                { outcome: "deny", feedback: false },
+              ],
+            });
+          }
+        }
+        if (behavior === "failed" || behavior === "cancelled") {
+          queueMicrotask(() => {
+            emit({
+              type: "turn.completed",
+              sessionId: spec.sessionId,
+              turnId: spec.turnId,
+              stopReason: behavior === "failed" ? "failed" : "cancelled",
+              finalReply: null,
+            });
           });
         }
       },
@@ -83,8 +122,14 @@ function fakeAdapter(options: {
         });
       },
       interrupt() {},
-      resolvePermission(_sessionId, _permissionId, resolution) {
+      resolvePermission(_sessionId, permissionId, resolution) {
         if (current === null) return;
+        const requestsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
+        if (requestsFile !== undefined) {
+          appendFileSync(requestsFile, `${permissionId}\n`);
+        }
+        resolvedPermissions.add(permissionId);
+        if (resolvedPermissions.size < expectedPermissionCount) return;
         const { sessionId, turnId } = current;
         queueMicrotask(() => {
           emit({
@@ -103,6 +148,9 @@ function fakeAdapter(options: {
   return {
     driverFactory: factory,
     capabilities: async () => capability(harness, modelId),
+    ...(options.canCaptureHarnessStderr === true
+      ? { canCaptureHarnessStderr: true }
+      : {}),
   };
 }
 
@@ -111,6 +159,12 @@ export default {
     harness: "fake",
     modelId: "fake-model",
     behavior: "complete",
+  }),
+  capture: fakeAdapter({
+    harness: "capture",
+    modelId: "capture-model",
+    behavior: "complete",
+    canCaptureHarnessStderr: true,
   }),
   hang: fakeAdapter({
     harness: "hang",
@@ -121,5 +175,15 @@ export default {
     harness: "permission",
     modelId: "perm-model",
     behavior: "permission",
+  }),
+  failed: fakeAdapter({
+    harness: "failed",
+    modelId: "failed-model",
+    behavior: "failed",
+  }),
+  cancelled: fakeAdapter({
+    harness: "cancelled",
+    modelId: "cancelled-model",
+    behavior: "cancelled",
   }),
 };

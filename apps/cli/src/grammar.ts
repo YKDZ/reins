@@ -4,6 +4,7 @@ import type { CommanderError } from "commander";
 import {
   commandSpecs,
   flagDisplay,
+  valueHint,
   type CommandSpec,
   type ValueKind,
 } from "./command-spec.ts";
@@ -31,6 +32,14 @@ export function renderCliError(
   spec?: CommandSpec,
 ): RenderedError {
   if (error.code === "usage_error") return renderUsageError(error, spec);
+  if (error.code === "input_error") {
+    return {
+      message:
+        error.reason === "permission_choice_eof"
+          ? "Permission input closed before a choice was received"
+          : "Permission input closed before feedback was received",
+    };
+  }
   if (error.code === "unknown_harness") return renderUnknownHarness(error);
   if (error.code === "invalid_params") {
     const rendered = renderInvalidParams(error);
@@ -131,6 +140,11 @@ function renderUsageError(
         detail ?? `Invalid value '${value ?? ""}' for '${field ?? ""}'`,
         allowedText(valid) ?? hint,
       );
+    case "invalid_combination":
+      return rendered(
+        `Invalid parameter combination${field === undefined ? "" : `: ${field}`}`,
+        hint,
+      );
   }
 }
 
@@ -141,17 +155,7 @@ function suggestionForMissing(
 ): string | undefined {
   const item = findSpecItem(spec, target, field);
   if (item === undefined) return undefined;
-  if (item.kind.type === "enum") {
-    return `Allowed: ${item.kind.values.join(", ")}`;
-  }
-  if (
-    item.kind.type === "dynamic" ||
-    item.kind.type === "number" ||
-    item.kind.type === "jsonObject"
-  ) {
-    return item.kind.hint;
-  }
-  return item.description;
+  return valueHint(item.kind) ?? item.description;
 }
 
 function findSpecItem(

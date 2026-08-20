@@ -26,7 +26,8 @@ export type UsageIssue =
   | "missing_argument"
   | "unknown_command"
   | "unknown_option"
-  | "invalid_value";
+  | "invalid_value"
+  | "invalid_combination";
 
 export type UsageError = {
   readonly code: "usage_error";
@@ -40,7 +41,26 @@ export type UsageError = {
   readonly didYouMean?: string;
 };
 
-export type CliError = MachineError | UsageError;
+export type InputError = {
+  readonly code: "input_error";
+  readonly reason: "permission_choice_eof" | "permission_feedback_eof";
+};
+
+export type CliError = MachineError | UsageError | InputError;
+
+export function inputError(reason: InputError["reason"]): InputError {
+  return { code: "input_error", reason };
+}
+
+export function isInputError(value: unknown): value is InputError {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { code?: unknown; reason?: unknown };
+  return (
+    candidate.code === "input_error" &&
+    (candidate.reason === "permission_choice_eof" ||
+      candidate.reason === "permission_feedback_eof")
+  );
+}
 
 export function usageError(
   issue: UsageIssue,
@@ -60,6 +80,7 @@ export function isUsageError(value: unknown): value is UsageError {
 export function toCliError(error: unknown): CliError {
   if (isUsageError(error)) return error;
   if (isMachineError(error)) return error;
+  if (isInputError(error)) return error;
   if (error instanceof Error) {
     try {
       const parsed = JSON.parse(error.message) as unknown;

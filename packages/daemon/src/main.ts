@@ -1,5 +1,6 @@
 #!/usr/bin/env node
 
+import { closeSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -10,6 +11,7 @@ import {
   createCodexTransport,
 } from "@reins/codex";
 import type { ProtocolMessage } from "@reins/protocol";
+import { makeErrorCause } from "@reins/protocol";
 import {
   createQoderCapabilities,
   createQoderDriver,
@@ -145,6 +147,26 @@ async function main(): Promise<void> {
 }
 
 void main().catch((error: unknown) => {
+  reportStartupFailure(error);
   console.error("reins-daemon failed to start", error);
   process.exitCode = 1;
 });
+
+function reportStartupFailure(error: unknown): void {
+  const rawFd = process.env.REINS_STARTUP_FD;
+  if (rawFd === undefined || !/^\d+$/u.test(rawFd)) return;
+  const fd = Number(rawFd);
+  if (!Number.isSafeInteger(fd) || fd < 3) return;
+  try {
+    writeFileSync(
+      fd,
+      `${JSON.stringify({
+        v: 1,
+        cause: makeErrorCause("exception", String(error)),
+      })}\n`,
+    );
+    closeSync(fd);
+  } catch {
+    // 启动报告是辅助通道；进程仍按原始启动错误失败。
+  }
+}
