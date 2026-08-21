@@ -2,6 +2,9 @@
   "name": "@reins/transport",
   "version": "0.0.0",
   "private": true,
+  "files": [
+    "dist"
+  ],
   "type": "module",
   "imports": {
     "#/*": {

@@ -4,6 +4,7 @@
     "oxfmt.config.ts",
     "oxlint.config.ts",
     "scripts/check-boundaries.ts",
+    "scripts/check-packed-cli.ts",
     "scripts/check-runtime-language.ts",
     "scripts/run-root-owned-task.ts"
   ]
