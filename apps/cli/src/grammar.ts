@@ -16,7 +16,7 @@ export type RenderedError = {
   readonly suggestion?: string;
 };
 
-function rendered(message: string, suggestion?: string): RenderedError {
+function renderedError(message: string, suggestion?: string): RenderedError {
   return suggestion === undefined ? { message } : { message, suggestion };
 }
 
@@ -33,12 +33,11 @@ export function renderCliError(
 ): RenderedError {
   if (error.code === "usage_error") return renderUsageError(error, spec);
   if (error.code === "input_error") {
-    return {
-      message:
-        error.reason === "permission_choice_eof"
-          ? "Permission input closed before a choice was received"
-          : "Permission input closed before feedback was received",
-    };
+    return renderedError(
+      error.reason === "permission_choice_eof"
+        ? "Permission input closed before a choice was received"
+        : "Permission input closed before feedback was received",
+    );
   }
   if (error.code === "unknown_harness") return renderUnknownHarness(error);
   if (error.code === "invalid_params") {
@@ -111,6 +110,7 @@ export function commanderToUsageError(
   }
 }
 
+// oxlint-disable-next-line typescript/consistent-return -- UsageIssue 是闭集；禁止用 default 掩盖新增成员。
 function renderUsageError(
   error: UsageError,
   spec: CommandSpec | undefined,
@@ -123,25 +123,25 @@ function renderUsageError(
         target === "option"
           ? `Missing required option '${field ?? ""}'`
           : `Missing required argument '${field ?? ""}'`;
-      return rendered(message, suggestionForMissing(spec, target, field));
+      return renderedError(message, suggestionForMissing(spec, target, field));
     }
     case "unknown_command":
-      return rendered(
+      return renderedError(
         `Unknown command '${value ?? ""}'${didYouMean === undefined ? "" : `. Did you mean ${didYouMean}?`}`,
         `Allowed: ${commandSpecs.map((candidate) => candidate.name).join(", ")}`,
       );
     case "unknown_option":
-      return rendered(
+      return renderedError(
         `Unknown option '${value ?? ""}'${didYouMean === undefined ? "" : ` Did you mean ${didYouMean}?`}`,
         allowedText(valid),
       );
     case "invalid_value":
-      return rendered(
+      return renderedError(
         detail ?? `Invalid value '${value ?? ""}' for '${field ?? ""}'`,
         allowedText(valid) ?? hint,
       );
     case "invalid_combination":
-      return rendered(
+      return renderedError(
         `Invalid parameter combination${field === undefined ? "" : `: ${field}`}`,
         hint,
       );
@@ -176,29 +176,30 @@ function renderUnknownHarness(error: MachineError): RenderedError {
   if (!("availableHarnesses" in error) || !("harness" in error))
     return { message: "Unknown harness" };
   const harnesses = error.availableHarnesses;
-  return rendered(
+  return renderedError(
     `Unknown harness '${error.harness}'`,
     harnesses.length === 0 ? undefined : `Allowed: ${harnesses.join(", ")}`,
   );
 }
 
+// oxlint-disable-next-line typescript/consistent-return -- InvalidParamIssue 是闭集；禁止用 default 掩盖新增成员。
 function renderInvalidParams(error: MachineError): RenderedError | null {
   if (!("issues" in error)) return null;
   const issue = error.issues[0];
-  if (issue === undefined) return { message: "Invalid parameters" };
+  if (issue === undefined) return renderedError("Invalid parameters");
   switch (issue.issue) {
     case "missing_required":
-      return { message: `Missing required parameter: ${issue.path}` };
+      return renderedError(`Missing required parameter: ${issue.path}`);
     case "invalid_type":
-      return {
-        message: `Invalid parameter type at ${issue.path}; expected ${issue.expected}`,
-      };
+      return renderedError(
+        `Invalid parameter type at ${issue.path}; expected ${issue.expected}`,
+      );
     case "invalid_value":
-      return { message: `Invalid parameter value: ${issue.path}` };
+      return renderedError(`Invalid parameter value: ${issue.path}`);
     case "invalid_combination":
-      return {
-        message: `Invalid parameter combination: ${issue.paths.join(", ")}`,
-      };
+      return renderedError(
+        `Invalid parameter combination: ${issue.paths.join(", ")}`,
+      );
   }
 }
 
@@ -216,6 +217,7 @@ function longFlagsFor(spec: CommandSpec | undefined): string[] {
   return [...flags, "--pretty"];
 }
 
+// oxlint-disable-next-line typescript/consistent-return -- MachineError 是闭集；新增错误码必须显式设计文案。
 function domainMessage(error: MachineError): string {
   switch (error.code) {
     case "session_not_found":

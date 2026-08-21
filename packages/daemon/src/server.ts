@@ -155,7 +155,7 @@ export function createProtocolServerInternal(
     return await options.diagnostics.record({
       ...input,
       source: "daemon",
-    } as Parameters<DiagnosticsRuntime["record"]>[0]);
+    });
   }
 
   function sendSafe(
@@ -454,7 +454,7 @@ export function createProtocolServerInternal(
             ...input,
             source: "adapter",
             harness,
-          } as Parameters<DiagnosticsRuntime["record"]>[0]);
+          });
         }),
       ),
     );
@@ -741,6 +741,7 @@ export function createProtocolServerInternal(
           throw new AggregateError(
             [startError, closeError],
             "Daemon startup and cleanup failed",
+            { cause: startError },
           );
         }
         throw startError;

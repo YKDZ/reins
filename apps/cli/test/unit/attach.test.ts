@@ -70,7 +70,7 @@ class ControlledClient implements ReinsClient {
   ): Promise<ProtocolResponseFor<M>> {
     if (method === "attach") {
       return new Promise((resolve) => {
-        this.attachResolve = resolve as typeof this.attachResolve;
+        this.attachResolve = resolve;
       }) as Promise<ProtocolResponseFor<M>>;
     }
     if (method === "resolvePermission") {

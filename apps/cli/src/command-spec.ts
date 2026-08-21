@@ -778,11 +778,7 @@ export function parseCommandInvocation(
   }
   validateCommand(spec, args, materializedOptions, mode);
   const parsedArgs = spec.args.map((arg, index) =>
-    parseFieldValue(
-      arg.kind,
-      args[index],
-      "variadic" in arg && arg.variadic === true,
-    ),
+    parseFieldValue(arg.kind, args[index], "variadic" in arg && arg.variadic),
   );
   const parsedOptions: Record<string, unknown> = {};
   for (const option of spec.options) {
@@ -791,7 +787,7 @@ export function parseCommandInvocation(
     parsedOptions[option.name] = parseFieldValue(
       option.kind,
       value,
-      "variadic" in option && option.variadic === true,
+      "variadic" in option && option.variadic,
     );
   }
   // 上述 arity、required/default、值类型与约束均已由同一 spec 证明；
@@ -811,8 +807,7 @@ function invocationFromParsed(
     args as unknown as CommandInvocationFor<N>["args"];
   const typedOptions = <
     N extends CommandName,
-  >(): CommandInvocationFor<N>["options"] =>
-    options as CommandInvocationFor<N>["options"];
+  >(): CommandInvocationFor<N>["options"] => options;
   switch (name) {
     case "spawn":
       return {

@@ -4,7 +4,7 @@ import { expect, test, vi } from "vitest";
 import { createReinsClient } from "../../src/client.ts";
 
 test("malformed inbound envelope rejects an outstanding request as invalid daemon response", async () => {
-  const pair = createInMemoryTransportPair<unknown>();
+  const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never);
   const pending = client.request("capabilities", {});
   pair.server.send({ kind: "notification", method: "event", params: {} });
@@ -13,7 +13,7 @@ test("malformed inbound envelope rejects an outstanding request as invalid daemo
 });
 
 test("a schema-invalid response result rejects as invalid daemon response", async () => {
-  const pair = createInMemoryTransportPair<unknown>();
+  const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never);
   const pending = client.request("capabilities", {});
   pair.server.send({ kind: "response", requestId: "cli1", result: {} });
@@ -22,7 +22,7 @@ test("a schema-invalid response result rejects as invalid daemon response", asyn
 });
 
 test("invalid input terminates every lifecycle listener with the concrete reason", async () => {
-  const pair = createInMemoryTransportPair<unknown>();
+  const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never);
   const reason = new Promise((resolve) => client.onClosed(resolve));
   pair.server.send({ kind: "notification", method: "event", params: {} });
@@ -31,7 +31,7 @@ test("invalid input terminates every lifecycle listener with the concrete reason
 });
 
 test("an invalid result terminates the client with invalid_daemon_response", async () => {
-  const pair = createInMemoryTransportPair<unknown>();
+  const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never);
   const reason = new Promise((resolve) => client.onClosed(resolve));
   const pending = client.request("capabilities", {});
@@ -42,7 +42,7 @@ test("an invalid result terminates the client with invalid_daemon_response", asy
 });
 
 test("a malformed notification after a valid response preserves invalid_daemon_response", async () => {
-  const pair = createInMemoryTransportPair<unknown>();
+  const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never);
   const pending = client.request("attach", { sessionId: "prompt@g1" as never });
   pair.server.send({
@@ -58,7 +58,7 @@ test("a malformed notification after a valid response preserves invalid_daemon_r
 });
 
 test("client close rejects a pending request without waiting for its timeout", async () => {
-  const pair = createInMemoryTransportPair<unknown>();
+  const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never);
   const pending = client.request("capabilities", {}, 30_000);
   client.close();
@@ -66,7 +66,7 @@ test("client close rejects a pending request without waiting for its timeout", a
 });
 
 test("request timeout rejects with the distinct daemon_timeout machine error", async () => {
-  const pair = createInMemoryTransportPair<unknown>();
+  const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never);
   await expect(client.request("capabilities", {}, 1)).rejects.toThrow(
     "daemon_timeout",
@@ -77,7 +77,7 @@ test("request timeout rejects with the distinct daemon_timeout machine error", a
 test("a settled response removes its request timer", async () => {
   vi.useFakeTimers();
   try {
-    const pair = createInMemoryTransportPair<unknown>();
+    const pair = createInMemoryTransportPair();
     const client = createReinsClient(pair.client as never);
     const pending = client.request("capabilities", {}, 30_000);
     expect(vi.getTimerCount()).toBe(1);
@@ -97,7 +97,7 @@ test("a settled response removes its request timer", async () => {
 test("a request made after close rejects without installing a timer", async () => {
   vi.useFakeTimers();
   try {
-    const pair = createInMemoryTransportPair<unknown>();
+    const pair = createInMemoryTransportPair();
     const client = createReinsClient(pair.client as never);
     client.close();
     await expect(client.request("capabilities", {})).rejects.toThrow(

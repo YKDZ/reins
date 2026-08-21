@@ -75,7 +75,7 @@ export function createDaemonInternal(
       return await options.diagnostics.record({
         ...fact,
         source: "core",
-      } as DiagnosticInput);
+      });
     },
   };
   const machine = createSessionMachine({

@@ -21,12 +21,12 @@ try {
     capabilities: null,
   });
   transport.notify("initialized", {});
-  const thread = (await transport.request("thread/start", {
+  const thread = await transport.request("thread/start", {
     ephemeral: true,
     cwd: process.cwd(),
     approvalPolicy: "on-request",
     model,
-  })) as { thread: { id: string } };
+  });
   await transport.request("turn/start", {
     threadId: thread.thread.id,
     input: [

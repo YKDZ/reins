@@ -28,7 +28,7 @@ export class CapabilityStore {
     if (this.store !== null) return this.store;
     const response = await this.client.request("capabilities", {});
     if ("error" in response) throw response.error;
-    const result = response.result as CapabilitiesResult;
+    const result = response.result;
     this.store = {
       capabilities: new Map(
         result.capabilities.map((capability) => [

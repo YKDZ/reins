@@ -6,7 +6,6 @@ import type {
   DiagnosticRecord,
   DiagnosticsParams,
   DiagnosticsResult,
-  SessionName,
 } from "@reins/protocol";
 import {
   diagnosticRecordSchema,
@@ -475,9 +474,9 @@ describe("DiagnosticsRuntime", () => {
     const store = new MemoryStore();
     const runtime = await openRuntime(store);
 
-    expect(
-      runtime.sessionId(v.parse(sessionNameSchema, "reviewer") as SessionName),
-    ).toBe("reviewer@ga");
+    expect(runtime.sessionId(v.parse(sessionNameSchema, "reviewer"))).toBe(
+      "reviewer@ga",
+    );
     await runtime.close();
     await runtime.close();
     expect(store.closed).toBe(1);

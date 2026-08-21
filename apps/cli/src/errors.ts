@@ -112,6 +112,7 @@ export function exitCodeForError(error: CliError): number {
   }
 }
 
+// oxlint-disable-next-line typescript/consistent-return -- StopReason 是闭集；新增成员必须触发编译期穷尽检查。
 export function exitCodeForStopReason(reason: StopReason): number {
   switch (reason) {
     case "end_turn":

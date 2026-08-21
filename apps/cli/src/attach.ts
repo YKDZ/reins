@@ -161,8 +161,12 @@ export async function runAttach(
       | { readonly key: string; readonly controller: AbortController }
       | undefined;
     let prompt: PromptInput | undefined;
+
+    // oxlint-disable-next-line unicorn/consistent-function-scoping
     let unsubscribe = (): void => {};
+    // oxlint-disable-next-line unicorn/consistent-function-scoping
     let unsubscribeClosed = (): void => {};
+
     const cleanup = (): void => {
       activePermission?.controller.abort();
       activePermission = undefined;

@@ -584,7 +584,7 @@ function parseRecord(input: unknown): DiagnosticRecord {
   if (typeof input !== "object" || input === null || !("v" in input)) {
     corrupt("Diagnostic record has no schema version");
   }
-  switch ((input as { v: unknown }).v) {
+  switch (input.v) {
     case 1:
       break;
     default:

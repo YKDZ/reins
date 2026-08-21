@@ -1691,6 +1691,37 @@ describe("daemon 空闲退出", () => {
     expect(fake.calls.starts).toBe(0);
   });
 
+  test("启动与 transport 收口同时失败时保留启动根因", async () => {
+    const startError = new Error("transport listen rejected");
+    const closeError = new Error("transport close rejected");
+    const daemon = createDaemon({
+      transport: {
+        async listen() {
+          throw startError;
+        },
+        onConnection() {
+          return () => {};
+        },
+        async close() {
+          throw closeError;
+        },
+      },
+      adapters: new Map(),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      idleTimeoutMs: 60_000,
+    });
+
+    const failure: unknown = await daemon
+      .start()
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(AggregateError);
+    expect(failure).toMatchObject({
+      cause: startError,
+      errors: [startError, closeError],
+    });
+  });
+
   test("transport close 拒绝不撤销已建立的 daemon stopped logical commit", async () => {
     const backing = createInMemoryTransportServer<ProtocolMessage>();
     const lifecycle: string[] = [];

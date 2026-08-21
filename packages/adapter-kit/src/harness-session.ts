@@ -100,7 +100,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
         ...input,
         sessionId: this.sessionId,
         ...(this.turnId === null ? {} : { turnId: this.turnId }),
-      } as AdapterDiagnosticFact);
+      });
     } catch {
       // 诊断存储故障不能改变 adapter 的控制流。
       return undefined;
