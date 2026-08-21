@@ -225,7 +225,10 @@ export type InboundMessage =
       kind: "notification";
       method: "turn/completed";
       params: {
-        turn: { status: "completed" | "interrupted" | "failed" | "inProgress" };
+        turn: {
+          status: "completed" | "interrupted" | "failed" | "inProgress";
+          error: { message: string } | null;
+        };
       };
     }
   | {
@@ -845,11 +848,26 @@ export function createCodexTransport(options: {
     if (method === "turn/completed") {
       if (!isRecord(params.turn)) return null;
       const status = params.turn.status;
+      const error = params.turn.error;
+      let parsedError: { message: string } | null = null;
+      if (error !== null) {
+        if (!isRecord(error) || typeof error.message !== "string") return null;
+        parsedError = { message: error.message };
+      }
       return status === "completed" ||
         status === "interrupted" ||
         status === "failed" ||
         status === "inProgress"
-        ? { kind: "notification", method, params: { turn: { status } } }
+        ? {
+            kind: "notification",
+            method,
+            params: {
+              turn: {
+                status,
+                error: parsedError,
+              },
+            },
+          }
         : null;
     }
     return isValidId(params.requestId)

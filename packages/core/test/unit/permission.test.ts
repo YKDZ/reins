@@ -51,7 +51,7 @@ function request(
 }
 
 describe("spawn 与授权模式", () => {
-  test("未指定 authorizationMode 时缺省补全为 allowAll 并透传 spec", async () => {
+  test("未指定 authorizationMode 时保持缺省并透传 spec", async () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({
       driverFactory: fake.factory,
@@ -74,7 +74,7 @@ describe("spawn 与授权模式", () => {
     });
 
     expect(fake.controls.started.map((spec) => spec.authorizationMode)).toEqual(
-      ["allowAll", "interactive"],
+      [undefined, "interactive"],
     );
   });
 });

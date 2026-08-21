@@ -73,15 +73,19 @@ class ControlledClient implements ReinsClient {
         this.attachResolve = resolve;
       }) as Promise<ProtocolResponseFor<M>>;
     }
+    let result: unknown = {};
     if (method === "resolvePermission") {
-      this.resolutions.push(
-        (params as ProtocolParams<"resolvePermission">).permissionId,
-      );
+      const resolution = params as ProtocolParams<"resolvePermission">;
+      this.resolutions.push(resolution.permissionId);
+      result = {
+        sessionId: resolution.sessionId,
+        permissionId: resolution.permissionId,
+      };
     }
     return Promise.resolve({
       kind: "response",
       requestId,
-      result: {},
+      result,
     }) as Promise<ProtocolResponseFor<M>>;
   }
 

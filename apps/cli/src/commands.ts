@@ -29,6 +29,7 @@ import {
   printInterruptResult,
   printKillResult,
   printListResult,
+  printResolvePermissionAck,
   printSendAck,
   printSpawnResult,
   printWaitResult,
@@ -249,9 +250,7 @@ async function runResolvePermission(
       permissionId,
       resolution,
     });
-    requireResult(response);
-    if (ctx.mode === "pretty")
-      process.stdout.write(`Resolved ${permissionId}\n`);
+    printResolvePermissionAck(requireResult(response), ctx.mode);
   });
 }
 

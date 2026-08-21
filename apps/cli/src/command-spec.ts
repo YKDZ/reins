@@ -17,7 +17,12 @@ import {
 } from "@reins/protocol";
 import * as v from "valibot";
 
-import { usageError } from "./errors.ts";
+import {
+  usageError,
+  usageErrors,
+  type UsageError,
+  type UsageIssue,
+} from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 
 export type ValueKind =
@@ -161,7 +166,7 @@ const commandSpecData = [
       {
         name: "authorizationMode",
         flags: "--authorization-mode <mode>",
-        description: "interactive | allow-all (default: allow-all)",
+        description: "interactive | allow-all",
         kind: { type: "enum", values: ["interactive", "allow-all"] },
       },
       {
@@ -380,7 +385,7 @@ const commandSpecData = [
       {
         name: "authorizationMode",
         flags: "--authorization-mode <mode>",
-        description: "interactive | allow-all (default: allow-all)",
+        description: "interactive | allow-all",
         kind: { type: "enum", values: ["interactive", "allow-all"] },
       },
       {
@@ -716,7 +721,8 @@ export function validateCommand(
           options[constraint.field] !== undefined &&
           constraint.with.some((field) => options[field] !== undefined)
         )
-          throw usageError("invalid_combination", {
+          throw usageError({
+            issue: "invalid_combination",
             field: flagFor(spec, constraint.field),
             hint: constraint.hint,
           });
@@ -726,7 +732,8 @@ export function validateCommand(
           options[constraint.field] !== undefined &&
           options[constraint.required] === undefined
         )
-          throw usageError("invalid_combination", {
+          throw usageError({
+            issue: "invalid_combination",
             field: flagFor(spec, constraint.field),
             hint: constraint.hint,
           });
@@ -737,7 +744,8 @@ export function validateCommand(
           options[constraint.until] !== undefined &&
           String(options[constraint.since]) > String(options[constraint.until])
         )
-          throw usageError("invalid_combination", {
+          throw usageError({
+            issue: "invalid_combination",
             field: `${flagFor(spec, constraint.since)}, ${flagFor(spec, constraint.until)}`,
             hint: constraint.hint,
           });
@@ -747,7 +755,8 @@ export function validateCommand(
           mode === constraint.mode &&
           options[constraint.field] === constraint.value
         )
-          throw usageError("invalid_combination", {
+          throw usageError({
+            issue: "invalid_combination",
             field: flagFor(spec, constraint.field),
             hint: constraint.hint,
           });
@@ -897,25 +906,12 @@ function validateInvocationShape(
   options: Record<string, unknown>,
 ): void {
   if (args.length > spec.args.length) {
-    throw usageError("invalid_value", {
+    throw usageError({
+      issue: "invalid_value",
       field: "arguments",
       detail: "Too many arguments",
       hint: "Remove the extra arguments",
     });
-  }
-  for (let index = 0; index < spec.args.length; index += 1) {
-    const arg = spec.args[index];
-    if (arg === undefined) continue;
-    const value = args[index];
-    if (
-      value === undefined ||
-      (arg.variadic === true && Array.isArray(value) && value.length === 0)
-    ) {
-      throw usageError("missing_argument", {
-        target: "argument",
-        field: arg.name,
-      });
-    }
   }
   const knownOptions = new Set([
     ...spec.options.map((option) => option.name),
@@ -923,7 +919,8 @@ function validateInvocationShape(
   ]);
   for (const name of Object.keys(options)) {
     if (!knownOptions.has(name)) {
-      throw usageError("unknown_option", {
+      throw usageError({
+        issue: "unknown_option",
         value: `--${name}`,
         valid: [
           ...spec.options.map((option) => flagDisplay(option.flags)),
@@ -932,14 +929,55 @@ function validateInvocationShape(
       });
     }
   }
-  for (const option of spec.options) {
-    if (option.required === true && options[option.name] === undefined) {
-      throw usageError("missing_argument", {
-        target: "option",
-        field: flagDisplay(option.flags),
-      });
+  const missing = missingRequiredUsageError(spec, args, options);
+  if (missing !== undefined) throw missing;
+}
+
+export function missingRequiredUsageError(
+  spec: CommandSpec,
+  args: readonly unknown[],
+  options: Readonly<Record<string, unknown>>,
+): UsageError | undefined {
+  const issues: UsageIssue[] = [];
+  for (let index = 0; index < spec.args.length; index += 1) {
+    const arg = spec.args[index];
+    if (arg === undefined) continue;
+    const value = args[index];
+    if (
+      value === undefined ||
+      (arg.variadic === true && Array.isArray(value) && value.length === 0)
+    ) {
+      issues.push(missingIssue("argument", arg.name, arg));
     }
   }
+  for (const option of spec.options) {
+    if (option.required === true && options[option.name] === undefined) {
+      issues.push(missingIssue("option", option.flags, option));
+    }
+  }
+  const [first, ...rest] = issues;
+  return first === undefined ? undefined : usageErrors([first, ...rest]);
+}
+
+function missingIssue(
+  target: "argument" | "option",
+  field: string,
+  declaration: Pick<CommandArg | CommandOption, "description" | "kind">,
+): UsageIssue {
+  if (declaration.kind.type === "enum") {
+    return {
+      issue: "missing_argument",
+      target,
+      field,
+      valid: [...declaration.kind.values],
+    };
+  }
+  return {
+    issue: "missing_argument",
+    target,
+    field,
+    hint: valueHint(declaration.kind) ?? declaration.description,
+  };
 }
 
 function flagFor(spec: CommandSpec, name: string): string {
@@ -956,7 +994,11 @@ function validateValue(
 ): void {
   if (variadic) {
     if (!Array.isArray(value)) {
-      throw usageError("invalid_value", { field, value: String(value) });
+      throw usageError({
+        issue: "invalid_value",
+        field,
+        value: String(value),
+      });
     }
     for (const item of value) validateValue(field, kind, item, false);
     return;
@@ -965,15 +1007,24 @@ function validateValue(
     case "text":
     case "dynamic":
       if (typeof value !== "string")
-        throw usageError("invalid_value", { field, value: String(value) });
+        throw usageError({
+          issue: "invalid_value",
+          field,
+          value: String(value),
+        });
       return;
     case "boolean":
       if (typeof value !== "boolean")
-        throw usageError("invalid_value", { field, value: String(value) });
+        throw usageError({
+          issue: "invalid_value",
+          field,
+          value: String(value),
+        });
       return;
     case "enum": {
       if (typeof value !== "string" || !kind.values.includes(value)) {
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           valid: [...kind.values],
@@ -989,7 +1040,8 @@ function validateValue(
         (kind.min !== undefined && numeric < kind.min) ||
         (kind.max !== undefined && numeric > kind.max)
       ) {
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           hint: kind.hint,
@@ -1003,7 +1055,8 @@ function validateValue(
       try {
         parsed = JSON.parse(value) as unknown;
       } catch {
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value,
           hint: kind.hint,
@@ -1014,7 +1067,8 @@ function validateValue(
         parsed === null ||
         Array.isArray(parsed)
       ) {
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value,
           hint: kind.hint,
@@ -1027,7 +1081,8 @@ function validateValue(
         typeof value !== "string" ||
         !v.safeParse(sessionNameSchema, value).success
       )
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           hint: kind.hint,
@@ -1038,7 +1093,8 @@ function validateValue(
         typeof value !== "string" ||
         !v.safeParse(sessionIdSchema, value).success
       )
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           hint: kind.hint,
@@ -1049,7 +1105,8 @@ function validateValue(
         typeof value !== "string" ||
         !v.safeParse(permissionIdSchema, value).success
       )
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           hint: kind.hint,
@@ -1060,7 +1117,8 @@ function validateValue(
         typeof value !== "string" ||
         !v.safeParse(turnIdSchema, value).success
       )
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           hint: kind.hint,
@@ -1071,7 +1129,8 @@ function validateValue(
         typeof value !== "string" ||
         !v.safeParse(diagnosticIdSchema, value).success
       )
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           hint: kind.hint,
@@ -1082,7 +1141,8 @@ function validateValue(
         typeof value !== "string" ||
         !v.safeParse(utcMillisecondTimestampSchema, value).success
       )
-        throw usageError("invalid_value", {
+        throw usageError({
+          issue: "invalid_value",
           field,
           value: String(value),
           hint: kind.hint,

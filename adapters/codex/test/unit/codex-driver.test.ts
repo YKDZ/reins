@@ -5,6 +5,7 @@ import type {
   SessionId,
   SessionName,
   TurnId,
+  WorkerSpec,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
@@ -25,8 +26,9 @@ const permissionId = "p1" as PermissionId;
 const sessionName = "reviewer" as SessionName;
 
 function setup(
-  authorizationMode: "interactive" | "allowAll" = "interactive",
+  authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
   terminateTimeoutMs?: number,
+  workerOverrides: Partial<Pick<WorkerSpec, "model" | "reasoning">> = {},
 ): {
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
@@ -54,7 +56,8 @@ function setup(
     harness: "codex",
     message: "检查",
     cwd: "/tmp/demo",
-    authorizationMode,
+    ...(authorizationMode === "omitted" ? {} : { authorizationMode }),
+    ...workerOverrides,
   });
   return { events, diagnostics, fake, driver };
 }
@@ -156,6 +159,59 @@ describe("codex driver", () => {
     });
   });
 
+  test("未指定授权模式时不注入 approvalPolicy 或 sandbox", async () => {
+    const { fake } = setup("omitted");
+    await flush();
+
+    const threadStart = fake.controls.requests()[1];
+    expect(threadStart?.params).toEqual({
+      ephemeral: true,
+      cwd: "/tmp/demo",
+    });
+  });
+
+  test("model 与 reasoning 只作为每次 turn/start override", async () => {
+    const { diagnostics, driver, fake } = setup("interactive", undefined, {
+      model: "gpt-5.4",
+      reasoning: "high",
+    });
+    await flush();
+
+    expect(fake.controls.requests()[1]?.params).toEqual({
+      ephemeral: true,
+      cwd: "/tmp/demo",
+      approvalPolicy: "on-request",
+    });
+    expect(fake.controls.requests()[2]?.params).toEqual({
+      threadId: "thr1",
+      input: [{ type: "text", text: "检查", text_elements: [] }],
+      model: "gpt-5.4",
+      effort: "high",
+    });
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { status: "completed", error: null } },
+    });
+    await flush();
+    driver.deliver(sessionId, secondTurnId, "下一步");
+    await flush();
+    expect(fake.controls.requests().at(-1)?.params).toEqual({
+      threadId: "thr1",
+      input: [{ type: "text", text: "下一步", text_elements: [] }],
+      model: "gpt-5.4",
+      effort: "high",
+    });
+    expect(
+      diagnostics.filter(
+        (input) =>
+          input.kind === "mapping_gap" &&
+          input.operation === "spawn" &&
+          input.fields.includes("reasoning"),
+      ),
+    ).toEqual([]);
+  });
+
   test("agentMessage delta 与 completed、turn completed 映射事件流", async () => {
     const { events, fake } = setup();
     await flush();
@@ -177,7 +233,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed" } },
+      params: { turn: { status: "completed", error: null } },
     });
     await flush();
 
@@ -316,13 +372,18 @@ describe("codex driver", () => {
     ]);
   });
 
-  test("worker reported failure 只记录类型化 turn_failure", async () => {
+  test("worker reported failure 保留上游 message 到 turn_failure", async () => {
     const { diagnostics, fake } = setup();
     await flush();
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "failed" } },
+      params: {
+        turn: {
+          status: "failed",
+          error: { message: "Requested reasoning effort is unsupported" },
+        },
+      },
     });
     await flush();
 
@@ -333,6 +394,29 @@ describe("codex driver", () => {
         reason: "worker_reported_failure",
         sessionId,
         turnId: firstTurnId,
+        message: expect.objectContaining({
+          text: "Requested reasoning effort is unsupported",
+        }),
+      }),
+    ]);
+  });
+
+  test("worker 未提供失败 message 时使用通用证据", async () => {
+    const { diagnostics, fake } = setup();
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { status: "failed", error: null } },
+    });
+    await flush();
+
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
+      expect.objectContaining({
+        kind: "turn_failure",
+        message: expect.objectContaining({
+          text: "worker reported a failed turn",
+        }),
       }),
     ]);
   });
@@ -400,7 +484,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed" } },
+      params: { turn: { status: "completed", error: null } },
     });
     await flush();
     driver.deliver(sessionId, secondTurnId, "下一步");
@@ -435,7 +519,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "interrupted" } },
+      params: { turn: { status: "interrupted", error: null } },
     });
     await flush();
     expect(events.at(-1)).toEqual({
@@ -562,7 +646,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed" } },
+      params: { turn: { status: "completed", error: null } },
     });
     await flush();
     fake.controls.end();
@@ -637,7 +721,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed" } },
+      params: { turn: { status: "completed", error: null } },
     });
     await flush();
     const completedBeforeEof = events.filter(

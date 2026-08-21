@@ -1,9 +1,10 @@
-import { Command } from "commander";
+import { Command, Help } from "commander";
 
 import {
   ROOT_USAGE,
   commandSpecs,
   flagDisplay,
+  fullUsageFor,
   parseCommandInvocation,
   usageFor,
   valueHint,
@@ -24,6 +25,7 @@ function prettyOf(
 }
 
 export function registerCommands(program: Command): void {
+  const defaultHelp = new Help();
   program
     .name("reins")
     .description("Control plane for agent harnesses")
@@ -31,7 +33,17 @@ export function registerCommands(program: Command): void {
     .usage(ROOT_USAGE)
     .option("--pretty", "human-readable output (default: NDJSON)")
     .exitOverride()
-    .configureOutput({ writeErr: () => {} });
+    .configureOutput({ writeErr: () => {} })
+    .configureHelp({
+      subcommandTerm: (command) => {
+        const spec = commandSpecs.find(
+          (candidate) => candidate.name === command.name(),
+        );
+        return spec === undefined
+          ? defaultHelp.subcommandTerm(command)
+          : fullUsageFor(spec);
+      },
+    });
 
   for (const spec of commandSpecs) {
     const command = program
@@ -45,7 +57,7 @@ export function registerCommands(program: Command): void {
       command.addHelpText("after", `\nConstraints:\n${constraintText}\n`);
     for (const arg of spec.args) {
       command.argument(
-        arg.variadic === true ? `<${arg.name}...>` : `<${arg.name}>`,
+        arg.variadic === true ? `[${arg.name}...]` : `[${arg.name}]`,
         helpDescription(arg.description, valueHint(arg.kind)),
       );
     }
@@ -55,7 +67,7 @@ export function registerCommands(program: Command): void {
         valueHint(option.kind),
       );
       if (option.required === true) {
-        command.requiredOption(option.flags, description);
+        command.option(option.flags, description);
       } else if (option.defaultValue !== undefined) {
         command.option(option.flags, description, option.defaultValue);
       } else {

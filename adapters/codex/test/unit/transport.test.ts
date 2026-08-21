@@ -568,6 +568,90 @@ describe("codex transport", () => {
     await transport.close();
   });
 
+  test("turn/completed 保留 worker 提供的失败 message", async () => {
+    const fake = fakeChild();
+    const transport = createCodexTransport({ spawnChild: () => fake.child });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: "turn/completed",
+        params: {
+          turn: {
+            status: "failed",
+            error: { message: "Requested reasoning effort is unsupported" },
+          },
+        },
+      })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: {
+        kind: "notification",
+        method: "turn/completed",
+        params: {
+          turn: {
+            status: "failed",
+            error: { message: "Requested reasoning effort is unsupported" },
+          },
+        },
+      },
+    });
+    await transport.close();
+  });
+
+  test("turn/completed 缺少或伪造 error 时按已知事件畸形处理", async () => {
+    const fake = fakeChild();
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const transport = createCodexTransport({
+      diagnostics: async (input) => {
+        diagnostics.push(input);
+        return undefined;
+      },
+      spawnChild: () => fake.child,
+    });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+
+    for (const turn of [
+      { status: "failed" },
+      { status: "failed", error: { message: 7 } },
+    ]) {
+      fake.stdout.write(
+        `${JSON.stringify({ method: "turn/completed", params: { turn } })}\n`,
+      );
+    }
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: "turn/completed",
+        params: { turn: { status: "completed", error: null } },
+      })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        method: "turn/completed",
+        params: { turn: { status: "completed", error: null } },
+      },
+    });
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        reason: "invalid_shape",
+      }),
+      expect.objectContaining({
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        reason: "invalid_shape",
+      }),
+    ]);
+    await transport.close();
+  });
+
   test("已知 item notification 中未知 variant 不得当作无关消息忽略", async () => {
     const fake = fakeChild();
     const diagnostics: DriverDiagnosticFact[] = [];
@@ -803,7 +887,7 @@ describe("codex transport", () => {
     fake.stdout.write(
       `${JSON.stringify({
         method: "turn/completed",
-        params: { turn: { status: "completed" } },
+        params: { turn: { status: "completed", error: null } },
       })}\n`,
     );
     fake.stdout.end();

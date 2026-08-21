@@ -813,7 +813,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
     expect(resolved).toMatchObject({
       kind: "response",
-      result: {},
+      result: { sessionId, permissionId },
     });
     expect(fake.calls.resolved).toEqual([{ outcome: "allow", scope: "once" }]);
     expect(

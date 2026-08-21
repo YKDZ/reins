@@ -23,22 +23,45 @@ export function isMachineError(value: unknown): value is MachineError {
 }
 
 export type UsageIssue =
-  | "missing_argument"
-  | "unknown_command"
-  | "unknown_option"
-  | "invalid_value"
-  | "invalid_combination";
+  | {
+      readonly issue: "missing_argument";
+      readonly target: "argument" | "option";
+      readonly field: string;
+      readonly valid?: readonly string[];
+      readonly hint?: string;
+    }
+  | {
+      readonly issue: "unknown_command";
+      readonly value?: string;
+      readonly valid: readonly string[];
+      readonly didYouMean?: string;
+    }
+  | {
+      readonly issue: "unknown_option";
+      readonly value?: string;
+      readonly valid: readonly string[];
+      readonly didYouMean?: string;
+    }
+  | {
+      readonly issue: "invalid_value";
+      readonly target?: "argument" | "option";
+      readonly field?: string;
+      readonly value?: string;
+      readonly valid?: readonly string[];
+      readonly hint?: string;
+      readonly detail?: string;
+    }
+  | {
+      readonly issue: "invalid_combination";
+      readonly field?: string;
+      readonly hint?: string;
+    };
+
+export type UsageIssues = readonly [UsageIssue, ...UsageIssue[]];
 
 export type UsageError = {
   readonly code: "usage_error";
-  readonly issue: UsageIssue;
-  readonly target?: "argument" | "option";
-  readonly field?: string;
-  readonly value?: string;
-  readonly valid?: readonly string[];
-  readonly hint?: string;
-  readonly detail?: string;
-  readonly didYouMean?: string;
+  readonly issues: UsageIssues;
 };
 
 export type InputError = {
@@ -62,11 +85,12 @@ export function isInputError(value: unknown): value is InputError {
   );
 }
 
-export function usageError(
-  issue: UsageIssue,
-  extra: Omit<UsageError, "code" | "issue">,
-): UsageError {
-  return { code: "usage_error", issue, ...extra };
+export function usageError(issue: UsageIssue): UsageError {
+  return { code: "usage_error", issues: [issue] };
+}
+
+export function usageErrors(issues: UsageIssues): UsageError {
+  return { code: "usage_error", issues };
 }
 
 export function isUsageError(value: unknown): value is UsageError {

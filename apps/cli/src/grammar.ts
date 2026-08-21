@@ -1,4 +1,4 @@
-import type { MachineError } from "@reins/protocol";
+import type { InvalidParamIssue, MachineError } from "@reins/protocol";
 import type { CommanderError } from "commander";
 
 import {
@@ -8,15 +8,26 @@ import {
   type CommandSpec,
   type ValueKind,
 } from "./command-spec.ts";
-import type { CliError, UsageError } from "./errors.ts";
+import type { CliError, UsageError, UsageIssue } from "./errors.ts";
 import { usageError } from "./errors.ts";
 
-export type RenderedError = {
+export type RenderedErrorItem = {
   readonly message: string;
   readonly suggestion?: string;
 };
 
+export type RenderedError = {
+  readonly items: readonly [RenderedErrorItem, ...RenderedErrorItem[]];
+};
+
 function renderedError(message: string, suggestion?: string): RenderedError {
+  return { items: [renderedErrorItem(message, suggestion)] };
+}
+
+function renderedErrorItem(
+  message: string,
+  suggestion?: string,
+): RenderedErrorItem {
   return suggestion === undefined ? { message } : { message, suggestion };
 }
 
@@ -44,10 +55,14 @@ export function renderCliError(
     const rendered = renderInvalidParams(error);
     if (rendered !== null) return rendered;
   }
-  return { message: domainMessage(error) };
+  return renderedError(domainMessage(error));
 }
 
 export function jsonErrorMessage(rendered: RenderedError): string {
+  return rendered.items.map(jsonErrorItemMessage).join(". ");
+}
+
+function jsonErrorItemMessage(rendered: RenderedErrorItem): string {
   if (rendered.suggestion === undefined) return rendered.message;
   const separator = rendered.message.endsWith("?") ? " " : ". ";
   return `${rendered.message}${separator}${rendered.suggestion}`;
@@ -73,77 +88,100 @@ export function commanderToUsageError(
   const quoted = /'([^']+)'/u.exec(firstLine)?.[1];
   switch (error.code) {
     case "commander.missingArgument":
-      return usageError("missing_argument", {
+      return usageError({
+        issue: "missing_argument",
         target: "argument",
         field: quoted ?? firstLine,
       });
     case "commander.missingMandatoryOptionValue":
-      return usageError("missing_argument", {
+      return usageError({
+        issue: "missing_argument",
         target: "option",
         field: quoted ?? firstLine,
       });
     case "commander.optionMissingArgument":
-      return usageError("missing_argument", {
+      return usageError({
+        issue: "missing_argument",
         target: "option",
         field: quoted ?? firstLine,
       });
     case "commander.unknownCommand":
-      return usageError("unknown_command", {
+      return usageError({
+        issue: "unknown_command",
         ...(quoted === undefined ? {} : { value: quoted }),
         valid: commandSpecs.map((candidate) => candidate.name),
         ...(didYouMean === undefined ? {} : { didYouMean }),
       });
     case "commander.unknownOption":
-      return usageError("unknown_option", {
+      return usageError({
+        issue: "unknown_option",
         ...(quoted === undefined ? {} : { value: quoted }),
         valid: longFlagsFor(spec),
         ...(didYouMean === undefined ? {} : { didYouMean }),
       });
     case "commander.excessArguments":
-      return usageError("invalid_value", {
+      return usageError({
+        issue: "invalid_value",
         field: "arguments",
         detail: firstLine,
         hint: "Remove the extra arguments",
       });
     default:
-      return usageError("invalid_value", { detail: firstLine });
+      return usageError({ issue: "invalid_value", detail: firstLine });
   }
 }
 
-// oxlint-disable-next-line typescript/consistent-return -- UsageIssue 是闭集；禁止用 default 掩盖新增成员。
 function renderUsageError(
   error: UsageError,
   spec: CommandSpec | undefined,
 ): RenderedError {
-  const { issue, target, field, value, valid, hint, detail, didYouMean } =
-    error;
-  switch (issue) {
+  const [first, ...rest] = error.issues;
+  return {
+    items: [
+      renderUsageIssue(first, spec),
+      ...rest.map((issue) => renderUsageIssue(issue, spec)),
+    ],
+  };
+}
+
+// oxlint-disable-next-line typescript/consistent-return -- UsageIssue 是闭集；禁止用 default 掩盖新增成员。
+function renderUsageIssue(
+  issue: UsageIssue,
+  spec: CommandSpec | undefined,
+): RenderedErrorItem {
+  switch (issue.issue) {
     case "missing_argument": {
       const message =
-        target === "option"
-          ? `Missing required option '${field ?? ""}'`
-          : `Missing required argument '${field ?? ""}'`;
-      return renderedError(message, suggestionForMissing(spec, target, field));
+        issue.target === "option"
+          ? `Missing required option '${issue.field}'`
+          : `Missing required argument '${issue.field}'`;
+      return renderedErrorItem(
+        message,
+        allowedText(issue.valid) ??
+          issue.hint ??
+          suggestionForMissing(spec, issue.target, issue.field),
+      );
     }
     case "unknown_command":
-      return renderedError(
-        `Unknown command '${value ?? ""}'${didYouMean === undefined ? "" : `. Did you mean ${didYouMean}?`}`,
-        `Allowed: ${commandSpecs.map((candidate) => candidate.name).join(", ")}`,
+      return renderedErrorItem(
+        `Unknown command '${issue.value ?? ""}'${issue.didYouMean === undefined ? "" : `. Did you mean ${issue.didYouMean}?`}`,
+        allowedText(issue.valid),
       );
     case "unknown_option":
-      return renderedError(
-        `Unknown option '${value ?? ""}'${didYouMean === undefined ? "" : ` Did you mean ${didYouMean}?`}`,
-        allowedText(valid),
+      return renderedErrorItem(
+        `Unknown option '${issue.value ?? ""}'${issue.didYouMean === undefined ? "" : ` Did you mean ${issue.didYouMean}?`}`,
+        allowedText(issue.valid),
       );
     case "invalid_value":
-      return renderedError(
-        detail ?? `Invalid value '${value ?? ""}' for '${field ?? ""}'`,
-        allowedText(valid) ?? hint,
+      return renderedErrorItem(
+        issue.detail ??
+          `Invalid value '${issue.value ?? ""}' for '${issue.field ?? ""}'`,
+        allowedText(issue.valid) ?? issue.hint,
       );
     case "invalid_combination":
-      return renderedError(
-        `Invalid parameter combination${field === undefined ? "" : `: ${field}`}`,
-        hint,
+      return renderedErrorItem(
+        `Invalid parameter combination${issue.field === undefined ? "" : `: ${issue.field}`}`,
+        issue.hint,
       );
   }
 }
@@ -174,7 +212,7 @@ function findSpecItem(
 
 function renderUnknownHarness(error: MachineError): RenderedError {
   if (!("availableHarnesses" in error) || !("harness" in error))
-    return { message: "Unknown harness" };
+    return renderedError("Unknown harness");
   const harnesses = error.availableHarnesses;
   return renderedError(
     `Unknown harness '${error.harness}'`,
@@ -182,22 +220,30 @@ function renderUnknownHarness(error: MachineError): RenderedError {
   );
 }
 
-// oxlint-disable-next-line typescript/consistent-return -- InvalidParamIssue 是闭集；禁止用 default 掩盖新增成员。
 function renderInvalidParams(error: MachineError): RenderedError | null {
   if (!("issues" in error)) return null;
-  const issue = error.issues[0];
-  if (issue === undefined) return renderedError("Invalid parameters");
+  const [first, ...rest] = error.issues;
+  return {
+    items: [
+      renderInvalidParamIssue(first),
+      ...rest.map(renderInvalidParamIssue),
+    ],
+  };
+}
+
+// oxlint-disable-next-line typescript/consistent-return -- InvalidParamIssue 是闭集；禁止用 default 掩盖新增成员。
+function renderInvalidParamIssue(issue: InvalidParamIssue): RenderedErrorItem {
   switch (issue.issue) {
     case "missing_required":
-      return renderedError(`Missing required parameter: ${issue.path}`);
+      return renderedErrorItem(`Missing required parameter: ${issue.path}`);
     case "invalid_type":
-      return renderedError(
+      return renderedErrorItem(
         `Invalid parameter type at ${issue.path}; expected ${issue.expected}`,
       );
     case "invalid_value":
-      return renderedError(`Invalid parameter value: ${issue.path}`);
+      return renderedErrorItem(`Invalid parameter value: ${issue.path}`);
     case "invalid_combination":
-      return renderedError(
+      return renderedErrorItem(
         `Invalid parameter combination: ${issue.paths.join(", ")}`,
       );
   }

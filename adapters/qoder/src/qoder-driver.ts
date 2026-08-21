@@ -140,15 +140,14 @@ export function createQoderDriver(deps: {
           ...(spec.reasoning === undefined ? [] : (["reasoning"] as const)),
           ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
         ];
-        if (unsupportedFields.length > 0) {
+        const [firstUnsupportedField, ...otherUnsupportedFields] =
+          unsupportedFields;
+        if (firstUnsupportedField !== undefined) {
           void session.diagnostic({
             kind: "mapping_gap",
             operation: "spawn",
             reason: "unsupported_input",
-            fields: unsupportedFields as [
-              "agent" | "reasoning" | "sandbox",
-              ...("agent" | "reasoning" | "sandbox")[],
-            ],
+            fields: [firstUnsupportedField, ...otherUnsupportedFields],
           });
         }
         const options: QoderOptions = {
@@ -156,17 +155,18 @@ export function createQoderDriver(deps: {
           persistSession: false,
           includePartialMessages: true,
           abortController,
-          permissionMode:
-            spec.authorizationMode === "allowAll"
-              ? "bypassPermissions"
-              : "default",
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.authorizationMode === "allowAll"
-            ? { allowDangerouslySkipPermissions: true }
-            : {}),
-          ...(spec.authorizationMode === "interactive"
-            ? { canUseTool: makeCanUseTool() }
-            : {}),
+            ? {
+                permissionMode: "bypassPermissions",
+                allowDangerouslySkipPermissions: true,
+              }
+            : spec.authorizationMode === "interactive"
+              ? {
+                  permissionMode: "default",
+                  canUseTool: makeCanUseTool(),
+                }
+              : {}),
         };
         try {
           query = deps.sdk.query({ prompt: stream, options });

@@ -732,7 +732,9 @@ export function createSessionMachine(options: {
                 harness: spec.harness,
                 message: spec.message,
                 cwd,
-                authorizationMode: spec.authorizationMode ?? "allowAll",
+                ...(spec.authorizationMode === undefined
+                  ? {}
+                  : { authorizationMode: spec.authorizationMode }),
                 ...(spec.agent === undefined ? {} : { agent: spec.agent }),
                 ...(spec.model === undefined ? {} : { model: spec.model }),
                 ...(spec.reasoning === undefined

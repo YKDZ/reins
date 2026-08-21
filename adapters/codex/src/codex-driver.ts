@@ -71,6 +71,8 @@ export function createCodexDriver(deps: {
     let workerExitedUnexpectedly = false;
     let activeTurnId: string | null = null;
     let ended = false;
+    let turnOverrides: { readonly model?: string; readonly effort?: string } =
+      {};
     const pendingByRequest = new Map<number, PermissionId>();
 
     async function startTurn(
@@ -84,6 +86,7 @@ export function createCodexDriver(deps: {
         const turn = await transport.request("turn/start", {
           threadId,
           input: [textInput(message)],
+          ...turnOverrides,
         });
         activeTurnId = turn.turn.id;
       } catch (error) {
@@ -214,20 +217,22 @@ export function createCodexDriver(deps: {
             : {}),
         });
         transport.start();
+        turnOverrides = {
+          ...(spec.model === undefined ? {} : { model: spec.model }),
+          ...(spec.reasoning === undefined ? {} : { effort: spec.reasoning }),
+        };
         const unsupportedFields = [
           ...(spec.agent === undefined ? [] : (["agent"] as const)),
-          ...(spec.reasoning === undefined ? [] : (["reasoning"] as const)),
           ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
         ];
-        if (unsupportedFields.length > 0) {
+        const [firstUnsupportedField, ...otherUnsupportedFields] =
+          unsupportedFields;
+        if (firstUnsupportedField !== undefined) {
           void session.diagnostic({
             kind: "mapping_gap",
             operation: "spawn",
             reason: "unsupported_input",
-            fields: unsupportedFields as [
-              "agent" | "reasoning" | "sandbox",
-              ...("agent" | "reasoning" | "sandbox")[],
-            ],
+            fields: [firstUnsupportedField, ...otherUnsupportedFields],
           });
         }
         void (async () => {
@@ -240,12 +245,14 @@ export function createCodexDriver(deps: {
             const thread = await transport?.request("thread/start", {
               ephemeral: true,
               cwd: spec.cwd,
-              approvalPolicy:
-                spec.authorizationMode === "allowAll" ? "never" : "on-request",
-              ...(spec.model === undefined ? {} : { model: spec.model }),
               ...(spec.authorizationMode === "allowAll"
-                ? { sandbox: "danger-full-access" }
-                : {}),
+                ? {
+                    approvalPolicy: "never",
+                    sandbox: "danger-full-access",
+                  }
+                : spec.authorizationMode === "interactive"
+                  ? { approvalPolicy: "on-request" }
+                  : {}),
             });
             threadId = thread?.thread.id ?? "";
             workerInitialized = true;

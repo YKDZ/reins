@@ -262,6 +262,14 @@ export type ResolvePermissionParams = v.InferOutput<
   typeof resolvePermissionParamsSchema
 >;
 
+export const resolvePermissionAckSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  permissionId: permissionIdSchema,
+});
+export type ResolvePermissionAck = v.InferOutput<
+  typeof resolvePermissionAckSchema
+>;
+
 export const killParamsSchema = v.strictObject({
   ids: v.array(sessionIdSchema),
 });
@@ -1687,7 +1695,7 @@ export type WorkerSpec = {
   readonly model?: string;
   readonly reasoning?: string;
   readonly cwd: string;
-  readonly authorizationMode: AuthorizationMode;
+  readonly authorizationMode?: AuthorizationMode;
   readonly sandbox?: string;
   readonly captureHarnessStderr?: boolean;
   readonly sessionName: SessionName;
@@ -1875,7 +1883,7 @@ const protocolResultSchemas = {
   kill: v.array(killResultSchema),
   list: v.array(sessionInfoSchema),
   attach: attachResultSchema,
-  resolvePermission: v.strictObject({}),
+  resolvePermission: resolvePermissionAckSchema,
   capabilities: capabilitiesResultSchema,
   diagnostics: diagnosticsResultSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;

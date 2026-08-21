@@ -218,6 +218,11 @@ describe("per-method 参数与结果 schema", () => {
       sessionId: "reviewer@g7",
       replayed: 0,
     });
+    ok(protocolResultSchemaFor("resolvePermission"), {
+      sessionId: "reviewer@g7",
+      permissionId: "p1",
+    });
+    bad(protocolResultSchemaFor("resolvePermission"), {});
     ok(protocolResultSchemaFor("capabilities"), {
       capabilities: [],
       failures: [],

@@ -30,18 +30,24 @@ export function printError(
 ): void {
   const rendered = renderCliError(error, spec);
   if (mode === "json") {
+    const message = jsonErrorMessage(rendered);
     printJsonLine({
       ...error,
       message:
         "diagnosticId" in error && error.diagnosticId !== undefined
-          ? `${jsonErrorMessage(rendered)}. reins diagnostics --id ${error.diagnosticId}`
-          : jsonErrorMessage(rendered),
+          ? `${message}. reins diagnostics --id ${error.diagnosticId}`
+          : message,
+      ...(isUsageClassError(error)
+        ? { usage: `reins ${fullUsageFor(spec)}` }
+        : {}),
     });
     return;
   }
-  process.stderr.write(`error: ${rendered.message}\n`);
-  if (rendered.suggestion !== undefined) {
-    process.stderr.write(`suggestion: ${rendered.suggestion}\n`);
+  for (const item of rendered.items) {
+    process.stderr.write(`error: ${item.message}\n`);
+    if (item.suggestion !== undefined) {
+      process.stderr.write(`suggestion: ${item.suggestion}\n`);
+    }
   }
   if ("diagnosticId" in error && error.diagnosticId !== undefined) {
     process.stderr.write(`diagnostic: ${error.diagnosticId}\n`);
@@ -187,11 +193,28 @@ export function printListResult(
     printJsonLine(sessions);
     return;
   }
+  if (sessions.length === 0) {
+    process.stdout.write("No sessions found\n");
+    return;
+  }
   for (const session of sessions) {
     process.stdout.write(
       `${session.sessionId}\t${session.harness}\t${session.state}\t${session.model ?? "-"}\t${session.turns}\t${session.lastStopReason ?? "-"}\n`,
     );
   }
+}
+
+export function printResolvePermissionAck(
+  ack: ProtocolResult<"resolvePermission">,
+  mode: OutputMode,
+): void {
+  if (mode === "json") {
+    printJsonLine(ack);
+    return;
+  }
+  process.stdout.write(
+    `Resolved permission ${ack.permissionId} on session ${ack.sessionId}\n`,
+  );
 }
 
 export function printCapabilitiesResult(

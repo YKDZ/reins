@@ -126,7 +126,9 @@ export function mapNotification(
           kind: "turn_failure",
           operation: "run_turn",
           reason: "worker_reported_failure",
-          message: makeTextEvidence("worker reported a failed turn"),
+          message: makeTextEvidence(
+            turn.error?.message ?? "worker reported a failed turn",
+          ),
         });
         return [session.endTurn("failed")];
       }

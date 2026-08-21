@@ -294,6 +294,10 @@ describe("A 类：帮助（stdout + 退出 0）", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain("Usage: reins [options] <command>");
+    expect(result.stdout).toContain(
+      "spawn <harness> <message...> --name <session-name> [options]",
+    );
+    expect(result.stdout).not.toContain("spawn [options] [harness]");
   });
 
   test("子命令 --help 输出完整参数表", async () => {
@@ -416,7 +420,7 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.exitCode).toBe(64);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "usage_error",
-      issue: "invalid_combination",
+      issues: [{ issue: "invalid_combination" }],
     });
   });
 
@@ -453,8 +457,7 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.exitCode).toBe(64);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "usage_error",
-      issue: "invalid_value",
-      field: "--name",
+      issues: [{ issue: "invalid_value", field: "--name" }],
     });
   });
 
@@ -598,7 +601,7 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.exitCode).toBe(64);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "usage_error",
-      issue: "invalid_combination",
+      issues: [{ issue: "invalid_combination" }],
     });
   });
   test("capabilities 输出能力矩阵（JSON 默认）", async () => {
@@ -940,6 +943,53 @@ describe("CLI 进程边界（缝 D）", () => {
     await runCli(["kill", sessionId ?? ""], env);
   });
 
+  test.each([
+    ["json", []],
+    ["pretty", ["--pretty"]],
+  ] as const)(
+    "resolve-permission %s 成功返回 typed ack",
+    async (mode, prefix) => {
+      const { env } = await freshEnv();
+      const spawned = await runCli(
+        ["spawn", "permission", "do it", "--name", `resolve-${mode}`],
+        env,
+      );
+      const sessionId = sessionIdFrom(spawned);
+      const resolved = await runCli(
+        [
+          ...prefix,
+          "resolve-permission",
+          sessionId,
+          "p1",
+          "--outcome",
+          "allow",
+        ],
+        env,
+      );
+      expect(resolved.exitCode).toBe(0);
+      expect(resolved.stderr).toBe("");
+      if (mode === "json") {
+        expect(JSON.parse(resolved.stdout)).toEqual({
+          sessionId,
+          permissionId: "p1",
+        });
+      } else {
+        expect(resolved.stdout).toBe(
+          `Resolved permission p1 on session ${sessionId}\n`,
+        );
+      }
+      await runCli(["kill", sessionId], env);
+    },
+  );
+
+  test("--pretty list 对空集合给出显式成功", async () => {
+    const { env } = await freshEnv();
+    const result = await runCli(["--pretty", "list"], env);
+    expect(result.exitCode).toBe(0);
+    expect(result.stderr).toBe("");
+    expect(result.stdout).toBe("No sessions found\n");
+  });
+
   test("attach pretty 权限交互并随决议结束", async () => {
     const { env } = await freshEnv();
     const spawned = await runCli(
@@ -1107,6 +1157,30 @@ function suggestionForMissing(
   arg: CommandArg | { flags: string; description: string; kind: ValueKind },
 ): string {
   return valueHint(arg.kind) ?? arg.description;
+}
+
+function allMissingIssues(spec: CommandSpec): unknown[] {
+  return [
+    ...spec.args.map((arg) => ({
+      target: "argument" as const,
+      field: arg.name,
+      declaration: arg,
+    })),
+    ...spec.options
+      .filter((option) => option.required === true)
+      .map((option) => ({
+        target: "option" as const,
+        field: option.flags,
+        declaration: option,
+      })),
+  ].map(({ target, field, declaration }) => ({
+    issue: "missing_argument",
+    target,
+    field,
+    ...(declaration.kind.type === "enum"
+      ? { valid: [...declaration.kind.values] }
+      : { hint: suggestionForMissing(declaration) }),
+  }));
 }
 
 function missingArgumentCases(): UsageCase[] {
@@ -1590,6 +1664,22 @@ describe("CLI 错误矩阵（缝 D，从命令规范派生）", () => {
     });
   }
 
+  for (const spec of commandSpecs) {
+    const expectedIssues = allMissingIssues(spec);
+    if (expectedIssues.length === 0) continue;
+    test(`${spec.name} 一次返回全部声明必填项`, async () => {
+      const { env } = await freshEnv();
+      const result = await runCli([spec.name], env);
+      expect(result.exitCode).toBe(64);
+      expect(result.stderr).toBe("");
+      expect(JSON.parse(result.stdout)).toMatchObject({
+        code: "usage_error",
+        issues: expectedIssues,
+        usage: `reins ${fullUsageFor(spec)}`,
+      });
+    });
+  }
+
   for (const usageCase of usageCases) {
     const spec =
       usageCase.specName === undefined
@@ -1619,32 +1709,37 @@ describe("CLI 错误矩阵（缝 D，从命令规范派生）", () => {
         const parsed = JSON.parse(result.stdout) as {
           code: string;
           message: string;
-          issue?: string;
-          target?: string;
-          field?: string;
-          value?: string;
-          valid?: string[];
-          hint?: string;
+          issues?: Array<{
+            issue: string;
+            target?: string;
+            field?: string;
+            value?: string;
+            valid?: string[];
+            hint?: string;
+          }>;
+          usage?: string;
         };
+        const primaryIssue = parsed.issues?.[0];
         expect(parsed.code).toBe(usageCase.code ?? "usage_error");
         if (usageCase.issue !== undefined) {
-          expect(parsed.issue).toBe(usageCase.issue);
+          expect(primaryIssue?.issue).toBe(usageCase.issue);
         }
         if (usageCase.target !== undefined) {
-          expect(parsed.target).toBe(usageCase.target);
+          expect(primaryIssue?.target).toBe(usageCase.target);
         }
         if (usageCase.field !== undefined) {
-          expect(parsed.field).toBe(usageCase.field);
+          expect(primaryIssue?.field).toBe(usageCase.field);
         }
         if (usageCase.value !== undefined) {
-          expect(parsed.value).toBe(usageCase.value);
+          expect(primaryIssue?.value).toBe(usageCase.value);
         }
         if (usageCase.valid !== undefined) {
-          expect(parsed.valid).toEqual([...usageCase.valid]);
+          expect(primaryIssue?.valid).toEqual([...usageCase.valid]);
         }
         if (usageCase.hint !== undefined) {
-          expect(parsed.hint).toBe(usageCase.hint);
+          expect(primaryIssue?.hint).toBe(usageCase.hint);
         }
+        expect(parsed.usage).toBe(`reins ${fullUsageFor(spec)}`);
         for (const fragment of usageCase.suggestionContains ?? []) {
           expect(parsed.message, usageCase.name).toContain(fragment);
         }
@@ -1665,6 +1760,8 @@ describe("CLI 输出金样（逐字节）", () => {
     expect(result.stderr).toBe(
       "error: Missing required argument 'harness'\n" +
         "suggestion: Run 'reins capabilities' to list valid harnesses\n" +
+        "error: Missing required argument 'message'\n" +
+        "suggestion: initial message\n" +
         "usage: reins spawn <harness> <message...> --name <session-name> [options]\n",
     );
   });
@@ -1677,12 +1774,72 @@ describe("CLI 输出金样（逐字节）", () => {
     expect(result.stdout).toBe(
       `${JSON.stringify({
         code: "usage_error",
-        issue: "missing_argument",
-        target: "argument",
-        field: "harness",
+        issues: [
+          {
+            issue: "missing_argument",
+            target: "argument",
+            field: "harness",
+            hint: "Run 'reins capabilities' to list valid harnesses",
+          },
+          {
+            issue: "missing_argument",
+            target: "argument",
+            field: "message",
+            hint: "initial message",
+          },
+        ],
         message:
-          "Missing required argument 'harness'. Run 'reins capabilities' to list valid harnesses",
+          "Missing required argument 'harness'. Run 'reins capabilities' to list valid harnesses. " +
+          "Missing required argument 'message'. initial message",
+        usage:
+          "reins spawn <harness> <message...> --name <session-name> [options]",
       })}\n`,
+    );
+  });
+
+  test("JSON 一次列全声明中可确定的缺失必填项", async () => {
+    const { env } = await freshEnv();
+    const result = await runCli(["resolve-permission", "test@g2"], env);
+    expect(result.exitCode).toBe(64);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toEqual({
+      code: "usage_error",
+      issues: [
+        {
+          issue: "missing_argument",
+          target: "argument",
+          field: "permissionId",
+          hint: "Expected a valid PermissionId",
+        },
+        {
+          issue: "missing_argument",
+          target: "option",
+          field: "--outcome <allow|deny>",
+          valid: ["allow", "deny"],
+        },
+      ],
+      message:
+        "Missing required argument 'permissionId'. Expected a valid PermissionId. " +
+        "Missing required option '--outcome <allow|deny>'. Allowed: allow, deny",
+      usage:
+        "reins resolve-permission <sessionId> <permissionId> --outcome <allow|deny> [options]",
+    });
+  });
+
+  test("pretty 按声明顺序列出同一组缺失必填项", async () => {
+    const { env } = await freshEnv();
+    const result = await runCli(
+      ["--pretty", "resolve-permission", "test@g2"],
+      env,
+    );
+    expect(result.exitCode).toBe(64);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      "error: Missing required argument 'permissionId'\n" +
+        "suggestion: Expected a valid PermissionId\n" +
+        "error: Missing required option '--outcome <allow|deny>'\n" +
+        "suggestion: Allowed: allow, deny\n" +
+        "usage: reins resolve-permission <sessionId> <permissionId> --outcome <allow|deny> [options]\n",
     );
   });
 

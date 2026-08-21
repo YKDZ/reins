@@ -22,7 +22,9 @@ const firstTurnId = "t1" as TurnId;
 const permissionId = "p1" as PermissionId;
 const sessionName = "reviewer" as SessionName;
 
-function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
+function setup(
+  authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
+): {
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeSdk>;
@@ -47,7 +49,7 @@ function setup(authorizationMode: "interactive" | "allowAll" = "interactive"): {
     harness: "qoder",
     message: "检查",
     cwd: "/tmp/demo",
-    authorizationMode,
+    ...(authorizationMode === "omitted" ? {} : { authorizationMode }),
   });
   return { events, diagnostics, fake, driver };
 }
@@ -393,6 +395,14 @@ describe("qoder driver 事件映射", () => {
 });
 
 describe("授权模式映射", () => {
+  test("未指定时不注入 SDK 权限选项", () => {
+    const { fake } = setup("omitted");
+    const options = fake.controls.lastOptions();
+    expect(options?.permissionMode).toBeUndefined();
+    expect(options?.allowDangerouslySkipPermissions).toBeUndefined();
+    expect(options?.canUseTool).toBeUndefined();
+  });
+
   test("interactive：default + canUseTool 注册", () => {
     const { fake } = setup("interactive");
     const options = fake.controls.lastOptions();

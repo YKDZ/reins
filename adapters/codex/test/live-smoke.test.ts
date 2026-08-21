@@ -1,4 +1,5 @@
 import type {
+  DriverDiagnosticFact,
   DomainEvent,
   SessionId,
   SessionName,
@@ -14,12 +15,14 @@ const live = process.env.REINS_LIVE_SMOKE === "1" ? describe : describe.skip;
 live("codex live smoke", () => {
   test("短任务产出流式输出、工具事件与回合终态", async () => {
     const model = process.env.REINS_LIVE_SMOKE_MODEL ?? "gpt-5.3-codex-spark";
+    const reasoning = process.env.REINS_LIVE_SMOKE_REASONING ?? "xhigh";
     type TurnCompletedEvent = Extract<DomainEvent, { type: "turn.completed" }>;
     let resolveTurn: ((event: TurnCompletedEvent) => void) | null = null;
     const turnDone = new Promise<TurnCompletedEvent>((resolve) => {
       resolveTurn = resolve;
     });
     const events: DomainEvent[] = [];
+    const diagnostics: DriverDiagnosticFact[] = [];
     const factory = createCodexDriver({
       transportFactory: () => createCodexTransport({}),
     });
@@ -36,7 +39,10 @@ live("codex live smoke", () => {
           resolveTurn(event);
         }
       },
-      diagnostics: async () => undefined,
+      diagnostics: async (input) => {
+        diagnostics.push(input);
+        return undefined;
+      },
     });
 
     driver.start({
@@ -47,12 +53,25 @@ live("codex live smoke", () => {
       message: "用一条 shell 命令列出当前目录的内容",
       cwd: process.cwd(),
       model,
+      reasoning,
       authorizationMode: "interactive",
     });
 
     const completed = await turnDone;
+    if (completed.stopReason === "failed") {
+      expect(diagnostics).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            kind: "turn_failure",
+            message: expect.objectContaining({ text: expect.any(String) }),
+          }),
+        ]),
+      );
+    }
     expect(completed.stopReason).toBe("end_turn");
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
+    expect(events.some((event) => event.type === "tool.requested")).toBe(true);
+    expect(events.some((event) => event.type === "tool.completed")).toBe(true);
     await driver.terminate("smoke@g1" as SessionId);
   }, 180_000);
 });

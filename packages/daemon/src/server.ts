@@ -618,11 +618,14 @@ export function createProtocolServerInternal(
         return options.machine.list(request.params as ListFilter | undefined);
       case "attach":
         return attach(connection, request.params as AttachParams);
-      case "resolvePermission":
-        await options.machine.resolvePermission(
-          request.params as ResolvePermissionParams,
-        );
-        return {};
+      case "resolvePermission": {
+        const params = request.params as ResolvePermissionParams;
+        await options.machine.resolvePermission(params);
+        return {
+          sessionId: params.sessionId,
+          permissionId: params.permissionId,
+        };
+      }
       case "diagnostics":
         if (options.diagnostics.health().status === "degraded") {
           throw { code: "diagnostics_unavailable" } satisfies MachineError;
