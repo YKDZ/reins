@@ -662,6 +662,26 @@ export function createCodexTransport(options: {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
+  function isUnmappedApprovalDecision(value: unknown): boolean {
+    if (!isRecord(value)) return false;
+    const execPolicy = value.acceptWithExecpolicyAmendment;
+    if (isRecord(execPolicy)) {
+      const amendment = execPolicy.execpolicy_amendment;
+      return (
+        Array.isArray(amendment) &&
+        amendment.every((entry) => typeof entry === "string")
+      );
+    }
+    const networkPolicy = value.applyNetworkPolicyAmendment;
+    if (!isRecord(networkPolicy)) return false;
+    const amendment = networkPolicy.network_policy_amendment;
+    return (
+      isRecord(amendment) &&
+      typeof amendment.host === "string" &&
+      (amendment.action === "allow" || amendment.action === "deny")
+    );
+  }
+
   const ignoredItemTypes = new Set([
     "userMessage",
     "hookPrompt",
@@ -899,6 +919,7 @@ export function createCodexTransport(options: {
       "acceptForSession",
       "decline",
     ]) {
+      if (isUnmappedApprovalDecision(decision)) continue;
       if (
         decision !== "accept" &&
         decision !== "acceptForSession" &&

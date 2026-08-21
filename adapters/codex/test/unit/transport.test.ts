@@ -733,6 +733,63 @@ describe("codex transport", () => {
     await transport.close();
   });
 
+  test("审批菜单忽略无法无损映射的对象形决策并保留字符串决策", async () => {
+    const fake = fakeChild();
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const transport = createCodexTransport({
+      diagnostics: async (input) => {
+        diagnostics.push(input);
+        return undefined;
+      },
+      spawnChild: () => fake.child,
+    });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        id: 42,
+        method: "item/commandExecution/requestApproval",
+        params: {
+          availableDecisions: [
+            "accept",
+            {
+              acceptWithExecpolicyAmendment: {
+                execpolicy_amendment: ["ls"],
+              },
+            },
+            {
+              applyNetworkPolicyAmendment: {
+                network_policy_amendment: {
+                  host: "example.com",
+                  action: "allow",
+                },
+              },
+            },
+            "cancel",
+          ],
+        },
+      })}\n`,
+    );
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: "item/agentMessage/delta",
+        params: { itemId: "fallback", delta: "request was rejected" },
+      })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: {
+        kind: "request",
+        id: 42,
+        method: "item/commandExecution/requestApproval",
+        availableDecisions: ["accept", "cancel"],
+      },
+    });
+    expect(diagnostics).toEqual([]);
+    await transport.close();
+  });
+
   test("非法 worker response 会在 transport 边界记录 protocol violation", async () => {
     const fake = fakeChild();
     const diagnostics: DriverDiagnosticFact[] = [];

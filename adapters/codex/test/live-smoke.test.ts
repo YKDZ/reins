@@ -71,7 +71,12 @@ live("codex live smoke", () => {
     expect(completed.stopReason).toBe("end_turn");
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
     expect(events.some((event) => event.type === "tool.requested")).toBe(true);
-    expect(events.some((event) => event.type === "tool.completed")).toBe(true);
+    expect(
+      events.some((event) => event.type === "tool.completed" && !event.isError),
+    ).toBe(true);
+    expect(
+      diagnostics.some((input) => input.kind === "protocol_violation"),
+    ).toBe(false);
     await driver.terminate("smoke@g1" as SessionId);
   }, 180_000);
 });
