@@ -17,6 +17,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import {
   assertReleaseVersionAuthority,
   readJsonObject,
+  releaseTarballName,
   resolveReleaseRuntimeDependencies,
 } from "./release-package.ts";
 
@@ -139,7 +140,10 @@ const temporaryRoot = mkdtempSync(join(tmpdir(), "reins-packed-cli-"));
 const installDirectory = join(temporaryRoot, "install");
 const runtimeDirectory = join(temporaryRoot, "runtime");
 const artifactDirectory = join(process.cwd(), ".artifacts", "release");
-const tarballName = `${releaseIdentity.name}-${releaseIdentity.version}.tgz`;
+const tarballName = releaseTarballName(
+  releaseIdentity.name,
+  releaseIdentity.version,
+);
 const tarball = join(artifactDirectory, tarballName);
 let runningDaemon: ChildProcess | undefined;
 

@@ -11,6 +11,7 @@ import {
   isJsonObject,
   parseJsonObject,
   releaseRuntimeDependencyNames,
+  releaseTarballName,
 } from "./release-package.ts";
 
 const repository = resolve(process.env.GITHUB_WORKSPACE ?? process.cwd());
@@ -80,7 +81,7 @@ if (expectedTag !== "" && expectedTag !== `v${version}`) {
     `Tag ${expectedTag} does not match manifest version ${version}`,
   );
 }
-const expectedTarballName = `${name}-${version}.tgz`;
+const expectedTarballName = releaseTarballName(name, version);
 if (tarballName !== expectedTarballName) {
   throw new Error(`Unexpected tarball name: ${tarballName}`);
 }

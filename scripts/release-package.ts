@@ -30,6 +30,7 @@ const unversionedPrivateManifestDirectories = [
 const stableVersionPattern = /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/u;
 const installedVersionPattern =
   /^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/u;
+const releasePackageName = "@ykdz/reins";
 
 export function isJsonObject(value: unknown): value is JsonObject {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -57,7 +58,7 @@ export function assertReleaseVersionAuthority(repository: string): {
 } {
   const authority = readManifest(repository, releaseAuthorityDirectory);
   if (
-    authority.name !== "reins" ||
+    authority.name !== releasePackageName ||
     authority.private !== true ||
     typeof authority.version !== "string" ||
     !stableVersionPattern.test(authority.version)
@@ -77,6 +78,13 @@ export function assertReleaseVersionAuthority(repository: string): {
     name: authority.name,
     version: authority.version,
   };
+}
+
+export function releaseTarballName(name: string, version: string): string {
+  if (name !== releasePackageName || !stableVersionPattern.test(version)) {
+    throw new Error("Invalid reins release identity");
+  }
+  return `${name.slice(1).replace("/", "-")}-${version}.tgz`;
 }
 
 function dependenciesOf(

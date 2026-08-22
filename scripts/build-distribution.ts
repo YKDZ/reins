@@ -19,6 +19,7 @@ import {
   assertReleaseVersionAuthority,
   createReleaseStagingManifest,
   readJsonObject,
+  releaseTarballName,
   resolveReleaseRuntimeDependencies,
 } from "./release-package.ts";
 
@@ -144,7 +145,10 @@ function pack(): string {
 const { authority } = assertReleaseVersionAuthority(repository);
 const dependencies = resolveReleaseRuntimeDependencies(repository);
 const manifest = createReleaseStagingManifest(authority, dependencies);
-const expectedTarball = `reins-${String(authority.version)}.tgz`;
+const expectedTarball = releaseTarballName(
+  String(authority.name),
+  String(authority.version),
+);
 
 rmSync(join(artifactsDirectory, "release"), { recursive: true, force: true });
 rmSync(join(artifactsDirectory, "staging"), { recursive: true, force: true });
