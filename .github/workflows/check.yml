@@ -70,7 +70,7 @@ jobs:
       - name: Run CLI end-to-end tests
         run: >-
           pnpm exec turbo run test:e2e
-          --filter=reins
+          --filter=./apps/cli
           --output-logs=errors-only
           --log-order=grouped
           --log-prefix=task
