@@ -35,4 +35,4 @@ catalog:
   "turbo": 2.10.5
   "typescript-7": npm:typescript@^7.0.2
   "valibot": ^1.4.2
-  "vitest": ^4.1.10
+  "vitest": ^4.1.11
