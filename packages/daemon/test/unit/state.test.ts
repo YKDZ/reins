@@ -46,8 +46,12 @@ describe("daemon state", () => {
     expect((await stat(state.diagnosticsDirectory)).mode & 0o777).toBe(0o700);
 
     await chmod(explicit, 0o500);
-    await resolveDaemonState({ env: { REINS_STATE_DIR: explicit } });
-    expect((await stat(explicit)).mode & 0o777).toBe(0o500);
+    try {
+      await resolveDaemonState({ env: { REINS_STATE_DIR: explicit } });
+      expect((await stat(explicit)).mode & 0o777).toBe(0o500);
+    } finally {
+      await chmod(explicit, 0o700);
+    }
 
     const xdgState = await resolveDaemonState({
       env: { XDG_STATE_HOME: xdg, HOME: home },
