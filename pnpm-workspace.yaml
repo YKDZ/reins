@@ -23,7 +23,7 @@ allowBuilds:
   esbuild: true
 
 catalog:
-  "@qodercn-ai/qodercn-agent-sdk": ^1.0.23
+  "@qodercn-ai/qodercn-agent-sdk": ^1.0.24
   "@types/node": ^24.13.3
   "@types/proper-lockfile": ^4.1.4
   "commander": ^15.0.0
