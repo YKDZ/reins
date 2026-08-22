@@ -55,6 +55,7 @@ jobs:
         uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
         with:
           node-version-file: package.json
+          package-manager-cache: false
           registry-url: https://registry.npmjs.org
       - name: Locate the successful tag release run
         id: release-run
