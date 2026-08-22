@@ -2,18 +2,24 @@ name: Finalize Release
 
 on:
   workflow_dispatch:
+    inputs:
+      release_tag:
+        description: Annotated vX.Y.Z tag to finalize
+        required: true
+        type: string
 
 permissions:
   actions: read
   contents: write
 
 concurrency:
-  group: finalize-${{ github.ref }}
+  group: finalize-${{ inputs.release_tag }}
   cancel-in-progress: false
 
 env:
   NPM_CLI_VERSION: 11.17.0
   NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+  RELEASE_TAG: ${{ inputs.release_tag }}
 
 jobs:
   finalize:
@@ -22,13 +28,11 @@ jobs:
     timeout-minutes: 10
     steps:
       - name: Require a selected release tag
-        env:
-          REF_TYPE: ${{ github.ref_type }}
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "$REF_TYPE" != "tag" || ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "Run this workflow against an annotated vX.Y.Z tag" >&2
+          if [[ ! "$RELEASE_TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "release_tag must be vX.Y.Z" >&2
             exit 1
           fi
       - name: Checkout tagged source
@@ -37,14 +41,15 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
           fetch-tags: true
+          ref: ${{ inputs.release_tag }}
       - name: Require an annotated tag on the checked-out commit
         shell: bash
         run: |
           set -euo pipefail
 
-          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          tag_ref="refs/tags/$RELEASE_TAG"
           if [[ "$(git cat-file -t "$tag_ref")" != "tag" ]]; then
-            echo "Release tag must be annotated: $GITHUB_REF_NAME" >&2
+            echo "Release tag must be annotated: $RELEASE_TAG" >&2
             exit 1
           fi
           if [[ "$(git rev-parse "$tag_ref^{}")" != "$(git rev-parse HEAD)" ]]; then
@@ -72,7 +77,7 @@ jobs:
             -f status=success \
             -f per_page=100 > "$runs"
 
-          RUNS_JSON="$runs" EXPECTED_TAG="$GITHUB_REF_NAME" EXPECTED_SHA="$(git rev-parse HEAD)" \
+          RUNS_JSON="$runs" EXPECTED_TAG="$RELEASE_TAG" EXPECTED_SHA="$(git rev-parse HEAD)" \
           node --input-type=module <<'NODE'
           import { appendFileSync, readFileSync } from "node:fs";
 
@@ -116,7 +121,7 @@ jobs:
       - name: Validate tag, manifest, artifact, and hash
         id: package
         env:
-          EXPECTED_TAG: ${{ github.ref_name }}
+          EXPECTED_TAG: ${{ inputs.release_tag }}
         run: node --conditions=source scripts/validate-release-package.ts
       - name: Validate the release preparation record
         id: preparation
@@ -126,7 +131,7 @@ jobs:
           EXPECTED_NAME: ${{ steps.package.outputs.name }}
           EXPECTED_RUN_ID: ${{ steps.release-run.outputs.run-id }}
           EXPECTED_SHA256: ${{ steps.package.outputs.sha256 }}
-          EXPECTED_TAG: ${{ github.ref_name }}
+          EXPECTED_TAG: ${{ inputs.release_tag }}
           EXPECTED_VERSION: ${{ steps.package.outputs.version }}
         shell: bash
         run: |
@@ -267,6 +272,7 @@ jobs:
           BOOTSTRAP: ${{ steps.preparation.outputs.bootstrap }}
           ONLY_REGISTRY_VERSION: ${{ steps.registry.outputs.only-version }}
           EXPECTED_SHA512: ${{ steps.package.outputs.sha512 }}
+          EXPECTED_INTEGRITY: ${{ steps.registry.outputs.integrity }}
           EXPECTED_RUN_ID: ${{ steps.release-run.outputs.run-id }}
           EXPECTED_RUN_ATTEMPT: ${{ steps.release-run.outputs.run-attempt }}
           EXPECTED_HEAD_SHA: ${{ steps.release-run.outputs.head-sha }}
@@ -285,11 +291,12 @@ jobs:
             --json \
             --include-attestations > "$audit_result"
 
-          AUDIT_RESULT="$audit_result" EXPECTED_TAG="$GITHUB_REF_NAME" \
+          AUDIT_RESULT="$audit_result" PACKAGE_LOCK="$audit_dir/package-lock.json" EXPECTED_TAG="$RELEASE_TAG" \
           node --input-type=module <<'NODE'
           import { readFileSync } from "node:fs";
 
           const audit = JSON.parse(readFileSync(process.env.AUDIT_RESULT, "utf8"));
+          const lock = JSON.parse(readFileSync(process.env.PACKAGE_LOCK, "utf8"));
           if (process.env.BOOTSTRAP !== "true" && process.env.BOOTSTRAP !== "false") {
             throw new Error(`Invalid bootstrap decision: ${process.env.BOOTSTRAP}`);
           }
@@ -309,15 +316,27 @@ jobs:
             throw new Error("npm signature audit reported invalid or missing signatures");
           }
 
+          const installed = lock.packages?.[`node_modules/${process.env.PACKAGE_NAME}`];
+          if (
+            typeof installed !== "object" ||
+            installed === null ||
+            installed.version !== process.env.RELEASE_VERSION ||
+            installed.integrity !== process.env.EXPECTED_INTEGRITY ||
+            typeof installed.resolved !== "string" ||
+            !installed.resolved.startsWith("https://registry.npmjs.org/")
+          ) {
+            throw new Error("Signature audit did not install the expected registry package");
+          }
+
           const packages = audit.verified.filter(
             (entry) =>
               entry.name === process.env.PACKAGE_NAME &&
               entry.version === process.env.RELEASE_VERSION,
           );
-          if (packages.length !== 1) {
-            throw new Error(`Expected one verified package entry; found ${packages.length}`);
+          if (packages.length > 1 || (!bootstrap && packages.length !== 1)) {
+            throw new Error(`Unexpected verified attestation entries: ${packages.length}`);
           }
-          const provenance = packages[0].attestationBundles?.filter(
+          const provenance = packages[0]?.attestationBundles?.filter(
             (entry) => entry.predicateType === "https://slsa.dev/provenance/v1",
           ) ?? [];
           if (provenance.length > 1 || (!bootstrap && provenance.length !== 1)) {
@@ -374,7 +393,6 @@ jobs:
       - name: Create the GitHub Release with verified assets
         env:
           GH_TOKEN: ${{ github.token }}
-          RELEASE_TAG: ${{ github.ref_name }}
           RELEASE_VERSION: ${{ steps.package.outputs.version }}
           TARBALL: ${{ steps.package.outputs.tarball }}
         shell: bash
