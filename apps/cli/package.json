@@ -14,6 +14,7 @@
   "bugs": {
     "url": "https://github.com/YKDZ/reins/issues"
   },
+  "license": "MIT",
   "repository": {
     "type": "git",
     "url": "git+https://github.com/YKDZ/reins.git"

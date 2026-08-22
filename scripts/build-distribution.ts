@@ -155,7 +155,7 @@ writeFileSync(
   join(stagingDirectory, "package.json"),
   `${JSON.stringify(manifest, null, 2)}\n`,
 );
-for (const name of ["README.md"] as const) {
+for (const name of ["README.md", "LICENSE"] as const) {
   copyFileSync(join(repository, name), join(stagingDirectory, name));
 }
 

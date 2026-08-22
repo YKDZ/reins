@@ -199,6 +199,7 @@ try {
   if (
     installedManifest.name !== releaseIdentity.name ||
     installedManifest.version !== releaseIdentity.version ||
+    installedManifest.license !== "MIT" ||
     JSON.stringify(installedManifest.dependencies) !==
       JSON.stringify(expectedRuntimeDependencies) ||
     JSON.stringify(installedManifest.os) !== JSON.stringify(["linux"]) ||
@@ -214,6 +215,14 @@ try {
     readFileSync("README.md", "utf8")
   ) {
     throw new Error("Packed README did not come from the repository authority");
+  }
+  if (
+    readFileSync(join(installedPackage, "LICENSE"), "utf8") !==
+    readFileSync("LICENSE", "utf8")
+  ) {
+    throw new Error(
+      "Packed LICENSE did not come from the repository authority",
+    );
   }
   for (const name of ["reins.js", "reins-daemon.js"] as const) {
     const path = join(installedPackage, "dist", name);

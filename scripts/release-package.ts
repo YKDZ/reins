@@ -218,6 +218,7 @@ export function createReleaseStagingManifest(
     "name",
     "version",
     "description",
+    "license",
     "repository",
     "homepage",
     "bugs",
