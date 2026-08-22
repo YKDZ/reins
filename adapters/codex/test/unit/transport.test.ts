@@ -348,16 +348,25 @@ describe("codex transport", () => {
         transport.start();
         await waitUntil(async () => {
           try {
-            await readFile(pidFile);
+            const parsed: unknown = JSON.parse(await readFile(pidFile, "utf8"));
+            if (
+              typeof parsed !== "object" ||
+              parsed === null ||
+              !("parent" in parsed) ||
+              !Number.isSafeInteger(parsed.parent) ||
+              !("descendant" in parsed) ||
+              !Number.isSafeInteger(parsed.descendant)
+            ) {
+              return false;
+            }
+            pids = parsed as { parent: number; descendant: number };
             return true;
           } catch {
             return false;
           }
         });
-        pids = JSON.parse(await readFile(pidFile, "utf8")) as {
-          parent: number;
-          descendant: number;
-        };
+        if (pids === undefined)
+          throw new Error("Process tree omitted valid pids");
 
         await transport.close();
         expect(
