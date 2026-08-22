@@ -1,6 +1,5 @@
 {
   "name": "@reins/qoder",
-  "version": "0.0.0",
   "private": true,
   "files": [
     "dist"

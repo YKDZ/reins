@@ -33,15 +33,23 @@ async function tryConnect(
   }
 }
 
-// 开发模式默认指向 monorepo 内 daemon 构建产物；发布形态回退到同名 bin。
-export function resolveDaemonCommand(env: NodeJS.ProcessEnv): string[] {
+// daemon 解析顺序是显式覆盖、同包发行入口、monorepo 开发产物；禁止隐式 PATH 漂移。
+export function resolveDaemonCommand(
+  env: NodeJS.ProcessEnv,
+  moduleUrl: string | URL = import.meta.url,
+): string[] {
   const explicit = env.REINS_DAEMON_BIN;
   if (explicit !== undefined && explicit !== "") return [explicit];
+  const siblingPath = fileURLToPath(new URL("./reins-daemon.js", moduleUrl));
+  if (existsSync(siblingPath)) return [process.execPath, siblingPath];
   const devPath = fileURLToPath(
-    new URL("../../../packages/daemon/dist/main.js", import.meta.url),
+    new URL("../../../packages/daemon/dist/main.js", moduleUrl),
   );
   if (existsSync(devPath)) return [process.execPath, devPath];
-  return ["reins-daemon"];
+  throw machineError({
+    code: "daemon_start_failed",
+    cause: makeErrorCause("io", "Unable to locate the reins-daemon executable"),
+  });
 }
 
 export type EnsureDaemonResult = {
@@ -96,12 +104,18 @@ export async function ensureDaemon(
           await releaseLaunch();
           return { connection: winner, child: null };
         }
-        const args = resolveDaemonCommand(env);
+        let args: string[];
+        try {
+          args = resolveDaemonCommand(env);
+        } catch (error) {
+          await releaseLaunch();
+          throw error;
+        }
         const adaptersModule = env.REINS_ADAPTERS_MODULE;
         if (adaptersModule !== undefined && adaptersModule !== "") {
           args.push("--adapters", adaptersModule);
         }
-        child = spawn(args[0] ?? "reins-daemon", args.slice(1), {
+        child = spawn(args[0] ?? process.execPath, args.slice(1), {
           // fd 3 只承载启动窗口的有界机器报告；正常后台 stdout/stderr 仍不进入 CLI。
           stdio: ["ignore", "ignore", "ignore", "pipe"],
           env: {

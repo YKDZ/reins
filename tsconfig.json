@@ -1,11 +1,18 @@
 {
   "extends": "./tsconfig.config.json",
+  "compilerOptions": {
+    "allowImportingTsExtensions": true,
+    "noEmit": true
+  },
   "files": [
     "oxfmt.config.ts",
     "oxlint.config.ts",
+    "scripts/build-distribution.ts",
     "scripts/check-boundaries.ts",
     "scripts/check-packed-cli.ts",
     "scripts/check-runtime-language.ts",
-    "scripts/run-root-owned-task.ts"
+    "scripts/release-package.ts",
+    "scripts/run-root-owned-task.ts",
+    "scripts/validate-release-package.ts"
   ]
 }

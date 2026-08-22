@@ -24,8 +24,19 @@ import {
 } from "../../src/command-spec.ts";
 
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
-const cliBin = join(repoRoot, "apps/cli/dist/cli.js");
+const cliBin = join(repoRoot, "apps/cli/dist/reins.js");
 const daemonBin = join(repoRoot, "packages/daemon/dist/main.js");
+const releaseVersion = v.parse(
+  v.object({
+    version: v.pipe(
+      v.string(),
+      v.regex(/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u),
+    ),
+  }),
+  JSON.parse(
+    await readFile(join(repoRoot, "apps/cli/package.json"), "utf8"),
+  ) as unknown,
+).version;
 const fixturesModule = join(
   repoRoot,
   "apps/cli/test/e2e/fixtures/fake-adapters.ts",
@@ -336,7 +347,7 @@ describe("A 类：帮助（stdout + 退出 0）", () => {
     const result = await runCli(["--version"], env);
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toBe("0.0.0\n");
+    expect(result.stdout).toBe(`${releaseVersion}\n`);
   });
 });
 

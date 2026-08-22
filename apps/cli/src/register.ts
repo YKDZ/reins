@@ -1,3 +1,5 @@
+import { readFileSync } from "node:fs";
+
 import { Command, Help } from "commander";
 
 import {
@@ -15,6 +17,27 @@ import { ExitError, exitCodeForError, toCliError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 import { printError } from "./output.ts";
 
+function readReleaseVersion(): string {
+  let manifest: unknown;
+  try {
+    manifest = JSON.parse(
+      readFileSync(new URL("../package.json", import.meta.url), "utf8"),
+    ) as unknown;
+  } catch (cause) {
+    throw new Error("Unable to read the reins package manifest", { cause });
+  }
+  if (
+    typeof manifest !== "object" ||
+    manifest === null ||
+    !("version" in manifest) ||
+    typeof manifest.version !== "string" ||
+    !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/u.test(manifest.version)
+  ) {
+    throw new TypeError("The reins package manifest has an invalid version");
+  }
+  return manifest.version;
+}
+
 function prettyOf(
   options: Record<string, unknown>,
   program: Command,
@@ -29,7 +52,7 @@ export function registerCommands(program: Command): void {
   program
     .name("reins")
     .description("Control plane for agent harnesses")
-    .version("0.0.0")
+    .version(readReleaseVersion())
     .usage(ROOT_USAGE)
     .option("--pretty", "human-readable output (default: NDJSON)")
     .exitOverride()

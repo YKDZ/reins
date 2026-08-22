@@ -1,0 +1,247 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions: {}
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NPM_CLI_VERSION: 11.17.0
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+
+jobs:
+  check:
+    name: Check release candidate
+    uses: ./.github/workflows/check.yml
+    permissions:
+      contents: read
+
+  prepare:
+    name: Prepare Release
+    needs: check
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    outputs:
+      bootstrap: ${{ steps.registry.outputs.bootstrap }}
+      name: ${{ steps.package.outputs.name }}
+      sha256: ${{ steps.package.outputs.sha256 }}
+      tarball-name: ${{ steps.package.outputs.tarball-name }}
+      version: ${{ steps.package.outputs.version }}
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          fetch-tags: ${{ github.event_name == 'push' }}
+      - name: Require an annotated tag on the checked-out commit
+        if: github.event_name == 'push'
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          if [[ "$(git cat-file -t "$tag_ref")" != "tag" ]]; then
+            echo "Release tag must be annotated: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$tag_ref^{}")" != "$(git rev-parse HEAD)" ]]; then
+            echo "Release tag does not resolve to the checked-out commit" >&2
+            exit 1
+          fi
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: package.json
+          registry-url: https://registry.npmjs.org
+      - name: Download the verified release package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-package
+          path: .artifacts/release
+      - name: Validate tag, manifest, artifact, and hash
+        id: package
+        env:
+          EXPECTED_TAG: ${{ github.event_name == 'push' && github.ref_name || '' }}
+        run: node --conditions=source scripts/validate-release-package.ts
+      - name: Exercise npm staged publishing without a registry write
+        if: github.event_name == 'workflow_dispatch'
+        run: >-
+          npx --yes "npm@${NPM_CLI_VERSION}" stage publish
+          "${{ steps.package.outputs.tarball }}"
+          --access public
+          --provenance
+          --dry-run
+      - name: Require a public repository before registry staging
+        if: github.event_name == 'push'
+        env:
+          REPOSITORY_VISIBILITY: ${{ github.event.repository.visibility }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REPOSITORY_VISIBILITY" != "public" ]]; then
+            echo "Registry staging is disabled until the repository is public" >&2
+            exit 1
+          fi
+      - name: Inspect registry bootstrap state
+        if: github.event_name == 'push'
+        id: registry
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encoded_name="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$PACKAGE_NAME")"
+          metadata="$RUNNER_TEMP/registry-package.json"
+          status="$(curl --silent --show-error --location \
+            --retry 3 --retry-all-errors --connect-timeout 10 --max-time 30 \
+            --output "$metadata" --write-out '%{http_code}' \
+            "https://registry.npmjs.org/$encoded_name")"
+
+          if [[ "$status" == "200" ]]; then
+            PACKAGE_METADATA="$metadata" node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const metadata = JSON.parse(readFileSync(process.env.PACKAGE_METADATA, "utf8"));
+          if (metadata.versions?.[process.env.RELEASE_VERSION] !== undefined) {
+            throw new Error(
+              `${process.env.PACKAGE_NAME}@${process.env.RELEASE_VERSION} is already public`,
+            );
+          }
+          NODE
+            echo "bootstrap=false" >> "$GITHUB_OUTPUT"
+          elif [[ "$status" == "404" ]]; then
+            echo "bootstrap=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "Unexpected npm registry response: HTTP $status" >&2
+            exit 1
+          fi
+      - name: Report first-publish bootstrap readiness
+        if: github.event_name == 'push' && steps.registry.outputs.bootstrap == 'true'
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          {
+            echo "## Bootstrap ready"
+            echo
+            echo "$PACKAGE_NAME@$RELEASE_VERSION does not exist in the npm registry."
+            echo "No registry write was attempted. Download the release-package artifact from this run for the separately authorized first publish."
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Record the tag preparation decision
+        if: github.event_name == 'push'
+        env:
+          BOOTSTRAP: ${{ steps.registry.outputs.bootstrap }}
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          RELEASE_ATTEMPT: ${{ github.run_attempt }}
+          RELEASE_RUN_ID: ${{ github.run_id }}
+          RELEASE_SHA256: ${{ steps.package.outputs.sha256 }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          preparation_dir="$GITHUB_WORKSPACE/.artifacts/preparation"
+          mkdir -p "$preparation_dir"
+          HEAD_SHA="$(git rev-parse HEAD)" \
+          PREPARATION_PATH="$preparation_dir/release-preparation.json" \
+          node --input-type=module <<'NODE'
+          import { writeFileSync } from "node:fs";
+
+          if (process.env.BOOTSTRAP !== "true" && process.env.BOOTSTRAP !== "false") {
+            throw new Error(`Invalid bootstrap decision: ${process.env.BOOTSTRAP}`);
+          }
+          const attempt = Number(process.env.RELEASE_ATTEMPT);
+          if (!Number.isSafeInteger(attempt) || attempt < 1) {
+            throw new Error(`Invalid release run attempt: ${process.env.RELEASE_ATTEMPT}`);
+          }
+
+          const preparation = {
+            bootstrap: process.env.BOOTSTRAP === "true",
+            name: process.env.PACKAGE_NAME,
+            version: process.env.RELEASE_VERSION,
+            sha256: process.env.RELEASE_SHA256,
+            tag: process.env.RELEASE_TAG,
+            head_sha: process.env.HEAD_SHA,
+            run_id: process.env.RELEASE_RUN_ID,
+            attempt,
+          };
+          writeFileSync(
+            process.env.PREPARATION_PATH,
+            `${JSON.stringify(preparation, null, 2)}\n`,
+          );
+          NODE
+      - name: Upload the tag preparation record
+        if: github.event_name == 'push'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-preparation
+          path: .artifacts/preparation/release-preparation.json
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 3
+
+  stage:
+    name: Stage Release
+    if: github.event_name == 'push' && needs.prepare.outputs.bootstrap == 'false'
+    needs: prepare
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: npm
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: 24
+          registry-url: https://registry.npmjs.org
+      - name: Download the prepared release package
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-package
+          path: .artifacts/release
+      - name: Recheck the prepared tarball hash
+        env:
+          EXPECTED_SHA256: ${{ needs.prepare.outputs.sha256 }}
+          TARBALL_NAME: ${{ needs.prepare.outputs.tarball-name }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          artifact_dir="$GITHUB_WORKSPACE/.artifacts/release"
+          tarball="$artifact_dir/$TARBALL_NAME"
+          if [[ ! -f "$tarball" || ! -f "$artifact_dir/SHA256SUMS" ]]; then
+            echo "Prepared release package is incomplete" >&2
+            exit 1
+          fi
+          actual_sha256="$(sha256sum -- "$tarball" | cut -d ' ' -f 1)"
+          if [[ "$actual_sha256" != "$EXPECTED_SHA256" ]]; then
+            echo "Prepared tarball hash changed between validation and staging" >&2
+            exit 1
+          fi
+          expected_sums="$EXPECTED_SHA256  $TARBALL_NAME"
+          if [[ "$(<"$artifact_dir/SHA256SUMS")" != "$expected_sums" ]]; then
+            echo "SHA256SUMS changed between validation and staging" >&2
+            exit 1
+          fi
+      - name: Stage the verified package with npm trusted publishing
+        run: >-
+          npx --yes "npm@${NPM_CLI_VERSION}" stage publish
+          "$GITHUB_WORKSPACE/.artifacts/release/${{ needs.prepare.outputs.tarball-name }}"
+          --access public
+          --provenance

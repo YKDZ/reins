@@ -75,7 +75,8 @@
       "outputs": []
     },
     "build": {
-      "dependsOn": ["^build"]
+      "dependsOn": ["^build"],
+      "outputs": ["dist/**"]
     },
     "deployment": {
       "cache": false

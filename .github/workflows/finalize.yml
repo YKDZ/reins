@@ -1,0 +1,407 @@
+name: Finalize Release
+
+on:
+  workflow_dispatch:
+
+permissions:
+  actions: read
+  contents: write
+
+concurrency:
+  group: finalize-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  NPM_CLI_VERSION: 11.17.0
+  NPM_CONFIG_REGISTRY: https://registry.npmjs.org
+
+jobs:
+  finalize:
+    name: Finalize Release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Require a selected release tag
+        env:
+          REF_TYPE: ${{ github.ref_type }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ "$REF_TYPE" != "tag" || ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Run this workflow against an annotated vX.Y.Z tag" >&2
+            exit 1
+          fi
+      - name: Checkout tagged source
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+          fetch-depth: 1
+          fetch-tags: true
+      - name: Require an annotated tag on the checked-out commit
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          tag_ref="refs/tags/$GITHUB_REF_NAME"
+          if [[ "$(git cat-file -t "$tag_ref")" != "tag" ]]; then
+            echo "Release tag must be annotated: $GITHUB_REF_NAME" >&2
+            exit 1
+          fi
+          if [[ "$(git rev-parse "$tag_ref^{}")" != "$(git rev-parse HEAD)" ]]; then
+            echo "Release tag does not resolve to the checked-out commit" >&2
+            exit 1
+          fi
+      - name: Set up Node.js
+        uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version-file: package.json
+          registry-url: https://registry.npmjs.org
+      - name: Locate the successful tag release run
+        id: release-run
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          runs="$RUNNER_TEMP/release-runs.json"
+          gh api --method GET \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/release.yml/runs" \
+            -f event=push \
+            -f status=success \
+            -f per_page=100 > "$runs"
+
+          RUNS_JSON="$runs" EXPECTED_TAG="$GITHUB_REF_NAME" EXPECTED_SHA="$(git rev-parse HEAD)" \
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+
+          const response = JSON.parse(readFileSync(process.env.RUNS_JSON, "utf8"));
+          const matches = response.workflow_runs.filter(
+            (run) =>
+              run.event === "push" &&
+              run.status === "completed" &&
+              run.conclusion === "success" &&
+              run.head_branch === process.env.EXPECTED_TAG &&
+              run.head_sha === process.env.EXPECTED_SHA,
+          );
+          if (matches.length !== 1) {
+            throw new Error(
+              `Expected one successful release run for ${process.env.EXPECTED_TAG} at ${process.env.EXPECTED_SHA}; found ${matches.length}`,
+            );
+          }
+
+          const run = matches[0];
+          appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `run-id=${run.id}\nrun-attempt=${run.run_attempt}\nhead-sha=${run.head_sha}\n`,
+          );
+          NODE
+      - name: Download the exact artifact from the release run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-package
+          path: .artifacts/release
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.release-run.outputs.run-id }}
+      - name: Download the exact preparation record from the release run
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: release-preparation
+          path: .artifacts/preparation
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.release-run.outputs.run-id }}
+      - name: Validate tag, manifest, artifact, and hash
+        id: package
+        env:
+          EXPECTED_TAG: ${{ github.ref_name }}
+        run: node --conditions=source scripts/validate-release-package.ts
+      - name: Validate the release preparation record
+        id: preparation
+        env:
+          EXPECTED_ATTEMPT: ${{ steps.release-run.outputs.run-attempt }}
+          EXPECTED_HEAD_SHA: ${{ steps.release-run.outputs.head-sha }}
+          EXPECTED_NAME: ${{ steps.package.outputs.name }}
+          EXPECTED_RUN_ID: ${{ steps.release-run.outputs.run-id }}
+          EXPECTED_SHA256: ${{ steps.package.outputs.sha256 }}
+          EXPECTED_TAG: ${{ github.ref_name }}
+          EXPECTED_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          preparation_dir="$GITHUB_WORKSPACE/.artifacts/preparation"
+          mapfile -t files < <(find "$preparation_dir" -maxdepth 1 -type f -printf '%f\n' | sort)
+          if [[ ${#files[@]} -ne 1 || "${files[0]:-}" != "release-preparation.json" ]]; then
+            echo "Expected exactly one release-preparation.json file" >&2
+            printf 'Found: %s\n' "${files[*]:-<none>}" >&2
+            exit 1
+          fi
+
+          PREPARATION="$preparation_dir/release-preparation.json" \
+          node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+
+          const preparation = JSON.parse(readFileSync(process.env.PREPARATION, "utf8"));
+          const expectedKeys = [
+            "attempt",
+            "bootstrap",
+            "head_sha",
+            "name",
+            "run_id",
+            "sha256",
+            "tag",
+            "version",
+          ];
+          const actualKeys = Object.keys(preparation).sort();
+          if (
+            actualKeys.length !== expectedKeys.length ||
+            actualKeys.some((key, index) => key !== expectedKeys[index])
+          ) {
+            throw new Error(`Unexpected preparation fields: ${actualKeys.join(", ")}`);
+          }
+          if (
+            typeof preparation.bootstrap !== "boolean" ||
+            !Number.isSafeInteger(preparation.attempt) ||
+            String(preparation.attempt) !== process.env.EXPECTED_ATTEMPT ||
+            preparation.name !== process.env.EXPECTED_NAME ||
+            preparation.version !== process.env.EXPECTED_VERSION ||
+            preparation.sha256 !== process.env.EXPECTED_SHA256 ||
+            preparation.tag !== process.env.EXPECTED_TAG ||
+            preparation.head_sha !== process.env.EXPECTED_HEAD_SHA ||
+            preparation.run_id !== process.env.EXPECTED_RUN_ID
+          ) {
+            throw new Error("Release preparation record does not match the selected run and artifact");
+          }
+
+          appendFileSync(process.env.GITHUB_OUTPUT, `bootstrap=${preparation.bootstrap}\n`);
+          NODE
+      - name: Read the public registry metadata
+        id: registry
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          encoded_name="$(node -e 'process.stdout.write(encodeURIComponent(process.argv[1]))' "$PACKAGE_NAME")"
+          metadata="$RUNNER_TEMP/registry-package.json"
+          status="$(curl --silent --show-error --location \
+            --retry 3 --retry-all-errors --connect-timeout 10 --max-time 30 \
+            --output "$metadata" --write-out '%{http_code}' \
+            "https://registry.npmjs.org/$encoded_name")"
+          if [[ "$status" != "200" ]]; then
+            echo "$PACKAGE_NAME@$RELEASE_VERSION is not public in the npm registry (HTTP $status)" >&2
+            exit 1
+          fi
+
+          PACKAGE_METADATA="$metadata" node --input-type=module <<'NODE'
+          import { appendFileSync, readFileSync } from "node:fs";
+
+          const packument = JSON.parse(readFileSync(process.env.PACKAGE_METADATA, "utf8"));
+          const versions = Object.keys(packument.versions ?? {});
+          const metadata = packument.versions?.[process.env.RELEASE_VERSION];
+          if (
+            packument.name !== process.env.PACKAGE_NAME ||
+            typeof metadata !== "object" ||
+            metadata === null ||
+            metadata.name !== process.env.PACKAGE_NAME ||
+            metadata.version !== process.env.RELEASE_VERSION
+          ) {
+            throw new Error("Registry metadata identity does not match the release package");
+          }
+
+          const tarballUrl = metadata.dist?.tarball;
+          const integrity = metadata.dist?.integrity;
+          if (
+            typeof tarballUrl !== "string" ||
+            !tarballUrl.startsWith("https://registry.npmjs.org/") ||
+            typeof integrity !== "string" ||
+            !integrity.startsWith("sha512-")
+          ) {
+            throw new Error("Registry metadata is missing the expected tarball or integrity");
+          }
+
+          appendFileSync(
+            process.env.GITHUB_OUTPUT,
+            `tarball-url=${tarballUrl}\nintegrity=${integrity}\nonly-version=${versions.length === 1 && versions[0] === process.env.RELEASE_VERSION}\n`,
+          );
+          NODE
+      - name: Verify the public registry tarball
+        env:
+          EXPECTED_INTEGRITY: ${{ steps.registry.outputs.integrity }}
+          TARBALL_URL: ${{ steps.registry.outputs.tarball-url }}
+          VERIFIED_TARBALL: ${{ steps.package.outputs.tarball }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          registry_tarball="$RUNNER_TEMP/registry-package.tgz"
+          curl --fail --silent --show-error --location \
+            --retry 3 --retry-all-errors --connect-timeout 10 --max-time 120 \
+            --output "$registry_tarball" "$TARBALL_URL"
+          if ! cmp --silent "$VERIFIED_TARBALL" "$registry_tarball"; then
+            echo "Registry tarball bytes do not match the verified release artifact" >&2
+            exit 1
+          fi
+
+          REGISTRY_TARBALL="$registry_tarball" \
+          node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { readFileSync } from "node:fs";
+
+          const integrity = `sha512-${createHash("sha512")
+            .update(readFileSync(process.env.REGISTRY_TARBALL))
+            .digest("base64")}`;
+          if (integrity !== process.env.EXPECTED_INTEGRITY) {
+            throw new Error("Registry integrity does not match the registry tarball");
+          }
+          NODE
+      - name: Verify npm signatures and provenance
+        env:
+          PACKAGE_NAME: ${{ steps.package.outputs.name }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+          BOOTSTRAP: ${{ steps.preparation.outputs.bootstrap }}
+          ONLY_REGISTRY_VERSION: ${{ steps.registry.outputs.only-version }}
+          EXPECTED_SHA512: ${{ steps.package.outputs.sha512 }}
+          EXPECTED_RUN_ID: ${{ steps.release-run.outputs.run-id }}
+          EXPECTED_RUN_ATTEMPT: ${{ steps.release-run.outputs.run-attempt }}
+          EXPECTED_HEAD_SHA: ${{ steps.release-run.outputs.head-sha }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          audit_dir="$RUNNER_TEMP/npm-signature-audit"
+          mkdir "$audit_dir"
+          npx --yes "npm@${NPM_CLI_VERSION}" install --prefix "$audit_dir" \
+            --ignore-scripts --no-audit --no-fund \
+            "$PACKAGE_NAME@$RELEASE_VERSION"
+          audit_result="$RUNNER_TEMP/npm-signature-audit.json"
+          npx --yes "npm@${NPM_CLI_VERSION}" audit signatures \
+            --prefix "$audit_dir" \
+            --json \
+            --include-attestations > "$audit_result"
+
+          AUDIT_RESULT="$audit_result" EXPECTED_TAG="$GITHUB_REF_NAME" \
+          node --input-type=module <<'NODE'
+          import { readFileSync } from "node:fs";
+
+          const audit = JSON.parse(readFileSync(process.env.AUDIT_RESULT, "utf8"));
+          if (process.env.BOOTSTRAP !== "true" && process.env.BOOTSTRAP !== "false") {
+            throw new Error(`Invalid bootstrap decision: ${process.env.BOOTSTRAP}`);
+          }
+          const bootstrap = process.env.BOOTSTRAP === "true";
+          if (bootstrap && process.env.ONLY_REGISTRY_VERSION !== "true") {
+            throw new Error(
+              "A bootstrap release is only valid while the registry contains exactly this version",
+            );
+          }
+          if (
+            !Array.isArray(audit.invalid) ||
+            audit.invalid.length !== 0 ||
+            !Array.isArray(audit.missing) ||
+            audit.missing.length !== 0 ||
+            !Array.isArray(audit.verified)
+          ) {
+            throw new Error("npm signature audit reported invalid or missing signatures");
+          }
+
+          const packages = audit.verified.filter(
+            (entry) =>
+              entry.name === process.env.PACKAGE_NAME &&
+              entry.version === process.env.RELEASE_VERSION,
+          );
+          if (packages.length !== 1) {
+            throw new Error(`Expected one verified package entry; found ${packages.length}`);
+          }
+          const provenance = packages[0].attestationBundles?.filter(
+            (entry) => entry.predicateType === "https://slsa.dev/provenance/v1",
+          ) ?? [];
+          if (provenance.length > 1 || (!bootstrap && provenance.length !== 1)) {
+            throw new Error(`Expected one SLSA provenance attestation; found ${provenance?.length ?? 0}`);
+          }
+          if (provenance.length === 0) {
+            process.stdout.write(
+              "Verified the one-time bootstrap package with npm registry signatures; GitHub SLSA is not available.\n",
+            );
+            process.exit(0);
+          }
+
+          const envelope = provenance[0].bundle?.dsseEnvelope;
+          if (envelope?.payloadType !== "application/vnd.in-toto+json") {
+            throw new Error("SLSA attestation has an unexpected payload type");
+          }
+          const statement = JSON.parse(Buffer.from(envelope.payload, "base64").toString("utf8"));
+          const expectedSubject = `pkg:npm/${process.env.PACKAGE_NAME}@${process.env.RELEASE_VERSION}`;
+          if (
+            statement._type !== "https://in-toto.io/Statement/v1" ||
+            statement.predicateType !== "https://slsa.dev/provenance/v1" ||
+            statement.subject?.length !== 1 ||
+            statement.subject[0].name !== expectedSubject ||
+            statement.subject[0].digest?.sha512 !== process.env.EXPECTED_SHA512
+          ) {
+            throw new Error("SLSA subject does not match the published package bytes");
+          }
+
+          const predicate = statement.predicate;
+          const workflow = predicate?.buildDefinition?.externalParameters?.workflow;
+          const github = predicate?.buildDefinition?.internalParameters?.github;
+          const expectedRepository = `https://github.com/${process.env.GITHUB_REPOSITORY}`;
+          const expectedRef = `refs/tags/${process.env.EXPECTED_TAG}`;
+          const expectedInvocation = `${expectedRepository}/actions/runs/${process.env.EXPECTED_RUN_ID}/attempts/${process.env.EXPECTED_RUN_ATTEMPT}`;
+          const resolved = predicate?.buildDefinition?.resolvedDependencies;
+          if (
+            workflow?.repository !== expectedRepository ||
+            workflow?.path !== ".github/workflows/release.yml" ||
+            workflow?.ref !== expectedRef ||
+            github?.event_name !== "push" ||
+            predicate?.runDetails?.builder?.id !==
+              "https://github.com/actions/runner/github-hosted" ||
+            predicate?.runDetails?.metadata?.invocationId !== expectedInvocation ||
+            !Array.isArray(resolved) ||
+            !resolved.some(
+              (dependency) =>
+                dependency.digest?.gitCommit === process.env.EXPECTED_HEAD_SHA &&
+                dependency.uri === `git+${expectedRepository}@${expectedRef}`,
+            )
+          ) {
+            throw new Error("SLSA provenance does not bind the expected tag, commit, workflow, and run");
+          }
+          NODE
+      - name: Create the GitHub Release with verified assets
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_VERSION: ${{ steps.package.outputs.version }}
+          TARBALL: ${{ steps.package.outputs.tarball }}
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          response="$RUNNER_TEMP/existing-release.json"
+          status="$(curl --silent --show-error --location \
+            --header "Accept: application/vnd.github+json" \
+            --header "Authorization: Bearer $GH_TOKEN" \
+            --header "X-GitHub-Api-Version: 2022-11-28" \
+            --output "$response" --write-out '%{http_code}' \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          case "$status" in
+            404) ;;
+            200)
+              echo "GitHub Release already exists for $RELEASE_TAG; finalize is create-only" >&2
+              exit 1
+              ;;
+            *)
+              echo "Unable to check for an existing GitHub Release (HTTP $status)" >&2
+              exit 1
+              ;;
+          esac
+
+          gh release create "$RELEASE_TAG" \
+            "$TARBALL" \
+            "$GITHUB_WORKSPACE/.artifacts/release/SHA256SUMS" \
+            --verify-tag \
+            --generate-notes \
+            --title "reins $RELEASE_VERSION"

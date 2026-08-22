@@ -3,6 +3,9 @@
   "tags": ["app"],
   "tasks": {
     "build": { "outputs": ["dist/**"] },
-    "test:e2e": { "dependsOn": ["build"], "cache": false }
+    "test:e2e": {
+      "dependsOn": ["build", "@reins/daemon#build"],
+      "cache": false
+    }
   }
 }

@@ -1,13 +1,12 @@
 {
-  "name": "test",
-  "version": "0.0.0",
+  "name": "reins-workspace",
   "private": true,
   "type": "module",
   "scripts": {
     "boundaries": "node --conditions=source scripts/check-boundaries.ts",
     "language": "node --conditions=source scripts/check-runtime-language.ts",
     "check": "turbo run boundaries language format:check lint typecheck build test test:e2e --continue=dependencies-successful --output-logs=errors-only --log-order=grouped --log-prefix=task",
-    "deployment": "pnpm exec turbo run build && node --conditions=source scripts/check-packed-cli.ts",
+    "deployment": "pnpm exec turbo run build && node --conditions=source scripts/build-distribution.ts && node --conditions=source scripts/validate-release-package.ts && node --conditions=source scripts/check-packed-cli.ts",
     "fix": "turbo run lint:fix format:write --continue=dependencies-successful --output-logs=full --log-order=grouped --log-prefix=task",
     "format:check": "node --conditions=source scripts/run-root-owned-task.ts format:check",
     "format:write": "node --conditions=source scripts/run-root-owned-task.ts format:write",
@@ -20,6 +19,7 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
+    "rolldown": "catalog:",
     "turbo": "catalog:",
     "typescript-7": "catalog:"
   },

@@ -1,27 +1,37 @@
 {
-  "name": "@reins/cli",
-  "version": "0.0.0",
+  "name": "reins",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A deliberately simple harness control plane.",
+  "keywords": [
+    "agent",
+    "cli",
+    "codex",
+    "harness",
+    "qoder"
+  ],
+  "homepage": "https://github.com/YKDZ/reins#readme",
+  "bugs": {
+    "url": "https://github.com/YKDZ/reins/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YKDZ/reins.git"
+  },
   "bin": {
-    "reins": "./dist/cli.js"
+    "reins": "./dist/reins.js",
+    "reins-daemon": "./dist/reins-daemon.js"
   },
   "files": [
     "dist"
   ],
+  "os": [
+    "linux"
+  ],
+  "cpu": [
+    "x64"
+  ],
   "type": "module",
-  "imports": {
-    "#main": {
-      "source": "./src/main.ts",
-      "types": "./src/main.ts",
-      "default": "./dist/main.js"
-    }
-  },
-  "exports": {
-    ".": {
-      "source": "./src/main.ts",
-      "types": "./dist/main.d.ts",
-      "default": "./dist/main.js"
-    }
-  },
   "publishConfig": {
     "access": "public"
   },
@@ -31,7 +41,7 @@
     "format:write": "oxfmt --write --config ../../oxfmt.config.ts .",
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
-    "postbuild": "node -e \"if (process.platform !== 'win32') require('node:fs').chmodSync('dist/cli.js', 0o755)\"",
+    "postbuild": "node -e \"const fs = require('node:fs'); fs.copyFileSync('dist/cli.js', 'dist/reins.js'); if (process.platform !== 'win32') fs.chmodSync('dist/reins.js', 0o755)\"",
     "test": "vitest run test/unit --reporter=agent",
     "test:e2e": "vitest run test/e2e --reporter=agent",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
@@ -40,13 +50,13 @@
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
     "commander": "catalog:",
-    "proper-lockfile": "4.1.2",
+    "proper-lockfile": "catalog:",
     "valibot": "catalog:"
   },
   "devDependencies": {
     "@reins/typescript-config": "workspace:*",
     "@types/node": "catalog:",
-    "@types/proper-lockfile": "4.1.4",
+    "@types/proper-lockfile": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
