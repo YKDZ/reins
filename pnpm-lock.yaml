@@ -180,12 +180,18 @@ importers:
 
   apps/cli:
     dependencies:
+      '@reins/client':
+        specifier: workspace:*
+        version: link:../../packages/client
       '@reins/protocol':
         specifier: workspace:*
         version: link:../../packages/protocol
       '@reins/transport':
         specifier: workspace:*
         version: link:../../packages/transport
+      '@reins/workspace-protocol':
+        specifier: workspace:*
+        version: link:../../packages/workspace-protocol
       commander:
         specifier: 'catalog:'
         version: 15.0.0
@@ -196,9 +202,13 @@ importers:
         specifier: 'catalog:'
         version: 1.4.2(typescript@7.0.2)
     dependenciesMeta:
+      '@reins/client':
+        injected: false
       '@reins/protocol':
         injected: false
       '@reins/transport':
+        injected: false
+      '@reins/workspace-protocol':
         injected: false
     devDependencies:
       '@reins/typescript-config':
@@ -225,6 +235,44 @@ importers:
       vitest:
         specifier: 'catalog:'
         version: 4.1.10(@types/node@24.13.3)
+
+  apps/workspace-manager:
+    dependencies:
+      '@reins/transport':
+        specifier: workspace:*
+        version: link:../../packages/transport
+      '@reins/workspace-protocol':
+        specifier: workspace:*
+        version: link:../../packages/workspace-protocol
+      '@reins/workspace-runtime':
+        specifier: workspace:*
+        version: link:../../packages/workspace-runtime
+    dependenciesMeta:
+      '@reins/transport':
+        injected: false
+      '@reins/workspace-protocol':
+        injected: false
+      '@reins/workspace-runtime':
+        injected: false
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../../packages/typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
 
   packages/adapter-kit:
     dependencies:
@@ -256,6 +304,42 @@ importers:
       vitest:
         specifier: 'catalog:'
         version: 4.1.10(@types/node@24.13.3)
+
+  packages/client:
+    dependencies:
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@reins/transport':
+        specifier: workspace:*
+        version: link:../transport
+      valibot:
+        specifier: 'catalog:'
+        version: 1.4.2(typescript@7.0.2)
+    dependenciesMeta:
+      '@reins/protocol':
+        injected: false
+      '@reins/transport':
+        injected: false
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
 
   packages/core:
     dependencies:
@@ -302,6 +386,9 @@ importers:
       '@reins/core':
         specifier: workspace:*
         version: link:../core
+      '@reins/event-journal':
+        specifier: workspace:*
+        version: link:../event-journal
       '@reins/protocol':
         specifier: workspace:*
         version: link:../protocol
@@ -323,6 +410,8 @@ importers:
       '@reins/codex':
         injected: false
       '@reins/core':
+        injected: false
+      '@reins/event-journal':
         injected: false
       '@reins/protocol':
         injected: false
@@ -355,6 +444,37 @@ importers:
       vitest:
         specifier: 'catalog:'
         version: 4.1.10(@types/node@24.13.3)
+
+  packages/event-journal:
+    dependencies:
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      valibot:
+        specifier: 'catalog:'
+        version: 1.4.2(typescript@7.0.2)
+    dependenciesMeta:
+      '@reins/protocol':
+        injected: false
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
 
   packages/protocol:
     dependencies:
@@ -420,6 +540,85 @@ importers:
       oxfmt:
         specifier: 'catalog:'
         version: 0.58.0
+
+  packages/workspace-protocol:
+    dependencies:
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      valibot:
+        specifier: 'catalog:'
+        version: 1.4.2(typescript@7.0.2)
+    dependenciesMeta:
+      '@reins/protocol':
+        injected: false
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  packages/workspace-runtime:
+    dependencies:
+      '@reins/client':
+        specifier: workspace:*
+        version: link:../client
+      '@reins/event-journal':
+        specifier: workspace:*
+        version: link:../event-journal
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@reins/transport':
+        specifier: workspace:*
+        version: link:../transport
+      '@reins/workspace-protocol':
+        specifier: workspace:*
+        version: link:../workspace-protocol
+    dependenciesMeta:
+      '@reins/client':
+        injected: false
+      '@reins/event-journal':
+        injected: false
+      '@reins/protocol':
+        injected: false
+      '@reins/transport':
+        injected: false
+      '@reins/workspace-protocol':
+        injected: false
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
 
 packages:
 

@@ -4,7 +4,13 @@
     "tags": {
       "app": {
         "dependencies": {
-          "allow": ["protocol", "transport", "library"]
+          "allow": [
+            "client",
+            "protocol",
+            "transport",
+            "workspace-protocol",
+            "library"
+          ]
         }
       },
       "adapter": {
@@ -22,6 +28,11 @@
           "allow": ["protocol", "library"]
         }
       },
+      "client": {
+        "dependencies": {
+          "allow": ["protocol", "transport", "library"]
+        }
+      },
       "daemon": {
         "dependencies": {
           "allow": [
@@ -29,9 +40,15 @@
             "core",
             "adapter",
             "adapter-kit",
+            "event-journal",
             "transport",
             "library"
           ]
+        }
+      },
+      "event-journal": {
+        "dependencies": {
+          "allow": ["protocol", "library"]
         }
       },
       "library": {
@@ -47,6 +64,36 @@
       "transport": {
         "dependencies": {
           "allow": ["protocol", "library"]
+        }
+      },
+      "workspace-app": {
+        "dependencies": {
+          "allow": [
+            "client",
+            "event-journal",
+            "protocol",
+            "workspace-runtime",
+            "workspace-protocol",
+            "transport",
+            "library"
+          ]
+        }
+      },
+      "workspace-protocol": {
+        "dependencies": {
+          "allow": ["protocol", "library"]
+        }
+      },
+      "workspace-runtime": {
+        "dependencies": {
+          "allow": [
+            "workspace-protocol",
+            "client",
+            "event-journal",
+            "protocol",
+            "transport",
+            "library"
+          ]
         }
       }
     }

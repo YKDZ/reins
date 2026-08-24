@@ -10,12 +10,17 @@ const distributionEntryDirectories = [
 ] as const;
 const workspacePackageDirectories = [
   releaseAuthorityDirectory,
+  "apps/workspace-manager",
   "packages/protocol",
   "packages/adapter-kit",
+  "packages/client",
   "packages/core",
+  "packages/event-journal",
   "packages/transport",
   "packages/daemon",
   "packages/typescript-config",
+  "packages/workspace-protocol",
+  "packages/workspace-runtime",
   "adapters/codex",
   "adapters/dsh",
   "adapters/qoder",

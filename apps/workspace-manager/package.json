@@ -1,0 +1,43 @@
+{
+  "name": "@reins/workspace-manager",
+  "private": true,
+  "files": [
+    "dist"
+  ],
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json --pretty false",
+    "format:check": "oxfmt --list-different --config ../../oxfmt.config.ts .",
+    "format:write": "oxfmt --write --config ../../oxfmt.config.ts .",
+    "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
+    "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+  },
+  "dependencies": {
+    "@reins/transport": "workspace:*",
+    "@reins/workspace-protocol": "workspace:*",
+    "@reins/workspace-runtime": "workspace:*"
+  },
+  "devDependencies": {
+    "@reins/typescript-config": "workspace:*",
+    "@types/node": "catalog:",
+    "oxfmt": "catalog:",
+    "oxlint": "catalog:",
+    "oxlint-tsgolint": "catalog:",
+    "typescript-7": "catalog:"
+  },
+  "dependenciesMeta": {
+    "@reins/transport": {
+      "injected": false
+    },
+    "@reins/workspace-protocol": {
+      "injected": false
+    },
+    "@reins/workspace-runtime": {
+      "injected": false
+    }
+  },
+  "engines": {
+    "node": "24"
+  }
+}

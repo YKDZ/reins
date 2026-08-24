@@ -48,8 +48,10 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@reins/client": "workspace:*",
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
+    "@reins/workspace-protocol": "workspace:*",
     "commander": "catalog:",
     "proper-lockfile": "catalog:",
     "valibot": "catalog:"
@@ -65,10 +67,16 @@
     "vitest": "catalog:"
   },
   "dependenciesMeta": {
+    "@reins/client": {
+      "injected": false
+    },
     "@reins/protocol": {
       "injected": false
     },
     "@reins/transport": {
+      "injected": false
+    },
+    "@reins/workspace-protocol": {
       "injected": false
     }
   },
