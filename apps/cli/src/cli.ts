@@ -1,6 +1,9 @@
 #!/usr/bin/env node
 
 import { main } from "./main.ts";
+import { installStdoutErrorBoundary } from "./output-boundary.ts";
+
+installStdoutErrorBoundary();
 
 async function flushIfPending(stream: NodeJS.WriteStream): Promise<void> {
   if (stream.writableLength > 0 && !stream.destroyed) {

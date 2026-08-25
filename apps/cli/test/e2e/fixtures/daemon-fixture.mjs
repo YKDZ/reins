@@ -204,7 +204,43 @@ const server = createServer((socket) => {
         appendFileSync(requestsFile, `${request.method}\n`);
       }
       if (mode === "timeout") continue;
-      if (mode === "invalid-envelope" || mode === "attach-invalid-envelope") {
+      if (mode === "attach-long-replay" && request.method === "attach") {
+        const body = "x".repeat(16 * 1024);
+        for (let index = 0; index < 1024; index += 1) {
+          socket.write(
+            `${JSON.stringify({
+              kind: "notification",
+              method: "event",
+              params: {
+                type: "message",
+                sessionId: "prompt@g1",
+                turnId: "t1",
+                messageId: `m${index}`,
+                role: "worker",
+                content: body,
+              },
+            })}\n`,
+          );
+        }
+        socket.write(
+          `${JSON.stringify({
+            kind: "response",
+            requestId: request.requestId,
+            result: { sessionId: "prompt@g1", replayed: 1024 },
+          })}\n`,
+        );
+      } else if (mode === "output-error" && request.method === "capabilities") {
+        socket.write(
+          `${JSON.stringify({
+            kind: "response",
+            requestId: request.requestId,
+            result: { capabilities: [], failures: [] },
+          })}\n`,
+        );
+      } else if (
+        mode === "invalid-envelope" ||
+        mode === "attach-invalid-envelope"
+      ) {
         socket.write(
           `${JSON.stringify({ kind: "response", requestId: request.requestId })}\n`,
         );

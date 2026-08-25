@@ -301,8 +301,8 @@ function printPrettyEvent(event: DomainEvent): void {
       process.stdout.write(
         `[turn completed] ${event.stopReason} (${event.sessionId})\n`,
       );
-      if (event.finalReply !== null && event.finalReply !== undefined) {
-        process.stdout.write(`${event.finalReply}\n`);
+      if (event.usage !== undefined) {
+        process.stdout.write(`usage: ${JSON.stringify(event.usage)}\n`);
       }
       break;
     case "session.created":

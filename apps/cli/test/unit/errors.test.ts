@@ -4,7 +4,7 @@ import { machineErrorSchema } from "@reins/protocol";
 import * as v from "valibot";
 import { expect, test } from "vitest";
 
-import { toCliError } from "../../src/errors.ts";
+import { outputError, toCliError } from "../../src/errors.ts";
 
 test("local exception cause is UTF-8 bounded without splitting non-ASCII text", () => {
   const error = toCliError(new Error("é".repeat(3_000)));
@@ -18,4 +18,15 @@ test("local exception cause is UTF-8 bounded without splitting non-ASCII text", 
     4 * 1024,
   );
   expect(error.cause.message.endsWith("é")).toBe(true);
+});
+
+test("a local stdout failure remains a typed output error", () => {
+  const error = outputError("EIO");
+
+  expect(toCliError(error)).toEqual({
+    code: "output_error",
+    reason: "stdout_write_failed",
+    systemCode: "EIO",
+  });
+  expect(v.safeParse(machineErrorSchema, error).success).toBe(false);
 });

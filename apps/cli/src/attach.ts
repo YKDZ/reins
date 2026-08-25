@@ -11,6 +11,10 @@ import type {
 } from "@reins/protocol";
 import { STOP_REASONS } from "@reins/protocol";
 
+import {
+  createPrettyAttachPresenter,
+  type PrettyAttachPresenter,
+} from "./attach-presenter.ts";
 import type { ReinsClient } from "./client.ts";
 import {
   ExitError,
@@ -161,6 +165,11 @@ export async function runAttach(
       | { readonly key: string; readonly controller: AbortController }
       | undefined;
     let prompt: PromptInput | undefined;
+    let pendingEnd: AttachEnded | undefined;
+    const presenter: PrettyAttachPresenter | undefined =
+      options.mode === "pretty" && options.quiet !== true
+        ? createPrettyAttachPresenter()
+        : undefined;
 
     // oxlint-disable-next-line unicorn/consistent-function-scoping
     let unsubscribe = (): void => {};
@@ -172,6 +181,7 @@ export async function runAttach(
       activePermission = undefined;
       permissionQueue.length = 0;
       pendingPermissions.clear();
+      presenter?.clear();
       prompt?.close();
       unsubscribe();
       unsubscribeClosed();
@@ -207,11 +217,17 @@ export async function runAttach(
     unsubscribe = client.onNotification(
       (notification: ProtocolNotification) => {
         if (options.quiet !== true) {
-          printNotification(
-            notification.method,
-            notification.params,
-            options.mode,
-          );
+          if (presenter === undefined) {
+            printNotification(
+              notification.method,
+              notification.params,
+              options.mode,
+            );
+          } else if (attachReady) {
+            presenter.present(notification);
+          } else {
+            presenter.bufferInitial(notification);
+          }
         }
         if (
           notification.method === "event" &&
@@ -220,6 +236,10 @@ export async function runAttach(
           options.onTurnCompleted?.(notification.params);
         }
         if (notification.method === "attach.ended") {
+          if (!attachReady) {
+            pendingEnd = notification.params;
+            return;
+          }
           settled = true;
           cleanup();
           resolve(notification.params);
@@ -275,6 +295,14 @@ export async function runAttach(
           return;
         }
         attachReady = true;
+        presenter?.flushInitial();
+        if (pendingEnd !== undefined) {
+          settled = true;
+          const result = pendingEnd;
+          cleanup();
+          resolve(result);
+          return;
+        }
         void consumePermissions().catch((error: unknown) => {
           if (settled) return;
           settled = true;

@@ -7,6 +7,7 @@ import type {
   ProtocolParams,
 } from "@reins/protocol";
 import {
+  messageIdSchema,
   permissionIdSchema,
   protocolNotificationSchema,
   requestIdSchema,
@@ -26,6 +27,7 @@ import type {
 const sessionId = v.parse(sessionIdSchema, "prompt@g1");
 const turnId = v.parse(turnIdSchema, "t1");
 const requestId = v.parse(requestIdSchema, "test");
+const messageId = v.parse(messageIdSchema, "m1");
 const requested = (permissionId: "p1" | "p2"): ProtocolNotification =>
   v.parse(protocolNotificationSchema, {
     kind: "notification",
@@ -148,6 +150,116 @@ test("replayed request followed by resolution never opens a prompt", async () =>
   expect(output.join("")).not.toContain("Permission requested:");
   client.end();
   await expect(attached).resolves.toMatchObject({ reason: "session_killed" });
+});
+
+test("pretty replay waits for attach acceptance and flushes a complete body once", async () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const client = new ControlledClient();
+  const attached = runAttach(client, { params: { sessionId }, mode: "pretty" });
+  client.emit({
+    kind: "notification",
+    method: "event",
+    params: {
+      type: "text.delta",
+      sessionId,
+      turnId,
+      messageId,
+      delta: "hello",
+    },
+  });
+  client.emit({
+    kind: "notification",
+    method: "event",
+    params: {
+      type: "message",
+      sessionId,
+      turnId,
+      messageId,
+      role: "worker",
+      content: "hello",
+    },
+  });
+  expect(output.join("")).toBe("");
+  client.acceptAttach();
+  await tick();
+  expect(output.join("")).toBe("hello\n");
+  client.end();
+  await attached;
+});
+
+test("an end received before the attach ACK flushes its initial batch before resolving", async () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const client = new ControlledClient();
+  let resolvedEarly = false;
+  const attached = runAttach(client, { params: { sessionId }, mode: "pretty" });
+  void attached.then(() => {
+    resolvedEarly = true;
+  });
+  client.emit({
+    kind: "notification",
+    method: "event",
+    params: {
+      type: "message",
+      sessionId,
+      turnId,
+      messageId,
+      role: "worker",
+      content: "last replay",
+    },
+  });
+  client.end();
+  await tick();
+  expect(resolvedEarly).toBe(false);
+  expect(output.join("")).toBe("");
+  client.acceptAttach();
+  await expect(attached).resolves.toMatchObject({ reason: "session_killed" });
+  expect(output.join("")).toBe(
+    "worker: last replay\n[attach ended] prompt@g1: session_killed\n",
+  );
+});
+
+test("JSON attach emits every notification without presenter projection", async () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const client = new ControlledClient();
+  const attached = runAttach(client, { params: { sessionId }, mode: "json" });
+  const delta: ProtocolNotification = {
+    kind: "notification",
+    method: "event",
+    params: { type: "text.delta", sessionId, turnId, messageId, delta: "same" },
+  };
+  const snapshot: ProtocolNotification = {
+    kind: "notification",
+    method: "event",
+    params: {
+      type: "message",
+      sessionId,
+      turnId,
+      messageId,
+      role: "worker",
+      content: "same",
+    },
+  };
+  client.emit(delta);
+  client.emit(snapshot);
+  expect(output.map((line) => JSON.parse(line) as unknown)).toEqual([
+    delta,
+    snapshot,
+  ]);
+  client.acceptAttach();
+  client.end();
+  await attached;
 });
 
 test("pending permissions drain once in FIFO order after attach acceptance", async () => {

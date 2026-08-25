@@ -45,11 +45,16 @@ const fixtureDaemonBin = join(
   repoRoot,
   "apps/cli/test/e2e/fixtures/daemon-fixture.mjs",
 );
+const stdoutEioPreload = join(
+  repoRoot,
+  "apps/cli/test/e2e/fixtures/emit-stdout-eio.cjs",
+);
 
 type CliResult = {
   stdout: string;
   stderr: string;
   exitCode: number;
+  pid: number;
 };
 
 function runCli(
@@ -82,6 +87,7 @@ function runCli(
         stdout: stdout.join(""),
         stderr: stderr.join(""),
         exitCode: code,
+        pid: child.pid ?? -1,
       });
     };
     const timer = setTimeout(() => {
@@ -152,6 +158,16 @@ const sleep = (ms: number): Promise<void> =>
 async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function processExists(pid: number): boolean {
+  if (pid < 1) return false;
+  try {
+    process.kill(pid, 0);
     return true;
   } catch {
     return false;
@@ -377,6 +393,55 @@ describe("CLI 进程边界（缝 D）", () => {
       if (sessionId !== undefined) await runCli(["kill", sessionId], env);
       if (daemon.exitCode === null) await stopDaemon(daemon, socketPath);
     }
+  });
+
+  test("a downstream pipe close makes a long attach exit quietly and release its daemon", async () => {
+    const { dir, env, socketPath } = await freshEnv();
+    const fixtureEnv = fixtureDaemonEnv(env, dir, "attach-long-replay");
+    const child = spawn(
+      process.execPath,
+      [cliBin, "--pretty", "attach", "prompt@g1"],
+      {
+        env: { ...process.env, ...fixtureEnv },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    const stderr: string[] = [];
+    child.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
+    let closedPipe = false;
+    child.stdout?.once("data", () => {
+      closedPipe = true;
+      child.stdout?.destroy();
+    });
+
+    expect(await waitForExit(child, 8_000)).toBe(0);
+    expect(closedPipe).toBe(true);
+    expect(stderr.join("")).toBe("");
+    expect(child.killed).toBe(false);
+    expect(processExists(child.pid ?? -1)).toBe(false);
+    await waitForFixtureExit(fixtureEnv, 4_000);
+    expect(await pathExists(socketPath)).toBe(false);
+    expect(await pathExists(`${socketPath}.lock`)).toBe(false);
+  }, 12_000);
+
+  test("a non-EPIPE stdout failure uses the typed stderr grammar and exit 65", async () => {
+    const { dir, env, socketPath } = await freshEnv();
+    const fixtureEnv = fixtureDaemonEnv(env, dir, "output-error");
+    const result = await runCli(["capabilities"], {
+      ...fixtureEnv,
+      NODE_OPTIONS:
+        `${process.env.NODE_OPTIONS ?? ""} --require=${stdoutEioPreload}`.trim(),
+    });
+
+    expect(result.exitCode).toBe(65);
+    expect(result.stderr).toBe("error: Unable to write CLI output (EIO)\n");
+    expect(result.stderr).not.toContain("Error:");
+    expect(result.stdout).not.toContain("internal_error");
+    expect(result.stdout).not.toContain("output_error");
+    expect(processExists(result.pid)).toBe(false);
+    await waitForFixtureExit(fixtureEnv, 4_000);
+    expect(await pathExists(socketPath)).toBe(false);
+    expect(await pathExists(`${socketPath}.lock`)).toBe(false);
   });
 
   test("two cold CLI launchers coordinate one daemon and both connect", async () => {
@@ -1017,7 +1082,8 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(attached.exitCode).toBe(0);
     expect(attached.stdout).toContain("Permission requested");
     expect(attached.stdout).toContain("[attach ended]");
-    expect(attached.stdout).toContain("resolved:allow");
+    expect(attached.stdout).toContain("[turn completed] end_turn");
+    expect(attached.stdout).not.toContain("resolved:allow");
     await runCli(["kill", sessionId], env);
   });
 

@@ -50,6 +50,11 @@ export function renderCliError(
         : "Permission input closed before feedback was received",
     );
   }
+  if (error.code === "output_error") {
+    return renderedError(
+      `Unable to write CLI output${error.systemCode === undefined ? "" : ` (${error.systemCode})`}`,
+    );
+  }
   if (error.code === "unknown_harness") return renderUnknownHarness(error);
   if (error.code === "invalid_params") {
     const rendered = renderInvalidParams(error);

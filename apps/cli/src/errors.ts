@@ -69,7 +69,21 @@ export type InputError = {
   readonly reason: "permission_choice_eof" | "permission_feedback_eof";
 };
 
-export type CliError = MachineError | UsageError | InputError;
+export type OutputError = {
+  readonly code: "output_error";
+  readonly reason: "stdout_write_failed";
+  readonly systemCode?: string;
+};
+
+export type CliError = MachineError | UsageError | InputError | OutputError;
+
+export function outputError(systemCode?: string): OutputError {
+  return {
+    code: "output_error",
+    reason: "stdout_write_failed",
+    ...(systemCode === undefined ? {} : { systemCode }),
+  };
+}
 
 export function inputError(reason: InputError["reason"]): InputError {
   return { code: "input_error", reason };
@@ -82,6 +96,15 @@ export function isInputError(value: unknown): value is InputError {
     candidate.code === "input_error" &&
     (candidate.reason === "permission_choice_eof" ||
       candidate.reason === "permission_feedback_eof")
+  );
+}
+
+export function isOutputError(value: unknown): value is OutputError {
+  if (typeof value !== "object" || value === null) return false;
+  const candidate = value as { code?: unknown; reason?: unknown };
+  return (
+    candidate.code === "output_error" &&
+    candidate.reason === "stdout_write_failed"
   );
 }
 
@@ -105,6 +128,7 @@ export function toCliError(error: unknown): CliError {
   if (isUsageError(error)) return error;
   if (isMachineError(error)) return error;
   if (isInputError(error)) return error;
+  if (isOutputError(error)) return error;
   if (error instanceof Error) {
     try {
       const parsed = JSON.parse(error.message) as unknown;
