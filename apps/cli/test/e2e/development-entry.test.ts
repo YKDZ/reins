@@ -12,7 +12,7 @@ import {
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -271,6 +271,75 @@ describe("checkout-isolated development entry", () => {
     expect(await pathExists(requests)).toBe(false);
   }, 120_000);
 
+  test("does not reuse a daemon when explicit adapter composition changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
+    cleanupDirectories.push(directory);
+    const baseEnv = {
+      PNPM_CONFIG_REPORTER: "silent",
+      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+      REINS_IDLE_TIMEOUT_MS: "50",
+    };
+    const originalEnv = {
+      ...baseEnv,
+      REINS_ADAPTERS_MODULE: adaptersModule,
+    };
+    const spawned = await runDevelopmentCli(
+      ["spawn", "fake", "hello", "--name", "composition-session"],
+      originalEnv,
+    );
+    expect(spawned.status, spawned.stderr).toBe(0);
+    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
+      .sessionId;
+
+    const changed = await runDevelopmentCli(["capabilities"], {
+      ...baseEnv,
+      REINS_ADAPTERS_MODULE: join(directory, "missing-adapters.mjs"),
+    });
+    const cleanup = await runDevelopmentCli(["kill", sessionId], originalEnv);
+    expect(cleanup.status, cleanup.stderr).toBe(0);
+
+    expect(changed.status).toBe(65);
+    expect(changed.stderr).toBe("");
+    expect(JSON.parse(changed.stdout)).toMatchObject({
+      code: "daemon_start_failed",
+    });
+  }, 120_000);
+
+  test("does not reuse a daemon after an adapter override file changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
+    cleanupDirectories.push(directory);
+    const override = join(directory, "adapters.mjs");
+    const validOverride = `export { default } from ${JSON.stringify(
+      pathToFileURL(adaptersModule).href,
+    )};\n`;
+    await writeFile(override, validOverride);
+    const env = {
+      PNPM_CONFIG_REPORTER: "silent",
+      REINS_ADAPTERS_MODULE: override,
+      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+      REINS_IDLE_TIMEOUT_MS: "50",
+    };
+    const spawned = await runDevelopmentCli(
+      ["spawn", "fake", "hello", "--name", "adapter-content-session"],
+      env,
+    );
+    expect(spawned.status, spawned.stderr).toBe(0);
+    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
+      .sessionId;
+
+    await writeFile(override, "export default 42;\n");
+    const changed = await runDevelopmentCli(["capabilities"], env);
+    await writeFile(override, validOverride);
+    const cleanup = await runDevelopmentCli(["kill", sessionId], env);
+    expect(cleanup.status, cleanup.stderr).toBe(0);
+
+    expect(changed.status).toBe(65);
+    expect(changed.stderr).toBe("");
+    expect(JSON.parse(changed.stdout)).toMatchObject({
+      code: "daemon_start_failed",
+    });
+  }, 120_000);
+
   test("isolates live sessions across clean checkouts and rebuilt output", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);
@@ -404,20 +473,31 @@ describe("checkout-isolated development entry", () => {
       daemonGenerationFromSessionId(sessionId),
     );
 
-    const listed = await runDevelopmentCli(
-      ["list", "--name", "development-session"],
-      env,
-    );
+    const listed = await runDevelopmentCli(["list"], env);
     expect(listed.status, listed.stderr).toBe(0);
-    expect(JSON.parse(listed.stdout)).toEqual([
-      expect.objectContaining({ sessionId }),
-    ]);
+    expect(JSON.parse(listed.stdout)).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sessionId,
+          sessionName: "development-session",
+        }),
+        expect.objectContaining({
+          sessionId: secondSessionId,
+          sessionName: "development-session-second",
+        }),
+      ]),
+    );
+    expect(JSON.parse(listed.stdout)).toHaveLength(2);
 
     const killed = await runDevelopmentCli(
       ["kill", sessionId, secondSessionId],
       env,
     );
     expect(killed.status, killed.stderr).toBe(0);
+    expect(JSON.parse(killed.stdout)).toEqual([
+      { sessionId, status: "killed" },
+      { sessionId: secondSessionId, status: "killed" },
+    ]);
   }, 120_000);
 
   test("isolates a live daemon when Node resolution conditions change without rebuilding output", async () => {

@@ -25,7 +25,7 @@ type CommandResult = {
 };
 
 function runPnpm(args: readonly string[]): Promise<CommandResult> {
-  return new Promise((resolveBuild, reject) => {
+  return new Promise((resolveCommand, reject) => {
     const child = spawn("pnpm", [...args], {
       cwd: repository,
       env: process.env,
@@ -37,7 +37,7 @@ function runPnpm(args: readonly string[]): Promise<CommandResult> {
     child.stderr.on("data", (chunk: Buffer) => stderr.push(chunk));
     child.once("error", reject);
     child.once("close", (status) => {
-      resolveBuild({
+      resolveCommand({
         status: status ?? 1,
         stdout: Buffer.concat(stdout),
         stderr: Buffer.concat(stderr),
@@ -58,6 +58,23 @@ type BuildTaskIdentity = {
 type BuildGraphIdentity = {
   readonly turboVersion: string;
   readonly tasks: readonly BuildTaskIdentity[];
+};
+
+type AdapterModuleIdentity =
+  | { readonly kind: "built-in" }
+  | { readonly kind: "missing"; readonly selection: string }
+  | {
+      readonly kind: "file";
+      readonly selection: string;
+      readonly realPath: string;
+      readonly contentSha256: string;
+    };
+
+type DaemonCompositionIdentity = {
+  readonly adaptersModule: AdapterModuleIdentity;
+  readonly idleTimeoutMs: string | null;
+  readonly diagnosticsMaxAgeMs: string | null;
+  readonly diagnosticsMaxBytes: string | null;
 };
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -118,6 +135,49 @@ async function readBuildGraph(): Promise<BuildGraphIdentity> {
   return parseBuildGraph(result.stdout);
 }
 
+function isMissingFileError(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
+}
+
+async function adapterModuleIdentity(
+  selection: string | undefined,
+): Promise<AdapterModuleIdentity> {
+  if (selection === undefined) return { kind: "built-in" };
+  const resolvedSelection = resolve(process.cwd(), selection);
+  let realPath: string;
+  try {
+    realPath = await realpath(resolvedSelection);
+  } catch (error) {
+    if (isMissingFileError(error)) {
+      return { kind: "missing", selection: resolvedSelection };
+    }
+    throw error;
+  }
+  const content = await readFile(realPath);
+  return {
+    kind: "file",
+    selection: resolvedSelection,
+    realPath,
+    contentSha256: createHash("sha256").update(content).digest("hex"),
+  };
+}
+
+async function daemonCompositionIdentity(
+  env: NodeJS.ProcessEnv,
+): Promise<DaemonCompositionIdentity> {
+  return {
+    adaptersModule: await adapterModuleIdentity(env.REINS_ADAPTERS_MODULE),
+    idleTimeoutMs: env.REINS_IDLE_TIMEOUT_MS ?? null,
+    diagnosticsMaxAgeMs: env.REINS_DIAGNOSTICS_MAX_AGE_MS ?? null,
+    diagnosticsMaxBytes: env.REINS_DIAGNOSTICS_MAX_BYTES ?? null,
+  };
+}
+
 function updateIdentity(
   hash: ReturnType<typeof createHash>,
   label: string,
@@ -142,6 +202,11 @@ async function buildIdentity(
     await readFile(join(repository, "pnpm-lock.yaml")),
   );
   updateIdentity(hash, "turbo-build-graph", JSON.stringify(graph));
+  updateIdentity(
+    hash,
+    "daemon-composition",
+    JSON.stringify(await daemonCompositionIdentity(env)),
+  );
   updateIdentity(
     hash,
     "node-runtime",
