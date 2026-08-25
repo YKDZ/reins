@@ -107,6 +107,7 @@ class RecorderRuntime implements DiagnosticsRuntime {
   readonly #idFactory: DaemonIdFactory;
   readonly #reportedSchemaFailures = new Set<"input" | "record">();
   readonly #activeOperations = new Set<Promise<unknown>>();
+  readonly #activeRecordOperations = new Set<Promise<unknown>>();
   #degraded: { operation: "append" | "query"; cause: string } | undefined;
   #lifecycle: "open" | "closing" | "committed" | "closed" = "open";
   #closePromise: Promise<void> | undefined;
@@ -130,7 +131,7 @@ class RecorderRuntime implements DiagnosticsRuntime {
 
   record(input: DiagnosticInput): Promise<DiagnosticId | undefined> {
     if (this.#lifecycle !== "open") return Promise.resolve(undefined);
-    return this.#track(this.#record(input));
+    return this.#track(this.#record(input), this.#activeRecordOperations);
   }
 
   async #record(input: DiagnosticInput): Promise<DiagnosticId | undefined> {
@@ -179,10 +180,15 @@ class RecorderRuntime implements DiagnosticsRuntime {
     if (this.#degraded !== undefined || this.#lifecycle !== "open") {
       return Promise.reject(new Error("Diagnostics store is unavailable"));
     }
-    return this.#track(this.#query(params));
+    const recordWatermark = [...this.#activeRecordOperations];
+    return this.#track(this.#query(params, recordWatermark));
   }
 
-  async #query(params: DiagnosticsParams): Promise<DiagnosticsResult> {
+  async #query(
+    params: DiagnosticsParams,
+    recordWatermark: readonly Promise<unknown>[],
+  ): Promise<DiagnosticsResult> {
+    await Promise.allSettled(recordWatermark);
     if (this.#degraded !== undefined) {
       throw new Error("Diagnostics store is unavailable");
     }
@@ -246,11 +252,21 @@ class RecorderRuntime implements DiagnosticsRuntime {
     }
   }
 
-  #track<T>(operation: Promise<T>): Promise<T> {
+  #track<T>(
+    operation: Promise<T>,
+    category?: Set<Promise<unknown>>,
+  ): Promise<T> {
     this.#activeOperations.add(operation);
+    category?.add(operation);
     void operation.then(
-      () => this.#activeOperations.delete(operation),
-      () => this.#activeOperations.delete(operation),
+      () => {
+        this.#activeOperations.delete(operation);
+        category?.delete(operation);
+      },
+      () => {
+        this.#activeOperations.delete(operation);
+        category?.delete(operation);
+      },
     );
     return operation;
   }

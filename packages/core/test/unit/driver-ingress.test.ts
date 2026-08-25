@@ -537,7 +537,7 @@ describe("driver event ingress ownership", () => {
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
   });
 
-  test("retains terminal ownership for every completed turn", async () => {
+  test("prioritizes completed-turn ownership over permission lifecycle checks", async () => {
     const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver();
     const machine = createSessionMachine({
@@ -567,15 +567,29 @@ describe("driver event ingress ownership", () => {
       usage: {},
     });
     await machine.send({ sessionId, message: "two" });
+    fake.controls.emit({
+      type: "permission.requested",
+      sessionId,
+      turnId: ids.turn("t2"),
+      permissionId: ids.permission("p-active"),
+      kind: "tool:Bash",
+      options: [{ outcome: "allow", scope: "once" }],
+    });
     const publishedBeforeRejectedEvents = events.length;
 
     fake.controls.emit({
-      type: "message",
+      type: "permission.resolved",
       sessionId,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m-old-active"),
-      role: "worker",
-      content: "old turn while t2 is active",
+      permissionId: ids.permission("p-old-nonpending"),
+      resolution: { outcome: "deny" },
+    });
+    fake.controls.emit({
+      type: "permission.resolved",
+      sessionId,
+      turnId: ids.turn("t1"),
+      permissionId: ids.permission("p-active"),
+      resolution: { outcome: "deny" },
     });
     fake.controls.emit({
       type: "turn.completed",
@@ -586,18 +600,19 @@ describe("driver event ingress ownership", () => {
       usage: {},
     });
     fake.controls.emit({
-      type: "text.delta",
+      type: "permission.resolved",
       sessionId,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m-old-idle"),
-      delta: "old turn after t2 completed",
+      permissionId: ids.permission("p-old-idle"),
+      resolution: { outcome: "deny" },
     });
 
-    await vi.waitFor(() => expect(diagnostics).toHaveLength(2));
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(3));
     expect(diagnostics).toEqual([
       expect.objectContaining({
         kind: "protocol_violation",
         operation: "validate_worker_event",
+        eventType: "permission.resolved",
         eventTurnId: ids.turn("t1"),
         activeTurnId: ids.turn("t2"),
         reason: "event_after_turn_completed",
@@ -606,12 +621,22 @@ describe("driver event ingress ownership", () => {
       expect.objectContaining({
         kind: "protocol_violation",
         operation: "validate_worker_event",
+        eventType: "permission.resolved",
+        eventTurnId: ids.turn("t1"),
+        activeTurnId: ids.turn("t2"),
+        reason: "event_after_turn_completed",
+        sessionState: "busy",
+      }),
+      expect.objectContaining({
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        eventType: "permission.resolved",
         eventTurnId: ids.turn("t1"),
         reason: "event_after_turn_completed",
         sessionState: "idle",
       }),
     ]);
-    expect("activeTurnId" in diagnostics[1]!).toBe(false);
+    expect("activeTurnId" in diagnostics[2]!).toBe(false);
     expect(
       events.slice(publishedBeforeRejectedEvents).map(({ type }) => type),
     ).toEqual(["turn.completed"]);

@@ -71,6 +71,69 @@ afterEach(async () => {
 });
 
 describe("daemon diagnostic error dispatch", () => {
+  test("queries a synchronously registered worker rejection without polling", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "reins-daemon-immediate-rejection-query-"),
+    );
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () => v.parse(daemonGenerationSchema, "query"),
+    });
+    let emit!: (event: DomainEvent) => void;
+    const machine = createSessionMachine({
+      driverFactory: (ingress) => {
+        emit = ingress;
+        return {
+          start() {},
+          deliver() {},
+          interrupt() {},
+          resolvePermission() {},
+          async terminate() {},
+        };
+      },
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: {
+        async record(input) {
+          return await runtime.record({ source: "core", ...input });
+        },
+      },
+    });
+    const sessionId = await machine.spawn({
+      sessionName: v.parse(sessionNameSchema, "immediate-query"),
+      harness: "fake",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+
+    emit({ type: "session.killed", sessionId });
+    const result = await runtime.query({
+      sources: ["core"],
+      kinds: ["protocol_violation"],
+    });
+    await runtime.close();
+
+    expect("records" in result ? result.records : []).toEqual([
+      expect.objectContaining({
+        source: "core",
+        sessionId,
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        reason: "driver_event_forbidden",
+        eventType: "session.killed",
+        sessionState: "busy",
+      }),
+    ]);
+  });
+
   test("drains a worker rejection registered before immediate runtime close", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "reins-daemon-immediate-rejection-close-"),

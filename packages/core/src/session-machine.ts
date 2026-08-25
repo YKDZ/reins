@@ -601,6 +601,25 @@ export function createSessionMachine(options: {
       const activeTurnId =
         current?.currentTurnId ??
         (spawning?.completedTurnId === null ? spawning.turn.turnId : null);
+      const eventTurnCompleted =
+        projected?.completedTurnIds.has(event.turnId) === true ||
+        session?.turns.some(({ turnId }) => turnId === event.turnId) === true ||
+        spawning?.completedTurnId === event.turnId;
+      if (eventTurnCompleted)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "event_after_turn_completed",
+            eventType: event.type,
+            eventTurnId: event.turnId,
+            ...(activeTurnId === null
+              ? { sessionState: "idle" as const }
+              : {
+                  sessionState: sessionState as "busy" | "spawning",
+                  activeTurnId,
+                }),
+          },
+        };
       if (event.type === "permission.resolved" && activeTurnId !== null) {
         const pendingPermissions =
           current?.pendingPermissions ?? spawning?.pendingPermissions;
@@ -630,25 +649,6 @@ export function createSessionMachine(options: {
             },
           };
       }
-      const eventTurnCompleted =
-        projected?.completedTurnIds.has(event.turnId) === true ||
-        session?.turns.some(({ turnId }) => turnId === event.turnId) === true ||
-        spawning?.completedTurnId === event.turnId;
-      if (eventTurnCompleted)
-        return {
-          status: "rejected",
-          rejection: {
-            reason: "event_after_turn_completed",
-            eventType: event.type,
-            eventTurnId: event.turnId,
-            ...(activeTurnId === null
-              ? { sessionState: "idle" as const }
-              : {
-                  sessionState: sessionState as "busy" | "spawning",
-                  activeTurnId,
-                }),
-          },
-        };
       if (activeTurnId === null) {
         return {
           status: "rejected",
