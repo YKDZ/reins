@@ -234,7 +234,7 @@ export function loadRecordedQoderFixtureSource(
     protocolVersion: init.protocol_version,
     lineCount: saved.length,
     uniqueNativeToolCount: facts.tools.length,
-    sha256: sha256(source.raw),
+    artifactSha256: sha256(source.raw),
   });
   return {
     messages: toQoderSdkMessages(saved),

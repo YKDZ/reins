@@ -9,6 +9,7 @@ export class KnownCredentialPolicyError extends Error {
 
 const prohibitedLexicalKeys = new Set([
   "auth",
+  "authentication",
   "oauth",
   "credential",
   "credentials",
@@ -29,31 +30,37 @@ const prohibitedCompoundKeys = [
   "clientsecret",
   "privatekey",
   "secretaccesskey",
+  "serviceaccountkey",
+  "serviceaccounttoken",
+  "serviceaccountprovider",
 ] as const;
 
-const allowedTokenUsageKeys = new Set([
-  "tokencount",
-  "tokenscount",
-  "tokenused",
-  "tokensused",
-  "tokenusage",
-  "tokensusage",
-  "tokenbudget",
-  "tokensbudget",
-  "tokenlimit",
-  "tokenslimit",
-  "inputtoken",
-  "inputtokens",
-  "outputtoken",
-  "outputtokens",
-  "cachecreationinputtoken",
-  "cachecreationinputtokens",
-  "cachereadinputtoken",
-  "cachereadinputtokens",
-  "ephemeral1hinputtoken",
-  "ephemeral1hinputtokens",
-  "ephemeral5minputtoken",
-  "ephemeral5minputtokens",
+const tokenMetricLexemes = new Set([
+  "token",
+  "tokens",
+  "input",
+  "output",
+  "prompt",
+  "pre",
+  "completion",
+  "cache",
+  "cached",
+  "creation",
+  "read",
+  "total",
+  "max",
+  "min",
+  "used",
+  "remaining",
+  "billable",
+  "count",
+  "usage",
+  "details",
+  "budget",
+  "limit",
+  "ephemeral",
+  "1h",
+  "5m",
 ]);
 
 const knownCredentialString = new RegExp(
@@ -85,17 +92,22 @@ function lexicalKeyParts(key: string): string[] {
     .map((part) => part.toLowerCase());
 }
 
-function isCredentialKey(key: string, normalized: string): boolean {
+function isCredentialKey(
+  key: string,
+  normalized: string,
+  value: unknown,
+): boolean {
   if (prohibitedCompoundKeys.some((marker) => normalized.includes(marker))) {
     return true;
   }
   const parts = lexicalKeyParts(key);
   if (parts.some((part) => prohibitedLexicalKeys.has(part))) return true;
-  if (
-    parts.some((part) => part === "token" || part === "tokens") &&
-    !allowedTokenUsageKeys.has(normalized)
-  ) {
-    return true;
+  if (parts.some((part) => part === "token" || part === "tokens")) {
+    return (
+      !parts.every((part) => tokenMetricLexemes.has(part)) ||
+      typeof value !== "number" ||
+      !Number.isFinite(value)
+    );
   }
   return false;
 }
@@ -124,7 +136,7 @@ export function assertMatchesKnownCredentialPolicy(value: unknown): void {
           "Fixture matches a known credential policy key",
         );
       }
-      if (isCredentialKey(key, normalized)) {
+      if (isCredentialKey(key, normalized, item)) {
         throw new KnownCredentialPolicyError(
           "Fixture matches a known credential policy key",
         );

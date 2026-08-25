@@ -251,11 +251,13 @@ describe("Qoder ingress conformance", () => {
       sdkVersion: "1.0.23",
       qoderCliVersion: "1.1.23",
       protocolVersion: "1.2.0",
-      projectionVersion: 1,
+      projectionVersion: 2,
       lineCount: 34,
       uniqueNativeToolCount: 2,
-      sha256:
-        "f8f2b3f4115dac12f494aa1f5a37cf32a9b547ca90352f160f421daba069b871",
+      artifactSha256:
+        "fd22bd2353a3b9651e88a52e057c3dd31ca7de04d811ce8d803826a022096491",
+      sourceSha256:
+        "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
       scenario:
         "Two sequential non-combined Bash tool requests and results followed by a streamed text reply",
     });

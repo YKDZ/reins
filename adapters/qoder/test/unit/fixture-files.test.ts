@@ -269,6 +269,15 @@ describe("known credential policy", () => {
   test.each([
     "AWS_SECRET_ACCESS_KEY",
     "QODER_OAUTH_TOKEN_CACHE",
+    "github_token",
+    "authentication",
+    "tokenType",
+    "tokenSource",
+    "serviceAccountKey",
+    "serviceAccountToken",
+    "serviceAccountProvider",
+    "accessTokenEnv",
+    "job_tokens",
     "QODER_ACCESS_TOKEN",
     "qoderOAuth",
     "runtimeCredential",
@@ -297,9 +306,36 @@ describe("known credential policy", () => {
     "tokenUsage",
     "input_tokens",
     "output_tokens",
+    "maxOutputTokens",
+    "totalTokens",
   ])("允许非 credential 的 token 计量 key %s", (key) => {
     expect(() =>
       assertMatchesKnownCredentialPolicy({ [key]: 3 }),
     ).not.toThrow();
+  });
+
+  test("允许完整 ModelUsage 计量字段", () => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({
+        modelUsage: {
+          inputTokens: 1,
+          outputTokens: 2,
+          cacheReadInputTokens: 3,
+          cacheCreationInputTokens: 4,
+          maxOutputTokens: 5,
+          totalTokens: 6,
+        },
+        pre_tokens: 7,
+        total_tokens: 8,
+      }),
+    ).not.toThrow();
+  });
+
+  test("token计量key只允许finite number", () => {
+    for (const value of ["3", {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        assertMatchesKnownCredentialPolicy({ maxOutputTokens: value }),
+      ).toThrow(KnownCredentialPolicyError);
+    }
   });
 });

@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
 
-export const RECORDED_QODER_PROJECTION_VERSION = 1 as const;
+export const RECORDED_QODER_PROJECTION_VERSION = 2 as const;
 
 export type RecordedUsage = {
   input_tokens: number;
@@ -104,7 +104,8 @@ export type RecordedQoderFixtureMetadata = {
   projectionVersion: number;
   lineCount: number;
   uniqueNativeToolCount: number;
-  sha256: string;
+  artifactSha256: string;
+  sourceSha256: string;
   scenario: string;
 };
 
@@ -154,6 +155,7 @@ export function parseCanonicalRecordedQoderMetadata(raw: string): unknown {
 }
 
 const recordedMetadataKeys = [
+  "artifactSha256",
   "fixture",
   "lineCount",
   "projectionVersion",
@@ -162,7 +164,7 @@ const recordedMetadataKeys = [
   "recordedAt",
   "scenario",
   "sdkVersion",
-  "sha256",
+  "sourceSha256",
   "uniqueNativeToolCount",
 ] as const;
 
@@ -495,13 +497,14 @@ export function assertRecordedQoderFixtureMetadata(
     protocolVersion: string;
     lineCount: number;
     uniqueNativeToolCount: number;
-    sha256: string;
+    artifactSha256: string;
   },
 ): asserts metadata is RecordedQoderFixtureMetadata {
   const candidate = record(metadata);
+  const candidateKeys = Object.keys(candidate).sort();
   const valid =
-    Object.keys(candidate).sort().join("\0") ===
-      recordedMetadataKeys.join("\0") &&
+    candidateKeys.length === recordedMetadataKeys.length &&
+    isDeepStrictEqual(candidateKeys, recordedMetadataKeys) &&
     candidate.fixture === `${name}.jsonl` &&
     candidate.recordedAt === observed.recordedAt &&
     candidate.sdkVersion === observed.sdkVersion &&
@@ -510,9 +513,12 @@ export function assertRecordedQoderFixtureMetadata(
     candidate.projectionVersion === RECORDED_QODER_PROJECTION_VERSION &&
     candidate.lineCount === observed.lineCount &&
     candidate.uniqueNativeToolCount === observed.uniqueNativeToolCount &&
-    candidate.sha256 === observed.sha256 &&
+    candidate.artifactSha256 === observed.artifactSha256 &&
+    typeof candidate.sourceSha256 === "string" &&
+    /^[a-f0-9]{64}$/u.test(candidate.sourceSha256) &&
     typeof candidate.recordedAt === "string" &&
     !Number.isNaN(Date.parse(candidate.recordedAt)) &&
+    new Date(candidate.recordedAt).toISOString() === candidate.recordedAt &&
     typeof candidate.scenario === "string" &&
     candidate.scenario === recordedQoderScenarios[name] &&
     candidate.scenario.length > 0;

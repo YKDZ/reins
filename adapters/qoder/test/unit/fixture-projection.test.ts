@@ -15,10 +15,13 @@ const metadata = {
   sdkVersion: "1.0.23",
   qoderCliVersion: "1.1.23",
   protocolVersion: "1.2.0",
-  projectionVersion: 1,
+  projectionVersion: 2,
   lineCount: 1,
   uniqueNativeToolCount: 0,
-  sha256: "fixture-digest",
+  artifactSha256:
+    "fd22bd2353a3b9651e88a52e057c3dd31ca7de04d811ce8d803826a022096491",
+  sourceSha256:
+    "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
   scenario:
     "Two sequential non-combined Bash tool requests and results followed by a streamed text reply",
 };
@@ -30,7 +33,8 @@ const observed = {
   protocolVersion: metadata.protocolVersion,
   lineCount: metadata.lineCount,
   uniqueNativeToolCount: metadata.uniqueNativeToolCount,
-  sha256: metadata.sha256,
+  artifactSha256: metadata.artifactSha256,
+  sourceSha256: metadata.sourceSha256,
 };
 
 const nonZeroUsage = {
@@ -145,15 +149,33 @@ describe("recorded Qoder projection", () => {
         observed,
       ),
     ).toThrow("Recorded Qoder fixture metadata mismatch");
-    const { sha256: _missing, ...missing } = metadata;
+    expect(() =>
+      assertRecordedQoderFixtureMetadata(
+        "two-tools",
+        { ...metadata, sourceSha256: "NOT-A-DIGEST" },
+        observed,
+      ),
+    ).toThrow("Recorded Qoder fixture metadata mismatch");
+    const { artifactSha256: _missing, ...missing } = metadata;
     expect(() =>
       assertRecordedQoderFixtureMetadata("two-tools", missing, observed),
     ).toThrow("Recorded Qoder fixture metadata mismatch");
     expect(() =>
       assertRecordedQoderFixtureMetadata(
         "two-tools",
-        { ...metadata, sha256: undefined },
+        { ...metadata, artifactSha256: undefined },
         observed,
+      ),
+    ).toThrow("Recorded Qoder fixture metadata mismatch");
+  });
+
+  test("requires a canonical RFC 3339 recorded timestamp", () => {
+    const nonCanonicalRecordedAt = "2026-08-25T18:10:33.366+00:00";
+    expect(() =>
+      assertRecordedQoderFixtureMetadata(
+        "two-tools",
+        { ...metadata, recordedAt: nonCanonicalRecordedAt },
+        { ...observed, recordedAt: nonCanonicalRecordedAt },
       ),
     ).toThrow("Recorded Qoder fixture metadata mismatch");
   });

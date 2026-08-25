@@ -1,85 +1,99 @@
+import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
+import { promisify } from "node:util";
 
-import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
+import { prepareFixtureCandidate } from "./fixture-candidate.ts";
+import { replaceFixturePair } from "./fixture-files.ts";
 
-import {
-  parseCanonicalRecordedQoderJsonl,
-  parseCanonicalRecordedQoderMetadata,
-  projectRecordedQoderMessages,
-  recordedQoderScenarios,
-  RECORDED_QODER_PROJECTION_VERSION,
-  serializeRecordedQoderMessages,
-  serializeRecordedQoderMetadata,
-  toQoderSdkMessages,
-  type RecordedQoderFixtureName,
-} from "../../src/fixture-projection.ts";
-import {
-  assertMatchesKnownCredentialPolicy,
-  replaceFixturePair,
-} from "./fixture-files.ts";
-import { assertQoderProjectionSemanticEquivalence } from "./fixture-fingerprint.ts";
-import { validateRecordedFixture } from "./fixture-validation.ts";
+const execFile = promisify(execFileCallback);
+const sourceRevision = "e3b522c4adc037319bf065590b2faab616ca47c6";
+const fixtures = {
+  "list-and-tool": {
+    minimumNativeToolCount: 1,
+    sourceSha256:
+      "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
+  },
+  "two-tools": {
+    minimumNativeToolCount: 2,
+    sourceSha256:
+      "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
+  },
+} as const;
 
-const minimumTools = {
-  "list-and-tool": 1,
-  "two-tools": 2,
-} as const satisfies Record<RecordedQoderFixtureName, number>;
+class FixtureSourceUnavailableError extends Error {
+  readonly code = "fixture_source_unavailable";
 
-for (const name of Object.keys(minimumTools) as RecordedQoderFixtureName[]) {
+  constructor(options?: ErrorOptions) {
+    super("Immutable Qoder fixture source is unavailable", options);
+    this.name = "FixtureSourceUnavailableError";
+  }
+}
+
+async function gitSource(path: string): Promise<string> {
+  try {
+    const result = await execFile(
+      "git",
+      ["show", `${sourceRevision}:${path}`],
+      {
+        encoding: "utf8",
+        maxBuffer: 16 * 1024 * 1024,
+      },
+    );
+    return result.stdout;
+  } catch (cause) {
+    throw new FixtureSourceUnavailableError({ cause });
+  }
+}
+
+const sdkPackage = JSON.parse(
+  await readFile(
+    new URL(
+      "../package.json",
+      import.meta.resolve("@qodercn-ai/qodercn-agent-sdk"),
+    ),
+    "utf8",
+  ),
+) as { version?: unknown };
+if (typeof sdkPackage.version !== "string") {
+  throw new Error("Installed Qoder SDK package has no version");
+}
+const installedSdkVersion = sdkPackage.version;
+
+const prepared = await Promise.all(
+  (Object.keys(fixtures) as Array<keyof typeof fixtures>).map(async (name) => {
+    const fixture = fixtures[name];
+    const base = `adapters/qoder/test/fixtures/${name}`;
+    const [sourceRaw, sourceMetadataRaw] = await Promise.all([
+      gitSource(`${base}.jsonl`),
+      gitSource(`${base}.metadata.json`),
+    ]);
+    const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
+    if (sourceSha256 !== fixture.sourceSha256) {
+      throw new Error("Immutable Qoder fixture source digest mismatch");
+    }
+    const candidate = await prepareFixtureCandidate({
+      name,
+      sourceRaw,
+      sourceMetadataRaw,
+      installedSdkVersion,
+      minimumNativeToolCount: fixture.minimumNativeToolCount,
+    });
+    return { name, candidate };
+  }),
+);
+
+for (const { name, candidate } of prepared) {
   const jsonlUrl = new URL(`../fixtures/${name}.jsonl`, import.meta.url);
   const metadataUrl = new URL(
     `../fixtures/${name}.metadata.json`,
     import.meta.url,
   );
-  const [raw, metadataRaw] = await Promise.all([
-    readFile(jsonlUrl, "utf8"),
-    readFile(metadataUrl, "utf8"),
-  ]);
-  const source = parseCanonicalRecordedQoderJsonl(raw);
-  const parsedMetadata = parseCanonicalRecordedQoderMetadata(metadataRaw);
-  if (
-    typeof parsedMetadata !== "object" ||
-    parsedMetadata === null ||
-    Array.isArray(parsedMetadata)
-  ) {
-    throw new Error("Recorded Qoder fixture metadata mismatch");
-  }
-  const previous = parsedMetadata as Record<string, unknown>;
-  assertMatchesKnownCredentialPolicy(source);
-  const projected = projectRecordedQoderMessages(source);
-  assertMatchesKnownCredentialPolicy(projected);
-  await assertQoderProjectionSemanticEquivalence(source as SDKMessage[]);
-  const facts = validateRecordedFixture(toQoderSdkMessages(projected), {
-    timedOut: false,
-    minimumNativeToolCount: minimumTools[name],
-  });
-  const jsonl = serializeRecordedQoderMessages(projected);
-  const init = projected[0];
-  if (
-    typeof previous.recordedAt !== "string" ||
-    typeof previous.sdkVersion !== "string" ||
-    init?.type !== "system"
-  ) {
-    throw new Error("Recorded Qoder fixture metadata mismatch");
-  }
-  const metadata = {
-    fixture: `${name}.jsonl`,
-    recordedAt: previous.recordedAt,
-    sdkVersion: previous.sdkVersion,
-    qoderCliVersion: init.qodercli_version,
-    protocolVersion: init.protocol_version,
-    projectionVersion: RECORDED_QODER_PROJECTION_VERSION,
-    lineCount: projected.length,
-    uniqueNativeToolCount: facts.uniqueNativeToolCount,
-    sha256: createHash("sha256").update(jsonl).digest("hex"),
-    scenario: recordedQoderScenarios[name],
-  };
   await replaceFixturePair({
     jsonlPath: fileURLToPath(jsonlUrl),
     metadataPath: fileURLToPath(metadataUrl),
-    jsonl,
-    metadata: serializeRecordedQoderMetadata(metadata),
+    jsonl: candidate.jsonl,
+    metadata: candidate.metadata,
   });
 }

@@ -100,9 +100,11 @@ describe("录制 fixture 回放", () => {
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.25",
       sdkVersion: "1.0.23",
-      projectionVersion: 1,
-      sha256:
-        "5874daa64735814f81a873fa188ef807def6651026cf4b62ed6f707e664420ba",
+      projectionVersion: 2,
+      artifactSha256:
+        "380b7a9d716ce02770f2f35a6976f9e2227eb240388ff47d7679fd20d7d7a9fb",
+      sourceSha256:
+        "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
     });
     const events = await replayFixture(messages);
     // 该指纹在 closed projection 迁移前固定，证明离线裁剪未改变公开事件流。
@@ -204,9 +206,11 @@ describe("录制 fixture 回放", () => {
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.23",
       sdkVersion: "1.0.23",
-      projectionVersion: 1,
-      sha256:
-        "f8f2b3f4115dac12f494aa1f5a37cf32a9b547ca90352f160f421daba069b871",
+      projectionVersion: 2,
+      artifactSha256:
+        "fd22bd2353a3b9651e88a52e057c3dd31ca7de04d811ce8d803826a022096491",
+      sourceSha256:
+        "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
     });
     const events = await replayFixture(messages);
     // 该指纹在 closed projection 迁移前固定，证明离线裁剪未改变公开事件流。
