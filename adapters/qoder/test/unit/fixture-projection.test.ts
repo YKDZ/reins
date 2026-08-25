@@ -3,6 +3,8 @@ import { describe, expect, test } from "vitest";
 import {
   assertCanonicalRecordedQoderMessages,
   assertRecordedQoderFixtureMetadata,
+  parseCanonicalRecordedQoderJsonl,
+  parseCanonicalRecordedQoderMetadata,
   projectRecordedQoderMessages,
   toQoderSdkMessages,
 } from "#/fixture-projection";
@@ -29,6 +31,25 @@ const observed = {
   lineCount: metadata.lineCount,
   uniqueNativeToolCount: metadata.uniqueNativeToolCount,
   sha256: metadata.sha256,
+};
+
+const nonZeroUsage = {
+  input_tokens: 7,
+  cache_creation_input_tokens: 1,
+  cache_read_input_tokens: 2,
+  output_tokens: 3,
+  server_tool_use: { web_search_requests: 4, web_fetch_requests: 5 },
+  service_tier: "standard",
+  cache_creation: {
+    ephemeral_1h_input_tokens: 6,
+    ephemeral_5m_input_tokens: 8,
+  },
+  inference_geo: "us",
+  iterations: [],
+  speed: "standard",
+  credits: 9,
+  original_credits: 10,
+  billable: true,
 };
 
 describe("recorded Qoder projection", () => {
@@ -108,5 +129,110 @@ describe("recorded Qoder projection", () => {
         observed,
       ),
     ).toThrow("Recorded Qoder fixture metadata mismatch");
+  });
+
+  test("rejects extra, missing, and undefined metadata fields", () => {
+    expect(() =>
+      assertRecordedQoderFixtureMetadata(
+        "two-tools",
+        {
+          ...metadata,
+          runtime: {
+            QODER_ACCESS_TOKEN: "opaque-device-secret",
+            transcript: [],
+          },
+        },
+        observed,
+      ),
+    ).toThrow("Recorded Qoder fixture metadata mismatch");
+    const { sha256: _missing, ...missing } = metadata;
+    expect(() =>
+      assertRecordedQoderFixtureMetadata("two-tools", missing, observed),
+    ).toThrow("Recorded Qoder fixture metadata mismatch");
+    expect(() =>
+      assertRecordedQoderFixtureMetadata(
+        "two-tools",
+        { ...metadata, sha256: undefined },
+        observed,
+      ),
+    ).toThrow("Recorded Qoder fixture metadata mismatch");
+  });
+
+  test("preserves assistant-only usage through projection and SDK rehydration", () => {
+    const projected = projectRecordedQoderMessages([
+      {
+        type: "assistant",
+        message: {
+          id: "native-message",
+          content: [{ type: "text", text: "done" }],
+          stop_reason: "end_turn",
+          usage: nonZeroUsage,
+        },
+      },
+    ]);
+    expect(projected[0]).toMatchObject({
+      type: "assistant",
+      message: { usage: nonZeroUsage },
+    });
+    expect(toQoderSdkMessages(projected)[0]).toMatchObject({
+      type: "assistant",
+      message: { usage: nonZeroUsage },
+    });
+  });
+
+  test("rejects duplicate-key raw fixture and metadata before parsed policy", () => {
+    const duplicateCwd =
+      '{"type":"system","subtype":"init","apiKeySource":"none","qodercli_version":"1.1.23","protocol_version":"1.2.0","cwd":"opaque-device-secret","cwd":"<fixture-cwd>"}\n';
+    expect(() => parseCanonicalRecordedQoderJsonl(duplicateCwd)).toThrow(
+      "Recorded Qoder fixture bytes are not canonical",
+    );
+
+    const duplicateScenario = `${JSON.stringify(
+      { ...metadata, scenario: "opaque-device-secret" },
+      null,
+      2,
+    ).replace(
+      '  "scenario": "opaque-device-secret"',
+      `  "scenario": "opaque-device-secret",\n  "scenario": ${JSON.stringify(metadata.scenario)}`,
+    )}\n`;
+    expect(() =>
+      parseCanonicalRecordedQoderMetadata(duplicateScenario),
+    ).toThrow("Recorded Qoder metadata bytes are not canonical");
+  });
+
+  test("rejects mapper-consumed variants that v1 cannot preserve", () => {
+    expect(() =>
+      projectRecordedQoderMessages([
+        {
+          type: "user",
+          message: { role: "user", content: [] },
+          parent_tool_use_id: "native-tool",
+          tool_use_result: { stdout: "done" },
+          tool_result_meta: [{ id: "native-tool" }],
+        },
+      ]),
+    ).toThrow("Unsupported recorded Qoder user fallback result");
+    expect(() =>
+      projectRecordedQoderMessages([
+        {
+          type: "system",
+          subtype: "session_state_changed",
+          state: "idle",
+        },
+      ]),
+    ).toThrow("Unsupported recorded Qoder system message");
+    expect(() =>
+      projectRecordedQoderMessages([
+        {
+          type: "assistant",
+          message: {
+            id: "native-message",
+            content: [],
+            stop_reason: "end_turn",
+            usage: { ...nonZeroUsage, vendor_runtime_usage: 99 },
+          },
+        },
+      ]),
+    ).toThrow("Unsupported recorded Qoder usage");
   });
 });

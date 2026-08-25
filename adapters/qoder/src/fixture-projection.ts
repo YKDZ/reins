@@ -72,6 +72,7 @@ export type RecordedQoderMessage =
         id: string;
         content: RecordedContentBlock[];
         stop_reason: string | null;
+        usage?: RecordedUsage;
       };
       isApiErrorMessage?: true;
       aborted?: true;
@@ -107,6 +108,64 @@ export type RecordedQoderFixtureMetadata = {
   scenario: string;
 };
 
+export function serializeRecordedQoderMessages(
+  messages: readonly RecordedQoderMessage[],
+): string {
+  return `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
+}
+
+export function serializeRecordedQoderMetadata(
+  metadata: RecordedQoderFixtureMetadata,
+): string {
+  return `${JSON.stringify(metadata, null, 2)}\n`;
+}
+
+export function parseCanonicalRecordedQoderJsonl(raw: string): unknown[] {
+  if (!raw.endsWith("\n") || raw.length === 1) {
+    throw new Error("Recorded Qoder fixture bytes are not canonical");
+  }
+  let parsed: unknown[];
+  try {
+    parsed = raw
+      .slice(0, -1)
+      .split("\n")
+      .map((line) => JSON.parse(line) as unknown);
+  } catch {
+    throw new Error("Recorded Qoder fixture bytes are not canonical");
+  }
+  const canonical = `${parsed.map((value) => JSON.stringify(value)).join("\n")}\n`;
+  if (canonical !== raw) {
+    throw new Error("Recorded Qoder fixture bytes are not canonical");
+  }
+  return parsed;
+}
+
+export function parseCanonicalRecordedQoderMetadata(raw: string): unknown {
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw) as unknown;
+  } catch {
+    throw new Error("Recorded Qoder metadata bytes are not canonical");
+  }
+  if (`${JSON.stringify(parsed, null, 2)}\n` !== raw) {
+    throw new Error("Recorded Qoder metadata bytes are not canonical");
+  }
+  return parsed;
+}
+
+const recordedMetadataKeys = [
+  "fixture",
+  "lineCount",
+  "projectionVersion",
+  "protocolVersion",
+  "qoderCliVersion",
+  "recordedAt",
+  "scenario",
+  "sdkVersion",
+  "sha256",
+  "uniqueNativeToolCount",
+] as const;
+
 function record(value: unknown): Record<string, unknown> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     throw new Error("Unsupported recorded Qoder message");
@@ -133,11 +192,54 @@ function nullableString(value: unknown): string | null {
   return string(value);
 }
 
+function hasExactKeys(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[] = [],
+): boolean {
+  const actual = Object.keys(value).sort();
+  const expected = [
+    ...required,
+    ...optional.filter((key) => value[key] !== undefined),
+  ].sort();
+  return (
+    actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index])
+  );
+}
+
 function projectUsage(value: unknown): RecordedUsage {
   const source = record(value);
   const serverToolUse = record(source.server_tool_use);
   const cacheCreation = record(source.cache_creation);
-  if (!Array.isArray(source.iterations) || source.iterations.length !== 0) {
+  if (
+    !hasExactKeys(
+      source,
+      [
+        "input_tokens",
+        "cache_creation_input_tokens",
+        "cache_read_input_tokens",
+        "output_tokens",
+        "server_tool_use",
+        "service_tier",
+        "cache_creation",
+        "inference_geo",
+        "iterations",
+        "speed",
+      ],
+      ["credits", "original_credits", "billable"],
+    ) ||
+    !hasExactKeys(serverToolUse, [
+      "web_search_requests",
+      "web_fetch_requests",
+    ]) ||
+    !hasExactKeys(cacheCreation, [
+      "ephemeral_1h_input_tokens",
+      "ephemeral_5m_input_tokens",
+    ]) ||
+    !Array.isArray(source.iterations) ||
+    source.iterations.length !== 0
+  ) {
     throw new Error("Unsupported recorded Qoder usage");
   }
   return {
@@ -233,6 +335,9 @@ function projectAssistant(
       id: string(message.id),
       content,
       stop_reason: nullableString(message.stop_reason),
+      ...(message.usage === undefined
+        ? {}
+        : { usage: projectUsage(message.usage) }),
     },
     ...(value.isApiErrorMessage === true ? { isApiErrorMessage: true } : {}),
     ...(value.aborted === true ? { aborted: true } : {}),
@@ -323,6 +428,9 @@ function projectMessage(value: unknown): RecordedQoderMessage | undefined {
       cwd: "<fixture-cwd>",
     };
   }
+  if (source.type === "system") {
+    throw new Error("Unsupported recorded Qoder system message");
+  }
   if (source.type === "stream_event") return projectStreamEvent(source);
   if (source.type === "assistant") return projectAssistant(source);
   if (source.type === "user") {
@@ -331,6 +439,15 @@ function projectMessage(value: unknown): RecordedQoderMessage | undefined {
       throw new Error("Unsupported recorded Qoder message");
     }
     const content = message.content.map(projectToolResult);
+    if (
+      content.length === 0 &&
+      (source.tool_use_result !== undefined ||
+        source.tool_result_meta !== undefined ||
+        (source.parent_tool_use_id !== undefined &&
+          source.parent_tool_use_id !== null))
+    ) {
+      throw new Error("Unsupported recorded Qoder user fallback result");
+    }
     return { type: "user", message: { role: "user", content } };
   }
   if (source.type === "result") {
@@ -383,6 +500,8 @@ export function assertRecordedQoderFixtureMetadata(
 ): asserts metadata is RecordedQoderFixtureMetadata {
   const candidate = record(metadata);
   const valid =
+    Object.keys(candidate).sort().join("\0") ===
+      recordedMetadataKeys.join("\0") &&
     candidate.fixture === `${name}.jsonl` &&
     candidate.recordedAt === observed.recordedAt &&
     candidate.sdkVersion === observed.sdkVersion &&
@@ -495,7 +614,7 @@ export function toQoderSdkMessages(
           context_management: null,
           model: "<fixture-model>",
           stop_sequence: null,
-          usage: emptyUsage,
+          usage: message.message.usage ?? emptyUsage,
         },
         parent_tool_use_id: null,
         uuid: "<fixture-uuid>",

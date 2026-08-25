@@ -7,24 +7,53 @@ export class KnownCredentialPolicyError extends Error {
   }
 }
 
-const prohibitedNormalizedKeys = new Set([
+const prohibitedLexicalKeys = new Set([
   "auth",
   "oauth",
-  "oauthtoken",
   "credential",
   "credentials",
-  "devicetoken",
-  "token",
   "password",
-  "privatekey",
-  "clientsecret",
-  "sessiontoken",
-  "accesstoken",
-  "refreshtoken",
-  "apikey",
   "authorization",
   "cookie",
   "secret",
+]);
+
+const prohibitedCompoundKeys = [
+  "apikey",
+  "accesstoken",
+  "refreshtoken",
+  "sessiontoken",
+  "oauthtoken",
+  "devicetoken",
+  "idtoken",
+  "clientsecret",
+  "privatekey",
+  "secretaccesskey",
+] as const;
+
+const allowedTokenUsageKeys = new Set([
+  "tokencount",
+  "tokenscount",
+  "tokenused",
+  "tokensused",
+  "tokenusage",
+  "tokensusage",
+  "tokenbudget",
+  "tokensbudget",
+  "tokenlimit",
+  "tokenslimit",
+  "inputtoken",
+  "inputtokens",
+  "outputtoken",
+  "outputtokens",
+  "cachecreationinputtoken",
+  "cachecreationinputtokens",
+  "cachereadinputtoken",
+  "cachereadinputtokens",
+  "ephemeral1hinputtoken",
+  "ephemeral1hinputtokens",
+  "ephemeral5minputtoken",
+  "ephemeral5minputtokens",
 ]);
 
 const knownCredentialString = new RegExp(
@@ -44,6 +73,31 @@ function normalizedKey(key: string): string {
     .normalize("NFKC")
     .replaceAll(/[^A-Za-z0-9]/g, "")
     .toLowerCase();
+}
+
+function lexicalKeyParts(key: string): string[] {
+  return key
+    .normalize("NFKC")
+    .replaceAll(/([A-Z]+)([A-Z][a-z])/g, "$1 $2")
+    .replaceAll(/([a-z0-9])([A-Z])/g, "$1 $2")
+    .split(/[^A-Za-z0-9]+/u)
+    .filter((part) => part.length > 0)
+    .map((part) => part.toLowerCase());
+}
+
+function isCredentialKey(key: string, normalized: string): boolean {
+  if (prohibitedCompoundKeys.some((marker) => normalized.includes(marker))) {
+    return true;
+  }
+  const parts = lexicalKeyParts(key);
+  if (parts.some((part) => prohibitedLexicalKeys.has(part))) return true;
+  if (
+    parts.some((part) => part === "token" || part === "tokens") &&
+    !allowedTokenUsageKeys.has(normalized)
+  ) {
+    return true;
+  }
+  return false;
 }
 
 /** Rejects known credential shapes; this is a policy, not a proof of secrecy. */
@@ -70,7 +124,7 @@ export function assertMatchesKnownCredentialPolicy(value: unknown): void {
           "Fixture matches a known credential policy key",
         );
       }
-      if (prohibitedNormalizedKeys.has(normalized)) {
+      if (isCredentialKey(key, normalized)) {
         throw new KnownCredentialPolicyError(
           "Fixture matches a known credential policy key",
         );

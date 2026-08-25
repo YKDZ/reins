@@ -265,4 +265,41 @@ describe("known credential policy", () => {
       assertMatchesKnownCredentialPolicy({ apiKeySource: "environment" }),
     ).toThrow(KnownCredentialPolicyError);
   });
+
+  test.each([
+    "AWS_SECRET_ACCESS_KEY",
+    "QODER_OAUTH_TOKEN_CACHE",
+    "QODER_ACCESS_TOKEN",
+    "qoderOAuth",
+    "runtimeCredential",
+    "deviceTokenValue",
+    "vendorPassword",
+    "privateKeyQoder",
+    "qoderClientSecret",
+    "sessionTokenCache",
+    "accessTokenV2",
+    "refreshTokenVendor",
+    "vendorApiKey",
+    "authorizationHeader",
+    "cookieJar",
+    "secretState",
+  ])("拒绝带厂商或用途限定的 credential key %s", (key) => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({ [key]: "opaque-value" }),
+    ).toThrow(KnownCredentialPolicyError);
+  });
+
+  test.each([
+    "author",
+    "tokens_used",
+    "tokenizer",
+    "tokenCount",
+    "tokenUsage",
+    "input_tokens",
+    "output_tokens",
+  ])("允许非 credential 的 token 计量 key %s", (key) => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({ [key]: 3 }),
+    ).not.toThrow();
+  });
 });

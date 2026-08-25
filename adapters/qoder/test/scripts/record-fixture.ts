@@ -16,6 +16,8 @@ import {
   projectRecordedQoderMessages,
   recordedQoderScenarios,
   RECORDED_QODER_PROJECTION_VERSION,
+  serializeRecordedQoderMessages,
+  serializeRecordedQoderMetadata,
   toQoderSdkMessages,
   type RecordedQoderFixtureMetadata,
   type RecordedQoderMessage,
@@ -24,6 +26,7 @@ import {
   assertMatchesKnownCredentialPolicy,
   replaceFixturePair,
 } from "./fixture-files.ts";
+import { assertQoderProjectionSemanticEquivalence } from "./fixture-fingerprint.ts";
 import { validateRecordedFixture } from "./fixture-validation.ts";
 
 const scenarios = {
@@ -136,6 +139,7 @@ try {
   assertMatchesKnownCredentialPolicy(messages);
   const projected = projectRecordedQoderMessages(messages);
   assertMatchesKnownCredentialPolicy(projected);
+  await assertQoderProjectionSemanticEquivalence(messages);
   const facts = validateRecordedFixture(toQoderSdkMessages(projected), {
     timedOut,
     minimumNativeToolCount: scenario.minimumNativeToolCount,
@@ -150,7 +154,7 @@ try {
   if (recordedAt === undefined) {
     throw new Error("Recorded stream has no source timestamp");
   }
-  const jsonl = `${projected.map((message) => JSON.stringify(message)).join("\n")}\n`;
+  const jsonl = serializeRecordedQoderMessages(projected);
   const metadata = buildMetadata(
     requestedName,
     scenario,
@@ -168,7 +172,7 @@ try {
       new URL(`${requestedName}.metadata.json`, fixturesDir),
     ),
     jsonl,
-    metadata: `${JSON.stringify(metadata, null, 2)}\n`,
+    metadata: serializeRecordedQoderMetadata(metadata),
   });
   console.log(
     `Recorded fixture ${requestedName}: lines=${metadata.lineCount}, nativeTools=${metadata.uniqueNativeToolCount}, sha256=${metadata.sha256}`,

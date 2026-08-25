@@ -7,6 +7,8 @@ import { assertMatchesKnownCredentialPolicy } from "./fixture-policy.ts";
 import {
   assertCanonicalRecordedQoderMessages,
   assertRecordedQoderFixtureMetadata,
+  parseCanonicalRecordedQoderJsonl,
+  parseCanonicalRecordedQoderMetadata,
   toQoderSdkMessages,
   type RecordedQoderFixtureMetadata,
   type RecordedQoderFixtureName,
@@ -189,7 +191,23 @@ export async function loadRecordedQoderFixture(
       "utf8",
     ),
   ]);
-  const metadata: unknown = JSON.parse(metadataRaw);
+  const sdkPackage = JSON.parse(sdkPackageRaw) as { version?: unknown };
+  return loadRecordedQoderFixtureSource(name, {
+    raw,
+    metadataRaw,
+    sdkVersion: sdkPackage.version,
+  });
+}
+
+export function loadRecordedQoderFixtureSource(
+  name: RecordedQoderFixtureName,
+  source: { raw: string; metadataRaw: string; sdkVersion: unknown },
+): {
+  messages: SDKMessage[];
+  metadata: RecordedQoderFixtureMetadata;
+  facts: RecordedQoderFixtureFacts;
+} {
+  const metadata = parseCanonicalRecordedQoderMetadata(source.metadataRaw);
   if (
     typeof metadata !== "object" ||
     metadata === null ||
@@ -197,11 +215,7 @@ export async function loadRecordedQoderFixture(
   ) {
     throw new Error("Recorded Qoder fixture metadata mismatch");
   }
-  const sdkPackage = JSON.parse(sdkPackageRaw) as { version?: unknown };
-  const saved: unknown[] = raw
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as unknown);
+  const saved = parseCanonicalRecordedQoderJsonl(source.raw);
   assertMatchesKnownCredentialPolicy([saved, metadata]);
   assertCanonicalRecordedQoderMessages(saved);
   const init = saved[0];
@@ -215,13 +229,12 @@ export async function loadRecordedQoderFixture(
       typeof metadataRecord.recordedAt === "string"
         ? metadataRecord.recordedAt
         : "",
-    sdkVersion:
-      typeof sdkPackage.version === "string" ? sdkPackage.version : "",
+    sdkVersion: typeof source.sdkVersion === "string" ? source.sdkVersion : "",
     qoderCliVersion: init.qodercli_version,
     protocolVersion: init.protocol_version,
     lineCount: saved.length,
     uniqueNativeToolCount: facts.tools.length,
-    sha256: sha256(raw),
+    sha256: sha256(source.raw),
   });
   return {
     messages: toQoderSdkMessages(saved),

@@ -2,10 +2,16 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 
+import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
+
 import {
+  parseCanonicalRecordedQoderJsonl,
+  parseCanonicalRecordedQoderMetadata,
   projectRecordedQoderMessages,
   recordedQoderScenarios,
   RECORDED_QODER_PROJECTION_VERSION,
+  serializeRecordedQoderMessages,
+  serializeRecordedQoderMetadata,
   toQoderSdkMessages,
   type RecordedQoderFixtureName,
 } from "../../src/fixture-projection.ts";
@@ -13,6 +19,7 @@ import {
   assertMatchesKnownCredentialPolicy,
   replaceFixturePair,
 } from "./fixture-files.ts";
+import { assertQoderProjectionSemanticEquivalence } from "./fixture-fingerprint.ts";
 import { validateRecordedFixture } from "./fixture-validation.ts";
 
 const minimumTools = {
@@ -30,31 +37,39 @@ for (const name of Object.keys(minimumTools) as RecordedQoderFixtureName[]) {
     readFile(jsonlUrl, "utf8"),
     readFile(metadataUrl, "utf8"),
   ]);
-  const source: unknown[] = raw
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as unknown);
-  const previous = JSON.parse(metadataRaw) as Record<string, unknown>;
+  const source = parseCanonicalRecordedQoderJsonl(raw);
+  const parsedMetadata = parseCanonicalRecordedQoderMetadata(metadataRaw);
+  if (
+    typeof parsedMetadata !== "object" ||
+    parsedMetadata === null ||
+    Array.isArray(parsedMetadata)
+  ) {
+    throw new Error("Recorded Qoder fixture metadata mismatch");
+  }
+  const previous = parsedMetadata as Record<string, unknown>;
   assertMatchesKnownCredentialPolicy(source);
   const projected = projectRecordedQoderMessages(source);
   assertMatchesKnownCredentialPolicy(projected);
+  await assertQoderProjectionSemanticEquivalence(source as SDKMessage[]);
   const facts = validateRecordedFixture(toQoderSdkMessages(projected), {
     timedOut: false,
     minimumNativeToolCount: minimumTools[name],
   });
-  const jsonl = `${projected.map((message) => JSON.stringify(message)).join("\n")}\n`;
+  const jsonl = serializeRecordedQoderMessages(projected);
+  const init = projected[0];
+  if (
+    typeof previous.recordedAt !== "string" ||
+    typeof previous.sdkVersion !== "string" ||
+    init?.type !== "system"
+  ) {
+    throw new Error("Recorded Qoder fixture metadata mismatch");
+  }
   const metadata = {
     fixture: `${name}.jsonl`,
     recordedAt: previous.recordedAt,
     sdkVersion: previous.sdkVersion,
-    qoderCliVersion:
-      projected[0]?.type === "system"
-        ? projected[0].qodercli_version
-        : undefined,
-    protocolVersion:
-      projected[0]?.type === "system"
-        ? projected[0].protocol_version
-        : undefined,
+    qoderCliVersion: init.qodercli_version,
+    protocolVersion: init.protocol_version,
     projectionVersion: RECORDED_QODER_PROJECTION_VERSION,
     lineCount: projected.length,
     uniqueNativeToolCount: facts.uniqueNativeToolCount,
@@ -65,6 +80,6 @@ for (const name of Object.keys(minimumTools) as RecordedQoderFixtureName[]) {
     jsonlPath: fileURLToPath(jsonlUrl),
     metadataPath: fileURLToPath(metadataUrl),
     jsonl,
-    metadata: `${JSON.stringify(metadata, null, 2)}\n`,
+    metadata: serializeRecordedQoderMetadata(metadata),
   });
 }

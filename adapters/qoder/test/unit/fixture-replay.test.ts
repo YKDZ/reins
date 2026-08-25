@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { readFile } from "node:fs/promises";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
 import type {
@@ -9,8 +10,12 @@ import type {
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
+import { KnownCredentialPolicyError } from "#/fixture-policy";
 import { createQoderDriver } from "#/qoder-driver";
-import { loadRecordedQoderFixture } from "#/testing";
+import {
+  loadRecordedQoderFixture,
+  loadRecordedQoderFixtureSource,
+} from "#/testing";
 
 import { createFakeSdk } from "../helpers/fake-sdk.ts";
 
@@ -48,6 +53,44 @@ async function replayFixture(
 }
 
 describe("录制 fixture 回放", () => {
+  test("loader拒绝canonical metadata中的额外认证与运行态字段", async () => {
+    const fixture = await loadRecordedQoderFixture("two-tools");
+    const raw = await readFile(
+      new URL("../fixtures/two-tools.jsonl", import.meta.url),
+      "utf8",
+    );
+    const metadataWithCredential = `${JSON.stringify(
+      {
+        ...fixture.metadata,
+        runtime: {
+          QODER_ACCESS_TOKEN: "opaque-device-secret",
+          transcript: [],
+        },
+      },
+      null,
+      2,
+    )}\n`;
+    expect(() =>
+      loadRecordedQoderFixtureSource("two-tools", {
+        raw,
+        metadataRaw: metadataWithCredential,
+        sdkVersion: fixture.metadata.sdkVersion,
+      }),
+    ).toThrow(KnownCredentialPolicyError);
+    const metadataWithRuntime = `${JSON.stringify(
+      { ...fixture.metadata, runtime: { transcript: [] } },
+      null,
+      2,
+    )}\n`;
+    expect(() =>
+      loadRecordedQoderFixtureSource("two-tools", {
+        raw,
+        metadataRaw: metadataWithRuntime,
+        sdkVersion: fixture.metadata.sdkVersion,
+      }),
+    ).toThrow("Recorded Qoder fixture metadata mismatch");
+  });
+
   test("固定版本的 list-and-tool 流保留原生消息和工具生命周期", async () => {
     const { messages, metadata } =
       await loadRecordedQoderFixture("list-and-tool");

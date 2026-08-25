@@ -10,6 +10,22 @@ const dependencies = {
   "@reins/qoder": "workspace:*",
 };
 
+const devDependencies = {
+  "@reins/typescript-config": "workspace:*",
+  "@types/node": "catalog:",
+  oxfmt: "catalog:",
+  oxlint: "catalog:",
+  "oxlint-tsgolint": "catalog:",
+  "typescript-7": "catalog:",
+  vitest: "catalog:",
+};
+
+const dependenciesMeta = Object.fromEntries(
+  Object.keys(dependencies).map((name) => [name, { injected: false }]),
+);
+
+const manifest = { dependencies, devDependencies, dependenciesMeta };
+
 const targetTags = new Map([
   ["@reins/client", ["client"]],
   ["@reins/daemon", ["daemon"]],
@@ -19,7 +35,7 @@ const targetTags = new Map([
 
 test("accepts the exact conformance dependency contract", () => {
   assert.doesNotThrow(() =>
-    assertConformanceDependencyContract({ dependencies }, targetTags),
+    assertConformanceDependencyContract(manifest, targetTags),
   );
 });
 
@@ -28,6 +44,7 @@ test("rejects an extra direct core dependency", () => {
     () =>
       assertConformanceDependencyContract(
         {
+          ...manifest,
           dependencies: {
             ...dependencies,
             "@reins/core": "workspace:*",
@@ -44,7 +61,7 @@ test("rejects a missing qoder dependency", () => {
   assert.throws(
     () =>
       assertConformanceDependencyContract(
-        { dependencies: missingQoder },
+        { ...manifest, dependencies: missingQoder },
         targetTags,
       ),
     /Conformance dependencies must be exact/u,
@@ -57,6 +74,7 @@ test("rejects an unknown package target", () => {
     () =>
       assertConformanceDependencyContract(
         {
+          ...manifest,
           dependencies: {
             ...withoutQoder,
             "@reins/unknown": "workspace:*",
@@ -73,6 +91,7 @@ test("rejects a non-workspace dependency specifier", () => {
     () =>
       assertConformanceDependencyContract(
         {
+          ...manifest,
           dependencies: { ...dependencies, "@reins/qoder": "^1.0.0" },
         },
         targetTags,
@@ -85,7 +104,7 @@ test("rejects an unexpected target tag", () => {
   assert.throws(
     () =>
       assertConformanceDependencyContract(
-        { dependencies },
+        manifest,
         new Map([...targetTags, ["@reins/qoder", ["core"]]]),
       ),
     /Conformance dependency target has an unexpected tag/u,
@@ -96,5 +115,82 @@ test("rejects an invalid manifest shape", () => {
   assert.throws(
     () => assertConformanceDependencyContract({ dependencies: [] }, targetTags),
     /Conformance manifest dependencies must be an object/u,
+  );
+});
+
+for (const [section, value] of [
+  ["devDependencies", { ...devDependencies, "@reins/core": "workspace:*" }],
+  ["optionalDependencies", { "@reins/core": "workspace:*" }],
+  ["peerDependencies", { "@reins/core": "workspace:*" }],
+  ["dependencies", { ...dependencies, chalk: "catalog:" }],
+] as const) {
+  test(`rejects an unexpected ${section} edge`, () => {
+    assert.throws(
+      () =>
+        assertConformanceDependencyContract(
+          { ...manifest, [section]: value },
+          targetTags,
+        ),
+      /Conformance .* must be exact/u,
+    );
+  });
+}
+
+test("rejects missing tooling and bad dev dependency specs", () => {
+  const { vitest: _missing, ...missingTooling } = devDependencies;
+  assert.throws(
+    () =>
+      assertConformanceDependencyContract(
+        { ...manifest, devDependencies: missingTooling },
+        targetTags,
+      ),
+    /Conformance devDependencies must be exact/u,
+  );
+  assert.throws(
+    () =>
+      assertConformanceDependencyContract(
+        {
+          ...manifest,
+          devDependencies: {
+            ...devDependencies,
+            "@types/node": "latest",
+          },
+        },
+        targetTags,
+      ),
+    /Conformance devDependencies must be exact/u,
+  );
+});
+
+test("rejects dependenciesMeta drift and bundled dependencies", () => {
+  assert.throws(
+    () =>
+      assertConformanceDependencyContract(
+        {
+          ...manifest,
+          dependenciesMeta: {
+            ...dependenciesMeta,
+            "@reins/core": { injected: false },
+          },
+        },
+        targetTags,
+      ),
+    /Conformance dependenciesMeta must be exact/u,
+  );
+  assert.throws(
+    () =>
+      assertConformanceDependencyContract(
+        { ...manifest, bundledDependencies: ["@reins/core"] },
+        targetTags,
+      ),
+    /Conformance bundledDependencies must be absent/u,
+  );
+  assert.throws(
+    () =>
+      assertConformanceDependencyContract(
+        { ...manifest, bundleDependencies: ["@reins/core"] },
+        targetTags,
+      ),
+    /Conformance bundleDependencies must be absent/u,
   );
 });
