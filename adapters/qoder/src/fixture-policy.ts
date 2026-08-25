@@ -8,6 +8,13 @@ export class KnownCredentialPolicyError extends Error {
 }
 
 const prohibitedNormalizedKeys = new Set([
+  "auth",
+  "oauth",
+  "oauthtoken",
+  "credential",
+  "credentials",
+  "devicetoken",
+  "token",
   "password",
   "privatekey",
   "clientsecret",
@@ -56,7 +63,14 @@ export function assertMatchesKnownCredentialPolicy(value: unknown): void {
     }
     if (typeof candidate !== "object" || candidate === null) return;
     for (const [key, item] of Object.entries(candidate)) {
-      if (prohibitedNormalizedKeys.has(normalizedKey(key))) {
+      const normalized = normalizedKey(key);
+      if (normalized === "apikeysource") {
+        if (item === "none") continue;
+        throw new KnownCredentialPolicyError(
+          "Fixture matches a known credential policy key",
+        );
+      }
+      if (prohibitedNormalizedKeys.has(normalized)) {
         throw new KnownCredentialPolicyError(
           "Fixture matches a known credential policy key",
         );

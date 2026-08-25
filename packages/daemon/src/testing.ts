@@ -96,39 +96,46 @@ export async function openEphemeralDaemonForTest(options: {
       connections.delete(readinessConnection);
     }
 
+    let lifecycle: "open" | "closing" | "cleanup_failed" | "closed" = "open";
     let closePromise: Promise<void> | undefined;
     return {
       connect() {
+        if (lifecycle !== "open") {
+          throw new Error(
+            lifecycle === "cleanup_failed"
+              ? "Ephemeral daemon cleanup failed"
+              : `Ephemeral daemon is ${lifecycle}`,
+          );
+        }
         const connection = transport.connect();
         connections.add(connection);
         return connection;
       },
       close() {
-        if (closePromise !== undefined) return closePromise;
-        closePromise = (async () => {
-          for (const connection of connections) connection.close();
-          connections.clear();
+        if (lifecycle === "closing" || lifecycle === "closed") {
+          if (closePromise === undefined) {
+            throw new Error("Ephemeral daemon close state is invalid");
+          }
+          return closePromise;
+        }
+        lifecycle = "closing";
+        const attempt = (async () => {
           try {
-            const stopped = createdDaemon.stop();
-            const lifecycle = await Promise.allSettled([stopped, started]);
-            const failures = lifecycle.flatMap((result) =>
-              result.status === "rejected" ? [result.reason] : [],
-            );
-            if (failures.length > 0) {
-              throw new AggregateError(
-                failures,
-                "Ephemeral daemon cleanup failed",
-              );
-            }
-          } finally {
-            try {
-              await openedRuntime.close();
-            } finally {
-              await rm(state.directory, { recursive: true, force: true });
-            }
+            for (const connection of connections) connection.close();
+            connections.clear();
+            await createdDaemon.stop();
+            await started;
+            await openedRuntime.close();
+            await rm(state.directory, { recursive: true, force: true });
+            lifecycle = "closed";
+          } catch (error) {
+            lifecycle = "cleanup_failed";
+            closePromise = undefined;
+            throw error;
           }
         })();
-        return closePromise;
+        closePromise = attempt;
+        return attempt;
       },
     };
   } catch (error) {

@@ -4,8 +4,9 @@
   "sdkVersion": "1.0.23",
   "qoderCliVersion": "1.1.25",
   "protocolVersion": "1.2.0",
-  "lineCount": 53,
+  "projectionVersion": 1,
+  "lineCount": 23,
   "uniqueNativeToolCount": 1,
-  "sha256": "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
+  "sha256": "5874daa64735814f81a873fa188ef807def6651026cf4b62ed6f707e664420ba",
   "scenario": "One Bash tool request and result followed by a streamed text reply"
 }

@@ -358,9 +358,6 @@ importers:
       '@reins/qoder':
         specifier: workspace:*
         version: link:../../adapters/qoder
-      '@reins/transport':
-        specifier: workspace:*
-        version: link:../transport
     dependenciesMeta:
       '@reins/client':
         injected: false
@@ -369,8 +366,6 @@ importers:
       '@reins/protocol':
         injected: false
       '@reins/qoder':
-        injected: false
-      '@reins/transport':
         injected: false
     devDependencies:
       '@reins/typescript-config':

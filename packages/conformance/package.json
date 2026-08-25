@@ -32,8 +32,7 @@
     "@reins/client": "workspace:*",
     "@reins/daemon": "workspace:*",
     "@reins/protocol": "workspace:*",
-    "@reins/qoder": "workspace:*",
-    "@reins/transport": "workspace:*"
+    "@reins/qoder": "workspace:*"
   },
   "devDependencies": {
     "@reins/typescript-config": "workspace:*",
@@ -55,9 +54,6 @@
       "injected": false
     },
     "@reins/qoder": {
-      "injected": false
-    },
-    "@reins/transport": {
       "injected": false
     }
   },

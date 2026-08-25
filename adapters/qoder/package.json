@@ -30,6 +30,7 @@
     "format:write": "oxfmt --write --config ../../oxfmt.config.ts .",
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
+    "migrate:fixtures": "node --conditions=source test/scripts/migrate-fixtures.ts",
     "record:fixture": "node test/scripts/record-fixture.ts",
     "test": "vitest run test",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"

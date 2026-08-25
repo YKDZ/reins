@@ -13,6 +13,14 @@ import {
 } from "@qodercn-ai/qodercn-agent-sdk";
 
 import {
+  projectRecordedQoderMessages,
+  recordedQoderScenarios,
+  RECORDED_QODER_PROJECTION_VERSION,
+  toQoderSdkMessages,
+  type RecordedQoderFixtureMetadata,
+  type RecordedQoderMessage,
+} from "../../src/fixture-projection.ts";
+import {
   assertMatchesKnownCredentialPolicy,
   replaceFixturePair,
 } from "./fixture-files.ts";
@@ -21,41 +29,20 @@ import { validateRecordedFixture } from "./fixture-validation.ts";
 const scenarios = {
   "list-and-tool": {
     prompt: "用一条 shell 命令列出当前目录的内容",
-    description:
-      "One Bash tool request and result followed by a streamed text reply",
+    description: recordedQoderScenarios["list-and-tool"],
     minimumNativeToolCount: 1,
   },
   "two-tools": {
     prompt:
       "必须在同一个回合中按顺序且不可合并地调用 Bash 工具恰好两次：第一次只执行 printf first，第二次只执行 printf second；两次工具完成后再总结结果。",
-    description:
-      "Two sequential non-combined Bash tool requests and results followed by a streamed text reply",
+    description: recordedQoderScenarios["two-tools"],
     minimumNativeToolCount: 2,
   },
 } as const;
 
 type ScenarioName = keyof typeof scenarios;
-type FixtureMetadata = {
-  fixture: string;
-  recordedAt: string;
-  sdkVersion: string;
-  qoderCliVersion: string;
-  protocolVersion: string;
-  lineCount: number;
-  uniqueNativeToolCount: number;
-  sha256: string;
-  scenario: string;
-};
-
 function isScenarioName(value: string): value is ScenarioName {
   return Object.hasOwn(scenarios, value);
-}
-
-function sanitizeMessage(message: SDKMessage): SDKMessage {
-  if (message.type === "system" && message.subtype === "init") {
-    return { ...message, cwd: "<fixture-cwd>" };
-  }
-  return message;
 }
 
 async function sdkVersion(): Promise<string> {
@@ -72,11 +59,12 @@ async function sdkVersion(): Promise<string> {
 function buildMetadata(
   name: ScenarioName,
   scenario: (typeof scenarios)[ScenarioName],
-  messages: readonly SDKMessage[],
+  messages: readonly RecordedQoderMessage[],
   jsonl: string,
   uniqueNativeToolCount: number,
   installedSdkVersion: string,
-): FixtureMetadata {
+  recordedAt: string,
+): RecordedQoderFixtureMetadata {
   const init = messages.find(
     (message) => message.type === "system" && message.subtype === "init",
   );
@@ -89,22 +77,13 @@ function buildMetadata(
   ) {
     throw new Error("Recorded stream has no protocol version");
   }
-  const recordedAt = messages
-    .flatMap((message) =>
-      "timestamp" in message && typeof message.timestamp === "string"
-        ? [message.timestamp]
-        : [],
-    )
-    .at(0);
-  if (recordedAt === undefined) {
-    throw new Error("Recorded stream has no source timestamp");
-  }
   return {
     fixture: `${name}.jsonl`,
     recordedAt,
     sdkVersion: installedSdkVersion,
     qoderCliVersion: init.qodercli_version,
     protocolVersion: init.protocol_version,
+    projectionVersion: RECORDED_QODER_PROJECTION_VERSION,
     lineCount: messages.length,
     uniqueNativeToolCount,
     sha256: createHash("sha256").update(jsonl).digest("hex"),
@@ -151,22 +130,35 @@ const timeout = setTimeout(() => {
 try {
   const messages: SDKMessage[] = [];
   for await (const message of q) {
-    messages.push(sanitizeMessage(message));
+    messages.push(message);
     if (message.type === "result") break;
   }
-  const facts = validateRecordedFixture(messages, {
+  assertMatchesKnownCredentialPolicy(messages);
+  const projected = projectRecordedQoderMessages(messages);
+  assertMatchesKnownCredentialPolicy(projected);
+  const facts = validateRecordedFixture(toQoderSdkMessages(projected), {
     timedOut,
     minimumNativeToolCount: scenario.minimumNativeToolCount,
   });
-  assertMatchesKnownCredentialPolicy(messages);
-  const jsonl = `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
+  const recordedAt = messages
+    .flatMap((message) =>
+      "timestamp" in message && typeof message.timestamp === "string"
+        ? [message.timestamp]
+        : [],
+    )
+    .at(0);
+  if (recordedAt === undefined) {
+    throw new Error("Recorded stream has no source timestamp");
+  }
+  const jsonl = `${projected.map((message) => JSON.stringify(message)).join("\n")}\n`;
   const metadata = buildMetadata(
     requestedName,
     scenario,
-    messages,
+    projected,
     jsonl,
     facts.uniqueNativeToolCount,
     await sdkVersion(),
+    recordedAt,
   );
   const fixturesDir = new URL("../fixtures/", import.meta.url);
   await mkdir(fixturesDir, { recursive: true });

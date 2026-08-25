@@ -13,6 +13,7 @@ import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
 import {
   createQoderFixtureSdk,
   loadRecordedQoderFixture,
+  type RecordedQoderFixtureFacts,
 } from "@reins/qoder/testing";
 import { describe, expect, test } from "vitest";
 
@@ -91,7 +92,10 @@ function mutatedFixture(messages: FixtureMessages): FixtureMessages {
   return mutated;
 }
 
-async function runFixture(messages: FixtureMessages): Promise<{
+async function runFixture(
+  messages: FixtureMessages,
+  diagnosticSources?: ["core"],
+): Promise<{
   events: DomainEvent[];
   ended: Extract<ProtocolNotification, { method: "attach.ended" }>["params"];
   waited: WaitResult;
@@ -145,8 +149,10 @@ async function runFixture(messages: FixtureMessages): Promise<{
     if ("error" in waited) throw new Error(JSON.stringify(waited.error));
     const diagnostics = await client.request("diagnostics", {
       sessionId: spawned.result.sessionId,
-      sources: ["core"],
       kinds: ["protocol_violation"],
+      ...(diagnosticSources === undefined
+        ? {}
+        : { sources: diagnosticSources }),
     });
     if ("error" in diagnostics)
       throw new Error(JSON.stringify(diagnostics.error));
@@ -163,13 +169,19 @@ async function runFixture(messages: FixtureMessages): Promise<{
   }
 }
 
-function assertPublicLifecycle(events: readonly DomainEvent[]): void {
+function assertPublicLifecycle(
+  events: readonly DomainEvent[],
+  facts: RecordedQoderFixtureFacts,
+): void {
   const deltas = events.filter((event) => event.type === "text.delta");
   const snapshots = events.filter((event) => event.type === "message");
-  expect(deltas).toHaveLength(12);
-  expect(snapshots.map((event) => event.messageId)).toEqual(["m1", "m2"]);
+  expect(deltas).toHaveLength(facts.textDeltaCount);
+  const expectedMessageIds = facts.messages.map(
+    (_message, index) => `m${index + 1}`,
+  );
+  expect(snapshots.map((event) => event.messageId)).toEqual(expectedMessageIds);
   expect(new Set(deltas.map((event) => event.messageId))).toEqual(
-    new Set(["m1", "m2"]),
+    new Set(expectedMessageIds),
   );
   const deltaHashes = snapshots.map((snapshot) =>
     sha256(
@@ -179,52 +191,47 @@ function assertPublicLifecycle(events: readonly DomainEvent[]): void {
         .join(""),
     ),
   );
-  expect(deltaHashes).toEqual([
-    "d45dd6feecf4f151424376d88796d93b761b9101488e5bc845545c3385fa48a5",
-    "cf483b98c8ab2e60be487129d3439e04c74fab1f1da82bc6ef64c72877f854a8",
-  ]);
+  expect(deltaHashes).toEqual(facts.messages.map((fact) => fact.deltaHash));
   expect(snapshots.map((snapshot) => sha256(snapshot.content))).toEqual(
-    deltaHashes,
+    facts.messages.map((fact) => fact.snapshotHash),
   );
-  expect(
-    events.filter(
-      (event) =>
-        event.type === "tool.requested" || event.type === "tool.completed",
-    ),
-  ).toEqual([
-    {
+  const toolEvents = events.filter(
+    (event) =>
+      event.type === "tool.requested" || event.type === "tool.completed",
+  );
+  expect(toolEvents).toHaveLength(facts.tools.length * 2);
+  for (const [index, fact] of facts.tools.entries()) {
+    const toolCallId = `c${index + 1}`;
+    expect(toolEvents[index * 2]).toEqual({
       type: "tool.requested",
       sessionId: "conformance@gtest",
       turnId: "t1",
-      toolCallId: "c1",
-      name: "Bash",
-    },
-    {
+      toolCallId,
+      name: fact.name,
+    });
+    const completed = toolEvents[index * 2 + 1];
+    expect(
+      completed?.type === "tool.completed"
+        ? {
+            type: completed.type,
+            sessionId: completed.sessionId,
+            turnId: completed.turnId,
+            toolCallId: completed.toolCallId,
+            name: completed.name,
+            resultHash: sha256(completed.result ?? ""),
+            isError: completed.isError,
+          }
+        : completed,
+    ).toEqual({
       type: "tool.completed",
       sessionId: "conformance@gtest",
       turnId: "t1",
-      toolCallId: "c1",
-      name: "Bash",
-      result: "first",
-      isError: false,
-    },
-    {
-      type: "tool.requested",
-      sessionId: "conformance@gtest",
-      turnId: "t1",
-      toolCallId: "c2",
-      name: "Bash",
-    },
-    {
-      type: "tool.completed",
-      sessionId: "conformance@gtest",
-      turnId: "t1",
-      toolCallId: "c2",
-      name: "Bash",
-      result: "second",
-      isError: false,
-    },
-  ]);
+      toolCallId,
+      name: fact.name,
+      resultHash: fact.resultHash,
+      isError: fact.isError,
+    });
+  }
   expect(
     events
       .filter(
@@ -244,20 +251,25 @@ describe("Qoder ingress conformance", () => {
       sdkVersion: "1.0.23",
       qoderCliVersion: "1.1.23",
       protocolVersion: "1.2.0",
-      lineCount: 84,
+      projectionVersion: 1,
+      lineCount: 34,
       uniqueNativeToolCount: 2,
       sha256:
-        "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
+        "f8f2b3f4115dac12f494aa1f5a37cf32a9b547ca90352f160f421daba069b871",
+      scenario:
+        "Two sequential non-combined Bash tool requests and results followed by a streamed text reply",
     });
     expect(fixture.messages[0]).toMatchObject({
       type: "system",
       apiKeySource: "none",
       cwd: "<fixture-cwd>",
-      tools: expect.arrayContaining(["Bash"]),
     });
+    expect(fixture.facts.textDeltaCount).toBe(12);
+    expect(fixture.facts.messages).toHaveLength(2);
+    expect(fixture.facts.tools).toHaveLength(2);
 
     const result = await runFixture(fixture.messages);
-    assertPublicLifecycle(result.events);
+    assertPublicLifecycle(result.events, fixture.facts);
     const snapshots = result.events.filter((event) => event.type === "message");
     const completed = result.events.filter(
       (event) => event.type === "turn.completed",
@@ -274,30 +286,13 @@ describe("Qoder ingress conformance", () => {
       type: "turn.completed",
       sessionId: "conformance@gtest",
       turnId: "t1",
-      stopReason: "end_turn",
+      stopReason: fixture.facts.terminal.stopReason,
     });
-    expect(terminal.finalReply === snapshots[1]?.content).toBe(true);
-    expect(terminal.usage).toEqual({
-      input_tokens: 0,
-      cache_creation_input_tokens: 0,
-      cache_read_input_tokens: 0,
-      output_tokens: 0,
-      server_tool_use: {
-        web_search_requests: 0,
-        web_fetch_requests: 0,
-      },
-      service_tier: "standard",
-      cache_creation: {
-        ephemeral_1h_input_tokens: 0,
-        ephemeral_5m_input_tokens: 0,
-      },
-      inference_geo: "",
-      iterations: [],
-      speed: "standard",
-      credits: 0.03156128799999999,
-      original_credits: 0.03156128799999999,
-      billable: true,
-    });
+    expect(terminal.finalReply === snapshots.at(-1)?.content).toBe(true);
+    expect(sha256(terminal.finalReply ?? "")).toBe(
+      fixture.facts.terminal.finalReplyHash,
+    );
+    expect(terminal.usage).toEqual(fixture.facts.terminal.usage);
     expect(result.ended).toEqual({
       sessionId: terminal.sessionId,
       reason: "end_turn",
@@ -329,9 +324,9 @@ describe("Qoder ingress conformance", () => {
 
   test("duplicate, late and orphan SDK facts remain contained by the adapter", async () => {
     const fixture = await loadRecordedQoderFixture("two-tools");
-    const result = await runFixture(mutatedFixture(fixture.messages));
+    const result = await runFixture(mutatedFixture(fixture.messages), ["core"]);
 
-    assertPublicLifecycle(result.events);
+    assertPublicLifecycle(result.events, fixture.facts);
     expect(
       result.events.filter((event) => event.type === "turn.completed"),
     ).toHaveLength(1);

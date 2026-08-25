@@ -52,15 +52,20 @@ describe("录制 fixture 回放", () => {
     const { messages, metadata } =
       await loadRecordedQoderFixture("list-and-tool");
     expect(metadata).toMatchObject({
-      lineCount: 53,
+      lineCount: 23,
       uniqueNativeToolCount: 1,
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.25",
       sdkVersion: "1.0.23",
+      projectionVersion: 1,
       sha256:
-        "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
+        "5874daa64735814f81a873fa188ef807def6651026cf4b62ed6f707e664420ba",
     });
     const events = await replayFixture(messages);
+    // 该指纹在 closed projection 迁移前固定，证明离线裁剪未改变公开事件流。
+    expect(sha256(JSON.stringify(events))).toBe(
+      "a740394f391c2e0e26a59e68705042220377676a5a0a151a9535e64bc8335e82",
+    );
 
     const deltas = events.filter((event) => event.type === "text.delta");
     const snapshots = events.filter((event) => event.type === "message");
@@ -151,15 +156,20 @@ describe("录制 fixture 回放", () => {
   test("真实 two-tools 流精确保留两个工具与消息终态", async () => {
     const { messages, metadata } = await loadRecordedQoderFixture("two-tools");
     expect(metadata).toMatchObject({
-      lineCount: 84,
+      lineCount: 34,
       uniqueNativeToolCount: 2,
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.23",
       sdkVersion: "1.0.23",
+      projectionVersion: 1,
       sha256:
-        "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
+        "f8f2b3f4115dac12f494aa1f5a37cf32a9b547ca90352f160f421daba069b871",
     });
     const events = await replayFixture(messages);
+    // 该指纹在 closed projection 迁移前固定，证明离线裁剪未改变公开事件流。
+    expect(sha256(JSON.stringify(events))).toBe(
+      "d0f931797e2a419a9252676a4a573f7d3dfb98aa0836b7667d38fdcc59a5a0a0",
+    );
 
     expect(
       events.filter(

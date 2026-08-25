@@ -246,4 +246,23 @@ describe("known credential policy", () => {
       }),
     ).not.toThrow();
   });
+
+  test.each([
+    { auth: { oauth: "opaque-device-secret" } },
+    { oauth_token: "opaque-device-secret" },
+    { device_token: "opaque-device-secret" },
+    { credential: "opaque-device-secret" },
+    { "session token": "opaque-device-secret" },
+    { runtime: { state: { oauth: "opaque-device-secret" } } },
+  ])("拒绝闭合保存契约中的认证与嵌套运行态字段", (candidate) => {
+    expect(() => assertMatchesKnownCredentialPolicy(candidate)).toThrow(
+      KnownCredentialPolicyError,
+    );
+  });
+
+  test("apiKeySource 只允许精确的 none sentinel", () => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({ apiKeySource: "environment" }),
+    ).toThrow(KnownCredentialPolicyError);
+  });
 });

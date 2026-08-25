@@ -4,25 +4,173 @@ import { readFile } from "node:fs/promises";
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
 
 import { assertMatchesKnownCredentialPolicy } from "./fixture-policy.ts";
+import {
+  assertCanonicalRecordedQoderMessages,
+  assertRecordedQoderFixtureMetadata,
+  toQoderSdkMessages,
+  type RecordedQoderFixtureMetadata,
+  type RecordedQoderFixtureName,
+  type RecordedQoderMessage,
+  type RecordedUsage,
+} from "./fixture-projection.ts";
 import type { QoderQuery, QoderSdk } from "./sdk-seam.ts";
 
-export type RecordedQoderFixtureMetadata = {
-  fixture: string;
-  recordedAt: string;
-  sdkVersion: string;
-  qoderCliVersion: string;
-  protocolVersion: string;
-  lineCount: number;
-  uniqueNativeToolCount: number;
-  sha256: string;
-  scenario: string;
+export type RecordedQoderFixtureFacts = {
+  textDeltaCount: number;
+  messages: Array<{ deltaHash: string; snapshotHash: string }>;
+  tools: Array<{ name: string; resultHash: string; isError: boolean }>;
+  terminal: {
+    stopReason: string;
+    finalReplyHash: string;
+    usage: RecordedUsage;
+  };
 };
 
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function deriveFixtureFacts(
+  messages: readonly RecordedQoderMessage[],
+): RecordedQoderFixtureFacts {
+  let currentMessageId: string | undefined;
+  const deltasById = new Map<string, string[]>();
+  const snapshotsById = new Map<string, string>();
+  const toolsById = new Map<string, { name: string }>();
+  const resultsById = new Map<string, { content: string; isError: boolean }>();
+  let terminalUsage: RecordedUsage | undefined;
+  let terminalStopReason: string | undefined;
+  let resultCount = 0;
+  let textDeltaCount = 0;
+  for (const message of messages) {
+    if (message.type === "stream_event") {
+      if (message.event.type === "message_start") {
+        currentMessageId = message.event.message.id;
+      } else if (message.event.type === "content_block_delta") {
+        if (currentMessageId === undefined) {
+          throw new Error("Recorded Qoder fixture fact mismatch");
+        }
+        const deltas = deltasById.get(currentMessageId) ?? [];
+        deltas.push(message.event.delta.text);
+        deltasById.set(currentMessageId, deltas);
+        textDeltaCount += 1;
+      } else if (message.event.type === "content_block_start") {
+        const { id, name } = message.event.content_block;
+        const existing = toolsById.get(id);
+        if (
+          id.length === 0 ||
+          name.length === 0 ||
+          (existing !== undefined && existing.name !== name)
+        ) {
+          throw new Error("Recorded Qoder fixture fact mismatch");
+        }
+        toolsById.set(id, { name });
+      } else if (
+        message.event.type === "message_delta" &&
+        message.event.delta.stop_reason === "end_turn"
+      ) {
+        terminalStopReason = message.event.delta.stop_reason;
+        terminalUsage = message.event.usage;
+      } else if (message.event.type === "message_stop") {
+        currentMessageId = undefined;
+      }
+      continue;
+    }
+    if (message.type === "assistant") {
+      for (const block of message.message.content) {
+        if (block.type === "tool_use") {
+          const existing = toolsById.get(block.id);
+          if (
+            block.id.length === 0 ||
+            block.name.length === 0 ||
+            (existing !== undefined && existing.name !== block.name)
+          ) {
+            throw new Error("Recorded Qoder fixture fact mismatch");
+          }
+          toolsById.set(block.id, { name: block.name });
+        }
+      }
+      const content = message.message.content
+        .filter((block) => block.type === "text")
+        .map((block) => block.text)
+        .join("");
+      if (
+        content.length > 0 &&
+        (message.message.id.length === 0 ||
+          snapshotsById.has(message.message.id))
+      ) {
+        throw new Error("Recorded Qoder fixture fact mismatch");
+      }
+      if (content.length > 0) snapshotsById.set(message.message.id, content);
+      continue;
+    }
+    if (message.type === "user") {
+      for (const block of message.message.content) {
+        if (
+          block.tool_use_id.length === 0 ||
+          resultsById.has(block.tool_use_id)
+        ) {
+          throw new Error("Recorded Qoder fixture fact mismatch");
+        }
+        resultsById.set(block.tool_use_id, {
+          content: block.content,
+          isError: block.is_error === true,
+        });
+      }
+      continue;
+    }
+    if (message.type === "result") {
+      resultCount += 1;
+    }
+  }
+  const terminal = messages.at(-1);
+  const messageFacts = [...snapshotsById].map(([id, snapshot]) => {
+    const delta = (deltasById.get(id) ?? []).join("");
+    return { deltaHash: sha256(delta), snapshotHash: sha256(snapshot) };
+  });
+  const toolFacts = [...toolsById].map(([id, tool]) => {
+    const result = resultsById.get(id);
+    if (result === undefined) {
+      throw new Error("Recorded Qoder fixture fact mismatch");
+    }
+    return {
+      name: tool.name,
+      resultHash: sha256(result.content),
+      isError: result.isError,
+    };
+  });
+  const finalSnapshot = [...snapshotsById.values()].at(-1);
+  if (
+    terminalStopReason === undefined ||
+    terminalUsage === undefined ||
+    terminal?.type !== "result" ||
+    terminal.subtype !== "success" ||
+    terminal.is_error ||
+    resultCount !== 1 ||
+    finalSnapshot === undefined ||
+    messageFacts.some((fact) => fact.deltaHash !== fact.snapshotHash) ||
+    toolFacts.length !== resultsById.size
+  ) {
+    throw new Error("Recorded Qoder fixture fact mismatch");
+  }
+  return {
+    textDeltaCount,
+    messages: messageFacts,
+    tools: toolFacts,
+    terminal: {
+      stopReason: terminalStopReason,
+      finalReplyHash: sha256(finalSnapshot),
+      usage: terminalUsage,
+    },
+  };
+}
+
 export async function loadRecordedQoderFixture(
-  name: "list-and-tool" | "two-tools",
+  name: RecordedQoderFixtureName,
 ): Promise<{
   messages: SDKMessage[];
   metadata: RecordedQoderFixtureMetadata;
+  facts: RecordedQoderFixtureFacts;
 }> {
   const [raw, metadataRaw, sdkPackageRaw] = await Promise.all([
     readFile(
@@ -41,53 +189,45 @@ export async function loadRecordedQoderFixture(
       "utf8",
     ),
   ]);
-  const metadata = JSON.parse(metadataRaw) as RecordedQoderFixtureMetadata;
+  const metadata: unknown = JSON.parse(metadataRaw);
+  if (
+    typeof metadata !== "object" ||
+    metadata === null ||
+    Array.isArray(metadata)
+  ) {
+    throw new Error("Recorded Qoder fixture metadata mismatch");
+  }
   const sdkPackage = JSON.parse(sdkPackageRaw) as { version?: unknown };
-  const messages = raw
+  const saved: unknown[] = raw
     .trim()
     .split("\n")
-    .map((line) => JSON.parse(line) as SDKMessage);
-  assertMatchesKnownCredentialPolicy([messages, metadata]);
-  const firstTimestamp = messages
-    .flatMap((message) =>
-      "timestamp" in message && typeof message.timestamp === "string"
-        ? [message.timestamp]
-        : [],
-    )
-    .at(0);
-  const init = messages[0];
-  const nativeToolIds = new Set<string>();
-  for (const message of messages) {
-    if (
-      message.type === "stream_event" &&
-      message.event.type === "content_block_start" &&
-      message.event.content_block?.type === "tool_use" &&
-      typeof message.event.content_block.id === "string"
-    ) {
-      nativeToolIds.add(message.event.content_block.id);
-    }
-    if (message.type === "assistant") {
-      for (const block of message.message.content) {
-        if (block.type === "tool_use" && typeof block.id === "string") {
-          nativeToolIds.add(block.id);
-        }
-      }
-    }
+    .map((line) => JSON.parse(line) as unknown);
+  assertMatchesKnownCredentialPolicy([saved, metadata]);
+  assertCanonicalRecordedQoderMessages(saved);
+  const init = saved[0];
+  if (init?.type !== "system" || init.cwd !== "<fixture-cwd>") {
+    throw new Error("Recorded Qoder fixture metadata mismatch");
   }
-  const valid =
-    metadata.fixture === `${name}.jsonl` &&
-    metadata.lineCount === messages.length &&
-    metadata.recordedAt === firstTimestamp &&
-    metadata.sdkVersion === sdkPackage.version &&
-    metadata.uniqueNativeToolCount === nativeToolIds.size &&
-    metadata.sha256 === createHash("sha256").update(raw).digest("hex") &&
-    init?.type === "system" &&
-    init.subtype === "init" &&
-    init.cwd === "<fixture-cwd>" &&
-    init.protocol_version === metadata.protocolVersion &&
-    init.qodercli_version === metadata.qoderCliVersion;
-  if (!valid) throw new Error("Recorded Qoder fixture metadata mismatch");
-  return { messages, metadata };
+  const facts = deriveFixtureFacts(saved);
+  const metadataRecord = metadata as Record<string, unknown>;
+  assertRecordedQoderFixtureMetadata(name, metadata, {
+    recordedAt:
+      typeof metadataRecord.recordedAt === "string"
+        ? metadataRecord.recordedAt
+        : "",
+    sdkVersion:
+      typeof sdkPackage.version === "string" ? sdkPackage.version : "",
+    qoderCliVersion: init.qodercli_version,
+    protocolVersion: init.protocol_version,
+    lineCount: saved.length,
+    uniqueNativeToolCount: facts.tools.length,
+    sha256: sha256(raw),
+  });
+  return {
+    messages: toQoderSdkMessages(saved),
+    metadata,
+    facts,
+  };
 }
 
 export function createQoderFixtureSdk(
