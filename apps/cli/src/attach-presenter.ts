@@ -6,19 +6,28 @@ export type PrettyAttachPresenter = {
   bufferInitial(notification: ProtocolNotification): void;
   flushInitial(): void;
   present(notification: ProtocolNotification): void;
+  isDeferring(): boolean;
   clear(): void;
 };
 
 type MessageState = {
   streamed: string;
   snapshotSeen: boolean;
-  boundaryUncertain: boolean;
+};
+
+type UncertainIdentity = {
+  readonly turnPrefix: string;
+  closed: boolean;
 };
 
 function messageIdentity(
   event: Extract<DomainEvent, { type: "text.delta" | "message" }>,
 ): string {
   return `${event.sessionId}\0${event.turnId}\0${event.messageId}`;
+}
+
+function turnPrefix(event: { sessionId: string; turnId: string }): string {
+  return `${event.sessionId}\0${event.turnId}\0`;
 }
 
 function writeSnapshot(event: Extract<DomainEvent, { type: "message" }>): void {
@@ -33,46 +42,17 @@ function completeStreamedLine(content: string): void {
 }
 
 export function createPrettyAttachPresenter(): PrettyAttachPresenter {
-  const initial: ProtocolNotification[] = [];
+  const batch: ProtocolNotification[] = [];
   const messages = new Map<string, MessageState>();
-
-  const holdUncertainDelta = (
-    event: Extract<DomainEvent, { type: "text.delta" }>,
-  ): void => {
-    const key = messageIdentity(event);
-    const state = messages.get(key) ?? {
-      streamed: "",
-      snapshotSeen: false,
-      boundaryUncertain: true,
-    };
-    state.streamed += event.delta;
-    messages.set(key, state);
-  };
-
-  const flushUncertain = (matches: (key: string) => boolean): void => {
-    for (const [key, state] of messages) {
-      if (!matches(key) || !state.boundaryUncertain || state.snapshotSeen) {
-        continue;
-      }
-      if (state.streamed.length > 0) {
-        process.stdout.write(state.streamed);
-        completeStreamedLine(state.streamed);
-      }
-      state.boundaryUncertain = false;
-      state.snapshotSeen = true;
-    }
-  };
+  const uncertain = new Map<string, UncertainIdentity>();
+  let deferring = false;
 
   const presentEvent = (event: DomainEvent): void => {
     if (event.type === "text.delta") {
       const key = messageIdentity(event);
-      const state = messages.get(key) ?? {
-        streamed: "",
-        snapshotSeen: false,
-        boundaryUncertain: false,
-      };
+      const state = messages.get(key) ?? { streamed: "", snapshotSeen: false };
       if (!state.snapshotSeen) {
-        if (!state.boundaryUncertain) process.stdout.write(event.delta);
+        process.stdout.write(event.delta);
         state.streamed += event.delta;
       }
       messages.set(key, state);
@@ -82,95 +62,144 @@ export function createPrettyAttachPresenter(): PrettyAttachPresenter {
       const key = messageIdentity(event);
       const state = messages.get(key);
       if (state?.snapshotSeen === true) return;
-      if (state?.boundaryUncertain === true) {
-        writeSnapshot(event);
-        messages.set(key, {
-          streamed: event.content,
-          snapshotSeen: true,
-          boundaryUncertain: false,
-        });
-        return;
-      }
       if (state !== undefined && state.streamed === event.content) {
         completeStreamedLine(state.streamed);
         state.snapshotSeen = true;
         return;
       }
       writeSnapshot(event);
-      messages.set(key, {
-        streamed: event.content,
-        snapshotSeen: true,
-        boundaryUncertain: false,
-      });
-      return;
-    }
-    if (event.type === "turn.completed") {
-      const turnPrefix = `${event.sessionId}\0${event.turnId}\0`;
-      flushUncertain((key) => key.startsWith(turnPrefix));
-      printNotification("event", event, "pretty");
-      for (const key of messages.keys()) {
-        if (key.startsWith(turnPrefix)) messages.delete(key);
-      }
+      messages.set(key, { streamed: event.content, snapshotSeen: true });
       return;
     }
     printNotification("event", event, "pretty");
+    if (event.type === "turn.completed") {
+      const prefix = turnPrefix(event);
+      for (const key of messages.keys()) {
+        if (key.startsWith(prefix)) messages.delete(key);
+      }
+    }
+  };
+
+  const closeUncertainties = (notification: ProtocolNotification): void => {
+    if (notification.method === "attach.ended") {
+      for (const identity of uncertain.values()) identity.closed = true;
+      return;
+    }
+    const event = notification.params;
+    if (event.type === "message") {
+      const identity = uncertain.get(messageIdentity(event));
+      if (identity !== undefined) identity.closed = true;
+      return;
+    }
+    if (event.type === "turn.completed") {
+      const prefix = turnPrefix(event);
+      for (const identity of uncertain.values()) {
+        if (identity.turnPrefix === prefix) identity.closed = true;
+      }
+    }
+  };
+
+  const renderBatch = (): void => {
+    const deltaContent = new Map<string, string>();
+    const snapshots = new Map<string, string>();
+    for (const notification of batch) {
+      if (notification.method !== "event") continue;
+      const event = notification.params;
+      if (event.type === "text.delta") {
+        const key = messageIdentity(event);
+        deltaContent.set(key, `${deltaContent.get(key) ?? ""}${event.delta}`);
+      } else if (event.type === "message") {
+        snapshots.set(messageIdentity(event), event.content);
+      }
+    }
+    const emittedUncertainTails = new Set<string>();
+    for (const notification of batch.splice(0)) {
+      if (notification.method !== "event") {
+        printNotification(notification.method, notification.params, "pretty");
+        continue;
+      }
+      const event = notification.params;
+      if (event.type === "text.delta") {
+        const key = messageIdentity(event);
+        if (uncertain.has(key)) {
+          if (!snapshots.has(key) && !emittedUncertainTails.has(key)) {
+            const observed = deltaContent.get(key) ?? "";
+            if (observed.length > 0) {
+              process.stdout.write(observed);
+              completeStreamedLine(observed);
+            }
+            emittedUncertainTails.add(key);
+          }
+          continue;
+        }
+        const snapshot = snapshots.get(key);
+        if (snapshot !== undefined && deltaContent.get(key) !== snapshot) {
+          continue;
+        }
+      }
+      presentEvent(event);
+    }
+    uncertain.clear();
+  };
+
+  const drainIfClosed = (): void => {
+    if (!deferring) return;
+    if ([...uncertain.values()].some((identity) => !identity.closed)) return;
+    deferring = false;
+    renderBatch();
   };
 
   return {
     bufferInitial(notification) {
-      initial.push(notification);
+      batch.push(notification);
     },
     flushInitial() {
-      const deltaContent = new Map<string, string>();
-      const snapshots = new Map<string, string>();
-      for (const notification of initial) {
+      const deltaEvents = new Map<
+        string,
+        Extract<DomainEvent, { type: "text.delta" }>
+      >();
+      const snapshotKeys = new Set<string>();
+      for (const notification of batch) {
         if (notification.method !== "event") continue;
         const event = notification.params;
         if (event.type === "text.delta") {
-          const key = messageIdentity(event);
-          deltaContent.set(key, `${deltaContent.get(key) ?? ""}${event.delta}`);
+          deltaEvents.set(messageIdentity(event), event);
         } else if (event.type === "message") {
-          snapshots.set(messageIdentity(event), event.content);
+          snapshotKeys.add(messageIdentity(event));
         }
       }
-      const complete = new Set(
-        [...snapshots].flatMap(([key, content]) =>
-          deltaContent.get(key) === content ? [key] : [],
-        ),
-      );
-      for (const notification of initial.splice(0)) {
-        if (notification.method === "event") {
-          const event = notification.params;
-          if (
-            event.type === "text.delta" &&
-            !snapshots.has(messageIdentity(event))
-          ) {
-            holdUncertainDelta(event);
-            continue;
-          }
-          if (
-            event.type === "text.delta" &&
-            !complete.has(messageIdentity(event))
-          ) {
-            continue;
-          }
-          presentEvent(event);
-        } else {
-          flushUncertain(() => true);
-          printNotification(notification.method, notification.params, "pretty");
+      for (const [key, event] of deltaEvents) {
+        if (!snapshotKeys.has(key)) {
+          uncertain.set(key, { turnPrefix: turnPrefix(event), closed: false });
         }
       }
+      if (uncertain.size === 0) {
+        renderBatch();
+        return;
+      }
+      deferring = true;
+      for (const notification of batch) closeUncertainties(notification);
+      drainIfClosed();
     },
     present(notification) {
-      if (notification.method === "event") presentEvent(notification.params);
-      else {
-        flushUncertain(() => true);
-        printNotification(notification.method, notification.params, "pretty");
+      if (deferring) {
+        batch.push(notification);
+        closeUncertainties(notification);
+        drainIfClosed();
+        return;
       }
+      if (notification.method === "event") presentEvent(notification.params);
+      else
+        printNotification(notification.method, notification.params, "pretty");
+    },
+    isDeferring() {
+      return deferring;
     },
     clear() {
-      initial.length = 0;
+      batch.length = 0;
       messages.clear();
+      uncertain.clear();
+      deferring = false;
     },
   };
 }

@@ -191,6 +191,53 @@ test("pretty replay waits for attach acceptance and flushes a complete body once
   await attached;
 });
 
+test("a deferred replay body is rendered before its permission menu starts", async () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.emit({
+    kind: "notification",
+    method: "event",
+    params: { type: "text.delta", sessionId, turnId, messageId, delta: "lo" },
+  });
+  client.emit(requested("p1"));
+  client.acceptAttach();
+  await tick();
+  expect(output.join("")).toBe("");
+
+  client.emit({
+    kind: "notification",
+    method: "event",
+    params: {
+      type: "message",
+      sessionId,
+      turnId,
+      messageId,
+      role: "worker",
+      content: "hello",
+    },
+  });
+  await tick();
+  expect(output.join("")).toMatch(
+    /^worker: hello\nPermission requested: tool:Bash/u,
+  );
+  input.end("1\n");
+  await tick();
+  await tick();
+  expect(client.resolutions).toEqual(["p1"]);
+  client.end();
+  await attached;
+});
+
 test("an end received before the attach ACK flushes its initial batch before resolving", async () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {

@@ -187,7 +187,13 @@ export async function runAttach(
       unsubscribeClosed();
     };
     const consumePermissions = async (): Promise<void> => {
-      if (consumingPermissions || settled || !attachReady) return;
+      if (
+        consumingPermissions ||
+        settled ||
+        !attachReady ||
+        presenter?.isDeferring() === true
+      )
+        return;
       consumingPermissions = true;
       try {
         while (!settled) {
@@ -275,6 +281,13 @@ export async function runAttach(
             activePermission.controller.abort();
             activePermission = undefined;
           }
+        }
+        if (options.mode === "pretty") {
+          void consumePermissions().catch((error: unknown) => {
+            settled = true;
+            cleanup();
+            reject(error);
+          });
         }
       },
     );

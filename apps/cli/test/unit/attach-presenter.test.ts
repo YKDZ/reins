@@ -2,6 +2,7 @@ import type { ProtocolNotification } from "@reins/protocol";
 import {
   messageIdSchema,
   sessionIdSchema,
+  toolCallIdSchema,
   turnIdSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -13,6 +14,7 @@ const sessionId = v.parse(sessionIdSchema, "presenter@g1");
 const turnId = v.parse(turnIdSchema, "t1");
 const messageId = v.parse(messageIdSchema, "m1");
 const secondMessageId = v.parse(messageIdSchema, "m2");
+const toolCallId = v.parse(toolCallIdSchema, "c1");
 
 function event(
   params: Extract<ProtocolNotification, { method: "event" }>["params"],
@@ -164,6 +166,93 @@ test("an uncertain initial tail without a snapshot is committed once before term
 
   expect(output.join("")).toBe(
     "tail\n[turn completed] end_turn (presenter@g1)\n[attach ended] presenter@g1: end_turn\n",
+  );
+});
+
+test("deferred ordinary events keep their position after an uncertain initial tail", () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const presenter = createPrettyAttachPresenter();
+
+  presenter.bufferInitial(
+    event({ type: "text.delta", sessionId, turnId, messageId, delta: "tail" }),
+  );
+  presenter.bufferInitial(
+    event({
+      type: "tool.requested",
+      sessionId,
+      turnId,
+      toolCallId,
+      name: "Read",
+    }),
+  );
+  presenter.bufferInitial(
+    event({
+      type: "turn.completed",
+      sessionId,
+      turnId,
+      stopReason: "end_turn",
+      finalReply: null,
+    }),
+  );
+  presenter.flushInitial();
+
+  expect(output.join("")).toBe(
+    "tail\n[tool] Read requested (c1)\n[turn completed] end_turn (presenter@g1)\n",
+  );
+});
+
+test("all initial uncertain identities close before one ordered drain", () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const presenter = createPrettyAttachPresenter();
+
+  presenter.bufferInitial(
+    event({ type: "text.delta", sessionId, turnId, messageId, delta: "one" }),
+  );
+  presenter.bufferInitial(
+    event({
+      type: "text.delta",
+      sessionId,
+      turnId,
+      messageId: secondMessageId,
+      delta: "two",
+    }),
+  );
+  presenter.flushInitial();
+  expect(presenter.isDeferring()).toBe(true);
+  presenter.present(
+    event({
+      type: "message",
+      sessionId,
+      turnId,
+      messageId,
+      role: "worker",
+      content: "complete one",
+    }),
+  );
+  expect(output.join("")).toBe("");
+  expect(presenter.isDeferring()).toBe(true);
+
+  presenter.present(
+    event({
+      type: "turn.completed",
+      sessionId,
+      turnId,
+      stopReason: "end_turn",
+      finalReply: null,
+    }),
+  );
+
+  expect(presenter.isDeferring()).toBe(false);
+  expect(output.join("")).toBe(
+    "two\nworker: complete one\n[turn completed] end_turn (presenter@g1)\n",
   );
 });
 
