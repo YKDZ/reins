@@ -19,6 +19,7 @@ const flush = async (): Promise<void> => {
 };
 const sessionId = "reviewer@g1" as SessionId;
 const firstTurnId = "t1" as TurnId;
+const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;
 const sessionName = "reviewer" as SessionName;
 
@@ -318,6 +319,142 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
+  test("content tool_result 阻止同一消息的跨工具 top-level wrapper", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(assistantToolUseBlock("request-1", "tc1"));
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "request-2",
+        role: "assistant",
+        content: [{ type: "tool_use", id: "tc2", name: "Read", input: {} }],
+      },
+      parent_tool_use_id: null,
+      uuid: "request-2",
+      session_id: "qs",
+    });
+    fake.controls.push({
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tc1", content: "one" }],
+      },
+      parent_tool_use_id: "tc2",
+      tool_use_result: "must not complete tc2",
+      uuid: "combined-results",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(events.filter((event) => event.type === "tool.completed")).toEqual([
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+        result: "one",
+        isError: false,
+      },
+    ]);
+
+    fake.controls.push({
+      type: "user",
+      message: { role: "user", content: "independent wrapper" },
+      parent_tool_use_id: "tc2",
+      tool_use_result: "two",
+      uuid: "fallback-result",
+      session_id: "qs",
+    });
+    await flush();
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "tool.requested" || event.type === "tool.completed",
+      ),
+    ).toEqual([
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+      },
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c2",
+        name: "Read",
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+        result: "one",
+        isError: false,
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c2",
+        name: "Read",
+        result: "two",
+        isError: false,
+      },
+    ]);
+  });
+
+  test("无效 content tool_result 也阻止 top-level fallback", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(assistantToolUseBlock("request-1", "tc1"));
+    fake.controls.push({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "unknown",
+            content: "unknown result",
+          },
+        ],
+      },
+      parent_tool_use_id: "tc1",
+      tool_use_result: "must not fallback",
+      uuid: "invalid-content-result",
+      session_id: "qs",
+    });
+    await flush();
+    expect(events.filter((event) => event.type === "tool.completed")).toEqual(
+      [],
+    );
+
+    fake.controls.push({
+      type: "user",
+      message: { role: "user", content: "independent wrapper" },
+      parent_tool_use_id: "tc1",
+      tool_use_result: "fallback",
+      uuid: "fallback-result",
+      session_id: "qs",
+    });
+    await flush();
+    expect(events.filter((event) => event.type === "tool.completed")).toEqual([
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+        result: "fallback",
+        isError: false,
+      },
+    ]);
+  });
+
   test("没有稳定原生 assistant id 时不从外层 uuid 制造消息身份", async () => {
     const { events, fake } = setup();
     fake.controls.push(textDelta("outer-delta", "不可关联"));
@@ -327,6 +464,7 @@ describe("qoder driver 事件映射", () => {
         role: "assistant",
         content: [{ type: "text", text: "仍不可关联" }],
         stop_reason: "end_turn",
+        usage: { input_tokens: 0, output_tokens: 0 },
       },
       parent_tool_use_id: null,
       uuid: "outer-snapshot",
@@ -345,7 +483,286 @@ describe("qoder driver 事件映射", () => {
         sessionId,
         turnId: firstTurnId,
         stopReason: "end_turn",
-        finalReply: null,
+        finalReply: "仍不可关联",
+        usage: { input_tokens: 0, output_tokens: 0 },
+      },
+    ]);
+  });
+
+  test("缺少 id 的中间 snapshot 清除此前的 assistant identity", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(messageStart("start-a", "native-a"));
+    fake.controls.push(textDelta("delta-before", "可关联"));
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "无身份快照" }],
+        stop_reason: null,
+      },
+      parent_tool_use_id: null,
+      uuid: "outer-snapshot",
+      session_id: "qs",
+    });
+    fake.controls.push(textDelta("delta-after", "不可再沿用"));
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "text.delta" || event.type === "message",
+      ),
+    ).toEqual([
+      {
+        type: "text.delta",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        delta: "可关联",
+      },
+    ]);
+  });
+
+  test("同一原生消息的渐进完整 snapshot 在 idle 前只发布最新文本", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(assistantText("outer-a", "A", "native-progressive"));
+    fake.controls.push(assistantText("outer-ab", "AB", "native-progressive"));
+    fake.controls.push(idle());
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "message" || event.type === "turn.completed",
+      ),
+    ).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "AB",
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: "AB",
+        usage: { input_tokens: 12, output_tokens: 34 },
+      },
+    ]);
+  });
+
+  test("同一原生消息的相同完整 snapshot 幂等发布一次", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(assistantText("outer-a1", "A", "native-repeat"));
+    fake.controls.push(assistantText("outer-a2", "A", "native-repeat"));
+    fake.controls.push(idle());
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "message" || event.type === "turn.completed",
+      ),
+    ).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "A",
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: "A",
+        usage: { input_tokens: 12, output_tokens: 34 },
+      },
+    ]);
+  });
+
+  test("已 flush 的原生消息拒绝不同文本但保留终态事实", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(assistantText("outer-a", "A", "native-flushed"));
+    fake.controls.push({
+      type: "stream_event",
+      event: { type: "content_block_stop", index: 0 },
+      parent_tool_use_id: null,
+      uuid: "block-stop",
+      session_id: "qs",
+    });
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "native-flushed",
+        role: "assistant",
+        content: [{ type: "text", text: "AB" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 0, output_tokens: 7 },
+      },
+      parent_tool_use_id: null,
+      uuid: "outer-ab",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "message" || event.type === "turn.completed",
+      ),
+    ).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "A",
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: "A",
+        usage: { input_tokens: 0, output_tokens: 7 },
+      },
+    ]);
+  });
+
+  test("同一回合的多个原生 assistant 消息按边界顺序发布", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(messageStart("start-1", "native-1"));
+    fake.controls.push(assistantText("outer-1", "first", "native-1"));
+    fake.controls.push(messageStart("start-2", "native-2"));
+    fake.controls.push(assistantText("outer-2", "second", "native-2"));
+    fake.controls.push(idle());
+    await flush();
+
+    expect(events.filter((event) => event.type === "message")).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "first",
+      },
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m2",
+        role: "worker",
+        content: "second",
+      },
+    ]);
+  });
+
+  test("新回合丢弃迟到工具结果并允许复用原生 tool id", async () => {
+    const { events, fake, driver } = setup();
+    fake.controls.push(assistantToolUseBlock("request-t1", "tc-shared"));
+    fake.controls.push(idle());
+    await flush();
+
+    fake.controls.push(
+      userToolResultBlock("late-while-idle", "tc-shared", "late"),
+    );
+    await flush();
+    expect(events.filter((event) => event.type === "tool.completed")).toEqual(
+      [],
+    );
+
+    driver.deliver(sessionId, secondTurnId, "继续");
+    fake.controls.push(
+      userToolResultBlock("late-after-deliver", "tc-shared", "late"),
+    );
+    await flush();
+    expect(events.filter((event) => event.type === "tool.completed")).toEqual(
+      [],
+    );
+
+    fake.controls.push(assistantToolUseBlock("request-t2", "tc-shared"));
+    fake.controls.push(userToolResultBlock("result-t2", "tc-shared", "ok"));
+    await flush();
+
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "tool.requested" || event.type === "tool.completed",
+      ),
+    ).toEqual([
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+      },
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: secondTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: secondTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+        result: "ok",
+        isError: false,
+      },
+    ]);
+  });
+
+  test("新回合可复用原生 assistant id 及通用 MessageId", async () => {
+    const { events, fake, driver } = setup();
+    fake.controls.push(messageStart("start-t1", "native-shared"));
+    fake.controls.push(textDelta("delta-t1", "one"));
+    fake.controls.push(assistantText("snapshot-t1", "one", "native-shared"));
+    fake.controls.push(idle());
+    await flush();
+
+    driver.deliver(sessionId, secondTurnId, "继续");
+    fake.controls.push(messageStart("start-t2", "native-shared"));
+    fake.controls.push(textDelta("delta-t2", "two"));
+    fake.controls.push(assistantText("snapshot-t2", "two", "native-shared"));
+    fake.controls.push(idle());
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => "turnId" in event && event.turnId === secondTurnId,
+      ),
+    ).toEqual([
+      {
+        type: "text.delta",
+        sessionId,
+        turnId: secondTurnId,
+        messageId: "m1",
+        delta: "two",
+      },
+      {
+        type: "message",
+        sessionId,
+        turnId: secondTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "two",
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: secondTurnId,
+        stopReason: "end_turn",
+        finalReply: "two",
+        usage: { input_tokens: 12, output_tokens: 34 },
       },
     ]);
   });

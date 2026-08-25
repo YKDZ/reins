@@ -1,0 +1,11 @@
+{
+  "fixture": "two-tools.jsonl",
+  "recordedAt": "2026-08-25T18:10:33.366Z",
+  "sdkVersion": "1.0.23",
+  "qoderCliVersion": "1.1.23",
+  "protocolVersion": "1.2.0",
+  "lineCount": 84,
+  "uniqueNativeToolCount": 2,
+  "sha256": "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
+  "scenario": "Two sequential non-combined Bash tool requests and results followed by a streamed text reply"
+}

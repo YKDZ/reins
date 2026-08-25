@@ -1,14 +1,11 @@
 {
   "fixture": "list-and-tool.jsonl",
-  "provenance": "Recorded through test/scripts/record-fixture.ts from a live Qoder SDK session",
   "recordedAt": "2026-08-19T04:14:57.595Z",
   "sdkVersion": "1.0.23",
   "qoderCliVersion": "1.1.25",
   "protocolVersion": "1.2.0",
   "lineCount": 53,
-  "scenario": "One Bash tool request and result followed by a streamed text reply",
-  "nativeToolCount": 1,
-  "limitations": [
-    "Multiple native tools are covered by a separate synthetic counterexample"
-  ]
+  "uniqueNativeToolCount": 1,
+  "sha256": "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
+  "scenario": "One Bash tool request and result followed by a streamed text reply"
 }

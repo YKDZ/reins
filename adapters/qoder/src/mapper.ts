@@ -17,7 +17,8 @@ import type {
 
 export type QoderMappingState = {
   currentAssistantId: string | null;
-  readonly emittedTextMessageIds: Set<string>;
+  readonly pendingTextById: Map<string, string>;
+  readonly flushedTextById: Map<string, string>;
   readonly requestedToolIds: Set<string>;
   readonly completedToolIds: Set<string>;
 };
@@ -25,10 +26,54 @@ export type QoderMappingState = {
 export function createQoderMappingState(): QoderMappingState {
   return {
     currentAssistantId: null,
-    emittedTextMessageIds: new Set(),
+    pendingTextById: new Map(),
+    flushedTextById: new Map(),
     requestedToolIds: new Set(),
     completedToolIds: new Set(),
   };
+}
+
+function flushPendingText(
+  session: TurnJournal,
+  state: QoderMappingState,
+  nativeId?: string,
+): DomainEvent[] {
+  if (session.turnId === null) return [];
+  let pending: ReadonlyArray<readonly [string, string]>;
+  if (nativeId === undefined) {
+    pending = [...state.pendingTextById.entries()];
+  } else {
+    const content = state.pendingTextById.get(nativeId);
+    pending = content === undefined ? [] : [[nativeId, content]];
+  }
+  const events: DomainEvent[] = [];
+  for (const [id, content] of pending) {
+    state.pendingTextById.delete(id);
+    if (state.flushedTextById.has(id)) continue;
+    state.flushedTextById.set(id, content);
+    events.push({
+      type: "message",
+      sessionId: session.sessionId,
+      turnId: session.turnId,
+      messageId: session.messageId(id),
+      role: "worker",
+      content,
+    });
+  }
+  return events;
+}
+
+function stageTextSnapshot(
+  state: QoderMappingState,
+  nativeId: string,
+  content: string,
+): "pending" | "idempotent" | "conflict" {
+  const flushed = state.flushedTextById.get(nativeId);
+  if (flushed === undefined) {
+    state.pendingTextById.set(nativeId, content);
+    return "pending";
+  }
+  return flushed === content ? "idempotent" : "conflict";
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -118,10 +163,11 @@ function mapStreamEvent(
   const event = message.event;
   const turnId = session.turnId;
   if (event.type === "message_start") {
+    const events = flushPendingText(session, state);
     state.currentAssistantId = isNonEmptyString(event.message?.id)
       ? event.message.id
       : null;
-    return [];
+    return events;
   }
   if (event.type === "message_delta") {
     if (event.usage !== undefined) {
@@ -134,8 +180,10 @@ function mapStreamEvent(
       "stop_reason" in delta &&
       (delta as { stop_reason?: unknown }).stop_reason === "end_turn"
     ) {
+      const events = flushPendingText(session, state);
       state.currentAssistantId = null;
-      return [session.endTurn("end_turn")];
+      events.push(session.endTurn("end_turn"));
+      return events;
     }
     return [];
   }
@@ -151,6 +199,11 @@ function mapStreamEvent(
         delta: event.delta.text,
       },
     ];
+  }
+  if (event.type === "content_block_stop" || event.type === "message_stop") {
+    return state.currentAssistantId === null
+      ? []
+      : flushPendingText(session, state, state.currentAssistantId);
   }
   const block = event.content_block;
   if (
@@ -175,7 +228,13 @@ function mapAssistant(
   const nativeMessageId = isNonEmptyString(message.message.id)
     ? message.message.id
     : null;
-  if (nativeMessageId !== null) state.currentAssistantId = nativeMessageId;
+  if (
+    state.currentAssistantId !== null &&
+    state.currentAssistantId !== nativeMessageId
+  ) {
+    events.push(...flushPendingText(session, state, state.currentAssistantId));
+  }
+  state.currentAssistantId = nativeMessageId;
 
   for (const block of message.message.content) {
     if (block.type === "thinking") {
@@ -209,18 +268,11 @@ function mapAssistant(
     .filter((block) => block.type === "text" && typeof block.text === "string")
     .map((block) => block.text ?? "")
     .join("");
-  if (text.length > 0 && nativeMessageId !== null) {
-    session.setFinalText(text);
-    if (!state.emittedTextMessageIds.has(nativeMessageId)) {
-      state.emittedTextMessageIds.add(nativeMessageId);
-      events.push({
-        type: "message",
-        sessionId: session.sessionId,
-        turnId,
-        messageId: session.messageId(nativeMessageId),
-        role: "worker",
-        content: text,
-      });
+  if (text.length > 0) {
+    if (nativeMessageId === null) {
+      session.setFinalText(text);
+    } else if (stageTextSnapshot(state, nativeMessageId, text) === "pending") {
+      session.setFinalText(text);
     }
   }
   if (message.message.usage !== undefined) {
@@ -234,12 +286,15 @@ function mapAssistant(
       reason: "worker_reported_failure",
       message: makeTextEvidence("worker reported a failed turn"),
     });
+    events.push(...flushPendingText(session, state));
     state.currentAssistantId = null;
     events.push(session.endTurn("failed"));
   } else if (message.aborted === true && session.cancelling) {
+    events.push(...flushPendingText(session, state));
     state.currentAssistantId = null;
     events.push(session.endTurn("cancelled"));
   } else if (message.message.stop_reason === "end_turn") {
+    events.push(...flushPendingText(session, state));
     state.currentAssistantId = null;
     events.push(session.endTurn("end_turn"));
   }
@@ -254,20 +309,22 @@ function mapUserMessage(
   if (session.turnId === null) return [];
   const events: DomainEvent[] = [];
   const content = message.message.content;
-  if (Array.isArray(content)) {
-    for (const block of content) {
-      if (block.type === "tool_result") {
-        const completed = completeTool(
-          session,
-          state,
-          session.turnId,
-          block.tool_use_id,
-          block.content,
-          block.is_error === true,
-        );
-        if (completed !== null) events.push(completed);
-      }
+  const contentToolResults = Array.isArray(content)
+    ? content.filter((block) => block.type === "tool_result")
+    : [];
+  if (contentToolResults.length > 0) {
+    for (const block of contentToolResults) {
+      const completed = completeTool(
+        session,
+        state,
+        session.turnId,
+        block.tool_use_id,
+        block.content,
+        block.is_error === true,
+      );
+      if (completed !== null) events.push(completed);
     }
+    return events;
   }
   if (message.tool_use_result === undefined) return events;
   const meta = message.tool_result_meta?.find(
@@ -298,8 +355,10 @@ function mapSystemMessage(
 ): DomainEvent[] {
   if (message.subtype !== "session_state_changed") return [];
   if (message.state !== "idle" || session.turnId === null) return [];
+  const events = flushPendingText(session, state);
   state.currentAssistantId = null;
-  return [session.endTurn(session.cancelling ? "cancelled" : "end_turn")];
+  events.push(session.endTurn(session.cancelling ? "cancelled" : "end_turn"));
+  return events;
 }
 
 function mapResult(
@@ -315,8 +374,10 @@ function mapResult(
       reason: "worker_reported_failure",
       message: makeTextEvidence("worker reported a failed turn"),
     });
+    const events = flushPendingText(session, state);
     state.currentAssistantId = null;
-    return [session.endTurn("failed")];
+    events.push(session.endTurn("failed"));
+    return events;
   }
   return [];
 }

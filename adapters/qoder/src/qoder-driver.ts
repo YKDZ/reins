@@ -198,6 +198,7 @@ export function createQoderDriver(deps: {
         })();
       },
       deliver(sessionId, turnId, message) {
+        mappingState = createQoderMappingState();
         void sessionId;
         session?.setTurnId(turnId);
         stream?.push(userMessage(message, "next", true));
