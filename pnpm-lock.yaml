@@ -340,6 +340,60 @@ importers:
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@24.13.3)
+
+  packages/conformance:
+    dependencies:
+      '@reins/client':
+        specifier: workspace:*
+        version: link:../client
+      '@reins/daemon':
+        specifier: workspace:*
+        version: link:../daemon
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@reins/qoder':
+        specifier: workspace:*
+        version: link:../../adapters/qoder
+      '@reins/transport':
+        specifier: workspace:*
+        version: link:../transport
+    dependenciesMeta:
+      '@reins/client':
+        injected: false
+      '@reins/daemon':
+        injected: false
+      '@reins/protocol':
+        injected: false
+      '@reins/qoder':
+        injected: false
+      '@reins/transport':
+        injected: false
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+      vitest:
+        specifier: 'catalog:'
+        version: 4.1.10(@types/node@24.13.3)
 
   packages/core:
     dependencies:

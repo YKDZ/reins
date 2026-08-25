@@ -24,6 +24,7 @@ const workspacePackageDirectories = [
   "adapters/codex",
   "adapters/dsh",
   "adapters/qoder",
+  "packages/conformance",
 ] as const;
 const unversionedPrivateManifestDirectories = [
   ".",

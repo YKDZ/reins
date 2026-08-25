@@ -1,5 +1,6 @@
 import { createInterface } from "node:readline/promises";
 
+import type { ReinsClient } from "@reins/client";
 import type {
   AttachEnded,
   AttachParams,
@@ -15,7 +16,6 @@ import {
   createPrettyAttachPresenter,
   type PrettyAttachPresenter,
 } from "./attach-presenter.ts";
-import type { ReinsClient } from "./client.ts";
 import {
   ExitError,
   EXIT_RESOURCE,

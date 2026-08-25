@@ -33,6 +33,21 @@
           "allow": ["protocol", "transport", "library"]
         }
       },
+      "conformance": {
+        "dependencies": {
+          "allow": [
+            "adapter",
+            "adapter-kit",
+            "client",
+            "core",
+            "daemon",
+            "event-journal",
+            "protocol",
+            "transport",
+            "library"
+          ]
+        }
+      },
       "daemon": {
         "dependencies": {
           "allow": [

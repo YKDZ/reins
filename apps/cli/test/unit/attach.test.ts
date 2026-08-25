@@ -1,6 +1,11 @@
 import { PassThrough } from "node:stream";
 
 import type {
+  NotificationListener,
+  ProtocolResponseFor,
+  ReinsClient,
+} from "@reins/client";
+import type {
   MachineError,
   ProtocolMethod,
   ProtocolNotification,
@@ -18,11 +23,6 @@ import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { runAttach } from "../../src/attach.ts";
-import type {
-  NotificationListener,
-  ProtocolResponseFor,
-  ReinsClient,
-} from "../../src/client.ts";
 
 const sessionId = v.parse(sessionIdSchema, "prompt@g1");
 const turnId = v.parse(turnIdSchema, "t1");

@@ -1,3 +1,4 @@
+import type { ReinsClient } from "@reins/client";
 import type {
   CapabilitiesResult,
   CapabilityFailure,
@@ -6,7 +7,6 @@ import type {
   SpawnParams,
 } from "@reins/protocol";
 
-import type { ReinsClient } from "./client.ts";
 import { machineError } from "./errors.ts";
 
 type Store = {

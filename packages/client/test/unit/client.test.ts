@@ -1,7 +1,7 @@
 import { createInMemoryTransportPair } from "@reins/transport";
 import { expect, test, vi } from "vitest";
 
-import { createReinsClient } from "../../src/client.ts";
+import { createReinsClient } from "../../src/index.ts";
 
 test("malformed inbound envelope rejects an outstanding request as invalid daemon response", async () => {
   const pair = createInMemoryTransportPair();

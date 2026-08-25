@@ -1,3 +1,8 @@
+import {
+  createReinsClient,
+  type ProtocolResponseFor,
+  type ReinsClient,
+} from "@reins/client";
 import type {
   AttachParams,
   DiagnosticsParams,
@@ -10,11 +15,6 @@ import type {
 
 import { runAndWait, runAttach } from "./attach.ts";
 import { CapabilityStore } from "./capabilities.ts";
-import {
-  createReinsClient,
-  type ProtocolResponseFor,
-  type ReinsClient,
-} from "./client.ts";
 import type {
   CommandInvocation,
   CommandInvocationFor,

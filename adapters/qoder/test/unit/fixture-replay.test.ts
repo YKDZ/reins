@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { readFile } from "node:fs/promises";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
 import type {
@@ -11,6 +10,7 @@ import type {
 import { describe, expect, test } from "vitest";
 
 import { createQoderDriver } from "#/qoder-driver";
+import { loadRecordedQoderFixture } from "#/testing";
 
 import { createFakeSdk } from "../helpers/fake-sdk.ts";
 
@@ -18,87 +18,8 @@ const flush = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
 
-type FixtureMetadata = {
-  fixture: string;
-  recordedAt: string;
-  sdkVersion: string;
-  qoderCliVersion: string;
-  protocolVersion: string;
-  lineCount: number;
-  uniqueNativeToolCount: number;
-  sha256: string;
-  scenario: string;
-};
-
 const sha256 = (value: string): string =>
   createHash("sha256").update(value).digest("hex");
-
-async function loadFixture(name: string): Promise<{
-  messages: SDKMessage[];
-  metadata: FixtureMetadata;
-}> {
-  const [raw, metadataRaw, sdkPackageRaw] = await Promise.all([
-    readFile(new URL(`../fixtures/${name}.jsonl`, import.meta.url), "utf8"),
-    readFile(
-      new URL(`../fixtures/${name}.metadata.json`, import.meta.url),
-      "utf8",
-    ),
-    readFile(
-      new URL(
-        "../package.json",
-        import.meta.resolve("@qodercn-ai/qodercn-agent-sdk"),
-      ),
-      "utf8",
-    ),
-  ]);
-  const metadata = JSON.parse(metadataRaw) as FixtureMetadata;
-  const sdkPackage = JSON.parse(sdkPackageRaw) as { version: string };
-  const messages = raw
-    .trim()
-    .split("\n")
-    .map((line) => JSON.parse(line) as SDKMessage);
-  const nativeToolIds = new Set<string>();
-  for (const message of messages) {
-    if (
-      message.type === "stream_event" &&
-      message.event.type === "content_block_start" &&
-      message.event.content_block?.type === "tool_use" &&
-      typeof message.event.content_block.id === "string"
-    ) {
-      nativeToolIds.add(message.event.content_block.id);
-    }
-    if (message.type === "assistant") {
-      for (const block of message.message.content) {
-        if (block.type === "tool_use" && typeof block.id === "string") {
-          nativeToolIds.add(block.id);
-        }
-      }
-    }
-  }
-  const recordedAt = messages
-    .flatMap((message) =>
-      "timestamp" in message && typeof message.timestamp === "string"
-        ? [message.timestamp]
-        : [],
-    )
-    .at(0);
-  expect(metadata).toMatchObject({
-    fixture: `${name}.jsonl`,
-    lineCount: messages.length,
-    recordedAt,
-    sdkVersion: sdkPackage.version,
-    uniqueNativeToolCount: nativeToolIds.size,
-    sha256: sha256(raw),
-    scenario: expect.any(String),
-  });
-  expect(messages[0]).toMatchObject({
-    type: "system",
-    cwd: "<fixture-cwd>",
-    protocol_version: metadata.protocolVersion,
-    qodercli_version: metadata.qoderCliVersion,
-  });
-  return { messages, metadata };
-}
 
 async function replayFixture(
   messages: readonly SDKMessage[],
@@ -128,7 +49,8 @@ async function replayFixture(
 
 describe("录制 fixture 回放", () => {
   test("固定版本的 list-and-tool 流保留原生消息和工具生命周期", async () => {
-    const { messages, metadata } = await loadFixture("list-and-tool");
+    const { messages, metadata } =
+      await loadRecordedQoderFixture("list-and-tool");
     expect(metadata).toMatchObject({
       lineCount: 53,
       uniqueNativeToolCount: 1,
@@ -227,7 +149,7 @@ describe("录制 fixture 回放", () => {
   });
 
   test("真实 two-tools 流精确保留两个工具与消息终态", async () => {
-    const { messages, metadata } = await loadFixture("two-tools");
+    const { messages, metadata } = await loadRecordedQoderFixture("two-tools");
     expect(metadata).toMatchObject({
       lineCount: 84,
       uniqueNativeToolCount: 2,
