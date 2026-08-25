@@ -297,6 +297,31 @@ test("surplus lines for one permission cannot pre-authorize the next", async () 
   await attached;
 });
 
+test("allow with surplus input and EOF resolves only its active permission", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.acceptAttach();
+  client.emit(requested("p1", turnId));
+  await tick();
+  input.end("1\n1\n");
+  await tick();
+  await tick();
+  expect(client.resolutions).toEqual(["p1"]);
+
+  client.emit(requested("p2", secondTurnId));
+  await expect(attached).rejects.toEqual({
+    code: "input_error",
+    reason: "permission_choice_eof",
+  });
+  expect(client.resolutions).toEqual(["p1"]);
+});
+
 test("a terminal clears its turn while a later turn keeps FIFO progress", async () => {
   vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   const client = new ControlledClient();
@@ -544,9 +569,7 @@ test("feedback EOF has its own typed recovery reason", async () => {
   client.acceptAttach();
   client.emit(requested("p1"));
   await tick();
-  input.write("2\n");
-  await tick();
-  input.end();
+  input.end("2\n");
   await expect(attached).rejects.toEqual({
     code: "input_error",
     reason: "permission_feedback_eof",
@@ -554,7 +577,7 @@ test("feedback EOF has its own typed recovery reason", async () => {
   expect(client.resolutions).toEqual([]);
 });
 
-test("deny feedback consumes two lines owned by the same permission", async () => {
+test("same-tick natural close preserves queued feedback for its owner", async () => {
   vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   const client = new ControlledClient();
   const input = new PassThrough();
@@ -567,6 +590,28 @@ test("deny feedback consumes two lines owned by the same permission", async () =
   client.emit(requested("p1"));
   await tick();
   input.write("2\nnot safe\n");
+  input.emit("end");
+  await tick();
+  await tick();
+
+  expect(client.resolutions).toEqual(["p1"]);
+  client.end();
+  await attached;
+});
+
+test("input end with choice and feedback resolves the same permission", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.acceptAttach();
+  client.emit(requested("p1"));
+  await tick();
+  input.end("2\nnot safe\n");
   await tick();
   await tick();
 

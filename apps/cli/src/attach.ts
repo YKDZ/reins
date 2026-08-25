@@ -80,10 +80,10 @@ function createPromptInput(input: NodeJS.ReadableStream): PromptInput {
   });
   readline.once("close", () => {
     closed = true;
-    activeOwner = undefined;
-    queued.length = 0;
-    for (const waiter of waiters.splice(0)) {
-      waiter.complete({ kind: "eof" });
+    if (queued.length === 0) {
+      for (const waiter of waiters.splice(0)) {
+        waiter.complete({ kind: "eof" });
+      }
     }
   });
   const deactivate = (owner: string): void => {
