@@ -1,30 +1,21 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  chmod,
-  mkdir,
-  readdir,
-  readFile,
-  realpath,
-  stat,
-} from "node:fs/promises";
+import { chmod, mkdir, readFile, realpath } from "node:fs/promises";
 import { constants, homedir, tmpdir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const buildRoots = [
-  "adapters/codex/dist",
-  "adapters/qoder/dist",
-  "apps/cli/dist",
-  "packages/adapter-kit/dist",
-  "packages/client/dist",
-  "packages/core/dist",
-  "packages/daemon/dist",
-  "packages/event-journal/dist",
-  "packages/protocol/dist",
-  "packages/transport/dist",
-  "packages/workspace-protocol/dist",
+const turboBuildArguments = [
+  "exec",
+  "turbo",
+  "run",
+  "build",
+  "--filter=@ykdz/reins",
+  "--filter=@reins/daemon",
+  "--output-logs=errors-only",
+  "--log-order=grouped",
+  "--log-prefix=task",
 ] as const;
 
 type CommandResult = {
@@ -33,27 +24,13 @@ type CommandResult = {
   readonly stderr: Buffer;
 };
 
-function runBuild(): Promise<CommandResult> {
+function runPnpm(args: readonly string[]): Promise<CommandResult> {
   return new Promise((resolveBuild, reject) => {
-    const child = spawn(
-      "pnpm",
-      [
-        "exec",
-        "turbo",
-        "run",
-        "build",
-        "--filter=@ykdz/reins",
-        "--filter=@reins/daemon",
-        "--output-logs=errors-only",
-        "--log-order=grouped",
-        "--log-prefix=task",
-      ],
-      {
-        cwd: repository,
-        env: process.env,
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
+    const child = spawn("pnpm", [...args], {
+      cwd: repository,
+      env: process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+    });
     const stdout: Buffer[] = [];
     const stderr: Buffer[] = [];
     child.stdout.on("data", (chunk: Buffer) => stdout.push(chunk));
@@ -69,30 +46,118 @@ function runBuild(): Promise<CommandResult> {
   });
 }
 
-async function filesRecursively(directory: string): Promise<string[]> {
-  const files: string[] = [];
-  for (const entry of await readdir(directory, { withFileTypes: true })) {
-    const path = join(directory, entry.name);
-    if (entry.isDirectory()) files.push(...(await filesRecursively(path)));
-    else if (entry.isFile()) files.push(path);
-  }
-  return files;
+type BuildTaskIdentity = {
+  readonly taskId: string;
+  readonly hash: string;
+  readonly hashOfExternalDependencies: string;
+  readonly directory: string;
+  readonly command: string;
+  readonly outputs: readonly string[];
+};
+
+type BuildGraphIdentity = {
+  readonly turboVersion: string;
+  readonly tasks: readonly BuildTaskIdentity[];
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
-async function buildIdentity(): Promise<string> {
-  const hash = createHash("sha256");
-  for (const buildRoot of buildRoots) {
-    const directory = join(repository, buildRoot);
-    for (const path of (await filesRecursively(directory)).sort()) {
-      const metadata = await stat(path);
-      hash.update(relative(repository, path));
-      hash.update("\0");
-      hash.update(String(metadata.mode & 0o111));
-      hash.update("\0");
-      hash.update(await readFile(path));
-      hash.update("\0");
-    }
+function readString(record: Record<string, unknown>, key: string): string {
+  const value = record[key];
+  if (typeof value !== "string" || value === "") {
+    throw new Error(`Turbo build graph omitted ${key}`);
   }
+  return value;
+}
+
+function parseBuildGraph(stdout: Buffer): BuildGraphIdentity {
+  const parsed: unknown = JSON.parse(stdout.toString("utf8"));
+  if (!isRecord(parsed) || !Array.isArray(parsed.tasks)) {
+    throw new Error("Turbo returned an invalid build graph");
+  }
+  const tasks = parsed.tasks.map((value): BuildTaskIdentity => {
+    if (!isRecord(value) || !Array.isArray(value.outputs)) {
+      throw new Error("Turbo returned an invalid build task");
+    }
+    const outputs = value.outputs.map((output) => {
+      if (typeof output !== "string") {
+        throw new Error("Turbo build task returned an invalid output");
+      }
+      return output;
+    });
+    return {
+      taskId: readString(value, "taskId"),
+      hash: readString(value, "hash"),
+      hashOfExternalDependencies: readString(
+        value,
+        "hashOfExternalDependencies",
+      ),
+      directory: readString(value, "directory"),
+      command: readString(value, "command"),
+      outputs,
+    };
+  });
+  if (tasks.length === 0)
+    throw new Error("Turbo build graph contained no tasks");
+  tasks.sort((left, right) => left.taskId.localeCompare(right.taskId));
+  return {
+    turboVersion: readString(parsed, "turboVersion"),
+    tasks,
+  };
+}
+
+async function readBuildGraph(): Promise<BuildGraphIdentity> {
+  const result = await runPnpm([...turboBuildArguments, "--dry=json"]);
+  if (result.status !== 0) {
+    throw new Error(
+      `Turbo build graph failed with exit ${result.status}: ${result.stderr.toString("utf8").trim()}`,
+    );
+  }
+  return parseBuildGraph(result.stdout);
+}
+
+function updateIdentity(
+  hash: ReturnType<typeof createHash>,
+  label: string,
+  value: string | Buffer,
+): void {
+  hash.update(label);
+  hash.update("\0");
+  hash.update(String(Buffer.byteLength(value)));
+  hash.update("\0");
+  hash.update(value);
+  hash.update("\0");
+}
+
+async function buildIdentity(
+  graph: BuildGraphIdentity,
+  env: NodeJS.ProcessEnv,
+): Promise<string> {
+  const hash = createHash("sha256");
+  updateIdentity(
+    hash,
+    "pnpm-lock",
+    await readFile(join(repository, "pnpm-lock.yaml")),
+  );
+  updateIdentity(hash, "turbo-build-graph", JSON.stringify(graph));
+  updateIdentity(
+    hash,
+    "node-runtime",
+    JSON.stringify({
+      arch: process.arch,
+      platform: process.platform,
+      execPath: await realpath(process.execPath),
+      execArgv: process.execArgv,
+      nodeOptions: env.NODE_OPTIONS ?? null,
+      versions: Object.fromEntries(
+        Object.entries(process.versions).sort(([left], [right]) =>
+          left.localeCompare(right),
+        ),
+      ),
+    }),
+  );
   return hash.digest("hex").slice(0, 20);
 }
 
@@ -122,7 +187,10 @@ async function runCli(args: readonly string[]): Promise<number> {
     .update(checkout)
     .digest("hex")
     .slice(0, 20);
-  const outputIdentity = await buildIdentity();
+  const outputIdentity = await buildIdentity(
+    await readBuildGraph(),
+    process.env,
+  );
   const root = developmentRoot(process.env);
   const runtimeDirectory = join(root, `${checkoutIdentity}-${outputIdentity}`);
   await ensurePrivateDirectory(runtimeDirectory);
@@ -156,7 +224,7 @@ async function runCli(args: readonly string[]): Promise<number> {
 }
 
 try {
-  const build = await runBuild();
+  const build = await runPnpm(turboBuildArguments);
   if (build.status !== 0) {
     process.stdout.write(build.stdout);
     process.stderr.write(build.stderr);

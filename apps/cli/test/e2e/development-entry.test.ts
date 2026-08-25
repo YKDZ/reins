@@ -34,6 +34,14 @@ type CommandResult = {
   readonly stderr: string;
 };
 
+function daemonGenerationFromSessionId(sessionId: string): string {
+  const match = /@g([a-z0-9]+)$/u.exec(sessionId);
+  if (match?.[1] === undefined) {
+    throw new Error(`Session ID omitted daemon generation: ${sessionId}`);
+  }
+  return match[1];
+}
+
 function runDevelopmentCli(
   args: readonly string[],
   env: NodeJS.ProcessEnv,
@@ -384,6 +392,18 @@ describe("checkout-isolated development entry", () => {
     const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
       .sessionId;
 
+    const secondSpawn = await runDevelopmentCli(
+      ["spawn", "fake", "hello", "--name", "development-session-second"],
+      env,
+    );
+    expect(secondSpawn.status, secondSpawn.stderr).toBe(0);
+    const secondSessionId = (
+      JSON.parse(secondSpawn.stdout) as { sessionId: string }
+    ).sessionId;
+    expect(daemonGenerationFromSessionId(secondSessionId)).toBe(
+      daemonGenerationFromSessionId(sessionId),
+    );
+
     const listed = await runDevelopmentCli(
       ["list", "--name", "development-session"],
       env,
@@ -393,8 +413,63 @@ describe("checkout-isolated development entry", () => {
       expect.objectContaining({ sessionId }),
     ]);
 
-    const killed = await runDevelopmentCli(["kill", sessionId], env);
+    const killed = await runDevelopmentCli(
+      ["kill", sessionId, secondSessionId],
+      env,
+    );
     expect(killed.status, killed.stderr).toBe(0);
+  }, 120_000);
+
+  test("isolates a live daemon when Node resolution conditions change without rebuilding output", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
+    cleanupDirectories.push(directory);
+    const runtimeRoot = join(directory, "development");
+    const baseEnv = {
+      PNPM_CONFIG_REPORTER: "silent",
+      REINS_ADAPTERS_MODULE: adaptersModule,
+      REINS_DEVELOPMENT_ROOT: runtimeRoot,
+      REINS_IDLE_TIMEOUT_MS: "50",
+    };
+    const originalEnv = {
+      ...baseEnv,
+      NODE_OPTIONS: "--conditions=f04-runtime-a",
+    };
+    const spawned = await runDevelopmentCli(
+      ["spawn", "fake", "hello", "--name", "runtime-session"],
+      originalEnv,
+    );
+    expect(spawned.status, spawned.stderr).toBe(0);
+    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
+      .sessionId;
+    const originalRuntimeDirectory = (
+      await readdir(runtimeRoot, { withFileTypes: true })
+    ).find((entry) => entry.isDirectory())?.name;
+    if (originalRuntimeDirectory === undefined) {
+      throw new Error("Development runtime directory was not created");
+    }
+
+    const listed = await runDevelopmentCli(
+      ["list", "--name", "runtime-session"],
+      {
+        ...baseEnv,
+        NODE_OPTIONS: "--conditions=f04-runtime-b",
+      },
+    );
+    const cleanup = await runCommand(
+      process.execPath,
+      [join(repository, "apps/cli/dist/reins.js"), "kill", sessionId],
+      repository,
+      {
+        ...originalEnv,
+        REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
+        REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
+        REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),
+      },
+    );
+    expect(cleanup.status, cleanup.stderr).toBe(0);
+
+    expect(listed.status, listed.stderr).toBe(0);
+    expect(JSON.parse(listed.stdout)).toEqual([]);
   }, 120_000);
 
   test("preserves stdin, stdout, stderr, arguments, and a non-zero exit code", async () => {
@@ -406,21 +481,26 @@ describe("checkout-isolated development entry", () => {
       "apps/cli/test/e2e/fixtures/record-cli-stdin.mjs",
     );
     const sentinel = "caller stdin sentinel\nsecond line\n";
+    const stdoutSentinel = "cli stdout sentinel\n";
+    const stderrSentinel = "cli stderr sentinel\n";
     const result = await runDevelopmentCli(
       ["--pretty", "capabilities", "--caller-sentinel"],
       {
         NODE_OPTIONS: `--import=${preload}`,
         PNPM_CONFIG_REPORTER: "silent",
         REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+        REINS_STDERR_SENTINEL: stderrSentinel,
         REINS_STDIN_RECORD: stdinRecord,
+        REINS_STDOUT_SENTINEL: stdoutSentinel,
       },
       sentinel,
     );
 
     expect(result.status).toBe(64);
-    expect(result.stdout).toBe("");
+    expect(result.stdout).toBe(stdoutSentinel);
     expect(result.stderr).toBe(
-      "error: Unknown option '--caller-sentinel'\n" +
+      stderrSentinel +
+        "error: Unknown option '--caller-sentinel'\n" +
         "suggestion: Allowed: --pretty\n" +
         "usage: reins capabilities [options]\n",
     );
