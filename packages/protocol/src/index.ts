@@ -390,21 +390,6 @@ export const domainEventSchema = v.union([
 ]);
 export type DomainEvent = v.InferOutput<typeof domainEventSchema>;
 
-export const WORKER_EVENT_REJECTION_REASONS = [
-  "unknown_session",
-  "session_killed",
-  "driver_event_forbidden",
-  "turn_not_active",
-  "turn_mismatch",
-  "event_after_turn_completed",
-  "message_already_completed",
-  "tool_already_requested",
-  "tool_already_completed",
-  "permission_id_reused",
-  "permission_not_pending",
-  "permission_turn_mismatch",
-] as const;
-
 const workerEventTypeSchema = v.picklist([
   "session.created",
   "turn.started",
@@ -427,34 +412,93 @@ const turnWorkerEventTypeSchema = v.picklist([
   "permission.resolved",
   "turn.completed",
 ]);
-const ingressSessionStateSchema = v.picklist([
-  "unknown",
-  "spawning",
-  "busy",
-  "idle",
-  "killed",
-]);
 const activeTurnRejectionEntries = {
   sessionState: v.picklist(["spawning", "busy"]),
   eventTurnId: turnIdSchema,
   activeTurnId: turnIdSchema,
 } as const;
 
-export const workerEventRejectionSchema = v.variant("reason", [
-  v.strictObject({
-    reason: v.literal("unknown_session"),
+function defineWorkerEventRejection<
+  const TReason extends string,
+  const TEntries extends v.ObjectEntries,
+>(reason: TReason, entries: TEntries) {
+  const rejectionEntries = { reason: v.literal(reason), ...entries } as const;
+  return {
+    reason,
+    entries: rejectionEntries,
+    rejection: v.strictObject(rejectionEntries),
+  } as const;
+}
+
+function defineCompletedTurnWorkerEventRejection() {
+  const reason = "event_after_turn_completed";
+  const variants = [
+    {
+      reason: v.literal(reason),
+      eventType: turnWorkerEventTypeSchema,
+      sessionState: v.literal("idle"),
+      eventTurnId: turnIdSchema,
+    },
+    {
+      reason: v.literal(reason),
+      eventType: turnWorkerEventTypeSchema,
+      sessionState: v.literal("busy"),
+      eventTurnId: turnIdSchema,
+      activeTurnId: turnIdSchema,
+    },
+    {
+      reason: v.literal(reason),
+      eventType: turnWorkerEventTypeSchema,
+      sessionState: v.literal("spawning"),
+      eventTurnId: turnIdSchema,
+      activeTurnId: turnIdSchema,
+    },
+  ] as const;
+  return {
+    reason,
+    variants,
+    rejection: v.variant("sessionState", [
+      v.strictObject(variants[0]),
+      v.strictObject(variants[1]),
+      v.strictObject(variants[2]),
+    ]),
+  } as const;
+}
+
+type DefinitionFieldTuple<
+  TKey extends PropertyKey,
+  TDefinitions extends readonly [
+    Record<TKey, unknown>,
+    ...Record<TKey, unknown>[],
+  ],
+> = {
+  -readonly [TIndex in keyof TDefinitions]: TDefinitions[TIndex][TKey];
+};
+
+function selectDefinitionField<
+  const TKey extends PropertyKey,
+  const TDefinitions extends readonly [
+    Record<TKey, unknown>,
+    ...Record<TKey, unknown>[],
+  ],
+>(definitions: TDefinitions, key: TKey) {
+  return definitions.map(
+    (definition) => definition[key],
+  ) as DefinitionFieldTuple<TKey, TDefinitions>;
+}
+
+const workerEventRejectionDefinitions = [
+  defineWorkerEventRejection("unknown_session", {
     eventType: workerEventTypeSchema,
     sessionState: v.literal("unknown"),
     eventTurnId: v.optional(turnIdSchema),
   }),
-  v.strictObject({
-    reason: v.literal("session_killed"),
+  defineWorkerEventRejection("session_killed", {
     eventType: workerEventTypeSchema,
     sessionState: v.literal("killed"),
     eventTurnId: v.optional(turnIdSchema),
   }),
-  v.strictObject({
-    reason: v.literal("driver_event_forbidden"),
+  defineWorkerEventRejection("driver_event_forbidden", {
     eventType: v.picklist([
       "session.created",
       "turn.started",
@@ -462,72 +506,58 @@ export const workerEventRejectionSchema = v.variant("reason", [
     ]),
     sessionState: v.picklist(["spawning", "busy", "idle"]),
   }),
-  v.strictObject({
-    reason: v.literal("turn_not_active"),
+  defineWorkerEventRejection("turn_not_active", {
     eventType: turnWorkerEventTypeSchema,
     sessionState: v.literal("idle"),
     eventTurnId: turnIdSchema,
   }),
-  v.strictObject({
-    reason: v.literal("turn_mismatch"),
+  defineWorkerEventRejection("turn_mismatch", {
     eventType: turnWorkerEventTypeSchema,
     ...activeTurnRejectionEntries,
   }),
-  v.strictObject({
-    reason: v.literal("event_after_turn_completed"),
-    eventType: turnWorkerEventTypeSchema,
-    sessionState: v.literal("idle"),
-    eventTurnId: turnIdSchema,
-  }),
-  v.strictObject({
-    reason: v.literal("message_already_completed"),
+  defineCompletedTurnWorkerEventRejection(),
+  defineWorkerEventRejection("message_already_completed", {
     eventType: v.picklist(["text.delta", "message"]),
     ...activeTurnRejectionEntries,
     messageId: messageIdSchema,
   }),
-  v.strictObject({
-    reason: v.literal("tool_already_requested"),
+  defineWorkerEventRejection("tool_already_requested", {
     eventType: v.literal("tool.requested"),
     ...activeTurnRejectionEntries,
     toolCallId: toolCallIdSchema,
   }),
-  v.strictObject({
-    reason: v.literal("tool_already_completed"),
+  defineWorkerEventRejection("tool_already_completed", {
     eventType: v.literal("tool.completed"),
     ...activeTurnRejectionEntries,
     toolCallId: toolCallIdSchema,
   }),
-  v.strictObject({
-    reason: v.literal("permission_id_reused"),
+  defineWorkerEventRejection("permission_id_reused", {
     eventType: v.literal("permission.requested"),
     ...activeTurnRejectionEntries,
     permissionId: permissionIdSchema,
   }),
-  v.strictObject({
-    reason: v.literal("permission_not_pending"),
+  defineWorkerEventRejection("permission_not_pending", {
     eventType: v.literal("permission.resolved"),
     ...activeTurnRejectionEntries,
     permissionId: permissionIdSchema,
   }),
-  v.strictObject({
-    reason: v.literal("permission_turn_mismatch"),
+  defineWorkerEventRejection("permission_turn_mismatch", {
     eventType: v.literal("permission.resolved"),
     ...activeTurnRejectionEntries,
     permissionId: permissionIdSchema,
   }),
-]);
+] as const;
+
+export const WORKER_EVENT_REJECTION_REASONS = Object.freeze(
+  selectDefinitionField(workerEventRejectionDefinitions, "reason"),
+);
+
+export const workerEventRejectionSchema = v.variant(
+  "reason",
+  selectDefinitionField(workerEventRejectionDefinitions, "rejection"),
+);
 export type WorkerEventRejection = v.InferOutput<
   typeof workerEventRejectionSchema
->;
-export const workerEventIngressDecisionSchema = v.variant("status", [
-  v.strictObject({ status: v.literal("accepted") }),
-  v.strictObject({
-    status: v.literal("rejected"),
-    rejection: workerEventRejectionSchema,
-  }),
-]);
-export type WorkerEventIngressDecision = v.InferOutput<
-  typeof workerEventIngressDecisionSchema
 >;
 
 // —— 诊断（存储 envelope 与 producer input） ——
@@ -752,64 +782,75 @@ function defineCoreSessionDiagnostic<
   } as const;
 }
 
-type WorkerEventProtocolViolationFact = {
-  source: "core";
-  sessionId: SessionId;
-  kind: "protocol_violation";
-  operation: "validate_worker_event";
-} & WorkerEventRejection;
-
-function defineCoreWorkerEventDiagnostic() {
-  const rejectionEntries = {
-    reason: v.picklist(WORKER_EVENT_REJECTION_REASONS),
-    eventType: workerEventTypeSchema,
-    sessionState: ingressSessionStateSchema,
-    eventTurnId: v.optional(turnIdSchema),
-    activeTurnId: v.optional(turnIdSchema),
-    messageId: v.optional(messageIdSchema),
-    toolCallId: v.optional(toolCallIdSchema),
-    permissionId: v.optional(permissionIdSchema),
-  } as const;
+function defineCoreWorkerEventDiagnosticVariant<
+  const TEntries extends v.ObjectEntries,
+>(definition: { entries: TEntries }) {
   const inputEntries = {
     source: v.literal("core"),
     sessionId: sessionIdSchema,
     kind: v.literal("protocol_violation"),
     operation: v.literal("validate_worker_event"),
-    ...rejectionEntries,
+    ...definition.entries,
   } as const;
-  const validRejection = (value: Record<string, unknown>): boolean => {
-    const { source, sessionId, kind, operation, ...rejection } = value;
-    void [source, sessionId, kind, operation];
-    return v.safeParse(workerEventRejectionSchema, rejection).success;
-  };
-  const input = v.pipe(
-    v.strictObject(inputEntries),
-    v.check((value) => validRejection(value)),
-  ) as unknown as v.GenericSchema<unknown, WorkerEventProtocolViolationFact>;
-  const record = v.pipe(
-    v.strictObject({ ...recordEnvelope("error"), ...inputEntries }),
-    v.check((value) => {
-      const {
-        v: version,
-        diagnosticId,
-        recordedAt,
-        severity,
-        ...input
-      } = value;
-      void [version, diagnosticId, recordedAt, severity];
-      return validRejection(input);
+  return {
+    input: v.strictObject(inputEntries),
+    record: v.strictObject({
+      ...recordEnvelope("error"),
+      ...inputEntries,
     }),
-  ) as unknown as v.GenericSchema<
-    unknown,
-    WorkerEventProtocolViolationFact & {
-      v: 1;
-      diagnosticId: DiagnosticId;
-      recordedAt: string;
-      severity: "error";
-    }
-  >;
-  return { input, record } as const;
+  } as const;
 }
+
+function defineCoreCompletedTurnWorkerEventDiagnostic(
+  definition: ReturnType<typeof defineCompletedTurnWorkerEventRejection>,
+) {
+  const variants = [
+    defineCoreWorkerEventDiagnosticVariant({
+      entries: definition.variants[0],
+    }),
+    defineCoreWorkerEventDiagnosticVariant({
+      entries: definition.variants[1],
+    }),
+    defineCoreWorkerEventDiagnosticVariant({
+      entries: definition.variants[2],
+    }),
+  ] as const;
+  return {
+    input: v.variant("sessionState", selectDefinitionField(variants, "input")),
+    record: v.variant(
+      "sessionState",
+      selectDefinitionField(variants, "record"),
+    ),
+  } as const;
+}
+
+function defineCoreWorkerEventDiagnostic() {
+  const variants = [
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[0]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[1]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[2]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[3]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[4]),
+    defineCoreCompletedTurnWorkerEventDiagnostic(
+      workerEventRejectionDefinitions[5],
+    ),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[6]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[7]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[8]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[9]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[10]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[11]),
+  ] as const;
+  return {
+    input: v.variant("reason", selectDefinitionField(variants, "input")),
+    record: v.variant("reason", selectDefinitionField(variants, "record")),
+  } as const;
+}
+
+const coreWorkerEventDiagnosticDefinition = defineCoreWorkerEventDiagnostic();
+type WorkerEventProtocolViolationFact = v.InferOutput<
+  typeof coreWorkerEventDiagnosticDefinition.input
+>;
 
 function defineSessionDiagnostic<
   const TEntries extends v.ObjectEntries,
@@ -1154,7 +1195,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineCoreWorkerEventDiagnostic(),
+  coreWorkerEventDiagnosticDefinition,
   defineControlDiagnostic(
     {
       kind: v.literal("protocol_violation"),

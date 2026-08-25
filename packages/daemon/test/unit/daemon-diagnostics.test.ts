@@ -9,20 +9,24 @@ import {
   createCodexTransport,
   type CodexChild,
 } from "@reins/codex";
+import { createSessionMachine } from "@reins/core";
 import type {
   ProtocolMessage,
   ProtocolResponse,
   AdapterDriverFactory,
   DomainEvent,
   ProtocolMethod,
+  WorkerDriverFactory,
 } from "@reins/protocol";
 import {
+  WORKER_EVENT_REJECTION_REASONS,
   diagnosticsResultSchema,
   makeDiagnosticId,
   diagnosticIdSchema,
   requestIdSchema,
   sessionNameSchema,
   turnIdSchema,
+  type WorkerEventRejection,
 } from "@reins/protocol";
 import { createInMemoryTransportServer } from "@reins/transport";
 import type {
@@ -67,6 +71,76 @@ afterEach(async () => {
 });
 
 describe("daemon diagnostic error dispatch", () => {
+  test("drains a worker rejection registered before immediate runtime close", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "reins-daemon-immediate-rejection-close-"),
+    );
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () => v.parse(daemonGenerationSchema, "drain"),
+    });
+    let emit!: (event: DomainEvent) => void;
+    const driverFactory: WorkerDriverFactory = (ingress) => {
+      emit = ingress;
+      return {
+        start() {},
+        deliver() {},
+        interrupt() {},
+        resolvePermission() {},
+        async terminate() {},
+      };
+    };
+    const machine = createSessionMachine({
+      driverFactory,
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: {
+        async record(input) {
+          return await runtime.record({ source: "core", ...input });
+        },
+      },
+    });
+    const sessionId = await machine.spawn({
+      sessionName: v.parse(sessionNameSchema, "immediate-close"),
+      harness: "fake",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+
+    emit({
+      type: "session.killed",
+      sessionId,
+    });
+    await runtime.close();
+
+    const files = await readdir(state.diagnosticsDirectory, {
+      withFileTypes: true,
+    });
+    const storeText = (
+      await Promise.all(
+        files
+          .filter((entry) => entry.isFile())
+          .map(
+            async (entry) =>
+              await readFile(
+                join(state.diagnosticsDirectory, entry.name),
+                "utf8",
+              ),
+          ),
+      )
+    ).join("\n");
+    expect(storeText).toContain('"kind":"protocol_violation"');
+    expect(storeText).toContain('"reason":"driver_event_forbidden"');
+  });
+
   test("persists every typed worker rejection without event payloads", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "reins-daemon-worker-rejection-"),
@@ -319,21 +393,80 @@ describe("daemon diagnostic error dispatch", () => {
       if (!("result" in query)) throw new Error("Expected diagnostics result");
       const records = (query.result as { records: Array<{ reason: string }> })
         .records;
-      expect(records.map(({ reason }) => reason)).toEqual([
-        "driver_event_forbidden",
-        "driver_event_forbidden",
-        "driver_event_forbidden",
-        "turn_mismatch",
-        "message_already_completed",
-        "tool_already_requested",
-        "tool_already_completed",
-        "permission_turn_mismatch",
-        "permission_not_pending",
-        "permission_id_reused",
-        "event_after_turn_completed",
-        "turn_not_active",
-        "session_killed",
-        "unknown_session",
+      const reasonCounts = Object.fromEntries(
+        records.map(({ reason }) => [reason, 0]),
+      ) as Record<string, number>;
+      for (const { reason } of records)
+        reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1;
+      expect(new Set(Object.keys(reasonCounts))).toEqual(
+        new Set(WORKER_EVENT_REJECTION_REASONS),
+      );
+      expect(reasonCounts).toEqual({
+        unknown_session: 1,
+        session_killed: 1,
+        driver_event_forbidden: 3,
+        turn_not_active: 1,
+        turn_mismatch: 1,
+        event_after_turn_completed: 1,
+        message_already_completed: 1,
+        tool_already_requested: 1,
+        tool_already_completed: 1,
+        permission_id_reused: 1,
+        permission_not_pending: 1,
+        permission_turn_mismatch: 1,
+      } satisfies Record<WorkerEventRejection["reason"], number>);
+      expect(records).toMatchObject([
+        {
+          reason: "driver_event_forbidden",
+          eventType: "session.created",
+          sessionState: "busy",
+        },
+        {
+          reason: "driver_event_forbidden",
+          eventType: "turn.started",
+          sessionState: "busy",
+        },
+        {
+          reason: "driver_event_forbidden",
+          eventType: "session.killed",
+          sessionState: "busy",
+        },
+        {
+          reason: "turn_mismatch",
+          eventTurnId: "t99",
+          activeTurnId: "t1",
+        },
+        { reason: "message_already_completed", messageId: "m1" },
+        { reason: "tool_already_requested", toolCallId: "c1" },
+        { reason: "tool_already_completed", toolCallId: "c2" },
+        {
+          reason: "permission_turn_mismatch",
+          permissionId: "p1",
+          eventTurnId: "t99",
+          activeTurnId: "t1",
+        },
+        { reason: "permission_not_pending", permissionId: "missing" },
+        { reason: "permission_id_reused", permissionId: "p1" },
+        {
+          reason: "event_after_turn_completed",
+          eventTurnId: "t2",
+          sessionState: "idle",
+        },
+        {
+          reason: "turn_not_active",
+          eventTurnId: "t77",
+          sessionState: "idle",
+        },
+        {
+          reason: "session_killed",
+          eventTurnId: "t3",
+          sessionState: "killed",
+        },
+        {
+          reason: "unknown_session",
+          eventTurnId: "t1",
+          sessionState: "unknown",
+        },
       ]);
       const protocolJson = JSON.stringify(query);
       const files = await readdir(state.diagnosticsDirectory, {

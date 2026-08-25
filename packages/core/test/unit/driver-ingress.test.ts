@@ -1,4 +1,9 @@
-import type { CoreDiagnosticFact, DomainEvent } from "@reins/protocol";
+import {
+  WORKER_EVENT_REJECTION_REASONS,
+  type CoreDiagnosticFact,
+  type DomainEvent,
+  type WorkerEventRejection,
+} from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
 
 import { createSessionMachine } from "#/session-machine";
@@ -7,6 +12,51 @@ import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testIdentity } from "./ids.ts";
 
 describe("driver event ingress ownership", () => {
+  test("registers best-effort diagnostics immediately and isolates recorder failures", async () => {
+    let recordCalls = 0;
+    const fake = createFakeDriver();
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        record() {
+          recordCalls += 1;
+          if (recordCalls === 1)
+            throw new Error("synchronous recorder failure");
+          return Promise.reject(new Error("asynchronous recorder failure"));
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const sessionId = await machine.spawn({
+      sessionName: ids.sessionName("best-effort-registration"),
+      harness: "codex",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+    const publishedBeforeRejections = events.length;
+
+    expect(() =>
+      fake.controls.emit({ type: "session.killed", sessionId }),
+    ).not.toThrow();
+    expect(recordCalls).toBe(1);
+    expect(() =>
+      fake.controls.emit({
+        type: "turn.started",
+        sessionId,
+        turnId: ids.turn("t99"),
+      }),
+    ).not.toThrow();
+    expect(recordCalls).toBe(2);
+    await Promise.resolve();
+
+    expect(events).toHaveLength(publishedBeforeRejections);
+    expect(machine.list()).toEqual([
+      expect.objectContaining({ sessionId, state: "busy", turns: 0 }),
+    ]);
+  });
+
   test("treats synchronous spawn completion as terminal for later ingress", async () => {
     const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
@@ -248,21 +298,86 @@ describe("driver event ingress ownership", () => {
     const violations = diagnostics.filter(
       (input) => input.kind === "protocol_violation",
     );
-    expect(violations.map((input) => input.reason)).toEqual([
-      "driver_event_forbidden",
-      "driver_event_forbidden",
-      "driver_event_forbidden",
-      "turn_mismatch",
-      "message_already_completed",
-      "tool_already_requested",
-      "tool_already_completed",
-      "permission_turn_mismatch",
-      "permission_not_pending",
-      "permission_id_reused",
-      "event_after_turn_completed",
-      "turn_not_active",
-      "session_killed",
-      "unknown_session",
+    const reasonCounts = Object.fromEntries(
+      violations.map(({ reason }) => [reason, 0]),
+    ) as Record<string, number>;
+    for (const { reason } of violations)
+      reasonCounts[reason] = (reasonCounts[reason] ?? 0) + 1;
+    expect(new Set(Object.keys(reasonCounts))).toEqual(
+      new Set(WORKER_EVENT_REJECTION_REASONS),
+    );
+    expect(reasonCounts).toEqual({
+      unknown_session: 1,
+      session_killed: 1,
+      driver_event_forbidden: 3,
+      turn_not_active: 1,
+      turn_mismatch: 1,
+      event_after_turn_completed: 1,
+      message_already_completed: 1,
+      tool_already_requested: 1,
+      tool_already_completed: 1,
+      permission_id_reused: 1,
+      permission_not_pending: 1,
+      permission_turn_mismatch: 1,
+    } satisfies Record<WorkerEventRejection["reason"], number>);
+    expect(violations).toMatchObject([
+      {
+        reason: "driver_event_forbidden",
+        eventType: "session.created",
+        sessionState: "busy",
+      },
+      {
+        reason: "driver_event_forbidden",
+        eventType: "turn.started",
+        sessionState: "busy",
+      },
+      {
+        reason: "driver_event_forbidden",
+        eventType: "session.killed",
+        sessionState: "busy",
+      },
+      {
+        reason: "turn_mismatch",
+        eventTurnId: ids.turn("t99"),
+        activeTurnId: ids.turn("t1"),
+      },
+      { reason: "message_already_completed", messageId: ids.message("m1") },
+      { reason: "tool_already_requested", toolCallId: ids.toolCall("c1") },
+      { reason: "tool_already_completed", toolCallId: ids.toolCall("c2") },
+      {
+        reason: "permission_turn_mismatch",
+        permissionId: ids.permission("p1"),
+        eventTurnId: ids.turn("t99"),
+        activeTurnId: ids.turn("t1"),
+      },
+      {
+        reason: "permission_not_pending",
+        permissionId: ids.permission("missing"),
+      },
+      {
+        reason: "permission_id_reused",
+        permissionId: ids.permission("p1"),
+      },
+      {
+        reason: "event_after_turn_completed",
+        eventTurnId: ids.turn("t2"),
+        sessionState: "idle",
+      },
+      {
+        reason: "turn_not_active",
+        eventTurnId: ids.turn("t77"),
+        sessionState: "idle",
+      },
+      {
+        reason: "session_killed",
+        eventTurnId: ids.turn("t3"),
+        sessionState: "killed",
+      },
+      {
+        reason: "unknown_session",
+        eventTurnId: ids.turn("t1"),
+        sessionState: "unknown",
+      },
     ]);
     expect(
       events.some(
@@ -420,6 +535,89 @@ describe("driver event ingress ownership", () => {
 
     await machine.send({ sessionId, message: "retry" });
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
+  });
+
+  test("retains terminal ownership for every completed turn", async () => {
+    const diagnostics: CoreDiagnosticFact[] = [];
+    const fake = createFakeDriver();
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const sessionId = await machine.spawn({
+      sessionName: ids.sessionName("completed-turn-ownership"),
+      harness: "codex",
+      message: "one",
+      cwd: "/tmp/demo",
+    });
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId,
+      turnId: ids.turn("t1"),
+      stopReason: "end_turn",
+      finalReply: null,
+      usage: {},
+    });
+    await machine.send({ sessionId, message: "two" });
+    const publishedBeforeRejectedEvents = events.length;
+
+    fake.controls.emit({
+      type: "message",
+      sessionId,
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m-old-active"),
+      role: "worker",
+      content: "old turn while t2 is active",
+    });
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId,
+      turnId: ids.turn("t2"),
+      stopReason: "end_turn",
+      finalReply: null,
+      usage: {},
+    });
+    fake.controls.emit({
+      type: "text.delta",
+      sessionId,
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m-old-idle"),
+      delta: "old turn after t2 completed",
+    });
+
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(2));
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        eventTurnId: ids.turn("t1"),
+        activeTurnId: ids.turn("t2"),
+        reason: "event_after_turn_completed",
+        sessionState: "busy",
+      }),
+      expect.objectContaining({
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        eventTurnId: ids.turn("t1"),
+        reason: "event_after_turn_completed",
+        sessionState: "idle",
+      }),
+    ]);
+    expect("activeTurnId" in diagnostics[1]!).toBe(false);
+    expect(
+      events.slice(publishedBeforeRejectedEvents).map(({ type }) => type),
+    ).toEqual(["turn.completed"]);
+    expect(machine.list()).toEqual([
+      expect.objectContaining({ sessionId, state: "idle", turns: 2 }),
+    ]);
   });
 
   test("rolls back action-local ownership when boundary delivery throws", async () => {

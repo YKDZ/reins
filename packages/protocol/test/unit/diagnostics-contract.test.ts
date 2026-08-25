@@ -1,5 +1,5 @@
 import * as v from "valibot";
-import { describe, expect, test } from "vitest";
+import { describe, expect, expectTypeOf, test } from "vitest";
 
 import {
   capabilityFailureSchema,
@@ -21,7 +21,6 @@ import {
   sessionNameSchema,
   toolCallIdSchema,
   turnIdSchema,
-  workerEventIngressDecisionSchema,
   workerEventRejectionSchema,
   type DiagnosticId,
   type DiagnosticInput,
@@ -36,7 +35,6 @@ import {
   type SessionId,
   type ToolCallId,
   type TurnId,
-  type WorkerEventIngressDecision,
   type WorkerEventRejection,
 } from "../../src/index.ts";
 
@@ -135,11 +133,24 @@ describe("worker event rejection contract", () => {
       permissionId: "p1",
     },
   ] as const;
+  const requiredVariantFields = [
+    "eventType",
+    "eventType",
+    "eventType",
+    "eventTurnId",
+    "activeTurnId",
+    "eventTurnId",
+    "messageId",
+    "toolCallId",
+    "toolCallId",
+    "permissionId",
+    "permissionId",
+    "permissionId",
+  ] as const;
 
   test("accepts every closed rejection variant and rejects unsafe fields", () => {
-    for (const rejection of rejections) {
+    for (const [index, rejection] of rejections.entries()) {
       ok(workerEventRejectionSchema, rejection);
-      ok(workerEventIngressDecisionSchema, { status: "rejected", rejection });
       ok(diagnosticInputSchema, {
         source: "core",
         sessionId,
@@ -163,12 +174,20 @@ describe("worker event rejection contract", () => {
         ...rejection,
         content: "secret-content",
       });
+      const missingField = requiredVariantFields[index];
+      if (missingField === undefined)
+        throw new Error("Missing rejection field fixture");
+      const incomplete = { ...rejection } as Record<string, unknown>;
+      delete incomplete[missingField];
+      bad(workerEventRejectionSchema, incomplete);
+      bad(diagnosticInputSchema, {
+        source: "core",
+        sessionId,
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        ...incomplete,
+      });
     }
-    ok(workerEventIngressDecisionSchema, { status: "accepted" });
-    bad(workerEventIngressDecisionSchema, {
-      status: "accepted",
-      rejection: rejections[0],
-    });
     bad(workerEventRejectionSchema, {
       ...rejections[0],
       reason: "unexpected_message",
@@ -182,7 +201,43 @@ describe("worker event rejection contract", () => {
     });
   });
 
-  test("keeps ingress decisions and rejection handling exhaustive", () => {
+  test("requires the active turn only when a completed-turn event arrives during an active turn", () => {
+    const envelope = {
+      source: "core",
+      sessionId,
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+    } as const;
+    const busy = {
+      reason: "event_after_turn_completed",
+      eventType: "message",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t2",
+    } as const;
+    const spawning = { ...busy, sessionState: "spawning" } as const;
+    const idle = {
+      reason: "event_after_turn_completed",
+      eventType: "message",
+      sessionState: "idle",
+      eventTurnId: "t1",
+    } as const;
+
+    for (const rejection of [busy, spawning, idle]) {
+      ok(workerEventRejectionSchema, rejection);
+      ok(diagnosticInputSchema, { ...envelope, ...rejection });
+    }
+    for (const rejection of [
+      { ...busy, activeTurnId: undefined },
+      { ...spawning, activeTurnId: undefined },
+      { ...idle, activeTurnId: "t2" },
+    ]) {
+      bad(workerEventRejectionSchema, rejection);
+      bad(diagnosticInputSchema, { ...envelope, ...rejection });
+    }
+  });
+
+  test("keeps rejection handling exhaustive", () => {
     const handleRejection = (rejection: WorkerEventRejection): string => {
       switch (rejection.reason) {
         case "unknown_session":
@@ -202,16 +257,45 @@ describe("worker event rejection contract", () => {
           return rejection satisfies never;
       }
     };
-    const handleDecision = (decision: WorkerEventIngressDecision): string =>
-      decision.status === "accepted"
-        ? decision.status
-        : handleRejection(decision.rejection);
     expect(
       rejections.map((rejection) =>
         handleRejection(v.parse(workerEventRejectionSchema, rejection)),
       ),
     ).toEqual(rejections.map(({ reason }) => reason));
-    expect(handleDecision({ status: "accepted" })).toBe("accepted");
+  });
+
+  test("derives diagnostic input and record types from the rejection union", () => {
+    type WorkerDiagnosticInput = Extract<
+      DiagnosticInput,
+      {
+        source: "core";
+        operation: "validate_worker_event";
+      }
+    >;
+    type ExpectedInput = WorkerEventRejection & {
+      source: "core";
+      sessionId: SessionId;
+      kind: "protocol_violation";
+      operation: "validate_worker_event";
+    };
+    type WorkerDiagnosticRecord = Extract<
+      DiagnosticRecord,
+      {
+        source: "core";
+        operation: "validate_worker_event";
+      }
+    >;
+    type ExpectedRecord = ExpectedInput & {
+      v: 1;
+      diagnosticId: DiagnosticId;
+      recordedAt: string;
+      severity: "error";
+    };
+
+    expectTypeOf<WorkerDiagnosticInput>().toMatchTypeOf<ExpectedInput>();
+    expectTypeOf<ExpectedInput>().toMatchTypeOf<WorkerDiagnosticInput>();
+    expectTypeOf<WorkerDiagnosticRecord>().toMatchTypeOf<ExpectedRecord>();
+    expectTypeOf<ExpectedRecord>().toMatchTypeOf<WorkerDiagnosticRecord>();
   });
 });
 

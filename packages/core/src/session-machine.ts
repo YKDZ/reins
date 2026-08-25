@@ -38,7 +38,6 @@ import {
   waitParamsSchema,
   type WorkerDriver,
   type WorkerDriverFactory,
-  type WorkerEventIngressDecision,
   type WorkerEventRejection,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -85,7 +84,7 @@ type IngressProjection = {
   state: SessionRecord["state"];
   currentTurnId: TurnId | null;
   activeTurn: TurnScope | null;
-  lastCompletedTurnId: TurnId | null;
+  readonly completedTurnIds: Set<TurnId>;
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
   readonly usedPermissionIds: Set<PermissionId>;
 };
@@ -94,6 +93,10 @@ type IngressActionFrame = {
   accepting: boolean;
   readonly projections: Map<SessionId, IngressProjection>;
 };
+
+type WorkerEventIngressDecision =
+  | { status: "accepted" }
+  | { status: "rejected"; rejection: WorkerEventRejection };
 
 function createTurnScope(turnId: TurnId): TurnScope {
   return { turnId, messages: new Map(), tools: new Map() };
@@ -163,9 +166,11 @@ function recordBestEffort(
   diagnostics: DiagnosticEmitter,
   input: CoreDiagnosticFact,
 ): void {
-  void Promise.resolve()
-    .then(async () => await diagnostics.record(input))
-    .catch(() => undefined);
+  try {
+    void diagnostics.record(input).catch(() => undefined);
+  } catch {
+    // Event observation has no response channel and remains best effort.
+  }
 }
 
 const invalidTypeExpectations = [
@@ -432,8 +437,10 @@ export function createSessionMachine(options: {
               messages: new Map(activeTurn.messages),
               tools: new Map(activeTurn.tools),
             },
-      lastCompletedTurnId:
-        inherited?.lastCompletedTurnId ?? session?.turns.at(-1)?.turnId ?? null,
+      completedTurnIds:
+        inherited === undefined
+          ? new Set(session?.turns.map(({ turnId }) => turnId))
+          : new Set(inherited.completedTurnIds),
       pendingPermissions: new Map(source.pendingPermissions),
       usedPermissionIds: new Set(source.usedPermissionIds),
     };
@@ -499,7 +506,7 @@ export function createSessionMachine(options: {
         projection.state = "idle";
         projection.currentTurnId = null;
         projection.activeTurn = null;
-        projection.lastCompletedTurnId = event.turnId;
+        projection.completedTurnIds.add(event.turnId);
         projection.pendingPermissions.clear();
         break;
       case "session.killed":
@@ -623,18 +630,30 @@ export function createSessionMachine(options: {
             },
           };
       }
-      if (activeTurnId === null) {
-        const lastCompletedTurnId =
-          projected?.lastCompletedTurnId ??
-          session?.turns.at(-1)?.turnId ??
-          spawning?.completedTurnId;
+      const eventTurnCompleted =
+        projected?.completedTurnIds.has(event.turnId) === true ||
+        session?.turns.some(({ turnId }) => turnId === event.turnId) === true ||
+        spawning?.completedTurnId === event.turnId;
+      if (eventTurnCompleted)
         return {
           status: "rejected",
           rejection: {
-            reason:
-              lastCompletedTurnId === event.turnId
-                ? "event_after_turn_completed"
-                : "turn_not_active",
+            reason: "event_after_turn_completed",
+            eventType: event.type,
+            eventTurnId: event.turnId,
+            ...(activeTurnId === null
+              ? { sessionState: "idle" as const }
+              : {
+                  sessionState: sessionState as "busy" | "spawning",
+                  activeTurnId,
+                }),
+          },
+        };
+      if (activeTurnId === null) {
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "turn_not_active",
             eventType: event.type,
             sessionState: "idle",
             eventTurnId: event.turnId,
@@ -755,9 +774,14 @@ export function createSessionMachine(options: {
 
   ingestDriverEvent = (event) => {
     const decision = decideDriverEvent(event);
-    if (decision.status === "rejected") {
-      protocolViolation(event.sessionId, decision.rejection);
-      return;
+    switch (decision.status) {
+      case "rejected":
+        protocolViolation(event.sessionId, decision.rejection);
+        return;
+      case "accepted":
+        break;
+      default:
+        decision satisfies never;
     }
     const projection = activeProjection(event.sessionId);
     if (projection !== undefined) projectEvent(projection, event);
