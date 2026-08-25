@@ -15,6 +15,7 @@ import {
   type RecordedQoderMessage,
   type RecordedUsage,
 } from "./fixture-projection.ts";
+import { recordedQoderFixtureRegistry } from "./fixture-registry.ts";
 import type { QoderQuery, QoderSdk } from "./sdk-seam.ts";
 
 export type RecordedQoderFixtureFacts = {
@@ -236,6 +237,13 @@ export function loadRecordedQoderFixtureSource(
     uniqueNativeToolCount: facts.tools.length,
     artifactSha256: sha256(source.raw),
   });
+  const registered = recordedQoderFixtureRegistry[name];
+  if (
+    metadata.projectionVersion !== registered.projectionVersion ||
+    metadata.sourceSha256 !== registered.sourceSha256
+  ) {
+    throw new Error("Recorded Qoder fixture source anchor mismatch");
+  }
   return {
     messages: toQoderSdkMessages(saved),
     metadata,

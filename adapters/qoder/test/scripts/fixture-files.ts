@@ -13,9 +13,11 @@ export type FixturePair = {
 };
 
 type RenameFile = (source: string, destination: string) => Promise<void>;
+type RemoveFile = (path: string) => Promise<void>;
 type FixturePairReplacementErrorCode =
   | "fixture_pair_replace_failed"
-  | "fixture_pair_rollback_failed";
+  | "fixture_pair_rollback_failed"
+  | "fixture_pair_cleanup_failed";
 
 export class FixturePairReplacementError extends Error {
   readonly code: FixturePairReplacementErrorCode;
@@ -50,8 +52,11 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
-async function removeArtifacts(paths: readonly string[]): Promise<void> {
-  await Promise.all(paths.map((path) => rm(path, { force: true })));
+async function removeArtifacts(
+  paths: readonly string[],
+  removeFile: RemoveFile,
+): Promise<void> {
+  await Promise.all(paths.map((path) => removeFile(path)));
 }
 
 /**
@@ -61,30 +66,38 @@ async function removeArtifacts(paths: readonly string[]): Promise<void> {
  */
 export async function replaceFixturePair(
   pair: FixturePair,
-  dependencies: { renameFile?: RenameFile } = {},
+  dependencies: { renameFile?: RenameFile; removeFile?: RemoveFile } = {},
+): Promise<void> {
+  await replaceFixturePairs([pair], dependencies);
+}
+
+/**
+ * Replaces every fixture pair as one compensating operation. Ordinary
+ * in-process failures restore the complete previous set. This does not claim
+ * durable atomicity across SIGKILL or host/filesystem failure.
+ */
+export async function replaceFixturePairs(
+  pairs: readonly FixturePair[],
+  dependencies: { renameFile?: RenameFile; removeFile?: RemoveFile } = {},
 ): Promise<void> {
   const renameFile = dependencies.renameFile ?? rename;
+  const removeFile =
+    dependencies.removeFile ?? ((path) => rm(path, { force: true }));
   const suffix = `${process.pid}.${Date.now()}.${replacementSequence++}`;
-  const entries = [
-    {
-      target: pair.jsonlPath,
-      content: pair.jsonl,
-      temp: `${pair.jsonlPath}.${suffix}.tmp`,
-      backup: `${pair.jsonlPath}.${suffix}.backup`,
+  const entries = pairs.flatMap((pair) =>
+    [
+      { target: pair.jsonlPath, content: pair.jsonl },
+      { target: pair.metadataPath, content: pair.metadata },
+    ].map(({ target, content }) => ({
+      target,
+      content,
+      temp: `${target}.${suffix}.tmp`,
+      backup: `${target}.${suffix}.backup`,
       hadOriginal: false,
       backupCreated: false,
       installed: false,
-    },
-    {
-      target: pair.metadataPath,
-      content: pair.metadata,
-      temp: `${pair.metadataPath}.${suffix}.tmp`,
-      backup: `${pair.metadataPath}.${suffix}.backup`,
-      hadOriginal: false,
-      backupCreated: false,
-      installed: false,
-    },
-  ];
+    })),
+  );
   const temporaryFiles = entries.map(({ temp }) => temp);
   const artifacts = entries.flatMap(({ temp, backup }) => [temp, backup]);
 
@@ -97,7 +110,7 @@ export async function replaceFixturePair(
     (result): result is PromiseRejectedResult => result.status === "rejected",
   );
   if (stagingFailure !== undefined) {
-    await removeArtifacts(artifacts);
+    await removeArtifacts(artifacts, removeFile);
     throw new FixturePairReplacementError(
       "fixture_pair_replace_failed",
       "Fixture pair staging failed",
@@ -121,7 +134,7 @@ export async function replaceFixturePair(
     try {
       for (const entry of entries.toReversed()) {
         if (entry.installed) {
-          await rm(entry.target, { force: true });
+          await removeFile(entry.target);
           entry.installed = false;
         }
         if (entry.backupCreated) {
@@ -129,9 +142,9 @@ export async function replaceFixturePair(
           entry.backupCreated = false;
         }
       }
-      await removeArtifacts(artifacts);
+      await removeArtifacts(artifacts, removeFile);
     } catch (rollbackCause) {
-      await removeArtifacts(temporaryFiles).catch(() => {});
+      await removeArtifacts(temporaryFiles, removeFile).catch(() => {});
       throw new FixturePairReplacementError(
         "fixture_pair_rollback_failed",
         "Fixture pair rollback failed",
@@ -145,5 +158,13 @@ export async function replaceFixturePair(
     );
   }
 
-  await removeArtifacts(artifacts);
+  try {
+    await removeArtifacts(artifacts, removeFile);
+  } catch (cause) {
+    throw new FixturePairReplacementError(
+      "fixture_pair_cleanup_failed",
+      "Fixture pair replacement completed but cleanup failed",
+      { cause },
+    );
+  }
 }

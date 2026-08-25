@@ -1,99 +1,149 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { fileURLToPath } from "node:url";
+import { join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import type { RecordedQoderFixtureName } from "../../src/fixture-projection.ts";
+import {
+  recordedQoderFixtureRegistry,
+  recordedQoderFixtureSourceRevision,
+} from "../../src/fixture-registry.ts";
 import { prepareFixtureCandidate } from "./fixture-candidate.ts";
-import { replaceFixturePair } from "./fixture-files.ts";
+import { replaceFixturePairs, type FixturePair } from "./fixture-files.ts";
 
 const execFile = promisify(execFileCallback);
-const sourceRevision = "e3b522c4adc037319bf065590b2faab616ca47c6";
-const fixtures = {
-  "list-and-tool": {
-    minimumNativeToolCount: 1,
-    sourceSha256:
-      "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
-  },
-  "two-tools": {
-    minimumNativeToolCount: 2,
-    sourceSha256:
-      "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
-  },
-} as const;
 
-class FixtureSourceUnavailableError extends Error {
+type GitSourceExecutor = (revision: string, path: string) => Promise<string>;
+
+export class FixtureSourceUnavailableError extends Error {
   readonly code = "fixture_source_unavailable";
+  readonly reason = "git_failed";
+  readonly revision: string;
+  readonly path: string;
 
-  constructor(options?: ErrorOptions) {
-    super("Immutable Qoder fixture source is unavailable", options);
-    this.name = "FixtureSourceUnavailableError";
-  }
-}
-
-async function gitSource(path: string): Promise<string> {
-  try {
-    const result = await execFile(
-      "git",
-      ["show", `${sourceRevision}:${path}`],
-      {
-        encoding: "utf8",
-        maxBuffer: 16 * 1024 * 1024,
-      },
+  constructor(revision: string, path: string) {
+    super(
+      `Immutable Qoder fixture source is unavailable: ${revision}:${path} (git_failed)`,
     );
-    return result.stdout;
-  } catch (cause) {
-    throw new FixtureSourceUnavailableError({ cause });
+    this.name = "FixtureSourceUnavailableError";
+    this.revision = revision;
+    this.path = path;
   }
 }
 
-const sdkPackage = JSON.parse(
-  await readFile(
-    new URL(
-      "../package.json",
-      import.meta.resolve("@qodercn-ai/qodercn-agent-sdk"),
-    ),
-    "utf8",
-  ),
-) as { version?: unknown };
-if (typeof sdkPackage.version !== "string") {
-  throw new Error("Installed Qoder SDK package has no version");
+const executeGitSource: GitSourceExecutor = async (revision, path) => {
+  const result = await execFile("git", ["show", `${revision}:${path}`], {
+    encoding: "utf8",
+    maxBuffer: 16 * 1024 * 1024,
+  });
+  return result.stdout;
+};
+
+export async function readImmutableGitSource(
+  revision: string,
+  path: string,
+  execute: GitSourceExecutor = executeGitSource,
+): Promise<string> {
+  try {
+    return await execute(revision, path);
+  } catch {
+    throw new FixtureSourceUnavailableError(revision, path);
+  }
 }
-const installedSdkVersion = sdkPackage.version;
 
-const prepared = await Promise.all(
-  (Object.keys(fixtures) as Array<keyof typeof fixtures>).map(async (name) => {
-    const fixture = fixtures[name];
-    const base = `adapters/qoder/test/fixtures/${name}`;
-    const [sourceRaw, sourceMetadataRaw] = await Promise.all([
-      gitSource(`${base}.jsonl`),
-      gitSource(`${base}.metadata.json`),
-    ]);
-    const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
-    if (sourceSha256 !== fixture.sourceSha256) {
-      throw new Error("Immutable Qoder fixture source digest mismatch");
-    }
-    const candidate = await prepareFixtureCandidate({
-      name,
-      sourceRaw,
-      sourceMetadataRaw,
-      installedSdkVersion,
-      minimumNativeToolCount: fixture.minimumNativeToolCount,
-    });
-    return { name, candidate };
-  }),
-);
+type PreparedFixture = { jsonl: string; metadata: string };
 
-for (const { name, candidate } of prepared) {
-  const jsonlUrl = new URL(`../fixtures/${name}.jsonl`, import.meta.url);
-  const metadataUrl = new URL(
-    `../fixtures/${name}.metadata.json`,
-    import.meta.url,
+export async function runFixtureMigration(
+  options: {
+    fixtureDirectory?: string;
+    prepare?: (name: RecordedQoderFixtureName) => Promise<PreparedFixture>;
+    install?: (pairs: readonly FixturePair[]) => Promise<void>;
+  } = {},
+): Promise<void> {
+  const fixtureDirectory =
+    options.fixtureDirectory ??
+    fileURLToPath(new URL("../fixtures", import.meta.url));
+  const prepare = options.prepare ?? prepareFromImmutableSource;
+  const install = options.install ?? replaceFixturePairs;
+  const names = Object.keys(
+    recordedQoderFixtureRegistry,
+  ) as RecordedQoderFixtureName[];
+  const prepared = await Promise.all(
+    names.map(async (name) => ({ name, candidate: await prepare(name) })),
   );
-  await replaceFixturePair({
-    jsonlPath: fileURLToPath(jsonlUrl),
-    metadataPath: fileURLToPath(metadataUrl),
+  const pairs = prepared.map(({ name, candidate }) => ({
+    jsonlPath: join(fixtureDirectory, `${name}.jsonl`),
+    metadataPath: join(fixtureDirectory, `${name}.metadata.json`),
     jsonl: candidate.jsonl,
     metadata: candidate.metadata,
+  }));
+  await install(pairs);
+}
+
+async function prepareFromImmutableSource(
+  name: RecordedQoderFixtureName,
+): Promise<PreparedFixture> {
+  const fixture = recordedQoderFixtureRegistry[name];
+  const base = `adapters/qoder/test/fixtures/${name}`;
+  const [sourceRaw, sourceMetadataRaw, installedSdkVersion] = await Promise.all(
+    [
+      readImmutableGitSource(
+        recordedQoderFixtureSourceRevision,
+        `${base}.jsonl`,
+      ),
+      readImmutableGitSource(
+        recordedQoderFixtureSourceRevision,
+        `${base}.metadata.json`,
+      ),
+      installedQoderSdkVersion(),
+    ],
+  );
+  const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
+  if (sourceSha256 !== fixture.sourceSha256) {
+    throw new Error("Immutable Qoder fixture source digest mismatch");
+  }
+  return prepareFixtureCandidate({
+    name,
+    sourceRaw,
+    sourceMetadataRaw,
+    installedSdkVersion,
+    minimumNativeToolCount: fixture.minimumNativeToolCount,
   });
+}
+
+async function installedQoderSdkVersion(): Promise<string> {
+  const sdkPackage = JSON.parse(
+    await readFile(
+      new URL(
+        "../package.json",
+        import.meta.resolve("@qodercn-ai/qodercn-agent-sdk"),
+      ),
+      "utf8",
+    ),
+  ) as { version?: unknown };
+  if (typeof sdkPackage.version !== "string") {
+    throw new Error("Installed Qoder SDK package has no version");
+  }
+  return sdkPackage.version;
+}
+
+const invokedPath = process.argv[1];
+if (
+  invokedPath !== undefined &&
+  pathToFileURL(invokedPath).href === import.meta.url
+) {
+  try {
+    await runFixtureMigration();
+  } catch (error) {
+    if (error instanceof FixtureSourceUnavailableError) {
+      console.error(
+        `${error.code}: revision=${error.revision} path=${error.path} reason=${error.reason}`,
+      );
+      process.exitCode = 1;
+    } else {
+      throw error;
+    }
+  }
 }

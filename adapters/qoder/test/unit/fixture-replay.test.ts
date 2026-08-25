@@ -91,6 +91,26 @@ describe("录制 fixture 回放", () => {
     ).toThrow("Recorded Qoder fixture metadata mismatch");
   });
 
+  test("内置 fixture loader 使用独立 source anchor 拒绝伪造摘要", async () => {
+    const fixture = await loadRecordedQoderFixture("two-tools");
+    const raw = await readFile(
+      new URL("../fixtures/two-tools.jsonl", import.meta.url),
+      "utf8",
+    );
+    const forgedMetadata = `${JSON.stringify(
+      { ...fixture.metadata, sourceSha256: "0".repeat(64) },
+      null,
+      2,
+    )}\n`;
+    expect(() =>
+      loadRecordedQoderFixtureSource("two-tools", {
+        raw,
+        metadataRaw: forgedMetadata,
+        sdkVersion: fixture.metadata.sdkVersion,
+      }),
+    ).toThrow("Recorded Qoder fixture source anchor mismatch");
+  });
+
   test("固定版本的 list-and-tool 流保留原生消息和工具生命周期", async () => {
     const { messages, metadata } =
       await loadRecordedQoderFixture("list-and-tool");

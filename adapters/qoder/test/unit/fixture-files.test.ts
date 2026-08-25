@@ -15,6 +15,7 @@ import {
   assertMatchesKnownCredentialPolicy,
   KnownCredentialPolicyError,
   replaceFixturePair,
+  replaceFixturePairs,
 } from "../scripts/fixture-files.ts";
 
 const directories: string[] = [];
@@ -67,6 +68,46 @@ function failRenameCalls(callsToFail: ReadonlySet<number>) {
 }
 
 describe("fixture 文件对替换", () => {
+  test("第二个 fixture pair 安装失败时恢复全部 pair 且无事务残留", async () => {
+    const directory = await fixtureDirectory();
+    const pairs = ["first", "second"].map((name) => ({
+      jsonlPath: join(directory, `${name}.jsonl`),
+      metadataPath: join(directory, `${name}.metadata.json`),
+      jsonl: `new-${name}-jsonl\n`,
+      metadata: `new-${name}-metadata\n`,
+    }));
+    for (const pair of pairs) {
+      await writeFile(
+        pair.jsonlPath,
+        `old-${pair.jsonlPath.endsWith("first.jsonl") ? "first" : "second"}-jsonl\n`,
+      );
+      await writeFile(
+        pair.metadataPath,
+        `old-${pair.metadataPath.includes("first") ? "first" : "second"}-metadata\n`,
+      );
+    }
+
+    await expect(
+      replaceFixturePairs(pairs, {
+        renameFile: failMetadataInstallOnce(pairs[1]!.metadataPath),
+      }),
+    ).rejects.toMatchObject({ code: "fixture_pair_replace_failed" });
+
+    for (const name of ["first", "second"]) {
+      await expect(
+        readFile(join(directory, `${name}.jsonl`), "utf8"),
+      ).resolves.toBe(`old-${name}-jsonl\n`);
+      await expect(
+        readFile(join(directory, `${name}.metadata.json`), "utf8"),
+      ).resolves.toBe(`old-${name}-metadata\n`);
+    }
+    expect(
+      (await readdir(directory)).some((file) =>
+        /\.(?:tmp|backup)$/u.test(file),
+      ),
+    ).toBe(false);
+  });
+
   test("已有文件对在第二个 install 失败后逐字节恢复且无残留", async () => {
     const directory = await fixtureDirectory();
     const jsonlPath = join(directory, "sample.jsonl");
@@ -170,6 +211,44 @@ describe("fixture 文件对替换", () => {
       "sample.jsonl",
       "sample.metadata.json",
     ]);
+  });
+
+  test("整组安装完成后的cleanup失败保持全部目标在同一新版本", async () => {
+    const directory = await fixtureDirectory();
+    const pairs = ["first", "second"].map((name) => ({
+      jsonlPath: join(directory, `${name}.jsonl`),
+      metadataPath: join(directory, `${name}.metadata.json`),
+      jsonl: `new-${name}-jsonl\n`,
+      metadata: `new-${name}-metadata\n`,
+    }));
+    for (const [index, pair] of pairs.entries()) {
+      await writeFile(pair.jsonlPath, `old-${index}-jsonl\n`);
+      await writeFile(pair.metadataPath, `old-${index}-metadata\n`);
+    }
+    let failed = false;
+    await expect(
+      replaceFixturePairs(pairs, {
+        removeFile: async (path) => {
+          if (!failed && path.endsWith(".backup")) {
+            failed = true;
+            throw new Error("injected cleanup failure");
+          }
+          await rm(path, { force: true });
+        },
+      }),
+    ).rejects.toMatchObject({ code: "fixture_pair_cleanup_failed" });
+
+    for (const name of ["first", "second"]) {
+      await expect(
+        readFile(join(directory, `${name}.jsonl`), "utf8"),
+      ).resolves.toBe(`new-${name}-jsonl\n`);
+      await expect(
+        readFile(join(directory, `${name}.metadata.json`), "utf8"),
+      ).resolves.toBe(`new-${name}-metadata\n`);
+    }
+    expect(
+      (await readdir(directory)).some((file) => file.endsWith(".tmp")),
+    ).toBe(false);
   });
 
   test("install 与 rollback 都失败时保留仍是唯一原件的 backup", async () => {
