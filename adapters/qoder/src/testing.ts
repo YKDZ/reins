@@ -3,6 +3,7 @@ import { readFile } from "node:fs/promises";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
 
+import { parseRecordedQoderFixtureAnchors } from "./fixture-anchors.ts";
 import { assertMatchesKnownCredentialPolicy } from "./fixture-policy.ts";
 import {
   assertCanonicalRecordedQoderMessages,
@@ -15,7 +16,6 @@ import {
   type RecordedQoderMessage,
   type RecordedUsage,
 } from "./fixture-projection.ts";
-import { recordedQoderFixtureRegistry } from "./fixture-registry.ts";
 import type { QoderQuery, QoderSdk } from "./sdk-seam.ts";
 
 export type RecordedQoderFixtureFacts = {
@@ -175,7 +175,7 @@ export async function loadRecordedQoderFixture(
   metadata: RecordedQoderFixtureMetadata;
   facts: RecordedQoderFixtureFacts;
 }> {
-  const [raw, metadataRaw, sdkPackageRaw] = await Promise.all([
+  const [raw, metadataRaw, anchorsRaw, sdkPackageRaw] = await Promise.all([
     readFile(
       new URL(`../test/fixtures/${name}.jsonl`, import.meta.url),
       "utf8",
@@ -184,6 +184,7 @@ export async function loadRecordedQoderFixture(
       new URL(`../test/fixtures/${name}.metadata.json`, import.meta.url),
       "utf8",
     ),
+    readFile(new URL("../test/fixtures/anchors.json", import.meta.url), "utf8"),
     readFile(
       new URL(
         "../package.json",
@@ -193,11 +194,28 @@ export async function loadRecordedQoderFixture(
     ),
   ]);
   const sdkPackage = JSON.parse(sdkPackageRaw) as { version?: unknown };
-  return loadRecordedQoderFixtureSource(name, {
-    raw,
-    metadataRaw,
-    sdkVersion: sdkPackage.version,
-  });
+  return loadAnchoredRecordedQoderFixtureSource(
+    name,
+    { raw, metadataRaw, sdkVersion: sdkPackage.version },
+    anchorsRaw,
+  );
+}
+
+export function loadAnchoredRecordedQoderFixtureSource(
+  name: RecordedQoderFixtureName,
+  source: { raw: string; metadataRaw: string; sdkVersion: unknown },
+  anchorsRaw: string,
+): ReturnType<typeof loadRecordedQoderFixtureSource> {
+  const loaded = loadRecordedQoderFixtureSource(name, source);
+  const anchor = parseRecordedQoderFixtureAnchors(anchorsRaw).fixtures[name];
+  if (
+    loaded.metadata.sourceSha256 !== anchor.sourceSha256 ||
+    loaded.metadata.artifactSha256 !== anchor.artifactSha256 ||
+    loaded.metadata.projectionVersion !== anchor.projectionVersion
+  ) {
+    throw new Error("Recorded Qoder fixture anchor mismatch");
+  }
+  return loaded;
 }
 
 export function loadRecordedQoderFixtureSource(
@@ -237,13 +255,6 @@ export function loadRecordedQoderFixtureSource(
     uniqueNativeToolCount: facts.tools.length,
     artifactSha256: sha256(source.raw),
   });
-  const registered = recordedQoderFixtureRegistry[name];
-  if (
-    metadata.projectionVersion !== registered.projectionVersion ||
-    metadata.sourceSha256 !== registered.sourceSha256
-  ) {
-    throw new Error("Recorded Qoder fixture source anchor mismatch");
-  }
   return {
     messages: toQoderSdkMessages(saved),
     metadata,

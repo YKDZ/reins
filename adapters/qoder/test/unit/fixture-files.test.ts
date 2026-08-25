@@ -68,6 +68,34 @@ function failRenameCalls(callsToFail: ReadonlySet<number>) {
 }
 
 describe("fixture 文件对替换", () => {
+  test("staging首因后的cleanup失败仍返回闭合typed双重语义", async () => {
+    const directory = await fixtureDirectory();
+    const pair = {
+      jsonlPath: join(directory, "sample.jsonl"),
+      metadataPath: join(directory, "sample.metadata.json"),
+      jsonl: "new-jsonl\n",
+      metadata: "new-metadata\n",
+    };
+    let writes = 0;
+    const error = await replaceFixturePairs([pair], {
+      writeFixtureFile: async (path, content) => {
+        writes += 1;
+        if (writes === 2) throw new Error("SECRET staging failure");
+        await writeFile(path, content, { flag: "wx" });
+      },
+      removeFile: async () => {
+        throw new Error("SECRET cleanup failure");
+      },
+    }).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
+      code: "fixture_pair_cleanup_failed",
+      phase: "staging",
+      primaryCode: "fixture_pair_replace_failed",
+    });
+    expect(JSON.stringify(error)).not.toContain("SECRET");
+    expect((error as Error).stack).not.toContain("SECRET");
+  });
+
   test("第二个 fixture pair 安装失败时恢复全部 pair 且无事务残留", async () => {
     const directory = await fixtureDirectory();
     const pairs = ["first", "second"].map((name) => ({

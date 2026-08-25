@@ -12,7 +12,7 @@ import {
 } from "@qodercn-ai/qodercn-agent-sdk";
 
 import { prepareFixtureCandidate } from "./fixture-candidate.ts";
-import { replaceFixturePair } from "./fixture-files.ts";
+import { installRecordedFixtureCandidates } from "./fixture-install.ts";
 
 const scenarios = {
   "list-and-tool": {
@@ -107,13 +107,14 @@ try {
   });
   const fixturesDir = new URL("../fixtures/", import.meta.url);
   await mkdir(fixturesDir, { recursive: true });
-  await replaceFixturePair({
-    jsonlPath: fileURLToPath(new URL(`${requestedName}.jsonl`, fixturesDir)),
-    metadataPath: fileURLToPath(
-      new URL(`${requestedName}.metadata.json`, fixturesDir),
-    ),
-    jsonl: candidate.jsonl,
-    metadata: candidate.metadata,
+  const anchorsRaw = await readFile(
+    new URL("anchors.json", fixturesDir),
+    "utf8",
+  );
+  await installRecordedFixtureCandidates({
+    fixtureDirectory: fileURLToPath(fixturesDir),
+    anchorsRaw,
+    candidates: [{ name: requestedName, ...candidate }],
   });
   console.log(
     `Recorded fixture ${requestedName}: nativeTools=${candidate.facts.uniqueNativeToolCount}`,

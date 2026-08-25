@@ -13,6 +13,7 @@ import { describe, expect, test } from "vitest";
 import { KnownCredentialPolicyError } from "#/fixture-policy";
 import { createQoderDriver } from "#/qoder-driver";
 import {
+  loadAnchoredRecordedQoderFixtureSource,
   loadRecordedQoderFixture,
   loadRecordedQoderFixtureSource,
 } from "#/testing";
@@ -91,24 +92,86 @@ describe("录制 fixture 回放", () => {
     ).toThrow("Recorded Qoder fixture metadata mismatch");
   });
 
-  test("内置 fixture loader 使用独立 source anchor 拒绝伪造摘要", async () => {
+  test("通用source loader接受自洽的新录制artifact而不声称固定provenance", async () => {
     const fixture = await loadRecordedQoderFixture("two-tools");
     const raw = await readFile(
       new URL("../fixtures/two-tools.jsonl", import.meta.url),
       "utf8",
     );
-    const forgedMetadata = `${JSON.stringify(
-      { ...fixture.metadata, sourceSha256: "0".repeat(64) },
+    const lines = raw.trimEnd().split("\n");
+    const init = JSON.parse(lines[0]!) as Record<string, unknown>;
+    lines[0] = JSON.stringify({ ...init, qodercli_version: "1.1.99" });
+    const changedRaw = `${lines.join("\n")}\n`;
+    const changedMetadata = `${JSON.stringify(
+      {
+        ...fixture.metadata,
+        qoderCliVersion: "1.1.99",
+        artifactSha256: sha256(changedRaw),
+        sourceSha256: "0".repeat(64),
+      },
       null,
       2,
     )}\n`;
     expect(() =>
       loadRecordedQoderFixtureSource("two-tools", {
-        raw,
-        metadataRaw: forgedMetadata,
+        raw: changedRaw,
+        metadataRaw: changedMetadata,
         sdkVersion: fixture.metadata.sdkVersion,
       }),
-    ).toThrow("Recorded Qoder fixture source anchor mismatch");
+    ).not.toThrow();
+  });
+
+  test("anchored loader拒绝只forge pair而未更新独立anchor", async () => {
+    const fixture = await loadRecordedQoderFixture("two-tools");
+    const raw = await readFile(
+      new URL("../fixtures/two-tools.jsonl", import.meta.url),
+      "utf8",
+    );
+    const lines = raw.trimEnd().split("\n");
+    const init = JSON.parse(lines[0]!) as Record<string, unknown>;
+    lines[0] = JSON.stringify({ ...init, qodercli_version: "1.1.99" });
+    const changedRaw = `${lines.join("\n")}\n`;
+    const changedMetadata = `${JSON.stringify(
+      {
+        ...fixture.metadata,
+        qoderCliVersion: "1.1.99",
+        artifactSha256: sha256(changedRaw),
+      },
+      null,
+      2,
+    )}\n`;
+    const anchors = `${JSON.stringify(
+      {
+        version: 1,
+        fixtures: {
+          "list-and-tool": {
+            sourceSha256:
+              "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
+            artifactSha256:
+              "380b7a9d716ce02770f2f35a6976f9e2227eb240388ff47d7679fd20d7d7a9fb",
+            projectionVersion: 2,
+          },
+          "two-tools": {
+            sourceSha256: fixture.metadata.sourceSha256,
+            artifactSha256: fixture.metadata.artifactSha256,
+            projectionVersion: fixture.metadata.projectionVersion,
+          },
+        },
+      },
+      null,
+      2,
+    )}\n`;
+    expect(() =>
+      loadAnchoredRecordedQoderFixtureSource(
+        "two-tools",
+        {
+          raw: changedRaw,
+          metadataRaw: changedMetadata,
+          sdkVersion: fixture.metadata.sdkVersion,
+        },
+        anchors,
+      ),
+    ).toThrow("Recorded Qoder fixture anchor mismatch");
   });
 
   test("固定版本的 list-and-tool 流保留原生消息和工具生命周期", async () => {

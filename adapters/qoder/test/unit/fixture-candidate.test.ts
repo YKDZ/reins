@@ -1,12 +1,25 @@
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import { loadAnchoredRecordedQoderFixtureSource } from "#/testing";
+
 import { prepareFixtureCandidate } from "../scripts/fixture-candidate.ts";
-import { replaceFixturePair } from "../scripts/fixture-files.ts";
+import {
+  replaceFixturePair,
+  replaceFixturePairs,
+} from "../scripts/fixture-files.ts";
+import { installRecordedFixtureCandidates } from "../scripts/fixture-install.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -51,6 +64,119 @@ function metadataBytes(metadata: object): string {
 }
 
 describe("Qoder fixture candidate acceptance", () => {
+  test("record-mode原子安装pair与独立anchor后内置loader立即接受", async () => {
+    const fixture = await source();
+    const candidate = await prepareFixtureCandidate({
+      name: "two-tools",
+      sourceRaw: fixture.raw,
+      sourceMetadataRaw: metadataBytes(fixture.metadata),
+      installedSdkVersion: "1.0.23",
+      minimumNativeToolCount: 2,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "reins-qoder-record-"));
+    temporaryDirectories.push(directory);
+    const anchorsRaw = await readFile(
+      new URL("../fixtures/anchors.json", import.meta.url),
+      "utf8",
+    );
+    for (const file of [
+      "anchors.json",
+      "list-and-tool.jsonl",
+      "list-and-tool.metadata.json",
+      "two-tools.jsonl",
+      "two-tools.metadata.json",
+    ]) {
+      await writeFile(
+        join(directory, file),
+        await readFile(new URL(`../fixtures/${file}`, import.meta.url), "utf8"),
+      );
+    }
+
+    await installRecordedFixtureCandidates({
+      fixtureDirectory: directory,
+      anchorsRaw,
+      candidates: [{ name: "two-tools", ...candidate }],
+    });
+    const installedRaw = await readFile(
+      join(directory, "two-tools.jsonl"),
+      "utf8",
+    );
+    const installedMetadata = await readFile(
+      join(directory, "two-tools.metadata.json"),
+      "utf8",
+    );
+    const installedAnchors = await readFile(
+      join(directory, "anchors.json"),
+      "utf8",
+    );
+    expect(() =>
+      loadAnchoredRecordedQoderFixtureSource(
+        "two-tools",
+        {
+          raw: installedRaw,
+          metadataRaw: installedMetadata,
+          sdkVersion: "1.0.23",
+        },
+        installedAnchors,
+      ),
+    ).not.toThrow();
+    expect(installedAnchors).not.toBe(anchorsRaw);
+  });
+
+  test("record-mode任一资产安装失败时pair与anchor全部回滚", async () => {
+    const fixture = await source();
+    const candidate = await prepareFixtureCandidate({
+      name: "two-tools",
+      sourceRaw: fixture.raw,
+      sourceMetadataRaw: metadataBytes(fixture.metadata),
+      installedSdkVersion: "1.0.23",
+      minimumNativeToolCount: 2,
+    });
+    const directory = await mkdtemp(join(tmpdir(), "reins-qoder-record-"));
+    temporaryDirectories.push(directory);
+    const originals = new Map<string, string>();
+    for (const file of [
+      "anchors.json",
+      "two-tools.jsonl",
+      "two-tools.metadata.json",
+    ]) {
+      const content = await readFile(
+        new URL(`../fixtures/${file}`, import.meta.url),
+        "utf8",
+      );
+      originals.set(file, content);
+      await writeFile(join(directory, file), content);
+    }
+    let installs = 0;
+    await expect(
+      installRecordedFixtureCandidates({
+        fixtureDirectory: directory,
+        anchorsRaw: originals.get("anchors.json")!,
+        candidates: [{ name: "two-tools", ...candidate }],
+        install: async (pairs, options) =>
+          replaceFixturePairs(pairs, {
+            ...options,
+            renameFile: async (source, destination) => {
+              if (source.endsWith(".tmp") && ++installs === 3) {
+                throw new Error("anchor install failed");
+              }
+              await rename(source, destination);
+            },
+          }),
+      }),
+    ).rejects.toMatchObject({ code: "fixture_pair_replace_failed" });
+    for (const [file, content] of originals) {
+      await expect(readFile(join(directory, file), "utf8")).resolves.toBe(
+        content,
+      );
+    }
+    expect(
+      (await readdir(directory)).some((file) =>
+        /\.(?:tmp|backup)$/u.test(file),
+      ),
+    ).toBe(false);
+  });
+
   test("prepares canonical v2 bytes through the single writer-side contract", async () => {
     const fixture = await source();
     const candidate = await prepareFixtureCandidate({

@@ -1,19 +1,20 @@
 import { execFile as execFileCallback } from "node:child_process";
 import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
-import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { promisify } from "node:util";
 
+import { parseRecordedQoderFixtureAnchors } from "../../src/fixture-anchors.ts";
 import type { RecordedQoderFixtureName } from "../../src/fixture-projection.ts";
-import {
-  recordedQoderFixtureRegistry,
-  recordedQoderFixtureSourceRevision,
-} from "../../src/fixture-registry.ts";
 import { prepareFixtureCandidate } from "./fixture-candidate.ts";
-import { replaceFixturePairs, type FixturePair } from "./fixture-files.ts";
+import { installRecordedFixtureCandidates } from "./fixture-install.ts";
 
 const execFile = promisify(execFileCallback);
+const sourceRevision = "e3b522c4adc037319bf065590b2faab616ca47c6";
+const fixtures = {
+  "list-and-tool": { minimumNativeToolCount: 1 },
+  "two-tools": { minimumNativeToolCount: 2 },
+} as const;
 
 type GitSourceExecutor = (revision: string, path: string) => Promise<string>;
 
@@ -58,50 +59,53 @@ type PreparedFixture = { jsonl: string; metadata: string };
 export async function runFixtureMigration(
   options: {
     fixtureDirectory?: string;
+    anchorsRaw?: string;
     prepare?: (name: RecordedQoderFixtureName) => Promise<PreparedFixture>;
-    install?: (pairs: readonly FixturePair[]) => Promise<void>;
+    install?: (
+      options: Parameters<typeof installRecordedFixtureCandidates>[0],
+    ) => Promise<unknown>;
   } = {},
 ): Promise<void> {
   const fixtureDirectory =
     options.fixtureDirectory ??
     fileURLToPath(new URL("../fixtures", import.meta.url));
-  const prepare = options.prepare ?? prepareFromImmutableSource;
-  const install = options.install ?? replaceFixturePairs;
-  const names = Object.keys(
-    recordedQoderFixtureRegistry,
-  ) as RecordedQoderFixtureName[];
+  const anchorsRaw =
+    options.anchorsRaw ??
+    (await readFile(
+      new URL("../fixtures/anchors.json", import.meta.url),
+      "utf8",
+    ));
+  const anchors = parseRecordedQoderFixtureAnchors(anchorsRaw);
+  const prepare =
+    options.prepare ??
+    ((name: RecordedQoderFixtureName) =>
+      prepareFromImmutableSource(name, anchors.fixtures[name].sourceSha256));
+  const names = Object.keys(fixtures) as RecordedQoderFixtureName[];
   const prepared = await Promise.all(
     names.map(async (name) => ({ name, candidate: await prepare(name) })),
   );
-  const pairs = prepared.map(({ name, candidate }) => ({
-    jsonlPath: join(fixtureDirectory, `${name}.jsonl`),
-    metadataPath: join(fixtureDirectory, `${name}.metadata.json`),
-    jsonl: candidate.jsonl,
-    metadata: candidate.metadata,
-  }));
-  await install(pairs);
+  await (options.install ?? installRecordedFixtureCandidates)({
+    fixtureDirectory,
+    anchorsRaw,
+    candidates: prepared.map(({ name, candidate }) => ({ name, ...candidate })),
+  });
 }
 
 async function prepareFromImmutableSource(
   name: RecordedQoderFixtureName,
+  expectedSourceSha256: string,
 ): Promise<PreparedFixture> {
-  const fixture = recordedQoderFixtureRegistry[name];
+  const fixture = fixtures[name];
   const base = `adapters/qoder/test/fixtures/${name}`;
   const [sourceRaw, sourceMetadataRaw, installedSdkVersion] = await Promise.all(
     [
-      readImmutableGitSource(
-        recordedQoderFixtureSourceRevision,
-        `${base}.jsonl`,
-      ),
-      readImmutableGitSource(
-        recordedQoderFixtureSourceRevision,
-        `${base}.metadata.json`,
-      ),
+      readImmutableGitSource(sourceRevision, `${base}.jsonl`),
+      readImmutableGitSource(sourceRevision, `${base}.metadata.json`),
       installedQoderSdkVersion(),
     ],
   );
   const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
-  if (sourceSha256 !== fixture.sourceSha256) {
+  if (sourceSha256 !== expectedSourceSha256) {
     throw new Error("Immutable Qoder fixture source digest mismatch");
   }
   return prepareFixtureCandidate({

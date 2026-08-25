@@ -81,6 +81,11 @@ describe("Qoder fixture migration orchestration", () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-fixture-migrate-"));
     directories.push(directory);
     const names = ["list-and-tool", "two-tools"] as const;
+    const anchorsRaw = await readFile(
+      new URL("../fixtures/anchors.json", import.meta.url),
+      "utf8",
+    );
+    await writeFile(join(directory, "anchors.json"), anchorsRaw);
     for (const name of names) {
       await writeFile(join(directory, `${name}.jsonl`), `old-${name}-jsonl\n`);
       await writeFile(
@@ -92,23 +97,38 @@ describe("Qoder fixture migration orchestration", () => {
     await expect(
       runFixtureMigration({
         fixtureDirectory: directory,
+        anchorsRaw,
         prepare: async (name) => ({
           jsonl: `new-${name}-jsonl\n`,
           metadata: `new-${name}-metadata\n`,
         }),
-        install: async (pairs) => {
+        install: async (options) => {
           const { replaceFixturePairs } =
             await import("../scripts/fixture-files.ts");
           let installs = 0;
-          await replaceFixturePairs(pairs, {
-            renameFile: async (source, destination) => {
-              if (source.includes(".tmp") && ++installs === 4) {
-                throw new Error("second pair install failed");
-              }
-              const { rename } = await import("node:fs/promises");
-              await rename(source, destination);
+          await replaceFixturePairs(
+            options.candidates.map(({ name, jsonl, metadata }) => ({
+              jsonlPath: join(directory, `${name}.jsonl`),
+              metadataPath: join(directory, `${name}.metadata.json`),
+              jsonl,
+              metadata,
+            })),
+            {
+              additionalFiles: [
+                {
+                  path: join(directory, "anchors.json"),
+                  content: "new-anchors\n",
+                },
+              ],
+              renameFile: async (source, destination) => {
+                if (source.includes(".tmp") && ++installs === 4) {
+                  throw new Error("second pair install failed");
+                }
+                const { rename } = await import("node:fs/promises");
+                await rename(source, destination);
+              },
             },
-          });
+          );
         },
       }),
     ).rejects.toMatchObject({ code: "fixture_pair_replace_failed" });
@@ -121,6 +141,9 @@ describe("Qoder fixture migration orchestration", () => {
         readFile(join(directory, `${name}.metadata.json`), "utf8"),
       ).resolves.toBe(`old-${name}-metadata\n`);
     }
+    await expect(
+      readFile(join(directory, "anchors.json"), "utf8"),
+    ).resolves.toBe(anchorsRaw);
     expect(
       (await readdir(directory)).some((file) =>
         /\.(?:tmp|backup)$/u.test(file),
