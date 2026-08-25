@@ -390,6 +390,146 @@ export const domainEventSchema = v.union([
 ]);
 export type DomainEvent = v.InferOutput<typeof domainEventSchema>;
 
+export const WORKER_EVENT_REJECTION_REASONS = [
+  "unknown_session",
+  "session_killed",
+  "driver_event_forbidden",
+  "turn_not_active",
+  "turn_mismatch",
+  "event_after_turn_completed",
+  "message_already_completed",
+  "tool_already_requested",
+  "tool_already_completed",
+  "permission_id_reused",
+  "permission_not_pending",
+  "permission_turn_mismatch",
+] as const;
+
+const workerEventTypeSchema = v.picklist([
+  "session.created",
+  "turn.started",
+  "text.delta",
+  "message",
+  "tool.requested",
+  "tool.completed",
+  "permission.requested",
+  "permission.resolved",
+  "turn.completed",
+  "session.killed",
+]);
+const turnWorkerEventTypeSchema = v.picklist([
+  "turn.started",
+  "text.delta",
+  "message",
+  "tool.requested",
+  "tool.completed",
+  "permission.requested",
+  "permission.resolved",
+  "turn.completed",
+]);
+const ingressSessionStateSchema = v.picklist([
+  "unknown",
+  "spawning",
+  "busy",
+  "idle",
+  "killed",
+]);
+const activeTurnRejectionEntries = {
+  sessionState: v.picklist(["spawning", "busy"]),
+  eventTurnId: turnIdSchema,
+  activeTurnId: turnIdSchema,
+} as const;
+
+export const workerEventRejectionSchema = v.variant("reason", [
+  v.strictObject({
+    reason: v.literal("unknown_session"),
+    eventType: workerEventTypeSchema,
+    sessionState: v.literal("unknown"),
+    eventTurnId: v.optional(turnIdSchema),
+  }),
+  v.strictObject({
+    reason: v.literal("session_killed"),
+    eventType: workerEventTypeSchema,
+    sessionState: v.literal("killed"),
+    eventTurnId: v.optional(turnIdSchema),
+  }),
+  v.strictObject({
+    reason: v.literal("driver_event_forbidden"),
+    eventType: v.picklist([
+      "session.created",
+      "turn.started",
+      "session.killed",
+    ]),
+    sessionState: v.picklist(["spawning", "busy", "idle"]),
+  }),
+  v.strictObject({
+    reason: v.literal("turn_not_active"),
+    eventType: turnWorkerEventTypeSchema,
+    sessionState: v.literal("idle"),
+    eventTurnId: turnIdSchema,
+  }),
+  v.strictObject({
+    reason: v.literal("turn_mismatch"),
+    eventType: turnWorkerEventTypeSchema,
+    ...activeTurnRejectionEntries,
+  }),
+  v.strictObject({
+    reason: v.literal("event_after_turn_completed"),
+    eventType: turnWorkerEventTypeSchema,
+    sessionState: v.literal("idle"),
+    eventTurnId: turnIdSchema,
+  }),
+  v.strictObject({
+    reason: v.literal("message_already_completed"),
+    eventType: v.picklist(["text.delta", "message"]),
+    ...activeTurnRejectionEntries,
+    messageId: messageIdSchema,
+  }),
+  v.strictObject({
+    reason: v.literal("tool_already_requested"),
+    eventType: v.literal("tool.requested"),
+    ...activeTurnRejectionEntries,
+    toolCallId: toolCallIdSchema,
+  }),
+  v.strictObject({
+    reason: v.literal("tool_already_completed"),
+    eventType: v.literal("tool.completed"),
+    ...activeTurnRejectionEntries,
+    toolCallId: toolCallIdSchema,
+  }),
+  v.strictObject({
+    reason: v.literal("permission_id_reused"),
+    eventType: v.literal("permission.requested"),
+    ...activeTurnRejectionEntries,
+    permissionId: permissionIdSchema,
+  }),
+  v.strictObject({
+    reason: v.literal("permission_not_pending"),
+    eventType: v.literal("permission.resolved"),
+    ...activeTurnRejectionEntries,
+    permissionId: permissionIdSchema,
+  }),
+  v.strictObject({
+    reason: v.literal("permission_turn_mismatch"),
+    eventType: v.literal("permission.resolved"),
+    ...activeTurnRejectionEntries,
+    permissionId: permissionIdSchema,
+  }),
+]);
+export type WorkerEventRejection = v.InferOutput<
+  typeof workerEventRejectionSchema
+>;
+export const workerEventIngressDecisionSchema = v.variant("status", [
+  v.strictObject({ status: v.literal("accepted") }),
+  v.strictObject({
+    status: v.literal("rejected"),
+    rejection: workerEventRejectionSchema,
+  }),
+]);
+export type WorkerEventIngressDecision = v.InferOutput<
+  typeof workerEventIngressDecisionSchema
+>;
+
 // —— 诊断（存储 envelope 与 producer input） ——
 
 export const DIAGNOSTIC_SOURCES = [
@@ -610,6 +750,65 @@ function defineCoreSessionDiagnostic<
     input: withCoreSession(entries),
     record: withCoreSession({ ...recordEnvelope(severity), ...entries }),
   } as const;
+}
+
+type WorkerEventProtocolViolationFact = {
+  source: "core";
+  sessionId: SessionId;
+  kind: "protocol_violation";
+  operation: "validate_worker_event";
+} & WorkerEventRejection;
+
+function defineCoreWorkerEventDiagnostic() {
+  const rejectionEntries = {
+    reason: v.picklist(WORKER_EVENT_REJECTION_REASONS),
+    eventType: workerEventTypeSchema,
+    sessionState: ingressSessionStateSchema,
+    eventTurnId: v.optional(turnIdSchema),
+    activeTurnId: v.optional(turnIdSchema),
+    messageId: v.optional(messageIdSchema),
+    toolCallId: v.optional(toolCallIdSchema),
+    permissionId: v.optional(permissionIdSchema),
+  } as const;
+  const inputEntries = {
+    source: v.literal("core"),
+    sessionId: sessionIdSchema,
+    kind: v.literal("protocol_violation"),
+    operation: v.literal("validate_worker_event"),
+    ...rejectionEntries,
+  } as const;
+  const validRejection = (value: Record<string, unknown>): boolean => {
+    const { source, sessionId, kind, operation, ...rejection } = value;
+    void [source, sessionId, kind, operation];
+    return v.safeParse(workerEventRejectionSchema, rejection).success;
+  };
+  const input = v.pipe(
+    v.strictObject(inputEntries),
+    v.check((value) => validRejection(value)),
+  ) as unknown as v.GenericSchema<unknown, WorkerEventProtocolViolationFact>;
+  const record = v.pipe(
+    v.strictObject({ ...recordEnvelope("error"), ...inputEntries }),
+    v.check((value) => {
+      const {
+        v: version,
+        diagnosticId,
+        recordedAt,
+        severity,
+        ...input
+      } = value;
+      void [version, diagnosticId, recordedAt, severity];
+      return validRejection(input);
+    }),
+  ) as unknown as v.GenericSchema<
+    unknown,
+    WorkerEventProtocolViolationFact & {
+      v: 1;
+      diagnosticId: DiagnosticId;
+      recordedAt: string;
+      severity: "error";
+    }
+  >;
+  return { input, record } as const;
 }
 
 function defineSessionDiagnostic<
@@ -919,7 +1118,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_response"),
@@ -928,7 +1127,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_response"),
@@ -937,7 +1136,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_event"),
@@ -946,7 +1145,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_event"),
@@ -955,6 +1154,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
+  defineCoreWorkerEventDiagnostic(),
   defineControlDiagnostic(
     {
       kind: v.literal("protocol_violation"),
@@ -1278,15 +1478,17 @@ type ProtocolViolationPair =
       reason: "invalid_json" | "invalid_shape" | "unexpected_message";
     }
   | {
-      operation: "validate_worker_response" | "validate_worker_event";
-      reason: "invalid_shape" | "unexpected_message";
-    }
-  | {
       operation: "validate_daemon_result" | "emit_domain_event";
       reason: "invalid_shape";
     };
 type ProtocolViolationFact = ProtocolViolationPair & {
   kind: "protocol_violation";
+  message?: TextEvidence | undefined;
+};
+type WorkerShapeProtocolViolationFact = {
+  kind: "protocol_violation";
+  operation: "validate_worker_event" | "validate_worker_response";
+  reason: "invalid_shape" | "unexpected_message";
   message?: TextEvidence | undefined;
 };
 type TransportFailurePair =
@@ -1342,6 +1544,8 @@ export type DiagnosticInput =
   | (AdapterSessionAssociation & TurnFailureFact)
   | (ScopedControlAssociation & AuthorizationFailureFact)
   | (ControlAssociation & ProtocolViolationFact)
+  | (AdapterAssociation & WorkerShapeProtocolViolationFact)
+  | WorkerEventProtocolViolationFact
   | (DaemonAssociation & TransportFailureFact)
   | (DaemonAssociation & (StorageFailureFact | TailRepairedFact))
   | HarnessStderrFact;

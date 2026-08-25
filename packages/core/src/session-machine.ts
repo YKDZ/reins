@@ -38,6 +38,8 @@ import {
   waitParamsSchema,
   type WorkerDriver,
   type WorkerDriverFactory,
+  type WorkerEventIngressDecision,
+  type WorkerEventRejection,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -75,6 +77,7 @@ type PendingSpawn = {
   readonly turn: TurnScope;
   readonly permissionIds: Set<PermissionId>;
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
+  completedTurnId: TurnId | null;
   accepting: boolean;
 };
 
@@ -82,6 +85,7 @@ type IngressProjection = {
   state: SessionRecord["state"];
   currentTurnId: TurnId | null;
   activeTurn: TurnScope | null;
+  lastCompletedTurnId: TurnId | null;
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
   readonly usedPermissionIds: Set<PermissionId>;
 };
@@ -410,7 +414,9 @@ export function createSessionMachine(options: {
   }
 
   function projectSession(sessionId: SessionId): IngressProjection {
-    const source = activeProjection(sessionId) ?? sessions.get(sessionId);
+    const inherited = activeProjection(sessionId);
+    const session = sessions.get(sessionId);
+    const source = inherited ?? session;
     if (source === undefined) {
       throw new Error("Cannot project an unknown session");
     }
@@ -426,6 +432,8 @@ export function createSessionMachine(options: {
               messages: new Map(activeTurn.messages),
               tools: new Map(activeTurn.tools),
             },
+      lastCompletedTurnId:
+        inherited?.lastCompletedTurnId ?? session?.turns.at(-1)?.turnId ?? null,
       pendingPermissions: new Map(source.pendingPermissions),
       usedPermissionIds: new Set(source.usedPermissionIds),
     };
@@ -491,6 +499,7 @@ export function createSessionMachine(options: {
         projection.state = "idle";
         projection.currentTurnId = null;
         projection.activeTurn = null;
+        projection.lastCompletedTurnId = event.turnId;
         projection.pendingPermissions.clear();
         break;
       case "session.killed":
@@ -534,108 +543,248 @@ export function createSessionMachine(options: {
     },
   });
 
-  function validDriverEvent(event: DomainEvent): boolean {
+  function decideDriverEvent(event: DomainEvent): WorkerEventIngressDecision {
     const session = sessions.get(event.sessionId);
     const projected = activeProjection(event.sessionId);
     const current = projected ?? session;
     const spawning =
       current === undefined ? pendingSpawns.get(event.sessionId) : undefined;
+    const eventTurnId = "turnId" in event ? event.turnId : undefined;
+    if (current === undefined && spawning?.accepting !== true)
+      return {
+        status: "rejected",
+        rejection: {
+          reason: "unknown_session",
+          eventType: event.type,
+          sessionState: "unknown",
+          ...(eventTurnId === undefined ? {} : { eventTurnId }),
+        },
+      };
+    if (current?.state === "killed")
+      return {
+        status: "rejected",
+        rejection: {
+          reason: "session_killed",
+          eventType: event.type,
+          sessionState: "killed",
+          ...(eventTurnId === undefined ? {} : { eventTurnId }),
+        },
+      };
+    const sessionState =
+      spawning === undefined
+        ? current!.state
+        : spawning.completedTurnId === null
+          ? "spawning"
+          : "idle";
     if (
-      (current === undefined && spawning?.accepting !== true) ||
-      current?.state === "killed"
-    ) {
-      return false;
-    }
-    if (event.type === "session.created" || event.type === "turn.started") {
-      return false;
-    }
+      event.type === "session.created" ||
+      event.type === "turn.started" ||
+      event.type === "session.killed"
+    )
+      return {
+        status: "rejected",
+        rejection: {
+          reason: "driver_event_forbidden",
+          eventType: event.type,
+          sessionState,
+        },
+      };
     let turnScope: TurnScope | undefined;
     if ("turnId" in event) {
-      if (
-        (current !== undefined &&
-          (current.state !== "busy" ||
-            current.currentTurnId === null ||
-            event.turnId !== current.currentTurnId)) ||
-        (spawning !== undefined && event.turnId !== spawning.turn.turnId)
-      ) {
-        return false;
+      const activeTurnId =
+        current?.currentTurnId ??
+        (spawning?.completedTurnId === null ? spawning.turn.turnId : null);
+      if (event.type === "permission.resolved" && activeTurnId !== null) {
+        const pendingPermissions =
+          current?.pendingPermissions ?? spawning?.pendingPermissions;
+        const pending = pendingPermissions?.get(event.permissionId);
+        if (pending === undefined)
+          return {
+            status: "rejected",
+            rejection: {
+              reason: "permission_not_pending",
+              eventType: event.type,
+              sessionState: sessionState as "busy" | "spawning",
+              eventTurnId: event.turnId,
+              activeTurnId,
+              permissionId: event.permissionId,
+            },
+          };
+        if (pending.turnId !== event.turnId)
+          return {
+            status: "rejected",
+            rejection: {
+              reason: "permission_turn_mismatch",
+              eventType: event.type,
+              sessionState: sessionState as "busy" | "spawning",
+              eventTurnId: event.turnId,
+              activeTurnId,
+              permissionId: event.permissionId,
+            },
+          };
       }
-      turnScope = current?.activeTurn ?? spawning?.turn;
-      if (turnScope === undefined || turnScope.turnId !== event.turnId) {
-        return false;
+      if (activeTurnId === null) {
+        const lastCompletedTurnId =
+          projected?.lastCompletedTurnId ??
+          session?.turns.at(-1)?.turnId ??
+          spawning?.completedTurnId;
+        return {
+          status: "rejected",
+          rejection: {
+            reason:
+              lastCompletedTurnId === event.turnId
+                ? "event_after_turn_completed"
+                : "turn_not_active",
+            eventType: event.type,
+            sessionState: "idle",
+            eventTurnId: event.turnId,
+          },
+        };
       }
+      if (event.turnId !== activeTurnId)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "turn_mismatch",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId,
+          },
+        };
+      turnScope =
+        current?.activeTurn ??
+        (spawning?.completedTurnId === null ? spawning.turn : undefined);
+      if (turnScope === undefined || turnScope.turnId !== event.turnId)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "turn_mismatch",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId,
+          },
+        };
     }
     if (event.type === "text.delta") {
-      if (turnScope?.messages.get(event.messageId) === "complete") return false;
-      turnScope?.messages.set(event.messageId, "streaming");
+      if (turnScope?.messages.get(event.messageId) === "complete")
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "message_already_completed",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            messageId: event.messageId,
+          },
+        };
     }
     if (event.type === "message") {
-      if (turnScope?.messages.get(event.messageId) === "complete") return false;
-      turnScope?.messages.set(event.messageId, "complete");
+      if (turnScope?.messages.get(event.messageId) === "complete")
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "message_already_completed",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            messageId: event.messageId,
+          },
+        };
     }
     if (event.type === "tool.requested") {
-      if (turnScope?.tools.has(event.toolCallId) === true) return false;
-      turnScope?.tools.set(event.toolCallId, "requested");
+      if (turnScope?.tools.has(event.toolCallId) === true)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "tool_already_requested",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            toolCallId: event.toolCallId,
+          },
+        };
     }
     if (event.type === "tool.completed") {
-      if (turnScope?.tools.get(event.toolCallId) === "complete") return false;
-      turnScope?.tools.set(event.toolCallId, "complete");
+      if (turnScope?.tools.get(event.toolCallId) === "complete")
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "tool_already_completed",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            toolCallId: event.toolCallId,
+          },
+        };
     }
     if (event.type === "permission.requested") {
       const used = current?.usedPermissionIds ?? spawning?.permissionIds;
-      if (used === undefined || used.has(event.permissionId)) return false;
-      used.add(event.permissionId);
-      const pendingPermissions =
-        current?.pendingPermissions ?? spawning?.pendingPermissions;
-      pendingPermissions?.set(event.permissionId, {
-        turnId: event.turnId,
-        options: event.options,
-      });
-      return true;
+      if (used === undefined || used.has(event.permissionId))
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "permission_id_reused",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            permissionId: event.permissionId,
+          },
+        };
     }
-    if (event.type === "permission.resolved") {
-      const pendingPermissions =
-        current?.pendingPermissions ?? spawning?.pendingPermissions;
-      if (pendingPermissions === undefined) return false;
-      const pending = pendingPermissions.get(event.permissionId);
-      if (pending === undefined || pending.turnId !== event.turnId)
-        return false;
-      pendingPermissions.delete(event.permissionId);
-      return true;
-    }
-    return true;
+    return { status: "accepted" };
   }
 
-  function protocolViolation(event: DomainEvent): void {
-    const session = sessions.get(event.sessionId);
-    const knownTurn =
-      session !== undefined &&
-      "turnId" in event &&
-      session.currentTurnId === event.turnId
-        ? event.turnId
-        : undefined;
+  function protocolViolation(
+    sessionId: SessionId,
+    rejection: WorkerEventRejection,
+  ): void {
     recordBestEffort(options.diagnostics, {
-      ...(session === undefined
-        ? {}
-        : {
-            sessionId: session.id,
-            ...(knownTurn === undefined ? {} : { turnId: knownTurn }),
-          }),
+      sessionId,
       kind: "protocol_violation",
       operation: "validate_worker_event",
-      reason: "unexpected_message",
-      message: {
-        text: "Worker event does not belong to the active session state",
-        truncated: false,
-        originalBytes: 56,
-      },
+      ...rejection,
     });
   }
 
   ingestDriverEvent = (event) => {
-    if (!validDriverEvent(event)) {
-      protocolViolation(event);
+    const decision = decideDriverEvent(event);
+    if (decision.status === "rejected") {
+      protocolViolation(event.sessionId, decision.rejection);
       return;
+    }
+    const projection = activeProjection(event.sessionId);
+    if (projection !== undefined) projectEvent(projection, event);
+    else {
+      const spawning = pendingSpawns.get(event.sessionId);
+      if (spawning?.accepting === true) {
+        if (event.type === "text.delta")
+          spawning.turn.messages.set(event.messageId, "streaming");
+        else if (event.type === "message")
+          spawning.turn.messages.set(event.messageId, "complete");
+        else if (event.type === "tool.requested")
+          spawning.turn.tools.set(event.toolCallId, "requested");
+        else if (event.type === "tool.completed")
+          spawning.turn.tools.set(event.toolCallId, "complete");
+        else if (event.type === "permission.requested") {
+          spawning.permissionIds.add(event.permissionId);
+          spawning.pendingPermissions.set(event.permissionId, {
+            turnId: event.turnId,
+            options: event.options,
+          });
+        } else if (event.type === "permission.resolved")
+          spawning.pendingPermissions.delete(event.permissionId);
+        else if (event.type === "turn.completed") {
+          spawning.completedTurnId = event.turnId;
+          spawning.pendingPermissions.clear();
+        }
+      }
     }
     bus.publish(event);
   };
@@ -706,6 +855,7 @@ export function createSessionMachine(options: {
         turn: createTurnScope(turnId),
         permissionIds: new Set(),
         pendingPermissions: new Map(),
+        completedTurnId: null,
         accepting: true,
       };
       pendingSpawns.set(sessionId, spawnScope);

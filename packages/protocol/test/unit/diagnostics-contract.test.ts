@@ -21,6 +21,8 @@ import {
   sessionNameSchema,
   toolCallIdSchema,
   turnIdSchema,
+  workerEventIngressDecisionSchema,
+  workerEventRejectionSchema,
   type DiagnosticId,
   type DiagnosticInput,
   type DriverDiagnosticFact,
@@ -34,6 +36,8 @@ import {
   type SessionId,
   type ToolCallId,
   type TurnId,
+  type WorkerEventIngressDecision,
+  type WorkerEventRejection,
 } from "../../src/index.ts";
 
 const ok = (schema: v.GenericSchema, input: unknown): void =>
@@ -43,6 +47,173 @@ const bad = (schema: v.GenericSchema, input: unknown): void =>
 
 const sessionId = "reviewer@g7";
 const diagnosticId = makeDiagnosticId("7", "42");
+
+describe("worker event rejection contract", () => {
+  const rejections = [
+    {
+      reason: "unknown_session",
+      eventType: "message",
+      sessionState: "unknown",
+      eventTurnId: "t1",
+    },
+    {
+      reason: "session_killed",
+      eventType: "message",
+      sessionState: "killed",
+      eventTurnId: "t1",
+    },
+    {
+      reason: "driver_event_forbidden",
+      eventType: "session.created",
+      sessionState: "busy",
+    },
+    {
+      reason: "turn_not_active",
+      eventType: "message",
+      sessionState: "idle",
+      eventTurnId: "t2",
+    },
+    {
+      reason: "turn_mismatch",
+      eventType: "message",
+      sessionState: "busy",
+      eventTurnId: "t2",
+      activeTurnId: "t1",
+    },
+    {
+      reason: "event_after_turn_completed",
+      eventType: "text.delta",
+      sessionState: "idle",
+      eventTurnId: "t1",
+    },
+    {
+      reason: "message_already_completed",
+      eventType: "message",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      messageId: "m1",
+    },
+    {
+      reason: "tool_already_requested",
+      eventType: "tool.requested",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      toolCallId: "c1",
+    },
+    {
+      reason: "tool_already_completed",
+      eventType: "tool.completed",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      toolCallId: "c1",
+    },
+    {
+      reason: "permission_id_reused",
+      eventType: "permission.requested",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      permissionId: "p1",
+    },
+    {
+      reason: "permission_not_pending",
+      eventType: "permission.resolved",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      permissionId: "p1",
+    },
+    {
+      reason: "permission_turn_mismatch",
+      eventType: "permission.resolved",
+      sessionState: "busy",
+      eventTurnId: "t2",
+      activeTurnId: "t1",
+      permissionId: "p1",
+    },
+  ] as const;
+
+  test("accepts every closed rejection variant and rejects unsafe fields", () => {
+    for (const rejection of rejections) {
+      ok(workerEventRejectionSchema, rejection);
+      ok(workerEventIngressDecisionSchema, { status: "rejected", rejection });
+      ok(diagnosticInputSchema, {
+        source: "core",
+        sessionId,
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        ...rejection,
+      });
+      bad(workerEventRejectionSchema, {
+        ...rejection,
+        content: "secret-content",
+      });
+      bad(workerEventRejectionSchema, {
+        ...rejection,
+        nativePayload: { secret: true },
+      });
+      bad(diagnosticInputSchema, {
+        source: "core",
+        sessionId,
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        ...rejection,
+        content: "secret-content",
+      });
+    }
+    ok(workerEventIngressDecisionSchema, { status: "accepted" });
+    bad(workerEventIngressDecisionSchema, {
+      status: "accepted",
+      rejection: rejections[0],
+    });
+    bad(workerEventRejectionSchema, {
+      ...rejections[0],
+      reason: "unexpected_message",
+    });
+    bad(diagnosticInputSchema, {
+      source: "core",
+      sessionId,
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+      reason: "unexpected_message",
+    });
+  });
+
+  test("keeps ingress decisions and rejection handling exhaustive", () => {
+    const handleRejection = (rejection: WorkerEventRejection): string => {
+      switch (rejection.reason) {
+        case "unknown_session":
+        case "session_killed":
+        case "driver_event_forbidden":
+        case "turn_not_active":
+        case "turn_mismatch":
+        case "event_after_turn_completed":
+        case "message_already_completed":
+        case "tool_already_requested":
+        case "tool_already_completed":
+        case "permission_id_reused":
+        case "permission_not_pending":
+        case "permission_turn_mismatch":
+          return rejection.reason;
+        default:
+          return rejection satisfies never;
+      }
+    };
+    const handleDecision = (decision: WorkerEventIngressDecision): string =>
+      decision.status === "accepted"
+        ? decision.status
+        : handleRejection(decision.rejection);
+    expect(
+      rejections.map((rejection) =>
+        handleRejection(v.parse(workerEventRejectionSchema, rejection)),
+      ),
+    ).toEqual(rejections.map(({ reason }) => reason));
+    expect(handleDecision({ status: "accepted" })).toBe("accepted");
+  });
+});
 
 describe("typed identifiers", () => {
   test("DiagnosticId check character detects every one-character edit and adjacent transposition", () => {
@@ -747,10 +918,6 @@ describe("strict diagnostic protocol", () => {
       ["decode_worker_message", "invalid_json"],
       ["decode_worker_message", "invalid_shape"],
       ["decode_worker_message", "unexpected_message"],
-      ["validate_worker_response", "invalid_shape"],
-      ["validate_worker_response", "unexpected_message"],
-      ["validate_worker_event", "invalid_shape"],
-      ["validate_worker_event", "unexpected_message"],
       ["validate_daemon_result", "invalid_shape"],
       ["emit_domain_event", "invalid_shape"],
     ] as const;
@@ -766,6 +933,23 @@ describe("strict diagnostic protocol", () => {
         "error",
       );
     }
+    for (const operation of [
+      "validate_worker_response",
+      "validate_worker_event",
+    ] as const)
+      for (const reason of ["invalid_shape", "unexpected_message"] as const) {
+        add(
+          {
+            source: "adapter",
+            harness: "codex",
+            sessionId,
+            kind: "protocol_violation",
+            operation,
+            reason,
+          },
+          "error",
+        );
+      }
 
     const transportPairs = [
       ["listen", "io_error"],

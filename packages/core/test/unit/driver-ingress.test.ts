@@ -7,6 +7,286 @@ import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testIdentity } from "./ids.ts";
 
 describe("driver event ingress ownership", () => {
+  test("treats synchronous spawn completion as terminal for later ingress", async () => {
+    const diagnostics: CoreDiagnosticFact[] = [];
+    const fake = createFakeDriver({
+      start: (spec) => {
+        fake.controls.emit({
+          type: "turn.completed",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          stopReason: "end_turn",
+          finalReply: "completed during spawn",
+          usage: {},
+        });
+        fake.controls.emit({
+          type: "text.delta",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          messageId: ids.message("m-after-spawn-completion"),
+          delta: "must be rejected",
+        });
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+
+    const sessionId = await machine.spawn({
+      sessionName: ids.sessionName("spawn-terminal-projection"),
+      harness: "codex",
+      message: "one",
+      cwd: "/tmp/demo",
+    });
+
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(1));
+    expect(diagnostics[0]).toMatchObject({
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+      reason: "event_after_turn_completed",
+    });
+    expect(events.map(({ type }) => type)).toEqual([
+      "session.created",
+      "turn.started",
+      "turn.completed",
+    ]);
+    expect(machine.list()).toEqual([
+      expect.objectContaining({ sessionId, state: "idle", turns: 1 }),
+    ]);
+  });
+
+  test("reports each worker lifecycle rejection from its causal event sequence", async () => {
+    const fake = createFakeDriver();
+    const diagnostics: CoreDiagnosticFact[] = [];
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const spawn = async (name: string) =>
+      await machine.spawn({
+        sessionName: ids.sessionName(name),
+        harness: "codex",
+        message: "start",
+        cwd: "/tmp/demo",
+      });
+    const active = await spawn("typed-active");
+
+    fake.controls.emit({
+      type: "session.created",
+      sessionId: active,
+      harness: "codex",
+      model: null,
+      reasoning: null,
+      cwd: "/secret/cwd",
+      sessionName: ids.sessionName("forged"),
+      spawnedAt: "secret-time",
+    });
+    fake.controls.emit({
+      type: "turn.started",
+      sessionId: active,
+      turnId: ids.turn("t99"),
+    });
+    fake.controls.emit({ type: "session.killed", sessionId: active });
+    fake.controls.emit({
+      type: "message",
+      sessionId: active,
+      turnId: ids.turn("t99"),
+      messageId: ids.message("m-mismatch"),
+      role: "worker",
+      content: "secret-mismatch",
+    });
+    fake.controls.emit({
+      type: "message",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m1"),
+      role: "worker",
+      content: "secret-message",
+    });
+    fake.controls.emit({
+      type: "message",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m1"),
+      role: "worker",
+      content: "secret-duplicate",
+    });
+    fake.controls.emit({
+      type: "tool.requested",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      toolCallId: ids.toolCall("c1"),
+      name: "secret-tool",
+    });
+    fake.controls.emit({
+      type: "tool.requested",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      toolCallId: ids.toolCall("c1"),
+      name: "secret-duplicate-tool",
+    });
+    fake.controls.emit({
+      type: "tool.completed",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      toolCallId: ids.toolCall("c2"),
+      name: "secret-tool",
+      result: "secret-result",
+      isError: false,
+    });
+    fake.controls.emit({
+      type: "tool.completed",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      toolCallId: ids.toolCall("c2"),
+      name: "secret-tool",
+      result: "secret-duplicate-result",
+      isError: false,
+    });
+    fake.controls.emit({
+      type: "permission.requested",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      permissionId: ids.permission("p1"),
+      kind: "secret-kind",
+      input: { secret: "permission-input" },
+      options: [{ outcome: "allow", scope: "once" }],
+    });
+    fake.controls.emit({
+      type: "permission.resolved",
+      sessionId: active,
+      turnId: ids.turn("t99"),
+      permissionId: ids.permission("p1"),
+      resolution: { outcome: "deny", feedback: "secret-feedback" },
+    });
+    fake.controls.emit({
+      type: "permission.resolved",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      permissionId: ids.permission("missing"),
+      resolution: { outcome: "deny", feedback: "secret-feedback" },
+    });
+    fake.controls.emit({
+      type: "permission.resolved",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      permissionId: ids.permission("p1"),
+      resolution: { outcome: "allow", scope: "once" },
+    });
+    fake.controls.emit({
+      type: "permission.requested",
+      sessionId: active,
+      turnId: ids.turn("t1"),
+      permissionId: ids.permission("p1"),
+      kind: "secret-reused",
+      input: { secret: true },
+      options: [{ outcome: "allow", scope: "once" }],
+    });
+
+    const idle = await spawn("typed-idle");
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId: idle,
+      turnId: ids.turn("t2"),
+      stopReason: "end_turn",
+      finalReply: "secret-final",
+      usage: { secret: "usage" },
+    });
+    fake.controls.emit({
+      type: "text.delta",
+      sessionId: idle,
+      turnId: ids.turn("t2"),
+      messageId: ids.message("m-after"),
+      delta: "secret-delta",
+    });
+    fake.controls.emit({
+      type: "message",
+      sessionId: idle,
+      turnId: ids.turn("t77"),
+      messageId: ids.message("m-idle"),
+      role: "worker",
+      content: "secret-idle",
+    });
+
+    const killed = await spawn("typed-killed");
+    await machine.kill({ ids: [killed] });
+    fake.controls.emit({
+      type: "message",
+      sessionId: killed,
+      turnId: ids.turn("t3"),
+      messageId: ids.message("m-killed"),
+      role: "worker",
+      content: "secret-killed",
+    });
+    fake.controls.emit({
+      type: "message",
+      sessionId: ids.session("unknown@gtest"),
+      turnId: ids.turn("t1"),
+      messageId: ids.message("m-unknown"),
+      role: "worker",
+      content: "secret-unknown",
+    });
+
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(14));
+    const violations = diagnostics.filter(
+      (input) => input.kind === "protocol_violation",
+    );
+    expect(violations.map((input) => input.reason)).toEqual([
+      "driver_event_forbidden",
+      "driver_event_forbidden",
+      "driver_event_forbidden",
+      "turn_mismatch",
+      "message_already_completed",
+      "tool_already_requested",
+      "tool_already_completed",
+      "permission_turn_mismatch",
+      "permission_not_pending",
+      "permission_id_reused",
+      "event_after_turn_completed",
+      "turn_not_active",
+      "session_killed",
+      "unknown_session",
+    ]);
+    expect(
+      events.some(
+        (event) =>
+          "content" in event &&
+          event.content.startsWith("secret-") &&
+          event.content !== "secret-message",
+      ),
+    ).toBe(false);
+    const serialized = JSON.stringify(violations);
+    for (const secret of [
+      "secret-content",
+      "secret-duplicate",
+      "secret-result",
+      "permission-input",
+      "secret-final",
+      "secret-delta",
+      "secret-feedback",
+      "usage",
+      "nativePayload",
+    ])
+      expect(serialized).not.toContain(secret);
+  });
+
   test("validates synchronous idle delivery against the projected new turn", async () => {
     const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
@@ -56,6 +336,90 @@ describe("driver event ingress ownership", () => {
       "text.delta",
     ]);
     expect(diagnostics).toEqual([]);
+  });
+
+  test("makes synchronous completion terminal for ingress and rolls its projection back on action failure", async () => {
+    let attempt = 0;
+    const diagnostics: CoreDiagnosticFact[] = [];
+    const fake = createFakeDriver({
+      deliver: (sessionId, turnId) => {
+        attempt += 1;
+        if (attempt === 1) {
+          fake.controls.emit({
+            type: "turn.completed",
+            sessionId,
+            turnId,
+            stopReason: "end_turn",
+            finalReply: "secret-final-reply",
+            usage: { secret: "usage" },
+          });
+          fake.controls.emit({
+            type: "text.delta",
+            sessionId,
+            turnId,
+            messageId: ids.message("m-after-sync-completion"),
+            delta: "secret-after-completion",
+          });
+          throw new Error("delivery failed after synchronous completion");
+        }
+        fake.controls.emit({
+          type: "text.delta",
+          sessionId,
+          turnId,
+          messageId: ids.message("m-retry-after-rollback"),
+          delta: "accepted retry",
+        });
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const sessionId = await machine.spawn({
+      sessionName: ids.sessionName("terminal-projection"),
+      harness: "codex",
+      message: "one",
+      cwd: "/tmp/demo",
+    });
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId,
+      turnId: ids.turn("t1"),
+      stopReason: "end_turn",
+      finalReply: null,
+      usage: {},
+    });
+    events.length = 0;
+
+    await expect(
+      machine.send({ sessionId, message: "fails" }),
+    ).rejects.toMatchObject({
+      code: "internal_error",
+    });
+    await vi.waitFor(() =>
+      expect(
+        diagnostics.some(
+          (input) =>
+            input.kind === "protocol_violation" &&
+            input.reason === "event_after_turn_completed",
+        ),
+      ).toBe(true),
+    );
+    expect(events).toEqual([]);
+    expect(machine.list()).toEqual([
+      expect.objectContaining({ sessionId, state: "idle", turns: 1 }),
+    ]);
+
+    await machine.send({ sessionId, message: "retry" });
+    expect(events.some((event) => event.type === "text.delta")).toBe(true);
   });
 
   test("rolls back action-local ownership when boundary delivery throws", async () => {
@@ -329,18 +693,15 @@ describe("driver event ingress ownership", () => {
           event.sessionId === ids.session("missing@gtest"),
       ),
     ).toEqual([]);
-    expect(diagnostics).toEqual(
-      Array.from({ length: 5 }, () =>
-        expect.objectContaining({
-          kind: "protocol_violation",
-          operation: "validate_worker_event",
-          reason: "unexpected_message",
-        }),
-      ),
-    );
-    expect(JSON.stringify(diagnostics)).not.toContain("m9");
-    expect(JSON.stringify(diagnostics)).not.toContain("c9");
-    expect(JSON.stringify(diagnostics)).not.toContain("p9");
+    expect(diagnostics.map((input) => input.reason)).toEqual([
+      "message_already_completed",
+      "permission_id_reused",
+      "tool_already_requested",
+      "turn_mismatch",
+      "unknown_session",
+    ]);
+    expect(JSON.stringify(diagnostics)).not.toContain("duplicate complete");
+    expect(JSON.stringify(diagnostics)).not.toContain("stale turn");
     expect(
       events.filter(
         (event) => event.type === "tool.requested" && event.sessionId === first,

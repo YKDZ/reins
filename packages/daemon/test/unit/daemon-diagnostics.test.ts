@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -13,6 +13,8 @@ import type {
   ProtocolMessage,
   ProtocolResponse,
   AdapterDriverFactory,
+  DomainEvent,
+  ProtocolMethod,
 } from "@reins/protocol";
 import {
   diagnosticsResultSchema,
@@ -29,7 +31,7 @@ import type {
   TransportServer,
 } from "@reins/transport";
 import * as v from "valibot";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { createDaemonForTest } from "../../src/daemon.testing.ts";
 import { createDaemon } from "../../src/daemon.ts";
@@ -65,6 +67,309 @@ afterEach(async () => {
 });
 
 describe("daemon diagnostic error dispatch", () => {
+  test("persists every typed worker rejection without event payloads", async () => {
+    const root = await mkdtemp(
+      join(tmpdir(), "reins-daemon-worker-rejection-"),
+    );
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () => v.parse(daemonGenerationSchema, "typed"),
+    });
+    let emit!: (event: DomainEvent) => void;
+    const driverFactory: AdapterDriverFactory = (context) => {
+      emit = context.emit;
+      return {
+        start() {},
+        deliver() {},
+        interrupt() {},
+        resolvePermission() {},
+        async terminate() {},
+      };
+    };
+    const transport = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport,
+      adapters: new Map([
+        [
+          "fake",
+          {
+            driverFactory,
+            capabilities: async () => ({ harness: "fake", models: [] }),
+          },
+        ],
+      ]),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: runtime,
+    });
+    const running = daemon.start();
+    const client = transport.connect();
+    await waitForDaemonLifecycle(runtime);
+    let requestSeq = 0;
+    const request = async (method: ProtocolMethod, params: unknown) => {
+      requestSeq += 1;
+      const requestId = v.parse(requestIdSchema, `typed-${requestSeq}`);
+      const response = new Promise<ProtocolResponse>((resolve) => {
+        const unsubscribe = client.onEvent((event) => {
+          if (
+            event.kind === "message" &&
+            event.message.kind === "response" &&
+            event.message.requestId === requestId
+          ) {
+            unsubscribe();
+            resolve(event.message);
+          }
+        });
+      });
+      client.send({ kind: "request", requestId, method, params });
+      return await response;
+    };
+    const spawn = async (sessionName: string) => {
+      const response = await request("spawn", {
+        sessionName,
+        harness: "fake",
+        message: "caller-authored",
+        cwd: "/tmp/demo",
+      });
+      if (!("result" in response)) throw new Error("Expected spawn result");
+      return (response.result as { sessionId: DomainEvent["sessionId"] })
+        .sessionId;
+    };
+    try {
+      const active = await spawn("typed-active-daemon");
+      emit({
+        type: "session.created",
+        sessionId: active,
+        harness: "fake",
+        model: null,
+        reasoning: null,
+        cwd: "/sentinel-cwd",
+        sessionName: v.parse(sessionNameSchema, "forged"),
+        spawnedAt: "sentinel-time",
+      });
+      emit({
+        type: "turn.started",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t99"),
+      });
+      emit({ type: "session.killed", sessionId: active });
+      emit({
+        type: "message",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t99"),
+        messageId: "m-mismatch" as never,
+        role: "worker",
+        content: "sentinel-mismatch",
+      });
+      emit({
+        type: "message",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        messageId: "m1" as never,
+        role: "worker",
+        content: "accepted",
+      });
+      emit({
+        type: "message",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        messageId: "m1" as never,
+        role: "worker",
+        content: "sentinel-content",
+      });
+      emit({
+        type: "tool.requested",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        toolCallId: "c1" as never,
+        name: "Read",
+      });
+      emit({
+        type: "tool.requested",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        toolCallId: "c1" as never,
+        name: "sentinel-tool-name",
+      });
+      emit({
+        type: "tool.completed",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        toolCallId: "c2" as never,
+        name: "Read",
+        result: "accepted",
+        isError: false,
+      });
+      emit({
+        type: "tool.completed",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        toolCallId: "c2" as never,
+        name: "Read",
+        result: "sentinel-tool-result",
+        isError: false,
+      });
+      emit({
+        type: "permission.requested",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        permissionId: "p1" as never,
+        kind: "tool:Bash",
+        input: { value: "accepted" },
+        options: [{ outcome: "allow", scope: "once" }],
+      });
+      emit({
+        type: "permission.resolved",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t99"),
+        permissionId: "p1" as never,
+        resolution: { outcome: "deny", feedback: "sentinel-feedback" },
+      });
+      emit({
+        type: "permission.resolved",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        permissionId: "missing" as never,
+        resolution: { outcome: "deny", feedback: "sentinel-feedback" },
+      });
+      emit({
+        type: "permission.resolved",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        permissionId: "p1" as never,
+        resolution: { outcome: "allow", scope: "once" },
+      });
+      emit({
+        type: "permission.requested",
+        sessionId: active,
+        turnId: v.parse(turnIdSchema, "t1"),
+        permissionId: "p1" as never,
+        kind: "tool:Bash",
+        input: { value: "sentinel-permission-input" },
+        options: [{ outcome: "allow", scope: "once" }],
+      });
+
+      const idle = await spawn("typed-idle-daemon");
+      emit({
+        type: "turn.completed",
+        sessionId: idle,
+        turnId: v.parse(turnIdSchema, "t2"),
+        stopReason: "end_turn",
+        finalReply: "sentinel-final-reply",
+        usage: { marker: "sentinel-usage" },
+      });
+      emit({
+        type: "text.delta",
+        sessionId: idle,
+        turnId: v.parse(turnIdSchema, "t2"),
+        messageId: "m-after" as never,
+        delta: "sentinel-delta",
+      });
+      emit({
+        type: "message",
+        sessionId: idle,
+        turnId: v.parse(turnIdSchema, "t77"),
+        messageId: "m-idle" as never,
+        role: "worker",
+        content: "sentinel-idle",
+      });
+
+      const killed = await spawn("typed-killed-daemon");
+      await request("kill", { ids: [killed] });
+      emit({
+        type: "message",
+        sessionId: killed,
+        turnId: v.parse(turnIdSchema, "t3"),
+        messageId: "m-killed" as never,
+        role: "worker",
+        content: "sentinel-killed",
+      });
+      emit({
+        type: "message",
+        sessionId: runtime.sessionId(v.parse(sessionNameSchema, "unknown")),
+        turnId: v.parse(turnIdSchema, "t1"),
+        messageId: "m-unknown" as never,
+        role: "worker",
+        content: "sentinel-unknown",
+        nativePayload: { value: "sentinel-native-payload" },
+      } as DomainEvent);
+
+      let query!: ProtocolResponse;
+      await vi.waitFor(async () => {
+        query = await request("diagnostics", {
+          kinds: ["protocol_violation"],
+          sources: ["core"],
+          limit: 100,
+        });
+        expect(query).toMatchObject({ result: { records: expect.any(Array) } });
+        if (!("result" in query))
+          throw new Error("Expected diagnostics result");
+        expect((query.result as { records: unknown[] }).records).toHaveLength(
+          14,
+        );
+      });
+      if (!("result" in query)) throw new Error("Expected diagnostics result");
+      const records = (query.result as { records: Array<{ reason: string }> })
+        .records;
+      expect(records.map(({ reason }) => reason)).toEqual([
+        "driver_event_forbidden",
+        "driver_event_forbidden",
+        "driver_event_forbidden",
+        "turn_mismatch",
+        "message_already_completed",
+        "tool_already_requested",
+        "tool_already_completed",
+        "permission_turn_mismatch",
+        "permission_not_pending",
+        "permission_id_reused",
+        "event_after_turn_completed",
+        "turn_not_active",
+        "session_killed",
+        "unknown_session",
+      ]);
+      const protocolJson = JSON.stringify(query);
+      const files = await readdir(state.diagnosticsDirectory, {
+        withFileTypes: true,
+      });
+      const storeText = (
+        await Promise.all(
+          files
+            .filter((entry) => entry.isFile())
+            .map(
+              async (entry) =>
+                await readFile(
+                  join(state.diagnosticsDirectory, entry.name),
+                  "utf8",
+                ),
+            ),
+        )
+      ).join("\n");
+      for (const sentinel of [
+        "sentinel-content",
+        "sentinel-delta",
+        "sentinel-tool-result",
+        "sentinel-permission-input",
+        "sentinel-final-reply",
+        "sentinel-usage",
+        "sentinel-native-payload",
+        "sentinel-feedback",
+      ])
+        expect(`${protocolJson}\n${storeText}`).not.toContain(sentinel);
+    } finally {
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+
   test("serves exact and filtered diagnostics from the real recorder store", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "reins-daemon-diagnostic-query-"),
