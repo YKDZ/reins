@@ -3,7 +3,7 @@
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
 import {
   qodercliAuth,
@@ -31,7 +31,7 @@ function isScenarioName(value: string): value is ScenarioName {
   return Object.hasOwn(scenarios, value);
 }
 
-async function sdkVersion(): Promise<string> {
+async function installedQoderSdkVersion(): Promise<string> {
   const entry = import.meta.resolve("@qodercn-ai/qodercn-agent-sdk");
   const packageJson = JSON.parse(
     await readFile(new URL("../package.json", entry), "utf8"),
@@ -42,85 +42,131 @@ async function sdkVersion(): Promise<string> {
   return packageJson.version;
 }
 
-const requestedName =
-  process.argv.slice(2).find((value) => value !== "--") ?? "list-and-tool";
-if (!isScenarioName(requestedName)) {
-  throw new Error(`Unknown fixture scenario: ${requestedName}`);
+type FixtureRecording = {
+  sourceRaw: string;
+  recordedAt: string;
+  timedOut: boolean;
+};
+
+async function recordQoderFixture(
+  scenario: (typeof scenarios)[ScenarioName],
+): Promise<FixtureRecording> {
+  const workdir = await mkdtemp(join(tmpdir(), "reins-fixture-"));
+  await writeFile(join(workdir, "alpha.txt"), "alpha\n");
+  await writeFile(join(workdir, "beta.md"), "# beta\n");
+  const abortController = new AbortController();
+  const q = query({
+    prompt: scenario.prompt,
+    options: {
+      auth: qodercliAuth(),
+      cwd: workdir,
+      model: "qwen3.7-flash",
+      persistSession: false,
+      includePartialMessages: true,
+      permissionMode: "default",
+      canUseTool: async (toolName, input, options) => ({
+        behavior: "allow",
+        updatedInput: input,
+        toolUseID: options.toolUseID,
+      }),
+      abortController,
+    },
+  });
+  let timedOut = false;
+  const timeout = setTimeout(() => {
+    timedOut = true;
+    console.error("Fixture recording timed out; aborting");
+    abortController.abort();
+  }, 120_000);
+
+  try {
+    const messages: SDKMessage[] = [];
+    for await (const message of q) {
+      messages.push(message);
+      if (message.type === "result") break;
+    }
+    const recordedAt = messages
+      .flatMap((message) =>
+        "timestamp" in message && typeof message.timestamp === "string"
+          ? [message.timestamp]
+          : [],
+      )
+      .at(0);
+    if (recordedAt === undefined) {
+      throw new Error("Recorded stream has no source timestamp");
+    }
+    return {
+      sourceRaw: `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`,
+      recordedAt,
+      timedOut,
+    };
+  } finally {
+    clearTimeout(timeout);
+    abortController.abort();
+    await rm(workdir, { recursive: true, force: true }).catch(() => {});
+  }
 }
-const scenario = scenarios[requestedName];
-const workdir = await mkdtemp(join(tmpdir(), "reins-fixture-"));
-await writeFile(join(workdir, "alpha.txt"), "alpha\n");
-await writeFile(join(workdir, "beta.md"), "# beta\n");
 
-const abortController = new AbortController();
-const q = query({
-  prompt: scenario.prompt,
+export async function runFixtureRecording(
   options: {
-    auth: qodercliAuth(),
-    cwd: workdir,
-    model: "qwen3.7-flash",
-    persistSession: false,
-    includePartialMessages: true,
-    permissionMode: "default",
-    canUseTool: async (toolName, input, options) => ({
-      behavior: "allow",
-      updatedInput: input,
-      toolUseID: options.toolUseID,
-    }),
-    abortController,
+    name: ScenarioName;
+    fixtureDirectory?: string;
+    anchorsRaw?: string;
   },
-});
-
-let timedOut = false;
-const timeout = setTimeout(() => {
-  timedOut = true;
-  console.error("Fixture recording timed out; aborting");
-  abortController.abort();
-}, 120_000);
-
-try {
-  const messages: SDKMessage[] = [];
-  for await (const message of q) {
-    messages.push(message);
-    if (message.type === "result") break;
-  }
-  const recordedAt = messages
-    .flatMap((message) =>
-      "timestamp" in message && typeof message.timestamp === "string"
-        ? [message.timestamp]
-        : [],
-    )
-    .at(0);
-  if (recordedAt === undefined) {
-    throw new Error("Recorded stream has no source timestamp");
-  }
-  const sourceRaw = `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
-  const installedSdkVersion = await sdkVersion();
-  const candidate = await prepareFixtureCandidate({
-    name: requestedName,
-    sourceRaw,
-    recordedAt,
+  dependencies: {
+    record?: (
+      scenario: (typeof scenarios)[ScenarioName],
+    ) => Promise<FixtureRecording>;
+    installedSdkVersion?: () => Promise<string>;
+    prepare?: typeof prepareFixtureCandidate;
+    install?: typeof installRecordedFixtureCandidates;
+  } = {},
+): Promise<{ uniqueNativeToolCount: number; contentResultCount: number }> {
+  const scenario = scenarios[options.name];
+  const recording = await (dependencies.record ?? recordQoderFixture)(scenario);
+  const installedSdkVersion = await (
+    dependencies.installedSdkVersion ?? installedQoderSdkVersion
+  )();
+  const candidate = await (dependencies.prepare ?? prepareFixtureCandidate)({
+    name: options.name,
+    sourceRaw: recording.sourceRaw,
+    recordedAt: recording.recordedAt,
     sdkVersion: installedSdkVersion,
     installedSdkVersion,
     minimumNativeToolCount: scenario.minimumNativeToolCount,
-    timedOut,
+    timedOut: recording.timedOut,
   });
-  const fixturesDir = new URL("../fixtures/", import.meta.url);
-  await mkdir(fixturesDir, { recursive: true });
-  const anchorsRaw = await readFile(
-    new URL("anchors.json", fixturesDir),
-    "utf8",
-  );
-  await installRecordedFixtureCandidates({
-    fixtureDirectory: fileURLToPath(fixturesDir),
+  const fixtureDirectory =
+    options.fixtureDirectory ??
+    fileURLToPath(new URL("../fixtures/", import.meta.url));
+  await mkdir(fixtureDirectory, { recursive: true });
+  const anchorsRaw =
+    options.anchorsRaw ??
+    (await readFile(join(fixtureDirectory, "anchors.json"), "utf8"));
+  await (dependencies.install ?? installRecordedFixtureCandidates)({
+    fixtureDirectory,
     anchorsRaw,
-    candidates: [{ name: requestedName, ...candidate }],
+    candidates: [{ name: options.name, ...candidate }],
   });
+  return candidate.facts;
+}
+
+async function main(): Promise<void> {
+  const requestedName =
+    process.argv.slice(2).find((value) => value !== "--") ?? "list-and-tool";
+  if (!isScenarioName(requestedName)) {
+    throw new Error(`Unknown fixture scenario: ${requestedName}`);
+  }
+  const facts = await runFixtureRecording({ name: requestedName });
   console.log(
-    `Recorded fixture ${requestedName}: nativeTools=${candidate.facts.uniqueNativeToolCount}`,
+    `Recorded fixture ${requestedName}: nativeTools=${facts.uniqueNativeToolCount}`,
   );
-} finally {
-  clearTimeout(timeout);
-  abortController.abort();
-  await rm(workdir, { recursive: true, force: true }).catch(() => {});
+}
+
+const invokedPath = process.argv[1];
+if (
+  invokedPath !== undefined &&
+  pathToFileURL(invokedPath).href === import.meta.url
+) {
+  await main();
 }

@@ -61,6 +61,8 @@ export async function runFixtureMigration(
     fixtureDirectory?: string;
     anchorsRaw?: string;
     prepare?: (name: RecordedQoderFixtureName) => Promise<PreparedFixture>;
+    readSource?: typeof readImmutableGitSource;
+    installedSdkVersion?: () => Promise<string>;
     install?: (
       options: Parameters<typeof installRecordedFixtureCandidates>[0],
     ) => Promise<unknown>;
@@ -79,7 +81,12 @@ export async function runFixtureMigration(
   const prepare =
     options.prepare ??
     ((name: RecordedQoderFixtureName) =>
-      prepareFromImmutableSource(name, anchors.fixtures[name].sourceSha256));
+      prepareFromImmutableSource(
+        name,
+        anchors.fixtures[name].sourceSha256,
+        options.readSource ?? readImmutableGitSource,
+        options.installedSdkVersion ?? installedQoderSdkVersion,
+      ));
   const names = Object.keys(fixtures) as RecordedQoderFixtureName[];
   const prepared = await Promise.all(
     names.map(async (name) => ({ name, candidate: await prepare(name) })),
@@ -94,14 +101,16 @@ export async function runFixtureMigration(
 async function prepareFromImmutableSource(
   name: RecordedQoderFixtureName,
   expectedSourceSha256: string,
+  readSource: typeof readImmutableGitSource,
+  readInstalledSdkVersion: () => Promise<string>,
 ): Promise<PreparedFixture> {
   const fixture = fixtures[name];
   const base = `adapters/qoder/test/fixtures/${name}`;
   const [sourceRaw, sourceMetadataRaw, installedSdkVersion] = await Promise.all(
     [
-      readImmutableGitSource(sourceRevision, `${base}.jsonl`),
-      readImmutableGitSource(sourceRevision, `${base}.metadata.json`),
-      installedQoderSdkVersion(),
+      readSource(sourceRevision, `${base}.jsonl`),
+      readSource(sourceRevision, `${base}.metadata.json`),
+      readInstalledSdkVersion(),
     ],
   );
   const sourceSha256 = createHash("sha256").update(sourceRaw).digest("hex");
