@@ -213,6 +213,90 @@ test("a live turn terminal aborts its active permission without resolving it", a
   await attached;
 });
 
+test("a late answer after terminal abort cannot authorize the next turn", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.acceptAttach();
+  client.emit(requested("p1", turnId));
+  await tick();
+  client.emit(completed(turnId));
+  await tick();
+  input.write("1\n");
+  await tick();
+  client.emit(requested("p2", secondTurnId));
+  await tick();
+
+  expect(client.resolutions).toEqual([]);
+  input.write("1\n");
+  await tick();
+  await tick();
+  expect(client.resolutions).toEqual(["p2"]);
+  client.end();
+  await attached;
+});
+
+test("a late answer after external resolution cannot authorize the next permission", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.acceptAttach();
+  client.emit(requested("p1", turnId));
+  await tick();
+  client.emit(resolved("p1"));
+  await tick();
+  input.write("1\n");
+  await tick();
+  client.emit(requested("p2", secondTurnId));
+  await tick();
+
+  expect(client.resolutions).toEqual([]);
+  input.write("1\n");
+  await tick();
+  await tick();
+  expect(client.resolutions).toEqual(["p2"]);
+  client.end();
+  await attached;
+});
+
+test("surplus lines for one permission cannot pre-authorize the next", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.acceptAttach();
+  client.emit(requested("p1", turnId));
+  await tick();
+  input.write("1\n1\n");
+  await tick();
+  await tick();
+  expect(client.resolutions).toEqual(["p1"]);
+
+  client.emit(requested("p2", secondTurnId));
+  await tick();
+  expect(client.resolutions).toEqual(["p1"]);
+  input.write("1\n");
+  await tick();
+  await tick();
+  expect(client.resolutions).toEqual(["p1", "p2"]);
+  client.end();
+  await attached;
+});
+
 test("a terminal clears its turn while a later turn keeps FIFO progress", async () => {
   vi.spyOn(process.stdout, "write").mockImplementation(() => true);
   const client = new ControlledClient();
@@ -227,7 +311,10 @@ test("a terminal clears its turn while a later turn keeps FIFO progress", async 
   client.emit(requested("p2", secondTurnId));
   client.emit(requested("p3", secondTurnId));
   client.acceptAttach();
-  input.end("1\n1\n");
+  await tick();
+  input.write("1\n");
+  await tick();
+  input.write("1\n");
   await tick();
   await tick();
 
@@ -395,7 +482,10 @@ test("pending permissions drain once in FIFO order after attach acceptance", asy
   client.emit(requested("p1"));
   client.emit(requested("p2"));
   client.acceptAttach();
-  input.end("1\n1\n");
+  await tick();
+  input.write("1\n");
+  await tick();
+  input.write("1\n");
   await tick();
   await tick();
   expect(client.resolutions).toEqual(["p1", "p2"]);
@@ -453,10 +543,34 @@ test("feedback EOF has its own typed recovery reason", async () => {
   });
   client.acceptAttach();
   client.emit(requested("p1"));
-  input.end("2\n");
+  await tick();
+  input.write("2\n");
+  await tick();
+  input.end();
   await expect(attached).rejects.toEqual({
     code: "input_error",
     reason: "permission_feedback_eof",
   });
   expect(client.resolutions).toEqual([]);
+});
+
+test("deny feedback consumes two lines owned by the same permission", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.acceptAttach();
+  client.emit(requested("p1"));
+  await tick();
+  input.write("2\nnot safe\n");
+  await tick();
+  await tick();
+
+  expect(client.resolutions).toEqual(["p1"]);
+  client.end();
+  await attached;
 });

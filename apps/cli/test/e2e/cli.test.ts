@@ -928,18 +928,38 @@ describe("CLI 进程边界（缝 D）", () => {
       queueEnv,
     );
     const sessionId = sessionIdFrom(spawned);
-    const attached = await runCli(
+    const attached = startCli(
       ["--pretty", "attach", sessionId, "--exit-on", "end_turn"],
       queueEnv,
-      { input: "1\n1\n", timeoutMs: 5_000 },
+      true,
     );
-    expect(attached.exitCode).toBe(0);
-    expect((await readFile(requestsFile, "utf8")).trim().split("\n")).toEqual([
-      "p1",
-      "p2",
-    ]);
-    expect(attached.stdout.match(/Permission requested:/gu)).toHaveLength(2);
-    await runCli(["kill", sessionId], queueEnv);
+    try {
+      await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
+      attached.child.stdin?.write("1\n");
+      await waitFor(
+        () =>
+          (attached.stdout.join("").match(/Choose \(1-2\):/gu)?.length ?? 0) ===
+          2,
+      );
+      attached.child.stdin?.end("1\n");
+      expect(await waitForExit(attached.child, 5_000)).toBe(0);
+      expect((await readFile(requestsFile, "utf8")).trim().split("\n")).toEqual(
+        ["p1", "p2"],
+      );
+      expect(
+        attached.stdout.join("").match(/Permission requested:/gu),
+      ).toHaveLength(2);
+    } finally {
+      attached.child.stdin?.destroy();
+      if (
+        attached.child.exitCode === null &&
+        attached.child.signalCode === null
+      ) {
+        attached.child.kill("SIGKILL");
+        await waitForExit(attached.child, 2_000);
+      }
+      await runCli(["kill", sessionId], queueEnv);
+    }
   });
 
   test("kill aborts the active prompt and clears queued permission requests", async () => {
@@ -1074,17 +1094,30 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
-    const attached = await runCli(
+    const attached = startCli(
       ["attach", sessionId, "--pretty", "--exit-on", "end_turn"],
       env,
-      { input: "1\n" },
+      true,
     );
-    expect(attached.exitCode).toBe(0);
-    expect(attached.stdout).toContain("Permission requested");
-    expect(attached.stdout).toContain("[attach ended]");
-    expect(attached.stdout).toContain("[turn completed] end_turn");
-    expect(attached.stdout).not.toContain("resolved:allow");
-    await runCli(["kill", sessionId], env);
+    try {
+      await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
+      attached.child.stdin?.end("1\n");
+      expect(await waitForExit(attached.child)).toBe(0);
+      expect(attached.stdout.join("")).toContain("Permission requested");
+      expect(attached.stdout.join("")).toContain("[attach ended]");
+      expect(attached.stdout.join("")).toContain("[turn completed] end_turn");
+      expect(attached.stdout.join("")).not.toContain("resolved:allow");
+    } finally {
+      attached.child.stdin?.destroy();
+      if (
+        attached.child.exitCode === null &&
+        attached.child.signalCode === null
+      ) {
+        attached.child.kill("SIGKILL");
+        await waitForExit(attached.child, 2_000);
+      }
+      await runCli(["kill", sessionId], env);
+    }
   });
 
   test("attach pretty 显示 caller/worker 角色", async () => {

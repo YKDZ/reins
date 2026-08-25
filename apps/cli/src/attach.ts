@@ -48,7 +48,9 @@ type PermissionRequestedEvent = Extract<
 >;
 
 type PromptInput = {
-  next(signal: AbortSignal): Promise<PromptRead>;
+  activate(owner: string): void;
+  deactivate(owner: string): void;
+  next(owner: string, signal: AbortSignal): Promise<PromptRead>;
   close(): void;
 };
 
@@ -60,36 +62,69 @@ type PromptRead =
 function createPromptInput(input: NodeJS.ReadableStream): PromptInput {
   const readline = createInterface({ input, output: process.stdout });
   const queued: string[] = [];
-  const waiters: Array<(result: PromptRead) => void> = [];
+  const waiters: Array<{
+    readonly owner: string;
+    readonly complete: (result: PromptRead) => void;
+  }> = [];
+  let activeOwner: string | undefined;
   let closed = false;
   readline.on("line", (line: string) => {
-    const waiter = waiters.shift();
+    if (activeOwner === undefined) return;
+    const waiterIndex = waiters.findIndex(
+      (waiter) => waiter.owner === activeOwner,
+    );
+    const waiter =
+      waiterIndex === -1 ? undefined : waiters.splice(waiterIndex, 1)[0];
     if (waiter === undefined) queued.push(line);
-    else waiter({ kind: "line", value: line });
+    else waiter.complete({ kind: "line", value: line });
   });
   readline.once("close", () => {
     closed = true;
-    for (const waiter of waiters.splice(0)) waiter({ kind: "eof" });
+    activeOwner = undefined;
+    queued.length = 0;
+    for (const waiter of waiters.splice(0)) {
+      waiter.complete({ kind: "eof" });
+    }
   });
+  const deactivate = (owner: string): void => {
+    if (activeOwner !== owner) return;
+    activeOwner = undefined;
+    queued.length = 0;
+    for (const waiter of waiters.filter(
+      (candidate) => candidate.owner === owner,
+    )) {
+      waiter.complete({ kind: "aborted" });
+    }
+  };
   return {
-    async next(signal) {
-      if (signal.aborted) return { kind: "aborted" };
+    activate(owner) {
+      if (activeOwner !== undefined) deactivate(activeOwner);
+      queued.length = 0;
+      activeOwner = owner;
+    },
+    deactivate,
+    async next(owner, signal) {
+      if (signal.aborted || activeOwner !== owner) return { kind: "aborted" };
       const line = queued.shift();
       if (line !== undefined) return { kind: "line", value: line };
       if (closed) return { kind: "eof" };
       return await new Promise<PromptRead>((resolve) => {
         const complete = (result: PromptRead): void => {
           signal.removeEventListener("abort", onAbort);
-          const index = waiters.indexOf(complete);
+          const index = waiters.findIndex(
+            (waiter) => waiter.complete === complete,
+          );
           if (index !== -1) waiters.splice(index, 1);
           resolve(result);
         };
         const onAbort = (): void => complete({ kind: "aborted" });
         signal.addEventListener("abort", onAbort, { once: true });
-        waiters.push(complete);
+        waiters.push({ owner, complete });
       });
     },
     close() {
+      activeOwner = undefined;
+      queued.length = 0;
       readline.close();
     },
   };
@@ -97,6 +132,7 @@ function createPromptInput(input: NodeJS.ReadableStream): PromptInput {
 
 async function resolveFromMenu(
   prompt: PromptInput,
+  owner: string,
   sessionId: Extract<
     DomainEvent,
     { type: "permission.requested" }
@@ -119,7 +155,8 @@ async function resolveFromMenu(
     process.stdout.write(`${optionLabel(option, index + 1)}\n`);
   });
   process.stdout.write(`Choose (1-${event.options.length}): `);
-  const answer = await prompt.next(signal);
+  prompt.activate(owner);
+  const answer = await prompt.next(owner, signal);
   if (answer.kind === "aborted" || signal.aborted) return;
   if (answer.kind === "eof") throw inputError("permission_choice_eof");
   const choice = Number.parseInt(answer.value, 10);
@@ -133,7 +170,7 @@ async function resolveFromMenu(
     resolution = { outcome: "allow", scope: option.scope };
   } else if (option.feedback) {
     process.stdout.write("Feedback for the worker: ");
-    const feedback = await prompt.next(signal);
+    const feedback = await prompt.next(owner, signal);
     if (feedback.kind === "aborted" || signal.aborted) return;
     if (feedback.kind === "eof") throw inputError("permission_feedback_eof");
     resolution = { outcome: "deny", feedback: feedback.value };
@@ -169,7 +206,8 @@ export async function runAttach(
           readonly controller: AbortController;
         }
       | undefined;
-    let prompt: PromptInput | undefined;
+    const prompt =
+      options.mode === "pretty" ? createPromptInput(input) : undefined;
     let pendingEnd: AttachEnded | undefined;
     const presenter: PrettyAttachPresenter | undefined =
       options.mode === "pretty" && options.quiet !== true
@@ -182,7 +220,10 @@ export async function runAttach(
     let unsubscribeClosed = (): void => {};
 
     const cleanup = (): void => {
-      activePermission?.controller.abort();
+      if (activePermission !== undefined) {
+        prompt?.deactivate(activePermission.key);
+        activePermission.controller.abort();
+      }
       activePermission = undefined;
       permissionQueue.length = 0;
       pendingPermissions.clear();
@@ -212,12 +253,19 @@ export async function runAttach(
         activePermission?.sessionId === sessionId &&
         activePermission.turnId === turnId
       ) {
+        prompt?.deactivate(activePermission.key);
         activePermission.controller.abort();
         activePermission = undefined;
       }
     };
     const consumePermissions = async (): Promise<void> => {
-      if (consumingPermissions || settled || !attachReady) return;
+      if (
+        consumingPermissions ||
+        settled ||
+        !attachReady ||
+        prompt === undefined
+      )
+        return;
       consumingPermissions = true;
       try {
         while (!settled) {
@@ -225,7 +273,6 @@ export async function runAttach(
           if (key === undefined) return;
           const event = pendingPermissions.get(key);
           if (event === undefined) continue;
-          prompt ??= createPromptInput(input);
           const controller = new AbortController();
           activePermission = {
             key,
@@ -233,14 +280,19 @@ export async function runAttach(
             turnId: event.turnId,
             controller,
           };
-          await resolveFromMenu(
-            prompt,
-            event.sessionId,
-            event.permissionId,
-            event,
-            client,
-            controller.signal,
-          );
+          try {
+            await resolveFromMenu(
+              prompt,
+              key,
+              event.sessionId,
+              event.permissionId,
+              event,
+              client,
+              controller.signal,
+            );
+          } finally {
+            prompt.deactivate(key);
+          }
           if (activePermission?.key === key) activePermission = undefined;
           pendingPermissions.delete(key);
         }
@@ -311,6 +363,7 @@ export async function runAttach(
           const queuedIndex = permissionQueue.indexOf(key);
           if (queuedIndex !== -1) permissionQueue.splice(queuedIndex, 1);
           if (activePermission?.key === key) {
+            prompt?.deactivate(key);
             activePermission.controller.abort();
             activePermission = undefined;
           }
