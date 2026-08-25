@@ -1,13 +1,9 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, realpath } from "node:fs/promises";
-import { isBuiltin } from "node:module";
 import { constants, homedir, tmpdir } from "node:os";
-import { isAbsolute, dirname, join, resolve } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-
-import { rolldown } from "rolldown";
-import { parseSync } from "rolldown/experimental";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const turboBuildArguments = [
@@ -64,39 +60,8 @@ type BuildGraphIdentity = {
   readonly tasks: readonly BuildTaskIdentity[];
 };
 
-type AdapterModuleIdentity =
-  | { readonly kind: "built-in" }
-  | { readonly kind: "missing"; readonly selection: string }
-  | {
-      readonly kind: "file";
-      readonly selection: string;
-      readonly modules: readonly LocalAdapterModuleIdentity[];
-    };
-
-type LocalAdapterModuleIdentity = {
-  readonly moduleId: string;
-  readonly realPath: string;
-  readonly contentSha256: string;
-};
-
-type AdapterDependencyProofFailure =
-  | "commonjs_module"
-  | "local_module_loader"
-  | "nonliteral_dynamic_import"
-  | "unresolved_dependency";
-
-class AdapterDependencyProofError extends Error {
-  readonly code: AdapterDependencyProofFailure;
-
-  constructor(code: AdapterDependencyProofFailure, modulePath: string) {
-    super(`Adapter dependency graph is not provable [${code}]: ${modulePath}`);
-    this.name = "AdapterDependencyProofError";
-    this.code = code;
-  }
-}
-
 type DaemonCompositionIdentity = {
-  readonly adaptersModule: AdapterModuleIdentity;
+  readonly path: string | null;
   readonly idleTimeoutMs: string | null;
   readonly diagnosticsMaxAgeMs: string | null;
   readonly diagnosticsMaxBytes: string | null;
@@ -160,192 +125,19 @@ async function readBuildGraph(): Promise<BuildGraphIdentity> {
   return parseBuildGraph(result.stdout);
 }
 
-function isMissingFileError(error: unknown): boolean {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ENOENT"
-  );
-}
-
-function isPackageDependency(specifier: string): boolean {
-  if (isBuiltin(specifier)) return true;
-  return !(
-    specifier.startsWith(".") ||
-    specifier.startsWith("/") ||
-    specifier.startsWith("file:") ||
-    specifier.startsWith("#")
-  );
-}
-
-function literalString(value: unknown): string | undefined {
-  if (!isRecord(value) || value.type !== "Literal") return undefined;
-  return typeof value.value === "string" ? value.value : undefined;
-}
-
-function assertProvableModuleSyntax(value: unknown, moduleId: string): void {
-  if (Array.isArray(value)) {
-    for (const child of value) assertProvableModuleSyntax(child, moduleId);
-    return;
-  }
-  if (!isRecord(value)) return;
-
-  if (value.type === "ImportExpression") {
-    const specifier = literalString(value.source);
-    if (specifier === undefined) {
-      throw new AdapterDependencyProofError(
-        "nonliteral_dynamic_import",
-        moduleId,
-      );
-    }
-    if (specifier === "module" || specifier === "node:module") {
-      throw new AdapterDependencyProofError("local_module_loader", moduleId);
-    }
-  }
-  if (
-    value.type === "CallExpression" &&
-    isRecord(value.callee) &&
-    value.callee.type === "Identifier" &&
-    value.callee.name === "require"
-  ) {
-    throw new AdapterDependencyProofError("local_module_loader", moduleId);
-  }
-  if (
-    (value.type === "ImportDeclaration" ||
-      value.type === "ExportAllDeclaration" ||
-      value.type === "ExportNamedDeclaration") &&
-    ["module", "node:module"].includes(literalString(value.source) ?? "")
-  ) {
-    throw new AdapterDependencyProofError("local_module_loader", moduleId);
-  }
-
-  for (const child of Object.values(value)) {
-    assertProvableModuleSyntax(child, moduleId);
-  }
-}
-
-async function localAdapterModuleIdentity(
-  entryPath: string,
-): Promise<readonly LocalAdapterModuleIdentity[]> {
-  const moduleIds = new Set<string>();
-  let proofFailure: AdapterDependencyProofError | undefined;
-  let bundle: Awaited<ReturnType<typeof rolldown>> | undefined;
-  try {
-    bundle = await rolldown({
-      cwd: repository,
-      input: entryPath,
-      platform: "node",
-      treeshake: false,
-      external: isPackageDependency,
-      onLog(level, _log) {
-        if (level === "warn") {
-          proofFailure = new AdapterDependencyProofError(
-            "unresolved_dependency",
-            entryPath,
-          );
-          throw proofFailure;
-        }
-      },
-      plugins: [
-        {
-          name: "reins-adapter-dependency-proof",
-          transform(code, moduleId) {
-            if (moduleId.startsWith("\0rolldown/")) return;
-            try {
-              const parsed = parseSync(moduleId, code, {
-                sourceType: "unambiguous",
-              });
-              if (parsed.errors.length > 0) {
-                throw new AdapterDependencyProofError(
-                  "unresolved_dependency",
-                  moduleId,
-                );
-              }
-              assertProvableModuleSyntax(parsed.program, moduleId);
-            } catch (error) {
-              if (error instanceof AdapterDependencyProofError) {
-                proofFailure = error;
-              }
-              throw error;
-            }
-          },
-          moduleParsed(info) {
-            if (info.id.startsWith("\0rolldown/")) return;
-            if (info.code === null) return;
-            if (info.inputFormat === "cjs") {
-              proofFailure = new AdapterDependencyProofError(
-                "commonjs_module",
-                info.id,
-              );
-              throw proofFailure;
-            }
-            moduleIds.add(info.id);
-          },
-        },
-      ],
-    });
-    await bundle.generate({ format: "esm" });
-
-    const identities = await Promise.all(
-      [...moduleIds].map(
-        async (moduleId): Promise<LocalAdapterModuleIdentity> => {
-          if (!isAbsolute(moduleId)) {
-            throw new AdapterDependencyProofError(
-              "unresolved_dependency",
-              moduleId,
-            );
-          }
-          const realPath = await realpath(moduleId);
-          return {
-            moduleId,
-            realPath,
-            contentSha256: createHash("sha256")
-              .update(await readFile(realPath))
-              .digest("hex"),
-          };
-        },
-      ),
+function assertSupportedDevelopmentEnvironment(env: NodeJS.ProcessEnv): void {
+  if (env.REINS_ADAPTERS_MODULE !== undefined) {
+    throw new Error(
+      "REINS_ADAPTERS_MODULE is not supported by the development CLI",
     );
-    identities.sort((left, right) =>
-      left.moduleId.localeCompare(right.moduleId),
-    );
-    return identities;
-  } catch (error) {
-    if (proofFailure !== undefined) throw proofFailure;
-    if (error instanceof AdapterDependencyProofError) throw error;
-    throw new AdapterDependencyProofError("unresolved_dependency", entryPath);
-  } finally {
-    await bundle?.close();
   }
 }
 
-async function adapterModuleIdentity(
-  selection: string | undefined,
-): Promise<AdapterModuleIdentity> {
-  if (selection === undefined) return { kind: "built-in" };
-  const resolvedSelection = resolve(process.cwd(), selection);
-  let realPath: string;
-  try {
-    realPath = await realpath(resolvedSelection);
-  } catch (error) {
-    if (isMissingFileError(error)) {
-      return { kind: "missing", selection: resolvedSelection };
-    }
-    throw error;
-  }
-  return {
-    kind: "file",
-    selection: resolvedSelection,
-    modules: await localAdapterModuleIdentity(realPath),
-  };
-}
-
-async function daemonCompositionIdentity(
+function daemonCompositionIdentity(
   env: NodeJS.ProcessEnv,
-): Promise<DaemonCompositionIdentity> {
+): DaemonCompositionIdentity {
   return {
-    adaptersModule: await adapterModuleIdentity(env.REINS_ADAPTERS_MODULE),
+    path: env.PATH ?? null,
     idleTimeoutMs: env.REINS_IDLE_TIMEOUT_MS ?? null,
     diagnosticsMaxAgeMs: env.REINS_DIAGNOSTICS_MAX_AGE_MS ?? null,
     diagnosticsMaxBytes: env.REINS_DIAGNOSTICS_MAX_BYTES ?? null,
@@ -379,7 +171,7 @@ async function buildIdentity(
   updateIdentity(
     hash,
     "daemon-composition",
-    JSON.stringify(await daemonCompositionIdentity(env)),
+    JSON.stringify(daemonCompositionIdentity(env)),
   );
   updateIdentity(
     hash,
@@ -463,6 +255,7 @@ async function runCli(args: readonly string[]): Promise<number> {
 }
 
 try {
+  assertSupportedDevelopmentEnvironment(process.env);
   const build = await runPnpm(turboBuildArguments);
   if (build.status !== 0) {
     process.stdout.write(build.stdout);

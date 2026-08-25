@@ -2,8 +2,11 @@ import { spawn, type ChildProcess } from "node:child_process";
 import {
   access,
   appendFile,
+  chmod,
   cp,
+  copyFile,
   mkdtemp,
+  mkdir,
   readFile,
   readdir,
   rm,
@@ -11,15 +14,15 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { fileURLToPath, pathToFileURL } from "node:url";
+import { delimiter, join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, test } from "vitest";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
-const adaptersModule = join(
+const codexAppServerFixture = join(
   repository,
-  "apps/cli/test/e2e/fixtures/fake-adapters.ts",
+  "apps/cli/test/e2e/fixtures/codex-app-server.mjs",
 );
 const fixtureDaemon = join(
   repository,
@@ -203,10 +206,29 @@ async function pathExists(path: string): Promise<boolean> {
   }
 }
 
+async function installCodexFixture(
+  directory: string,
+  binName = "bin",
+): Promise<{ readonly binary: string; readonly path: string }> {
+  const bin = join(directory, binName);
+  const binary = join(bin, "codex");
+  await mkdir(bin, { recursive: true });
+  await copyFile(codexAppServerFixture, binary);
+  await chmod(binary, 0o755);
+  return {
+    binary,
+    path:
+      process.env.PATH === undefined
+        ? bin
+        : `${bin}${delimiter}${process.env.PATH}`,
+  };
+}
+
 describe("checkout-isolated development entry", () => {
   test("builds and runs the current CLI and daemon without falling back to caller runtime paths", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);
+    const codex = await installCodexFixture(directory);
     const globalSocket = join(directory, "global.sock");
     const globalDaemon = spawn(process.execPath, [fixtureDaemon], {
       env: {
@@ -219,8 +241,8 @@ describe("checkout-isolated development entry", () => {
     cleanupProcesses.push(globalDaemon);
     await waitForPath(globalSocket);
     const result = await runDevelopmentCli(["capabilities"], {
+      PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
-      REINS_ADAPTERS_MODULE: adaptersModule,
       REINS_DAEMON_BIN: join(directory, "global-reins-daemon"),
       REINS_DEVELOPMENT_ROOT: join(directory, "development"),
       REINS_SOCKET: globalSocket,
@@ -231,9 +253,8 @@ describe("checkout-isolated development entry", () => {
     expect(result.status, result.stderr).toBe(0);
     expect(JSON.parse(result.stdout)).toMatchObject({
       capabilities: expect.arrayContaining([
-        expect.objectContaining({ harness: "fake" }),
+        expect.objectContaining({ harness: "codex" }),
       ]),
-      failures: [],
     });
     expect(result.stderr).toBe("");
   }, 120_000);
@@ -271,163 +292,55 @@ describe("checkout-isolated development entry", () => {
     expect(await pathExists(requests)).toBe(false);
   }, 120_000);
 
-  test("does not reuse a daemon when explicit adapter composition changes", async () => {
+  test("rejects an adapter override before selecting a development runtime", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);
-    const baseEnv = {
-      PNPM_CONFIG_REPORTER: "silent",
-      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
-      REINS_IDLE_TIMEOUT_MS: "50",
-    };
-    const originalEnv = {
-      ...baseEnv,
-      REINS_ADAPTERS_MODULE: adaptersModule,
-    };
-    const spawned = await runDevelopmentCli(
-      ["spawn", "fake", "hello", "--name", "composition-session"],
-      originalEnv,
-    );
-    expect(spawned.status, spawned.stderr).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
-
-    const changed = await runDevelopmentCli(["capabilities"], {
-      ...baseEnv,
-      REINS_ADAPTERS_MODULE: join(directory, "missing-adapters.mjs"),
+    const globalSocket = join(directory, "global.sock");
+    const requests = join(directory, "global-requests.txt");
+    const globalDaemon = spawn(process.execPath, [fixtureDaemon], {
+      env: {
+        ...process.env,
+        REINS_FIXTURE_DAEMON_MODE: "invalid-envelope",
+        REINS_FIXTURE_REQUESTS_FILE: requests,
+        REINS_SOCKET: globalSocket,
+      },
+      stdio: "ignore",
     });
-    const cleanup = await runDevelopmentCli(["kill", sessionId], originalEnv);
-    expect(cleanup.status, cleanup.stderr).toBe(0);
-
-    expect(changed.status).toBe(65);
-    expect(changed.stderr).toBe("");
-    expect(JSON.parse(changed.stdout)).toMatchObject({
-      code: "daemon_start_failed",
-    });
-  }, 120_000);
-
-  test("does not reuse a daemon after an adapter override file changes", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
-    cleanupDirectories.push(directory);
-    const override = join(directory, "adapters.mjs");
-    const validOverride = `export { default } from ${JSON.stringify(
-      pathToFileURL(adaptersModule).href,
-    )};\n`;
-    await writeFile(override, validOverride);
-    const env = {
-      PNPM_CONFIG_REPORTER: "silent",
-      REINS_ADAPTERS_MODULE: override,
-      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
-      REINS_IDLE_TIMEOUT_MS: "50",
-    };
-    const spawned = await runDevelopmentCli(
-      ["spawn", "fake", "hello", "--name", "adapter-content-session"],
-      env,
-    );
-    expect(spawned.status, spawned.stderr).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
-
-    await writeFile(override, "export default 42;\n");
-    const changed = await runDevelopmentCli(["capabilities"], env);
-    await writeFile(override, validOverride);
-    const cleanup = await runDevelopmentCli(["kill", sessionId], env);
-    expect(cleanup.status, cleanup.stderr).toBe(0);
-
-    expect(changed.status).toBe(65);
-    expect(changed.stderr).toBe("");
-    expect(JSON.parse(changed.stdout)).toMatchObject({
-      code: "daemon_start_failed",
-    });
-  }, 120_000);
-
-  test("does not reuse a daemon after a static adapter dependency changes", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
-    cleanupDirectories.push(directory);
-    const override = join(directory, "adapters.mjs");
-    const implementation = join(directory, "impl.mjs");
-    const validImplementation = `export { default } from ${JSON.stringify(
-      pathToFileURL(adaptersModule).href,
-    )};\n`;
-    await writeFile(override, 'export { default } from "./impl.mjs";\n');
-    await writeFile(implementation, validImplementation);
-    const env = {
-      PNPM_CONFIG_REPORTER: "silent",
-      REINS_ADAPTERS_MODULE: override,
-      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
-      REINS_IDLE_TIMEOUT_MS: "50",
-    };
-    const spawned = await runDevelopmentCli(
-      ["spawn", "fake", "hello", "--name", "adapter-dependency-session"],
-      env,
-    );
-    expect(spawned.status, spawned.stderr).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
-
-    await writeFile(implementation, "export default 42;\n");
-    const changed = await runDevelopmentCli(["capabilities"], env);
-    await writeFile(implementation, validImplementation);
-    const cleanup = await runDevelopmentCli(["kill", sessionId], env);
-    expect(cleanup.status, cleanup.stderr).toBe(0);
-
-    expect(changed.status).toBe(65);
-    expect(changed.stderr).toBe("");
-    expect(JSON.parse(changed.stdout)).toMatchObject({
-      code: "daemon_start_failed",
-    });
-  }, 120_000);
-
-  test("fails closed for a non-literal adapter dependency", async () => {
-    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
-    cleanupDirectories.push(directory);
-    const override = join(directory, "adapters.mjs");
-    const implementation = join(directory, "impl.mjs");
-    await writeFile(
-      override,
-      'const dependency = "./impl.mjs";\n' +
-        "export default (await import(dependency)).default;\n",
-    );
-    await writeFile(
-      implementation,
-      `export { default } from ${JSON.stringify(
-        pathToFileURL(adaptersModule).href,
-      )};\n`,
-    );
-
+    cleanupProcesses.push(globalDaemon);
+    await waitForPath(globalSocket);
+    const developmentRoot = join(directory, "development");
     const result = await runDevelopmentCli(["capabilities"], {
       PNPM_CONFIG_REPORTER: "silent",
-      REINS_ADAPTERS_MODULE: override,
-      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
-      REINS_IDLE_TIMEOUT_MS: "50",
+      REINS_ADAPTERS_MODULE: join(directory, "opaque-adapters.mjs"),
+      REINS_DEVELOPMENT_ROOT: developmentRoot,
+      REINS_SOCKET: globalSocket,
     });
 
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
-      `Failed to run the development CLI: Adapter dependency graph is not provable [nonliteral_dynamic_import]: ${override}\n`,
+      "Failed to run the development CLI: REINS_ADAPTERS_MODULE is not supported by the development CLI\n",
     );
+    expect(await pathExists(requests)).toBe(false);
+    expect(await pathExists(developmentRoot)).toBe(false);
   }, 120_000);
 
   test("isolates live sessions across clean checkouts and rebuilt output", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);
+    const codex = await installCodexFixture(directory);
     const checkoutA = join(directory, "checkout-a");
     const checkoutB = join(directory, "checkout-b");
     await materializeCleanCheckout(checkoutA);
     await materializeCleanCheckout(checkoutB);
     const runtimeRoot = join(directory, "development");
     const baseEnv = {
+      PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
       REINS_DEVELOPMENT_ROOT: runtimeRoot,
       REINS_IDLE_TIMEOUT_MS: "50",
     };
-    const envA = {
-      ...baseEnv,
-      REINS_ADAPTERS_MODULE: join(
-        checkoutA,
-        "apps/cli/test/e2e/fixtures/fake-adapters.ts",
-      ),
-    };
+    const envA = { ...baseEnv };
     const capabilities = await runDevelopmentCli(
       ["capabilities"],
       envA,
@@ -437,12 +350,11 @@ describe("checkout-isolated development entry", () => {
     expect(capabilities.status, capabilities.stderr).toBe(0);
     expect(JSON.parse(capabilities.stdout)).toMatchObject({
       capabilities: expect.arrayContaining([
-        expect.objectContaining({ harness: "fake" }),
+        expect.objectContaining({ harness: "codex" }),
       ]),
-      failures: [],
     });
     const spawned = await runDevelopmentCli(
-      ["spawn", "fake", "hello", "--name", "isolated-session"],
+      ["spawn", "codex", "hello", "--name", "isolated-session"],
       envA,
       "",
       checkoutA,
@@ -461,13 +373,7 @@ describe("checkout-isolated development entry", () => {
 
     const fromOtherCheckout = await runDevelopmentCli(
       ["list", "--name", "isolated-session"],
-      {
-        ...baseEnv,
-        REINS_ADAPTERS_MODULE: join(
-          checkoutB,
-          "apps/cli/test/e2e/fixtures/fake-adapters.ts",
-        ),
-      },
+      baseEnv,
       "",
       checkoutB,
     );
@@ -515,22 +421,41 @@ describe("checkout-isolated development entry", () => {
   test("reuses the same build daemon and its live sessions", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);
+    const codex = await installCodexFixture(directory);
     const env = {
+      PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
-      REINS_ADAPTERS_MODULE: adaptersModule,
       REINS_DEVELOPMENT_ROOT: join(directory, "development"),
       REINS_IDLE_TIMEOUT_MS: "50",
     };
     const spawned = await runDevelopmentCli(
-      ["spawn", "fake", "hello", "--name", "development-session"],
+      ["spawn", "codex", "hello", "--name", "development-session"],
       env,
     );
     expect(spawned.status, spawned.stderr).toBe(0);
     const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
       .sessionId;
 
+    const originalBinary = await readFile(codex.binary, "utf8");
+    await writeFile(
+      codex.binary,
+      originalBinary.replace("fixture-model", "fixture-model-changed"),
+    );
+    const capabilities = await runDevelopmentCli(["capabilities"], env);
+    expect(capabilities.status, capabilities.stderr).toBe(0);
+    expect(JSON.parse(capabilities.stdout)).toMatchObject({
+      capabilities: expect.arrayContaining([
+        expect.objectContaining({
+          harness: "codex",
+          models: expect.arrayContaining([
+            expect.objectContaining({ id: "fixture-model-changed" }),
+          ]),
+        }),
+      ]),
+    });
+
     const secondSpawn = await runDevelopmentCli(
-      ["spawn", "fake", "hello", "--name", "development-session-second"],
+      ["spawn", "codex", "hello", "--name", "development-session-second"],
       env,
     );
     expect(secondSpawn.status, secondSpawn.stderr).toBe(0);
@@ -568,13 +493,61 @@ describe("checkout-isolated development entry", () => {
     ]);
   }, 120_000);
 
+  test("isolates a live daemon when PATH changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
+    cleanupDirectories.push(directory);
+    const codexA = await installCodexFixture(directory, "bin-a");
+    const codexB = await installCodexFixture(directory, "bin-b");
+    const runtimeRoot = join(directory, "development");
+    const originalEnv = {
+      PATH: codexA.path,
+      PNPM_CONFIG_REPORTER: "silent",
+      REINS_DEVELOPMENT_ROOT: runtimeRoot,
+      REINS_IDLE_TIMEOUT_MS: "50",
+    };
+    const spawned = await runDevelopmentCli(
+      ["spawn", "codex", "hello", "--name", "path-session"],
+      originalEnv,
+    );
+    expect(spawned.status, spawned.stderr).toBe(0);
+    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
+      .sessionId;
+    const originalRuntimeDirectory = (
+      await readdir(runtimeRoot, { withFileTypes: true })
+    ).find((entry) => entry.isDirectory())?.name;
+    if (originalRuntimeDirectory === undefined) {
+      throw new Error("Development runtime directory was not created");
+    }
+
+    const listed = await runDevelopmentCli(["list", "--name", "path-session"], {
+      ...originalEnv,
+      PATH: codexB.path,
+    });
+    const cleanup = await runCommand(
+      process.execPath,
+      [join(repository, "apps/cli/dist/reins.js"), "kill", sessionId],
+      repository,
+      {
+        ...originalEnv,
+        REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
+        REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
+        REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),
+      },
+    );
+    expect(cleanup.status, cleanup.stderr).toBe(0);
+
+    expect(listed.status, listed.stderr).toBe(0);
+    expect(JSON.parse(listed.stdout)).toEqual([]);
+  }, 120_000);
+
   test("isolates a live daemon when Node resolution conditions change without rebuilding output", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);
+    const codex = await installCodexFixture(directory);
     const runtimeRoot = join(directory, "development");
     const baseEnv = {
+      PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
-      REINS_ADAPTERS_MODULE: adaptersModule,
       REINS_DEVELOPMENT_ROOT: runtimeRoot,
       REINS_IDLE_TIMEOUT_MS: "50",
     };
@@ -583,7 +556,7 @@ describe("checkout-isolated development entry", () => {
       NODE_OPTIONS: "--conditions=f04-runtime-a",
     };
     const spawned = await runDevelopmentCli(
-      ["spawn", "fake", "hello", "--name", "runtime-session"],
+      ["spawn", "codex", "hello", "--name", "runtime-session"],
       originalEnv,
     );
     expect(spawned.status, spawned.stderr).toBe(0);
