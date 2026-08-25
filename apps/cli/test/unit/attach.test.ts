@@ -1,7 +1,6 @@
 import { PassThrough } from "node:stream";
 
 import type {
-  AttachResult,
   MachineError,
   ProtocolMethod,
   ProtocolNotification,
@@ -92,11 +91,11 @@ class ControlledClient implements ReinsClient {
     }) as Promise<ProtocolResponseFor<M>>;
   }
 
-  acceptAttach(replayPrefixes: AttachResult["replayPrefixes"] = []): void {
+  acceptAttach(): void {
     this.attachResolve?.({
       kind: "response",
       requestId,
-      result: { sessionId, replayed: 0, replayPrefixes },
+      result: { sessionId, replayed: 0 },
     });
   }
 
@@ -192,7 +191,7 @@ test("pretty replay waits for attach acceptance and flushes a complete body once
   await attached;
 });
 
-test("a replay prefix restores the body before its permission menu starts", async () => {
+test("a coherent replay body is rendered before its permission menu starts", async () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));
@@ -208,10 +207,16 @@ test("a replay prefix restores the body before its permission menu starts", asyn
   client.emit({
     kind: "notification",
     method: "event",
-    params: { type: "text.delta", sessionId, turnId, messageId, delta: "lo" },
+    params: {
+      type: "text.delta",
+      sessionId,
+      turnId,
+      messageId,
+      delta: "hello",
+    },
   });
   client.emit(requested("p1"));
-  client.acceptAttach([{ turnId, messageId, prefix: "hel" }]);
+  client.acceptAttach();
   await tick();
   expect(output.join("")).toMatch(/^helloPermission requested: tool:Bash/u);
   input.end("1\n");
@@ -288,7 +293,7 @@ test("JSON attach emits every notification without presenter projection", async 
     delta,
     snapshot,
   ]);
-  client.acceptAttach([{ turnId, messageId, prefix: "ignored-prefix" }]);
+  client.acceptAttach();
   client.end();
   await attached;
 });

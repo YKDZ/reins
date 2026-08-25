@@ -317,8 +317,6 @@ function domainMessage(error: MachineError): string {
       return "Daemon disconnected";
     case "diagnostics_unavailable":
       return "Diagnostics are unavailable";
-    case "attach_replay_unavailable":
-      return `Attach replay is unavailable for message ${error.messageId} in turn ${error.turnId}`;
     case "diagnostics_store_corrupt":
       return !("cause" in error) || error.cause === undefined
         ? "Diagnostics store is corrupt"

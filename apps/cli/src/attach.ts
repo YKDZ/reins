@@ -302,7 +302,7 @@ export async function runAttach(
           return;
         }
         attachReady = true;
-        presenter?.flushInitial(response.result.replayPrefixes);
+        presenter?.flushInitial();
         if (pendingEnd !== undefined) {
           settled = true;
           const result = pendingEnd;

@@ -2,7 +2,6 @@ import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
-  AttachResult,
   CapabilitiesResult,
   DaemonDiagnosticFact,
   DomainEvent,
@@ -12,7 +11,6 @@ import type {
   KillParams,
   ListFilter,
   MachineError,
-  MessageId,
   ProtocolMessage,
   ProtocolRequest,
   RequestId,
@@ -59,6 +57,12 @@ type Observation = {
   killed: boolean;
 };
 
+type EventHistory = {
+  readonly events: DomainEvent[];
+  readonly openMessages: Set<string>;
+  safeBoundaries: number[];
+};
+
 function unsupportedProtocolMethod(value: ProtocolRequest["method"]): never {
   throw new Error(`unexpected protocol method: ${String(value)}`);
 }
@@ -102,13 +106,9 @@ export function createProtocolServerInternal(
     TransportConnection<ProtocolMessage>,
     Set<() => void>
   >();
-  const eventLog = new Map<SessionId, DomainEvent[]>();
+  const eventLog = new Map<SessionId, EventHistory>();
   const observations = new Map<SessionId, Observation>();
   const knownSessions = new Set<SessionId>();
-  const activeMessageText = new Map<
-    SessionId,
-    Map<TurnId, Map<MessageId, string>>
-  >();
   const transportFailureConnections = new WeakSet<
     TransportConnection<ProtocolMessage>
   >();
@@ -255,7 +255,6 @@ export function createProtocolServerInternal(
       }
       cleanupByConnection.clear();
       attachSubscriptions.clear();
-      activeMessageText.clear();
       pendingMessages.length = 0;
       try {
         if (daemonStarted && daemonStopReason === undefined) {
@@ -282,44 +281,58 @@ export function createProtocolServerInternal(
     return attempt;
   }
 
-  function appendLog(event: DomainEvent): void {
-    const history = eventLog.get(event.sessionId) ?? [];
-    history.push(event);
-    if (history.length > eventLogLimit) {
-      history.splice(0, history.length - eventLogLimit);
-    }
-    eventLog.set(event.sessionId, history);
+  function messageKey(event: { turnId: TurnId; messageId: string }): string {
+    return `${event.turnId}\0${event.messageId}`;
   }
 
-  function observeMessageText(event: DomainEvent): void {
+  function observeHistoryBoundary(
+    history: EventHistory,
+    event: DomainEvent,
+  ): void {
     if (event.type === "text.delta") {
-      const turns = activeMessageText.get(event.sessionId) ?? new Map();
-      const messages = turns.get(event.turnId) ?? new Map();
-      messages.set(
-        event.messageId,
-        `${messages.get(event.messageId) ?? ""}${event.delta}`,
-      );
-      turns.set(event.turnId, messages);
-      activeMessageText.set(event.sessionId, turns);
-      return;
+      history.openMessages.add(messageKey(event));
+    } else if (event.type === "message") {
+      history.openMessages.delete(messageKey(event));
+    } else if (event.type === "turn.completed") {
+      const prefix = `${event.turnId}\0`;
+      for (const key of history.openMessages) {
+        if (key.startsWith(prefix)) history.openMessages.delete(key);
+      }
+    } else if (event.type === "session.killed") {
+      history.openMessages.clear();
     }
-    if (event.type === "message") {
-      const turns = activeMessageText.get(event.sessionId);
-      const messages = turns?.get(event.turnId);
-      messages?.delete(event.messageId);
-      if (messages?.size === 0) turns?.delete(event.turnId);
-      if (turns?.size === 0) activeMessageText.delete(event.sessionId);
-      return;
+    if (history.openMessages.size === 0) {
+      history.safeBoundaries.push(history.events.length);
     }
-    if (event.type === "turn.completed") {
-      const turns = activeMessageText.get(event.sessionId);
-      turns?.delete(event.turnId);
-      if (turns?.size === 0) activeMessageText.delete(event.sessionId);
-      return;
-    }
-    if (event.type === "session.killed") {
-      activeMessageText.delete(event.sessionId);
-    }
+  }
+
+  function trimHistory(history: EventHistory): void {
+    if (history.events.length <= eventLogLimit) return;
+    const target = history.events.length - eventLogLimit;
+    const atOrAfter = history.safeBoundaries.find(
+      (boundary) => boundary >= target,
+    );
+    const cut =
+      atOrAfter ??
+      history.safeBoundaries.findLast((boundary) => boundary <= target) ??
+      0;
+    if (cut === 0) return;
+    history.events.splice(0, cut);
+    history.safeBoundaries = history.safeBoundaries
+      .filter((boundary) => boundary >= cut)
+      .map((boundary) => boundary - cut);
+  }
+
+  function appendLog(event: DomainEvent): void {
+    const history = eventLog.get(event.sessionId) ?? {
+      events: [],
+      openMessages: new Set<string>(),
+      safeBoundaries: [0],
+    };
+    history.events.push(event);
+    observeHistoryBoundary(history, event);
+    trimHistory(history);
+    eventLog.set(event.sessionId, history);
   }
 
   function endAttach(
@@ -340,7 +353,6 @@ export function createProtocolServerInternal(
     if (event.type === "session.created") {
       knownSessions.add(event.sessionId);
     }
-    observeMessageText(event);
     appendLog(event);
     const observation = observations.get(event.sessionId) ?? { killed: false };
     if (event.type === "turn.started") observation.activeTurnId = event.turnId;
@@ -554,27 +566,29 @@ export function createProtocolServerInternal(
   function attach(
     connection: TransportConnection<ProtocolMessage>,
     params: AttachParams,
-  ): AttachResult {
+  ): { sessionId: SessionId; replayed: number } {
     if (!knownSessions.has(params.sessionId)) {
       throw {
         code: "session_not_found",
         sessionId: params.sessionId,
       } satisfies MachineError;
     }
-    const history = eventLog.get(params.sessionId) ?? [];
+    const history = eventLog.get(params.sessionId) ?? {
+      events: [],
+      openMessages: new Set<string>(),
+      safeBoundaries: [0],
+    };
     const observation = observations.get(params.sessionId) ?? { killed: false };
     const replayedCount =
       params.replay === undefined
-        ? history.length
-        : Math.min(params.replay, history.length);
-    const replayEvents = history.slice(
-      replayedCount === 0 ? history.length : -replayedCount,
-    );
-    const replayPrefixes = deriveReplayPrefixes(
-      params.sessionId,
-      history,
-      replayEvents,
-    );
+        ? history.events.length
+        : Math.min(params.replay, history.events.length);
+    const naiveStart = history.events.length - replayedCount;
+    const replayStart = history.safeBoundaries.includes(naiveStart)
+      ? naiveStart
+      : (history.safeBoundaries.findLast((boundary) => boundary < naiveStart) ??
+        0);
+    const replayEvents = history.events.slice(replayStart);
     const targetTurnId =
       params.exitOn === undefined || params.exitOn.length === 0
         ? undefined
@@ -622,76 +636,8 @@ export function createProtocolServerInternal(
     }
     return {
       sessionId: params.sessionId,
-      replayed: replayedCount,
-      replayPrefixes,
+      replayed: replayEvents.length,
     };
-  }
-
-  function deriveReplayPrefixes(
-    sessionId: SessionId,
-    history: readonly DomainEvent[],
-    replayEvents: readonly DomainEvent[],
-  ): AttachResult["replayPrefixes"] {
-    const suffixes = new Map<
-      string,
-      { turnId: TurnId; messageId: MessageId; text: string }
-    >();
-    for (const event of replayEvents) {
-      if (event.type !== "text.delta") continue;
-      const key = `${event.turnId}\0${event.messageId}`;
-      const prior = suffixes.get(key);
-      suffixes.set(key, {
-        turnId: event.turnId,
-        messageId: event.messageId,
-        text: `${prior?.text ?? ""}${event.delta}`,
-      });
-    }
-    const snapshots = new Map<string, string>();
-    for (const event of history) {
-      if (event.type === "message") {
-        snapshots.set(`${event.turnId}\0${event.messageId}`, event.content);
-      }
-    }
-    const prefixes: AttachResult["replayPrefixes"] = [];
-    const replayedIdentities = new Set<string>();
-    for (const [key, suffix] of suffixes) {
-      replayedIdentities.add(key);
-      const full =
-        snapshots.get(key) ??
-        activeMessageText
-          .get(sessionId)
-          ?.get(suffix.turnId)
-          ?.get(suffix.messageId);
-      if (full === undefined) continue;
-      if (!full.endsWith(suffix.text)) {
-        throw {
-          code: "attach_replay_unavailable",
-          reason: "message_suffix_mismatch",
-          sessionId,
-          turnId: suffix.turnId,
-          messageId: suffix.messageId,
-        } satisfies MachineError;
-      }
-      const prefix = full.slice(0, full.length - suffix.text.length);
-      if (prefix.length > 0) {
-        prefixes.push({
-          turnId: suffix.turnId,
-          messageId: suffix.messageId,
-          prefix,
-        });
-      }
-    }
-    for (const [turnId, messages] of activeMessageText.get(sessionId) ?? []) {
-      for (const [messageId, prefix] of messages) {
-        if (
-          prefix.length > 0 &&
-          !replayedIdentities.has(`${turnId}\0${messageId}`)
-        ) {
-          prefixes.push({ turnId, messageId, prefix });
-        }
-      }
-    }
-    return prefixes;
   }
 
   async function dispatch(

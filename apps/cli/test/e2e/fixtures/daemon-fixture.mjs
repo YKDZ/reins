@@ -226,11 +226,7 @@ const server = createServer((socket) => {
           `${JSON.stringify({
             kind: "response",
             requestId: request.requestId,
-            result: {
-              sessionId: "prompt@g1",
-              replayed: 1024,
-              replayPrefixes: [],
-            },
+            result: { sessionId: "prompt@g1", replayed: 1024 },
           })}\n`,
         );
       } else if (mode === "output-error" && request.method === "capabilities") {
@@ -286,11 +282,7 @@ const server = createServer((socket) => {
           `${JSON.stringify({
             kind: "response",
             requestId: request.requestId,
-            result: {
-              sessionId: "prompt@g1",
-              replayed: 0,
-              replayPrefixes: [],
-            },
+            result: { sessionId: "prompt@g1", replayed: 0 },
           })}\n`,
         );
         socket.write(
@@ -324,11 +316,7 @@ const server = createServer((socket) => {
           `${JSON.stringify({
             kind: "response",
             requestId: request.requestId,
-            result: {
-              sessionId: "prompt@g1",
-              replayed: 1,
-              replayPrefixes: [],
-            },
+            result: { sessionId: "prompt@g1", replayed: 1 },
           })}\n`,
         );
         setTimeout(() => socket.end(), 100);

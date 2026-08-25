@@ -46,15 +46,3 @@ test("an output error with a non-string system code is rejected", () => {
 
   expect(error.code).toBe("internal_error");
 });
-
-test("attach replay mismatch uses the resource exit class", () => {
-  expect(
-    exitCodeForError({
-      code: "attach_replay_unavailable",
-      reason: "message_suffix_mismatch",
-      sessionId: "reviewer@g1" as never,
-      turnId: "t1" as never,
-      messageId: "m1" as never,
-    }),
-  ).toBe(EXIT_RESOURCE);
-});

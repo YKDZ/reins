@@ -1906,13 +1906,6 @@ export const machineErrorSchema = v.union([
   }),
   v.strictObject({ code: v.literal("daemon_disconnected") }),
   v.strictObject({ code: v.literal("diagnostics_unavailable") }),
-  v.strictObject({
-    code: v.literal("attach_replay_unavailable"),
-    reason: v.literal("message_suffix_mismatch"),
-    sessionId: sessionIdSchema,
-    turnId: turnIdSchema,
-    messageId: messageIdSchema,
-  }),
   unexpectedError("capability_query_failed"),
   unexpectedError("internal_error"),
   unexpectedError("diagnostics_store_corrupt"),
@@ -2096,13 +2089,6 @@ export const initializeResultSchema = v.strictObject({});
 export const attachResultSchema = v.strictObject({
   sessionId: sessionIdSchema,
   replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
-  replayPrefixes: v.array(
-    v.strictObject({
-      turnId: turnIdSchema,
-      messageId: messageIdSchema,
-      prefix: v.pipe(v.string(), v.minLength(1)),
-    }),
-  ),
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 

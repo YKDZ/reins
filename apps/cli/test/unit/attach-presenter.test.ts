@@ -48,12 +48,12 @@ test("an initial complete delta sequence prints its worker body once", () => {
       content: "hello",
     }),
   );
-  presenter.flushInitial([]);
+  presenter.flushInitial();
 
   expect(output.join("")).toBe("hello\n");
 });
 
-test("an explicit replay prefix restores text at the first delta without moving tools", () => {
+test("a coherent replay keeps text and tool events in their original order", () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));
@@ -62,7 +62,7 @@ test("an explicit replay prefix restores text at the first delta without moving 
   const presenter = createPrettyAttachPresenter();
 
   presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: "llo" }),
+    event({ type: "text.delta", sessionId, turnId, messageId, delta: "hello" }),
   );
   presenter.bufferInitial(
     event({
@@ -93,7 +93,7 @@ test("an explicit replay prefix restores text at the first delta without moving 
     }),
   );
 
-  presenter.flushInitial([{ turnId, messageId, prefix: "he" }]);
+  presenter.flushInitial();
 
   expect(output.join("")).toBe("hello[tool] Read requested (c1)\n world\n");
 });
@@ -122,7 +122,7 @@ test("initial snapshots remain complete when no matching full delta window exist
       sessionId,
       turnId,
       messageId: secondMessageId,
-      delta: "tail",
+      delta: "complete tail",
     }),
   );
   presenter.bufferInitial(
@@ -135,14 +135,12 @@ test("initial snapshots remain complete when no matching full delta window exist
       content: "complete tail",
     }),
   );
-  presenter.flushInitial([
-    { turnId, messageId: secondMessageId, prefix: "complete " },
-  ]);
+  presenter.flushInitial();
 
   expect(output.join("")).toBe("worker: snapshot only\ncomplete tail\n");
 });
 
-test("a replay-zero prefix is written at the start of the initial batch", () => {
+test("multiple coherent message identities are applied independently", () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));
@@ -152,28 +150,12 @@ test("a replay-zero prefix is written at the start of the initial batch", () => 
 
   presenter.bufferInitial(
     event({
-      type: "tool.requested",
+      type: "text.delta",
       sessionId,
       turnId,
-      toolCallId,
-      name: "Read",
+      messageId,
+      delta: "full one",
     }),
-  );
-  presenter.flushInitial([{ turnId, messageId, prefix: "working" }]);
-
-  expect(output.join("")).toBe("working[tool] Read requested (c1)\n");
-});
-
-test("prefixes for multiple identities are applied independently", () => {
-  const output: string[] = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    output.push(String(chunk));
-    return true;
-  });
-  const presenter = createPrettyAttachPresenter();
-
-  presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: " one" }),
   );
   presenter.bufferInitial(
     event({
@@ -191,7 +173,7 @@ test("prefixes for multiple identities are applied independently", () => {
       sessionId,
       turnId,
       messageId: secondMessageId,
-      delta: " two",
+      delta: "full two",
     }),
   );
   presenter.bufferInitial(
@@ -204,10 +186,7 @@ test("prefixes for multiple identities are applied independently", () => {
       content: "full two",
     }),
   );
-  presenter.flushInitial([
-    { turnId, messageId, prefix: "full" },
-    { turnId, messageId: secondMessageId, prefix: "full" },
-  ]);
+  presenter.flushInitial();
 
   expect(output.join("")).toBe("full one\nfull two\n");
 });
@@ -252,7 +231,7 @@ test("equal text from different message identities is never deduplicated", () =>
       }),
     );
   }
-  presenter.flushInitial([]);
+  presenter.flushInitial();
 
   expect(output.join("")).toBe("worker: same\nworker: same\n");
 });

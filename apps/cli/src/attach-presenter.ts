@@ -1,14 +1,10 @@
-import type {
-  AttachResult,
-  DomainEvent,
-  ProtocolNotification,
-} from "@reins/protocol";
+import type { DomainEvent, ProtocolNotification } from "@reins/protocol";
 
 import { printNotification } from "./output.ts";
 
 export type PrettyAttachPresenter = {
   bufferInitial(notification: ProtocolNotification): void;
-  flushInitial(prefixes: AttachResult["replayPrefixes"]): void;
+  flushInitial(): void;
   present(notification: ProtocolNotification): void;
   clear(): void;
 };
@@ -21,11 +17,11 @@ type MessageState = {
 function messageIdentity(
   event: Extract<DomainEvent, { type: "text.delta" | "message" }>,
 ): string {
-  return `${event.turnId}\0${event.messageId}`;
+  return `${event.sessionId}\0${event.turnId}\0${event.messageId}`;
 }
 
 function turnPrefix(event: { sessionId: string; turnId: string }): string {
-  return `${event.turnId}\0`;
+  return `${event.sessionId}\0${event.turnId}\0`;
 }
 
 function writeSnapshot(event: Extract<DomainEvent, { type: "message" }>): void {
@@ -80,42 +76,10 @@ export function createPrettyAttachPresenter(): PrettyAttachPresenter {
     bufferInitial(notification) {
       batch.push(notification);
     },
-    flushInitial(prefixes) {
-      const initialDeltaKeys = new Set<string>();
-      for (const notification of batch) {
-        if (notification.method !== "event") continue;
-        const event = notification.params;
-        if (event.type === "text.delta") {
-          initialDeltaKeys.add(messageIdentity(event));
-        }
-      }
-      const prefixByIdentity = new Map(
-        prefixes.map((prefix) => [
-          `${prefix.turnId}\0${prefix.messageId}`,
-          prefix.prefix,
-        ]),
-      );
-      const seeded = new Set<string>();
-      for (const [key, prefix] of prefixByIdentity) {
-        if (!initialDeltaKeys.has(key)) {
-          process.stdout.write(prefix);
-          messages.set(key, { streamed: prefix, snapshotSeen: false });
-          seeded.add(key);
-        }
-      }
+    flushInitial() {
       for (const notification of batch.splice(0)) {
         if (notification.method === "event") {
-          const event = notification.params;
-          if (event.type === "text.delta") {
-            const key = messageIdentity(event);
-            const prefix = prefixByIdentity.get(key);
-            if (prefix !== undefined && !seeded.has(key)) {
-              process.stdout.write(prefix);
-              messages.set(key, { streamed: prefix, snapshotSeen: false });
-              seeded.add(key);
-            }
-          }
-          presentEvent(event);
+          presentEvent(notification.params);
         } else {
           printNotification(notification.method, notification.params, "pretty");
         }
