@@ -26,16 +26,20 @@ import type {
 
 const sessionId = v.parse(sessionIdSchema, "prompt@g1");
 const turnId = v.parse(turnIdSchema, "t1");
+const secondTurnId = v.parse(turnIdSchema, "t2");
 const requestId = v.parse(requestIdSchema, "test");
 const messageId = v.parse(messageIdSchema, "m1");
-const requested = (permissionId: "p1" | "p2"): ProtocolNotification =>
+const requested = (
+  permissionId: "p1" | "p2" | "p3",
+  targetTurnId = turnId,
+): ProtocolNotification =>
   v.parse(protocolNotificationSchema, {
     kind: "notification",
     method: "event",
     params: {
       type: "permission.requested",
       sessionId,
-      turnId,
+      turnId: targetTurnId,
       permissionId: v.parse(permissionIdSchema, permissionId),
       kind: "tool:Bash",
       options: [
@@ -57,6 +61,18 @@ const resolved = (permissionId: "p1" | "p2"): ProtocolNotification =>
       resolution: { outcome: "allow", scope: "once" },
     },
   });
+
+const completed = (targetTurnId = turnId): ProtocolNotification => ({
+  kind: "notification",
+  method: "event",
+  params: {
+    type: "turn.completed",
+    sessionId,
+    turnId: targetTurnId,
+    stopReason: "end_turn",
+    finalReply: null,
+  },
+});
 
 class ControlledClient implements ReinsClient {
   readonly resolutions: string[] = [];
@@ -150,6 +166,74 @@ test("replayed request followed by resolution never opens a prompt", async () =>
   expect(output.join("")).not.toContain("Permission requested:");
   client.end();
   await expect(attached).resolves.toMatchObject({ reason: "session_killed" });
+});
+
+test("a replayed terminal clears its pending permission before attach acceptance", async () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.emit(requested("p1"));
+  client.emit(completed());
+  client.acceptAttach();
+  await tick();
+
+  expect(output.join("")).not.toContain("Permission requested:");
+  expect(client.resolutions).toEqual([]);
+  client.end();
+  await expect(attached).resolves.toMatchObject({ reason: "session_killed" });
+});
+
+test("a live turn terminal aborts its active permission without resolving it", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.acceptAttach();
+  client.emit(requested("p1"));
+  await tick();
+  client.emit(completed());
+  input.end("1\n");
+  await tick();
+
+  expect(client.resolutions).toEqual([]);
+  client.end();
+  await attached;
+});
+
+test("a terminal clears its turn while a later turn keeps FIFO progress", async () => {
+  vi.spyOn(process.stdout, "write").mockImplementation(() => true);
+  const client = new ControlledClient();
+  const input = new PassThrough();
+  const attached = runAttach(client, {
+    params: { sessionId },
+    mode: "pretty",
+    input,
+  });
+  client.emit(requested("p1", turnId));
+  client.emit(completed(turnId));
+  client.emit(requested("p2", secondTurnId));
+  client.emit(requested("p3", secondTurnId));
+  client.acceptAttach();
+  input.end("1\n1\n");
+  await tick();
+  await tick();
+
+  expect(client.resolutions).toEqual(["p2", "p3"]);
+  client.end();
+  await attached;
 });
 
 test("pretty replay waits for attach acceptance and flushes a complete body once", async () => {

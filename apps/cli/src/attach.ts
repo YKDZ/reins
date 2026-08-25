@@ -162,7 +162,12 @@ export async function runAttach(
     const pendingPermissions = new Map<string, PermissionRequestedEvent>();
     const seenPermissions = new Set<string>();
     let activePermission:
-      | { readonly key: string; readonly controller: AbortController }
+      | {
+          readonly key: string;
+          readonly sessionId: PermissionRequestedEvent["sessionId"];
+          readonly turnId: PermissionRequestedEvent["turnId"];
+          readonly controller: AbortController;
+        }
       | undefined;
     let prompt: PromptInput | undefined;
     let pendingEnd: AttachEnded | undefined;
@@ -186,6 +191,31 @@ export async function runAttach(
       unsubscribe();
       unsubscribeClosed();
     };
+    const clearPermissionsForTurn = (
+      sessionId: PermissionRequestedEvent["sessionId"],
+      turnId: PermissionRequestedEvent["turnId"],
+    ): void => {
+      const matchingKeys = new Set<string>();
+      for (const [key, event] of pendingPermissions) {
+        if (event.sessionId === sessionId && event.turnId === turnId) {
+          matchingKeys.add(key);
+          pendingPermissions.delete(key);
+        }
+      }
+      for (let index = permissionQueue.length - 1; index >= 0; index -= 1) {
+        const key = permissionQueue[index];
+        if (key !== undefined && matchingKeys.has(key)) {
+          permissionQueue.splice(index, 1);
+        }
+      }
+      if (
+        activePermission?.sessionId === sessionId &&
+        activePermission.turnId === turnId
+      ) {
+        activePermission.controller.abort();
+        activePermission = undefined;
+      }
+    };
     const consumePermissions = async (): Promise<void> => {
       if (consumingPermissions || settled || !attachReady) return;
       consumingPermissions = true;
@@ -197,7 +227,12 @@ export async function runAttach(
           if (event === undefined) continue;
           prompt ??= createPromptInput(input);
           const controller = new AbortController();
-          activePermission = { key, controller };
+          activePermission = {
+            key,
+            sessionId: event.sessionId,
+            turnId: event.turnId,
+            controller,
+          };
           await resolveFromMenu(
             prompt,
             event.sessionId,
@@ -233,6 +268,10 @@ export async function runAttach(
           notification.method === "event" &&
           notification.params.type === "turn.completed"
         ) {
+          clearPermissionsForTurn(
+            notification.params.sessionId,
+            notification.params.turnId,
+          );
           options.onTurnCompleted?.(notification.params);
         }
         if (notification.method === "attach.ended") {
