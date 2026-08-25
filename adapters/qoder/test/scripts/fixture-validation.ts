@@ -6,6 +6,8 @@ export type FixtureValidationErrorCode =
   | "terminal_result_not_last"
   | "terminal_result_failed"
   | "insufficient_tool_requests"
+  | "duplicate_tool_results"
+  | "orphan_tool_results"
   | "unmatched_tool_results";
 
 export class FixtureValidationError extends Error {
@@ -52,7 +54,7 @@ export function validateRecordedFixture(
     );
   }
   const requestIds = new Set<string>();
-  const resultIds = new Set<string>();
+  const resultCountById = new Map<string, number>();
   for (const message of messages) {
     if (message.type === "stream_event") {
       const event = message.event;
@@ -86,7 +88,10 @@ export function validateRecordedFixture(
           typeof block.tool_use_id === "string" &&
           block.tool_use_id.length > 0
         ) {
-          resultIds.add(block.tool_use_id);
+          resultCountById.set(
+            block.tool_use_id,
+            (resultCountById.get(block.tool_use_id) ?? 0) + 1,
+          );
         }
       }
     }
@@ -95,6 +100,23 @@ export function validateRecordedFixture(
     throw new FixtureValidationError(
       "insufficient_tool_requests",
       `Fixture has ${requestIds.size} native tool request(s); expected at least ${options.minimumNativeToolCount}`,
+    );
+  }
+  const duplicateResults = [...resultCountById].filter(
+    ([, count]) => count > 1,
+  );
+  if (duplicateResults.length > 0) {
+    throw new FixtureValidationError(
+      "duplicate_tool_results",
+      `Fixture has ${duplicateResults.length} native tool(s) with duplicate content results`,
+    );
+  }
+  const resultIds = new Set(resultCountById.keys());
+  const orphanResults = [...resultIds].filter((id) => !requestIds.has(id));
+  if (orphanResults.length > 0) {
+    throw new FixtureValidationError(
+      "orphan_tool_results",
+      `Fixture has ${orphanResults.length} content result(s) without native tool requests`,
     );
   }
   const missingResults = [...requestIds].filter((id) => !resultIds.has(id));

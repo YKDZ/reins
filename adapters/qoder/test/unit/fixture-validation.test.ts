@@ -120,4 +120,52 @@ describe("fixture 录制终态验收", () => {
       contentResultCount: 2,
     });
   });
+
+  test("同一 native tool 的两个 content results 拒绝", () => {
+    const duplicateResult = {
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "tc1", content: "again" },
+        ],
+      },
+      parent_tool_use_id: null,
+      uuid: "duplicate-result",
+      session_id: "qs",
+    } as SDKMessage;
+
+    expectCode(
+      () =>
+        validateRecordedFixture(
+          [...toolMessages, duplicateResult, successResult],
+          { timedOut: false, minimumNativeToolCount: 2 },
+        ),
+      "duplicate_tool_results",
+    );
+  });
+
+  test("所有 requests 完成后仍拒绝 unknown content result", () => {
+    const orphanResult = {
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          { type: "tool_result", tool_use_id: "unknown", content: "extra" },
+        ],
+      },
+      parent_tool_use_id: null,
+      uuid: "orphan-result",
+      session_id: "qs",
+    } as SDKMessage;
+
+    expectCode(
+      () =>
+        validateRecordedFixture(
+          [...toolMessages, orphanResult, successResult],
+          { timedOut: false, minimumNativeToolCount: 2 },
+        ),
+      "orphan_tool_results",
+    );
+  });
 });

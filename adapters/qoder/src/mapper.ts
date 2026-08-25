@@ -198,9 +198,9 @@ function mapStreamEvent(
     ];
   }
   if (event.type === "message_stop") {
-    return state.currentAssistantId === null
-      ? []
-      : flushPendingText(session, state, state.currentAssistantId);
+    const nativeId = state.currentAssistantId;
+    state.currentAssistantId = null;
+    return nativeId === null ? [] : flushPendingText(session, state, nativeId);
   }
   const block = event.content_block;
   if (

@@ -713,6 +713,66 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
+  test("message_stop 后丢弃迟到文本但保留 end_turn usage", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(messageStart("start-a", "native-a"));
+    fake.controls.push(textDelta("delta-a", "A"));
+    fake.controls.push(assistantText("snapshot-a", "A", "native-a"));
+    fake.controls.push({
+      type: "stream_event",
+      event: { type: "message_stop" },
+      parent_tool_use_id: null,
+      uuid: "message-stop-a",
+      session_id: "qs",
+    });
+    fake.controls.push(textDelta("late-delta", "X"));
+    fake.controls.push({
+      type: "stream_event",
+      event: {
+        type: "message_delta",
+        delta: { stop_reason: "end_turn", stop_sequence: null },
+        usage: { input_tokens: 13, output_tokens: 21 },
+      },
+      parent_tool_use_id: null,
+      uuid: "end-turn-a",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "text.delta" ||
+          event.type === "message" ||
+          event.type === "turn.completed",
+      ),
+    ).toEqual([
+      {
+        type: "text.delta",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        delta: "A",
+      },
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "A",
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: "A",
+        usage: { input_tokens: 13, output_tokens: 21 },
+      },
+    ]);
+  });
+
   test("同一回合的多个原生 assistant 消息按边界顺序发布", async () => {
     const { events, fake } = setup();
     fake.controls.push(messageStart("start-1", "native-1"));

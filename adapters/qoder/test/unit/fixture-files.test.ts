@@ -55,6 +55,17 @@ function failRenameCallOnce(callToFail: number) {
   };
 }
 
+function failRenameCalls(callsToFail: ReadonlySet<number>) {
+  let calls = 0;
+  return async (source: string, destination: string): Promise<void> => {
+    calls += 1;
+    if (callsToFail.has(calls)) {
+      throw new Error(`injected rename failure ${calls}`);
+    }
+    await rename(source, destination);
+  };
+}
+
 describe("fixture 文件对替换", () => {
   test("已有文件对在第二个 install 失败后逐字节恢复且无残留", async () => {
     const directory = await fixtureDirectory();
@@ -159,6 +170,39 @@ describe("fixture 文件对替换", () => {
       "sample.jsonl",
       "sample.metadata.json",
     ]);
+  });
+
+  test("install 与 rollback 都失败时保留仍是唯一原件的 backup", async () => {
+    const directory = await fixtureDirectory();
+    const jsonlPath = join(directory, "sample.jsonl");
+    const metadataPath = join(directory, "sample.metadata.json");
+    await writeFile(jsonlPath, "old-jsonl\n");
+    await writeFile(metadataPath, "old-metadata\n");
+
+    await expect(
+      replaceFixturePair(
+        {
+          jsonlPath,
+          metadataPath,
+          jsonl: "new-jsonl\n",
+          metadata: "new-metadata\n",
+        },
+        { renameFile: failRenameCalls(new Set([4, 6])) },
+      ),
+    ).rejects.toMatchObject({ code: "fixture_pair_rollback_failed" });
+
+    const files = await readdir(directory);
+    const jsonlBackup = files.find(
+      (file) => file.startsWith("sample.jsonl.") && file.endsWith(".backup"),
+    );
+    expect(jsonlBackup).toBeDefined();
+    await expect(readFile(join(directory, jsonlBackup!), "utf8")).resolves.toBe(
+      "old-jsonl\n",
+    );
+    await expect(readFile(metadataPath, "utf8")).resolves.toBe(
+      "old-metadata\n",
+    );
+    expect(files.some((file) => file.endsWith(".tmp"))).toBe(false);
   });
 });
 

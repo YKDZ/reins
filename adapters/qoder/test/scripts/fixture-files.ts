@@ -80,6 +80,7 @@ export async function replaceFixturePair(
       installed: false,
     },
   ];
+  const temporaryFiles = entries.map(({ temp }) => temp);
   const artifacts = entries.flatMap(({ temp, backup }) => [temp, backup]);
 
   const stagingResults = await Promise.allSettled(
@@ -125,7 +126,7 @@ export async function replaceFixturePair(
       }
       await removeArtifacts(artifacts);
     } catch (rollbackCause) {
-      await removeArtifacts(artifacts).catch(() => {});
+      await removeArtifacts(temporaryFiles).catch(() => {});
       throw new FixturePairReplacementError(
         "fixture_pair_rollback_failed",
         "Fixture pair rollback failed",
