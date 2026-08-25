@@ -340,6 +340,74 @@ describe("checkout-isolated development entry", () => {
     });
   }, 120_000);
 
+  test("does not reuse a daemon after a static adapter dependency changes", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
+    cleanupDirectories.push(directory);
+    const override = join(directory, "adapters.mjs");
+    const implementation = join(directory, "impl.mjs");
+    const validImplementation = `export { default } from ${JSON.stringify(
+      pathToFileURL(adaptersModule).href,
+    )};\n`;
+    await writeFile(override, 'export { default } from "./impl.mjs";\n');
+    await writeFile(implementation, validImplementation);
+    const env = {
+      PNPM_CONFIG_REPORTER: "silent",
+      REINS_ADAPTERS_MODULE: override,
+      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+      REINS_IDLE_TIMEOUT_MS: "50",
+    };
+    const spawned = await runDevelopmentCli(
+      ["spawn", "fake", "hello", "--name", "adapter-dependency-session"],
+      env,
+    );
+    expect(spawned.status, spawned.stderr).toBe(0);
+    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
+      .sessionId;
+
+    await writeFile(implementation, "export default 42;\n");
+    const changed = await runDevelopmentCli(["capabilities"], env);
+    await writeFile(implementation, validImplementation);
+    const cleanup = await runDevelopmentCli(["kill", sessionId], env);
+    expect(cleanup.status, cleanup.stderr).toBe(0);
+
+    expect(changed.status).toBe(65);
+    expect(changed.stderr).toBe("");
+    expect(JSON.parse(changed.stdout)).toMatchObject({
+      code: "daemon_start_failed",
+    });
+  }, 120_000);
+
+  test("fails closed for a non-literal adapter dependency", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
+    cleanupDirectories.push(directory);
+    const override = join(directory, "adapters.mjs");
+    const implementation = join(directory, "impl.mjs");
+    await writeFile(
+      override,
+      'const dependency = "./impl.mjs";\n' +
+        "export default (await import(dependency)).default;\n",
+    );
+    await writeFile(
+      implementation,
+      `export { default } from ${JSON.stringify(
+        pathToFileURL(adaptersModule).href,
+      )};\n`,
+    );
+
+    const result = await runDevelopmentCli(["capabilities"], {
+      PNPM_CONFIG_REPORTER: "silent",
+      REINS_ADAPTERS_MODULE: override,
+      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+      REINS_IDLE_TIMEOUT_MS: "50",
+    });
+
+    expect(result.status).toBe(1);
+    expect(result.stdout).toBe("");
+    expect(result.stderr).toBe(
+      `Failed to run the development CLI: Adapter dependency graph is not provable [nonliteral_dynamic_import]: ${override}\n`,
+    );
+  }, 120_000);
+
   test("isolates live sessions across clean checkouts and rebuilt output", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);

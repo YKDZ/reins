@@ -1,9 +1,13 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmod, mkdir, readFile, realpath } from "node:fs/promises";
+import { isBuiltin } from "node:module";
 import { constants, homedir, tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { isAbsolute, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+
+import { rolldown } from "rolldown";
+import { parseSync } from "rolldown/experimental";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const turboBuildArguments = [
@@ -66,9 +70,30 @@ type AdapterModuleIdentity =
   | {
       readonly kind: "file";
       readonly selection: string;
-      readonly realPath: string;
-      readonly contentSha256: string;
+      readonly modules: readonly LocalAdapterModuleIdentity[];
     };
+
+type LocalAdapterModuleIdentity = {
+  readonly moduleId: string;
+  readonly realPath: string;
+  readonly contentSha256: string;
+};
+
+type AdapterDependencyProofFailure =
+  | "commonjs_module"
+  | "local_module_loader"
+  | "nonliteral_dynamic_import"
+  | "unresolved_dependency";
+
+class AdapterDependencyProofError extends Error {
+  readonly code: AdapterDependencyProofFailure;
+
+  constructor(code: AdapterDependencyProofFailure, modulePath: string) {
+    super(`Adapter dependency graph is not provable [${code}]: ${modulePath}`);
+    this.name = "AdapterDependencyProofError";
+    this.code = code;
+  }
+}
 
 type DaemonCompositionIdentity = {
   readonly adaptersModule: AdapterModuleIdentity;
@@ -144,6 +169,157 @@ function isMissingFileError(error: unknown): boolean {
   );
 }
 
+function isPackageDependency(specifier: string): boolean {
+  if (isBuiltin(specifier)) return true;
+  return !(
+    specifier.startsWith(".") ||
+    specifier.startsWith("/") ||
+    specifier.startsWith("file:") ||
+    specifier.startsWith("#")
+  );
+}
+
+function literalString(value: unknown): string | undefined {
+  if (!isRecord(value) || value.type !== "Literal") return undefined;
+  return typeof value.value === "string" ? value.value : undefined;
+}
+
+function assertProvableModuleSyntax(value: unknown, moduleId: string): void {
+  if (Array.isArray(value)) {
+    for (const child of value) assertProvableModuleSyntax(child, moduleId);
+    return;
+  }
+  if (!isRecord(value)) return;
+
+  if (value.type === "ImportExpression") {
+    const specifier = literalString(value.source);
+    if (specifier === undefined) {
+      throw new AdapterDependencyProofError(
+        "nonliteral_dynamic_import",
+        moduleId,
+      );
+    }
+    if (specifier === "module" || specifier === "node:module") {
+      throw new AdapterDependencyProofError("local_module_loader", moduleId);
+    }
+  }
+  if (
+    value.type === "CallExpression" &&
+    isRecord(value.callee) &&
+    value.callee.type === "Identifier" &&
+    value.callee.name === "require"
+  ) {
+    throw new AdapterDependencyProofError("local_module_loader", moduleId);
+  }
+  if (
+    (value.type === "ImportDeclaration" ||
+      value.type === "ExportAllDeclaration" ||
+      value.type === "ExportNamedDeclaration") &&
+    ["module", "node:module"].includes(literalString(value.source) ?? "")
+  ) {
+    throw new AdapterDependencyProofError("local_module_loader", moduleId);
+  }
+
+  for (const child of Object.values(value)) {
+    assertProvableModuleSyntax(child, moduleId);
+  }
+}
+
+async function localAdapterModuleIdentity(
+  entryPath: string,
+): Promise<readonly LocalAdapterModuleIdentity[]> {
+  const moduleIds = new Set<string>();
+  let proofFailure: AdapterDependencyProofError | undefined;
+  let bundle: Awaited<ReturnType<typeof rolldown>> | undefined;
+  try {
+    bundle = await rolldown({
+      cwd: repository,
+      input: entryPath,
+      platform: "node",
+      treeshake: false,
+      external: isPackageDependency,
+      onLog(level, _log) {
+        if (level === "warn") {
+          proofFailure = new AdapterDependencyProofError(
+            "unresolved_dependency",
+            entryPath,
+          );
+          throw proofFailure;
+        }
+      },
+      plugins: [
+        {
+          name: "reins-adapter-dependency-proof",
+          transform(code, moduleId) {
+            if (moduleId.startsWith("\0rolldown/")) return;
+            try {
+              const parsed = parseSync(moduleId, code, {
+                sourceType: "unambiguous",
+              });
+              if (parsed.errors.length > 0) {
+                throw new AdapterDependencyProofError(
+                  "unresolved_dependency",
+                  moduleId,
+                );
+              }
+              assertProvableModuleSyntax(parsed.program, moduleId);
+            } catch (error) {
+              if (error instanceof AdapterDependencyProofError) {
+                proofFailure = error;
+              }
+              throw error;
+            }
+          },
+          moduleParsed(info) {
+            if (info.id.startsWith("\0rolldown/")) return;
+            if (info.code === null) return;
+            if (info.inputFormat === "cjs") {
+              proofFailure = new AdapterDependencyProofError(
+                "commonjs_module",
+                info.id,
+              );
+              throw proofFailure;
+            }
+            moduleIds.add(info.id);
+          },
+        },
+      ],
+    });
+    await bundle.generate({ format: "esm" });
+
+    const identities = await Promise.all(
+      [...moduleIds].map(
+        async (moduleId): Promise<LocalAdapterModuleIdentity> => {
+          if (!isAbsolute(moduleId)) {
+            throw new AdapterDependencyProofError(
+              "unresolved_dependency",
+              moduleId,
+            );
+          }
+          const realPath = await realpath(moduleId);
+          return {
+            moduleId,
+            realPath,
+            contentSha256: createHash("sha256")
+              .update(await readFile(realPath))
+              .digest("hex"),
+          };
+        },
+      ),
+    );
+    identities.sort((left, right) =>
+      left.moduleId.localeCompare(right.moduleId),
+    );
+    return identities;
+  } catch (error) {
+    if (proofFailure !== undefined) throw proofFailure;
+    if (error instanceof AdapterDependencyProofError) throw error;
+    throw new AdapterDependencyProofError("unresolved_dependency", entryPath);
+  } finally {
+    await bundle?.close();
+  }
+}
+
 async function adapterModuleIdentity(
   selection: string | undefined,
 ): Promise<AdapterModuleIdentity> {
@@ -158,12 +334,10 @@ async function adapterModuleIdentity(
     }
     throw error;
   }
-  const content = await readFile(realPath);
   return {
     kind: "file",
     selection: resolvedSelection,
-    realPath,
-    contentSha256: createHash("sha256").update(content).digest("hex"),
+    modules: await localAdapterModuleIdentity(realPath),
   };
 }
 
