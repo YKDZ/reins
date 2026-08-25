@@ -584,7 +584,7 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
-  test("已 flush 的原生消息拒绝不同文本但保留终态事实", async () => {
+  test("content_block_stop 后的渐进 snapshot 在终态发布最新文本", async () => {
     const { events, fake } = setup();
     fake.controls.push(assistantText("outer-a", "A", "native-flushed"));
     fake.controls.push({
@@ -592,6 +592,86 @@ describe("qoder driver 事件映射", () => {
       event: { type: "content_block_stop", index: 0 },
       parent_tool_use_id: null,
       uuid: "block-stop",
+      session_id: "qs",
+    });
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "native-flushed",
+        role: "assistant",
+        content: [{ type: "text", text: "AB" }],
+        stop_reason: "end_turn",
+        usage: { input_tokens: 0, output_tokens: 7 },
+      },
+      parent_tool_use_id: null,
+      uuid: "outer-ab",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "message" || event.type === "turn.completed",
+      ),
+    ).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "AB",
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: "AB",
+        usage: { input_tokens: 0, output_tokens: 7 },
+      },
+    ]);
+  });
+
+  test("content_block_stop 后由 message_stop 发布完整 snapshot", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(assistantText("outer-a", "A", "native-boundary"));
+    fake.controls.push({
+      type: "stream_event",
+      event: { type: "content_block_stop", index: 0 },
+      parent_tool_use_id: null,
+      uuid: "block-stop",
+      session_id: "qs",
+    });
+    fake.controls.push({
+      type: "stream_event",
+      event: { type: "message_stop" },
+      parent_tool_use_id: null,
+      uuid: "message-stop",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(events.filter((event) => event.type === "message")).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "A",
+      },
+    ]);
+  });
+
+  test("message_stop 后同 id 的不同文本保持已发布事实", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(assistantText("outer-a", "A", "native-flushed"));
+    fake.controls.push({
+      type: "stream_event",
+      event: { type: "message_stop" },
+      parent_tool_use_id: null,
+      uuid: "message-stop",
       session_id: "qs",
     });
     fake.controls.push({
@@ -658,6 +738,75 @@ describe("qoder driver 事件映射", () => {
         messageId: "m2",
         role: "worker",
         content: "second",
+      },
+    ]);
+  });
+
+  test("同一 active turn 的 deliver 保留未完成 tool state", async () => {
+    const { events, fake, driver } = setup();
+    fake.controls.push(assistantToolUseBlock("request-t1", "tc-active"));
+    await flush();
+
+    driver.deliver(sessionId, firstTurnId, "补充消息");
+    fake.controls.push(userToolResultBlock("result-t1", "tc-active", "ok"));
+    await flush();
+
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "tool.requested" || event.type === "tool.completed",
+      ),
+    ).toEqual([
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+        result: "ok",
+        isError: false,
+      },
+    ]);
+  });
+
+  test("同一 active turn 的 deliver 保留 pending snapshot", async () => {
+    const { events, fake, driver } = setup();
+    fake.controls.push(
+      assistantText("snapshot-t1", "pending", "native-active"),
+    );
+    await flush();
+
+    driver.deliver(sessionId, firstTurnId, "补充消息");
+    fake.controls.push(idle());
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "message" || event.type === "turn.completed",
+      ),
+    ).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "pending",
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: "pending",
+        usage: { input_tokens: 12, output_tokens: 34 },
       },
     ]);
   });

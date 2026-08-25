@@ -1,22 +1,22 @@
 // 录制真实 qoder 消息流为 fixture（ADR-0010 的“录制转写”层）。
 // 运行前置：本机 qodercn 登录态 + QODERCLI_PATH 指向 CN CLI。
 import { createHash } from "node:crypto";
-import {
-  mkdir,
-  mkdtemp,
-  readFile,
-  rename,
-  rm,
-  writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 
 import {
   qodercliAuth,
   query,
   type SDKMessage,
 } from "@qodercn-ai/qodercn-agent-sdk";
+
+import {
+  assertMatchesKnownCredentialPolicy,
+  replaceFixturePair,
+} from "./fixture-files.ts";
+import { validateRecordedFixture } from "./fixture-validation.ts";
 
 const scenarios = {
   "list-and-tool": {
@@ -56,85 +56,6 @@ function sanitizeMessage(message: SDKMessage): SDKMessage {
     return { ...message, cwd: "<fixture-cwd>" };
   }
   return message;
-}
-
-function inspectTools(messages: readonly SDKMessage[]): {
-  requestIds: Set<string>;
-  resultIds: Set<string>;
-} {
-  const requestIds = new Set<string>();
-  const resultIds = new Set<string>();
-  for (const message of messages) {
-    if (message.type === "stream_event") {
-      const event = message.event;
-      const block = event.content_block;
-      if (
-        event.type === "content_block_start" &&
-        block?.type === "tool_use" &&
-        typeof block.id === "string" &&
-        block.id.length > 0
-      ) {
-        requestIds.add(block.id);
-      }
-      continue;
-    }
-    if (message.type === "assistant") {
-      for (const block of message.message.content) {
-        if (
-          block.type === "tool_use" &&
-          typeof block.id === "string" &&
-          block.id.length > 0
-        ) {
-          requestIds.add(block.id);
-        }
-      }
-      continue;
-    }
-    if (message.type === "user" && Array.isArray(message.message.content)) {
-      for (const block of message.message.content) {
-        if (
-          block.type === "tool_result" &&
-          typeof block.tool_use_id === "string" &&
-          block.tool_use_id.length > 0
-        ) {
-          resultIds.add(block.tool_use_id);
-        }
-      }
-    }
-  }
-  return { requestIds, resultIds };
-}
-
-function assertNoCredentialMaterial(value: unknown): void {
-  const sensitiveKey =
-    /^(?:access[_-]?token|refresh[_-]?token|authorization|cookie|secret|api[_-]?key)$/iu;
-  const sensitiveString =
-    /(?:Bearer\s+[A-Za-z0-9._~+/=-]{16,}|\bsk-[A-Za-z0-9_-]{16,})/u;
-  const visit = (candidate: unknown): void => {
-    if (typeof candidate === "string") {
-      if (sensitiveString.test(candidate)) {
-        throw new Error("Fixture contains prohibited credential material");
-      }
-      return;
-    }
-    if (Array.isArray(candidate)) {
-      for (const item of candidate) visit(item);
-      return;
-    }
-    if (typeof candidate !== "object" || candidate === null) return;
-    for (const [key, item] of Object.entries(candidate)) {
-      if (
-        sensitiveKey.test(key) &&
-        item !== undefined &&
-        item !== null &&
-        item !== "none"
-      ) {
-        throw new Error("Fixture contains prohibited credential material");
-      }
-      visit(item);
-    }
-  };
-  visit(value);
 }
 
 async function sdkVersion(): Promise<string> {
@@ -220,7 +141,9 @@ const q = query({
   },
 });
 
+let timedOut = false;
 const timeout = setTimeout(() => {
+  timedOut = true;
   console.error("Fixture recording timed out; aborting");
   abortController.abort();
 }, 120_000);
@@ -231,45 +154,30 @@ try {
     messages.push(sanitizeMessage(message));
     if (message.type === "result") break;
   }
-  const { requestIds, resultIds } = inspectTools(messages);
-  const missingResults = [...requestIds].filter((id) => !resultIds.has(id));
-  if (
-    requestIds.size < scenario.minimumNativeToolCount ||
-    missingResults.length > 0
-  ) {
-    throw new Error(
-      `Fixture acceptance failed: requests=${requestIds.size}, contentResults=${resultIds.size}, unmatchedRequests=${missingResults.length}`,
-    );
-  }
-  assertNoCredentialMaterial(messages);
+  const facts = validateRecordedFixture(messages, {
+    timedOut,
+    minimumNativeToolCount: scenario.minimumNativeToolCount,
+  });
+  assertMatchesKnownCredentialPolicy(messages);
   const jsonl = `${messages.map((message) => JSON.stringify(message)).join("\n")}\n`;
   const metadata = buildMetadata(
     requestedName,
     scenario,
     messages,
     jsonl,
-    requestIds.size,
+    facts.uniqueNativeToolCount,
     await sdkVersion(),
   );
   const fixturesDir = new URL("../fixtures/", import.meta.url);
   await mkdir(fixturesDir, { recursive: true });
-  const jsonlTemp = new URL(
-    `${requestedName}.jsonl.${process.pid}.tmp`,
-    fixturesDir,
-  );
-  const metadataTemp = new URL(
-    `${requestedName}.metadata.json.${process.pid}.tmp`,
-    fixturesDir,
-  );
-  await Promise.all([
-    writeFile(jsonlTemp, jsonl),
-    writeFile(metadataTemp, `${JSON.stringify(metadata, null, 2)}\n`),
-  ]);
-  await rename(jsonlTemp, new URL(`${requestedName}.jsonl`, fixturesDir));
-  await rename(
-    metadataTemp,
-    new URL(`${requestedName}.metadata.json`, fixturesDir),
-  );
+  await replaceFixturePair({
+    jsonlPath: fileURLToPath(new URL(`${requestedName}.jsonl`, fixturesDir)),
+    metadataPath: fileURLToPath(
+      new URL(`${requestedName}.metadata.json`, fixturesDir),
+    ),
+    jsonl,
+    metadata: `${JSON.stringify(metadata, null, 2)}\n`,
+  });
   console.log(
     `Recorded fixture ${requestedName}: lines=${metadata.lineCount}, nativeTools=${metadata.uniqueNativeToolCount}, sha256=${metadata.sha256}`,
   );

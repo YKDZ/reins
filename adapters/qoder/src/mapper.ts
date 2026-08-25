@@ -18,7 +18,7 @@ import type {
 export type QoderMappingState = {
   currentAssistantId: string | null;
   readonly pendingTextById: Map<string, string>;
-  readonly flushedTextById: Map<string, string>;
+  readonly flushedTextIds: Set<string>;
   readonly requestedToolIds: Set<string>;
   readonly completedToolIds: Set<string>;
 };
@@ -27,7 +27,7 @@ export function createQoderMappingState(): QoderMappingState {
   return {
     currentAssistantId: null,
     pendingTextById: new Map(),
-    flushedTextById: new Map(),
+    flushedTextIds: new Set(),
     requestedToolIds: new Set(),
     completedToolIds: new Set(),
   };
@@ -49,8 +49,8 @@ function flushPendingText(
   const events: DomainEvent[] = [];
   for (const [id, content] of pending) {
     state.pendingTextById.delete(id);
-    if (state.flushedTextById.has(id)) continue;
-    state.flushedTextById.set(id, content);
+    if (state.flushedTextIds.has(id)) continue;
+    state.flushedTextIds.add(id);
     events.push({
       type: "message",
       sessionId: session.sessionId,
@@ -67,13 +67,10 @@ function stageTextSnapshot(
   state: QoderMappingState,
   nativeId: string,
   content: string,
-): "pending" | "idempotent" | "conflict" {
-  const flushed = state.flushedTextById.get(nativeId);
-  if (flushed === undefined) {
-    state.pendingTextById.set(nativeId, content);
-    return "pending";
-  }
-  return flushed === content ? "idempotent" : "conflict";
+): "pending" | "flushed" {
+  if (state.flushedTextIds.has(nativeId)) return "flushed";
+  state.pendingTextById.set(nativeId, content);
+  return "pending";
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -200,7 +197,7 @@ function mapStreamEvent(
       },
     ];
   }
-  if (event.type === "content_block_stop" || event.type === "message_stop") {
+  if (event.type === "message_stop") {
     return state.currentAssistantId === null
       ? []
       : flushPendingText(session, state, state.currentAssistantId);
