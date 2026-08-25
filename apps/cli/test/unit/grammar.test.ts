@@ -31,3 +31,21 @@ test("stdout failure uses the centralized CLI-local error grammar", () => {
   ]);
   expect(jsonErrorMessage(rendered)).toBe("Unable to write CLI output (EIO)");
 });
+
+test("attach replay mismatch renders only safe identities through centralized grammar", () => {
+  const error = {
+    code: "attach_replay_unavailable",
+    reason: "message_suffix_mismatch",
+    sessionId: "reviewer@g1" as never,
+    turnId: "t1" as never,
+    messageId: "m1" as never,
+  } satisfies MachineError;
+
+  expect(renderCliError(error)).toEqual({
+    items: [
+      {
+        message: "Attach replay is unavailable for message m1 in turn t1",
+      },
+    ],
+  });
+});

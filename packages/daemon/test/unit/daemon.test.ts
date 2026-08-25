@@ -240,6 +240,8 @@ function createFakeHarness(options: {
   controls: {
     completeTurn(stopReason?: StopReason, finalReply?: string | null): void;
     emitWorkerMessage(content: string): void;
+    emitText(messageId: MessageId, delta: string): void;
+    emitSnapshot(messageId: MessageId, content: string): void;
   };
 } {
   const calls: FakeCalls = {
@@ -331,6 +333,27 @@ function createFakeHarness(options: {
           sessionId: current.sessionId,
           turnId: current.turnId,
           messageId: `w${messageSeq}` as MessageId,
+          role: "worker",
+          content,
+        });
+      },
+      emitText(messageId, delta) {
+        if (current === null) throw new Error("没有进行中的回合");
+        emitEvent?.({
+          type: "text.delta",
+          sessionId: current.sessionId,
+          turnId: current.turnId,
+          messageId,
+          delta,
+        });
+      },
+      emitSnapshot(messageId, content) {
+        if (current === null) throw new Error("没有进行中的回合");
+        emitEvent?.({
+          type: "message",
+          sessionId: current.sessionId,
+          turnId: current.turnId,
+          messageId,
           role: "worker",
           content,
         });
@@ -913,6 +936,194 @@ describe("daemon 协议面（缝 C）", () => {
       "live",
       "response",
     ]);
+  });
+
+  test("attach replay zero returns the active message text observed before its boundary", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const spawned = await requester("spawn", {
+      sessionName: "prefix-zero",
+      harness: "fake",
+      message: "first",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
+    const messageId = "m-prefix" as MessageId;
+    fake.controls.emitText(messageId, "hello");
+
+    await expect(
+      requester("attach", { sessionId, replay: 0 }),
+    ).resolves.toMatchObject({
+      result: {
+        replayed: 0,
+        replayPrefixes: [{ turnId: "t1", messageId, prefix: "hello" }],
+      },
+    });
+  });
+
+  test("attach derives the missing prefix for a partial active delta window", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+      eventLogLimit: 1,
+    });
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const spawned = await requester("spawn", {
+      sessionName: "prefix-active",
+      harness: "fake",
+      message: "first",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
+    const messageId = "m-prefix" as MessageId;
+    fake.controls.emitText(messageId, "hel");
+    fake.controls.emitText(messageId, "lo");
+
+    await expect(
+      requester("attach", { sessionId, replay: 1 }),
+    ).resolves.toMatchObject({
+      result: {
+        replayed: 1,
+        replayPrefixes: [{ turnId: "t1", messageId, prefix: "hel" }],
+      },
+    });
+  });
+
+  test("attach derives a completed message prefix from its authoritative snapshot", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+      eventLogLimit: 2,
+    });
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const spawned = await requester("spawn", {
+      sessionName: "prefix-completed",
+      harness: "fake",
+      message: "first",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
+    const messageId = "m-prefix" as MessageId;
+    fake.controls.emitText(messageId, "hel");
+    fake.controls.emitText(messageId, "lo");
+    fake.controls.emitSnapshot(messageId, "hello");
+
+    await expect(
+      requester("attach", { sessionId, replay: 2 }),
+    ).resolves.toMatchObject({
+      result: {
+        replayPrefixes: [{ turnId: "t1", messageId, prefix: "hel" }],
+      },
+    });
+  });
+
+  test("attach rejects an unprovable snapshot suffix before emitting replay body", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const spawned = await requester("spawn", {
+      sessionName: "prefix-mismatch",
+      harness: "fake",
+      message: "first",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
+    const messageId = "m-prefix" as MessageId;
+    fake.controls.emitText(messageId, "tail");
+    fake.controls.emitSnapshot(messageId, "different");
+    const collector = collectNotifications(client);
+
+    await expect(
+      requester("attach", { sessionId, replay: 2 }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "attach_replay_unavailable",
+        reason: "message_suffix_mismatch",
+        sessionId,
+        turnId: "t1",
+        messageId,
+      },
+    });
+    expect(collector.events).toEqual([]);
+  });
+
+  test("attach freezes replay prefixes before pending live injection", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const messageId = "m-prefix" as MessageId;
+    let injectLive: (() => void) | undefined;
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+      beforeAttachReplay: () => injectLive?.(),
+    });
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const spawned = await requester("spawn", {
+      sessionName: "prefix-boundary",
+      harness: "fake",
+      message: "first",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
+    fake.controls.emitText(messageId, "he");
+    injectLive = () => fake.controls.emitText(messageId, "llo");
+    const collector = collectNotifications(client);
+
+    await expect(
+      requester("attach", { sessionId, replay: 0 }),
+    ).resolves.toMatchObject({
+      result: {
+        replayPrefixes: [{ turnId: "t1", messageId, prefix: "he" }],
+      },
+    });
+    expect(collector.events).toMatchObject([
+      { type: "text.delta", messageId, delta: "llo" },
+    ]);
+  });
+
+  test("message and turn terminals release active replay prefix state", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const spawned = await requester("spawn", {
+      sessionName: "prefix-cleanup",
+      harness: "fake",
+      message: "first",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
+    const messageId = "m-prefix" as MessageId;
+    fake.controls.emitText(messageId, "complete");
+    fake.controls.emitSnapshot(messageId, "complete");
+
+    await expect(
+      requester("attach", { sessionId, replay: 0 }),
+    ).resolves.toMatchObject({ result: { replayPrefixes: [] } });
+    fake.controls.emitText("m-tail" as MessageId, "tail");
+    fake.controls.completeTurn();
+    await expect(
+      requester("attach", { sessionId, replay: 0 }),
+    ).resolves.toMatchObject({ result: { replayPrefixes: [] } });
   });
 
   test("attach ends once when its target completes reentrantly during replay", async () => {

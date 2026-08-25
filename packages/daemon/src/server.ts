@@ -2,6 +2,7 @@ import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
+  AttachResult,
   CapabilitiesResult,
   DaemonDiagnosticFact,
   DomainEvent,
@@ -11,6 +12,7 @@ import type {
   KillParams,
   ListFilter,
   MachineError,
+  MessageId,
   ProtocolMessage,
   ProtocolRequest,
   RequestId,
@@ -103,6 +105,10 @@ export function createProtocolServerInternal(
   const eventLog = new Map<SessionId, DomainEvent[]>();
   const observations = new Map<SessionId, Observation>();
   const knownSessions = new Set<SessionId>();
+  const activeMessageText = new Map<
+    SessionId,
+    Map<TurnId, Map<MessageId, string>>
+  >();
   const transportFailureConnections = new WeakSet<
     TransportConnection<ProtocolMessage>
   >();
@@ -249,6 +255,7 @@ export function createProtocolServerInternal(
       }
       cleanupByConnection.clear();
       attachSubscriptions.clear();
+      activeMessageText.clear();
       pendingMessages.length = 0;
       try {
         if (daemonStarted && daemonStopReason === undefined) {
@@ -284,6 +291,37 @@ export function createProtocolServerInternal(
     eventLog.set(event.sessionId, history);
   }
 
+  function observeMessageText(event: DomainEvent): void {
+    if (event.type === "text.delta") {
+      const turns = activeMessageText.get(event.sessionId) ?? new Map();
+      const messages = turns.get(event.turnId) ?? new Map();
+      messages.set(
+        event.messageId,
+        `${messages.get(event.messageId) ?? ""}${event.delta}`,
+      );
+      turns.set(event.turnId, messages);
+      activeMessageText.set(event.sessionId, turns);
+      return;
+    }
+    if (event.type === "message") {
+      const turns = activeMessageText.get(event.sessionId);
+      const messages = turns?.get(event.turnId);
+      messages?.delete(event.messageId);
+      if (messages?.size === 0) turns?.delete(event.turnId);
+      if (turns?.size === 0) activeMessageText.delete(event.sessionId);
+      return;
+    }
+    if (event.type === "turn.completed") {
+      const turns = activeMessageText.get(event.sessionId);
+      turns?.delete(event.turnId);
+      if (turns?.size === 0) activeMessageText.delete(event.sessionId);
+      return;
+    }
+    if (event.type === "session.killed") {
+      activeMessageText.delete(event.sessionId);
+    }
+  }
+
   function endAttach(
     subscription: AttachSubscription,
     reason: StopReason | "session_killed",
@@ -302,6 +340,7 @@ export function createProtocolServerInternal(
     if (event.type === "session.created") {
       knownSessions.add(event.sessionId);
     }
+    observeMessageText(event);
     appendLog(event);
     const observation = observations.get(event.sessionId) ?? { killed: false };
     if (event.type === "turn.started") observation.activeTurnId = event.turnId;
@@ -515,7 +554,7 @@ export function createProtocolServerInternal(
   function attach(
     connection: TransportConnection<ProtocolMessage>,
     params: AttachParams,
-  ): { sessionId: SessionId; replayed: number } {
+  ): AttachResult {
     if (!knownSessions.has(params.sessionId)) {
       throw {
         code: "session_not_found",
@@ -530,6 +569,11 @@ export function createProtocolServerInternal(
         : Math.min(params.replay, history.length);
     const replayEvents = history.slice(
       replayedCount === 0 ? history.length : -replayedCount,
+    );
+    const replayPrefixes = deriveReplayPrefixes(
+      params.sessionId,
+      history,
+      replayEvents,
     );
     const targetTurnId =
       params.exitOn === undefined || params.exitOn.length === 0
@@ -576,7 +620,78 @@ export function createProtocolServerInternal(
     } else if (observation.killed) {
       endAttach(subscription, "session_killed");
     }
-    return { sessionId: params.sessionId, replayed: replayedCount };
+    return {
+      sessionId: params.sessionId,
+      replayed: replayedCount,
+      replayPrefixes,
+    };
+  }
+
+  function deriveReplayPrefixes(
+    sessionId: SessionId,
+    history: readonly DomainEvent[],
+    replayEvents: readonly DomainEvent[],
+  ): AttachResult["replayPrefixes"] {
+    const suffixes = new Map<
+      string,
+      { turnId: TurnId; messageId: MessageId; text: string }
+    >();
+    for (const event of replayEvents) {
+      if (event.type !== "text.delta") continue;
+      const key = `${event.turnId}\0${event.messageId}`;
+      const prior = suffixes.get(key);
+      suffixes.set(key, {
+        turnId: event.turnId,
+        messageId: event.messageId,
+        text: `${prior?.text ?? ""}${event.delta}`,
+      });
+    }
+    const snapshots = new Map<string, string>();
+    for (const event of history) {
+      if (event.type === "message") {
+        snapshots.set(`${event.turnId}\0${event.messageId}`, event.content);
+      }
+    }
+    const prefixes: AttachResult["replayPrefixes"] = [];
+    const replayedIdentities = new Set<string>();
+    for (const [key, suffix] of suffixes) {
+      replayedIdentities.add(key);
+      const full =
+        snapshots.get(key) ??
+        activeMessageText
+          .get(sessionId)
+          ?.get(suffix.turnId)
+          ?.get(suffix.messageId);
+      if (full === undefined) continue;
+      if (!full.endsWith(suffix.text)) {
+        throw {
+          code: "attach_replay_unavailable",
+          reason: "message_suffix_mismatch",
+          sessionId,
+          turnId: suffix.turnId,
+          messageId: suffix.messageId,
+        } satisfies MachineError;
+      }
+      const prefix = full.slice(0, full.length - suffix.text.length);
+      if (prefix.length > 0) {
+        prefixes.push({
+          turnId: suffix.turnId,
+          messageId: suffix.messageId,
+          prefix,
+        });
+      }
+    }
+    for (const [turnId, messages] of activeMessageText.get(sessionId) ?? []) {
+      for (const [messageId, prefix] of messages) {
+        if (
+          prefix.length > 0 &&
+          !replayedIdentities.has(`${turnId}\0${messageId}`)
+        ) {
+          prefixes.push({ turnId, messageId, prefix });
+        }
+      }
+    }
+    return prefixes;
   }
 
   async function dispatch(

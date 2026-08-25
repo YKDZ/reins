@@ -177,6 +177,7 @@ export function exitCodeForError(error: CliError): number {
     case "daemon_start_failed":
     case "daemon_disconnected":
     case "diagnostics_unavailable":
+    case "attach_replay_unavailable":
     case "capability_query_failed":
     case "internal_error":
     case "diagnostics_store_corrupt":

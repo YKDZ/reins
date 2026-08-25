@@ -1,6 +1,7 @@
 import { PassThrough } from "node:stream";
 
 import type {
+  AttachResult,
   MachineError,
   ProtocolMethod,
   ProtocolNotification,
@@ -91,11 +92,11 @@ class ControlledClient implements ReinsClient {
     }) as Promise<ProtocolResponseFor<M>>;
   }
 
-  acceptAttach(): void {
+  acceptAttach(replayPrefixes: AttachResult["replayPrefixes"] = []): void {
     this.attachResolve?.({
       kind: "response",
       requestId,
-      result: { sessionId, replayed: 0 },
+      result: { sessionId, replayed: 0, replayPrefixes },
     });
   }
 
@@ -191,7 +192,7 @@ test("pretty replay waits for attach acceptance and flushes a complete body once
   await attached;
 });
 
-test("a deferred replay body is rendered before its permission menu starts", async () => {
+test("a replay prefix restores the body before its permission menu starts", async () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));
@@ -210,26 +211,9 @@ test("a deferred replay body is rendered before its permission menu starts", asy
     params: { type: "text.delta", sessionId, turnId, messageId, delta: "lo" },
   });
   client.emit(requested("p1"));
-  client.acceptAttach();
+  client.acceptAttach([{ turnId, messageId, prefix: "hel" }]);
   await tick();
-  expect(output.join("")).toBe("");
-
-  client.emit({
-    kind: "notification",
-    method: "event",
-    params: {
-      type: "message",
-      sessionId,
-      turnId,
-      messageId,
-      role: "worker",
-      content: "hello",
-    },
-  });
-  await tick();
-  expect(output.join("")).toMatch(
-    /^worker: hello\nPermission requested: tool:Bash/u,
-  );
+  expect(output.join("")).toMatch(/^helloPermission requested: tool:Bash/u);
   input.end("1\n");
   await tick();
   await tick();
@@ -304,7 +288,7 @@ test("JSON attach emits every notification without presenter projection", async 
     delta,
     snapshot,
   ]);
-  client.acceptAttach();
+  client.acceptAttach([{ turnId, messageId, prefix: "ignored-prefix" }]);
   client.end();
   await attached;
 });

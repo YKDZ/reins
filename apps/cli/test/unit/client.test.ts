@@ -48,7 +48,7 @@ test("a malformed notification after a valid response preserves invalid_daemon_r
   pair.server.send({
     kind: "response",
     requestId: "cli1",
-    result: { sessionId: "prompt@g1", replayed: 0 },
+    result: { sessionId: "prompt@g1", replayed: 0, replayPrefixes: [] },
   });
   await expect(pending).resolves.toMatchObject({ kind: "response" });
   const reason = new Promise((resolve) => client.onClosed(resolve));

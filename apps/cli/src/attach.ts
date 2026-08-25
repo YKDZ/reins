@@ -187,13 +187,7 @@ export async function runAttach(
       unsubscribeClosed();
     };
     const consumePermissions = async (): Promise<void> => {
-      if (
-        consumingPermissions ||
-        settled ||
-        !attachReady ||
-        presenter?.isDeferring() === true
-      )
-        return;
+      if (consumingPermissions || settled || !attachReady) return;
       consumingPermissions = true;
       try {
         while (!settled) {
@@ -308,7 +302,7 @@ export async function runAttach(
           return;
         }
         attachReady = true;
-        presenter?.flushInitial();
+        presenter?.flushInitial(response.result.replayPrefixes);
         if (pendingEnd !== undefined) {
           settled = true;
           const result = pendingEnd;

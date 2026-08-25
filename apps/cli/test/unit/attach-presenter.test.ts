@@ -48,9 +48,54 @@ test("an initial complete delta sequence prints its worker body once", () => {
       content: "hello",
     }),
   );
-  presenter.flushInitial();
+  presenter.flushInitial([]);
 
   expect(output.join("")).toBe("hello\n");
+});
+
+test("an explicit replay prefix restores text at the first delta without moving tools", () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const presenter = createPrettyAttachPresenter();
+
+  presenter.bufferInitial(
+    event({ type: "text.delta", sessionId, turnId, messageId, delta: "llo" }),
+  );
+  presenter.bufferInitial(
+    event({
+      type: "tool.requested",
+      sessionId,
+      turnId,
+      toolCallId,
+      name: "Read",
+    }),
+  );
+  presenter.bufferInitial(
+    event({
+      type: "text.delta",
+      sessionId,
+      turnId,
+      messageId,
+      delta: " world",
+    }),
+  );
+  presenter.bufferInitial(
+    event({
+      type: "message",
+      sessionId,
+      turnId,
+      messageId,
+      role: "worker",
+      content: "hello world",
+    }),
+  );
+
+  presenter.flushInitial([{ turnId, messageId, prefix: "he" }]);
+
+  expect(output.join("")).toBe("hello[tool] Read requested (c1)\n world\n");
 });
 
 test("initial snapshots remain complete when no matching full delta window exists", () => {
@@ -90,14 +135,14 @@ test("initial snapshots remain complete when no matching full delta window exist
       content: "complete tail",
     }),
   );
-  presenter.flushInitial();
+  presenter.flushInitial([
+    { turnId, messageId: secondMessageId, prefix: "complete " },
+  ]);
 
-  expect(output.join("")).toBe(
-    "worker: snapshot only\nworker: complete tail\n",
-  );
+  expect(output.join("")).toBe("worker: snapshot only\ncomplete tail\n");
 });
 
-test("an uncertain initial tail stays held until its full snapshot arrives live", () => {
+test("a replay-zero prefix is written at the start of the initial batch", () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));
@@ -105,81 +150,6 @@ test("an uncertain initial tail stays held until its full snapshot arrives live"
   });
   const presenter = createPrettyAttachPresenter();
 
-  presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: "lo" }),
-  );
-  presenter.flushInitial();
-  expect(output.join("")).toBe("");
-
-  presenter.present(
-    event({
-      type: "text.delta",
-      sessionId,
-      turnId,
-      messageId,
-      delta: " from live",
-    }),
-  );
-  expect(output.join("")).toBe("");
-  presenter.present(
-    event({
-      type: "message",
-      sessionId,
-      turnId,
-      messageId,
-      role: "worker",
-      content: "hello from live",
-    }),
-  );
-
-  expect(output.join("")).toBe("worker: hello from live\n");
-  expect(output.join("")).not.toContain("loworker");
-});
-
-test("an uncertain initial tail without a snapshot is committed once before terminal output", () => {
-  const output: string[] = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    output.push(String(chunk));
-    return true;
-  });
-  const presenter = createPrettyAttachPresenter();
-
-  presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: "tail" }),
-  );
-  presenter.flushInitial();
-  presenter.present(
-    event({
-      type: "turn.completed",
-      sessionId,
-      turnId,
-      stopReason: "end_turn",
-      finalReply: "complete reply unavailable to presenter",
-    }),
-  );
-  presenter.present({
-    kind: "notification",
-    method: "attach.ended",
-    params: { sessionId, reason: "end_turn" },
-  });
-  presenter.clear();
-
-  expect(output.join("")).toBe(
-    "tail\n[turn completed] end_turn (presenter@g1)\n[attach ended] presenter@g1: end_turn\n",
-  );
-});
-
-test("deferred ordinary events keep their position after an uncertain initial tail", () => {
-  const output: string[] = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    output.push(String(chunk));
-    return true;
-  });
-  const presenter = createPrettyAttachPresenter();
-
-  presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: "tail" }),
-  );
   presenter.bufferInitial(
     event({
       type: "tool.requested",
@@ -189,23 +159,12 @@ test("deferred ordinary events keep their position after an uncertain initial ta
       name: "Read",
     }),
   );
-  presenter.bufferInitial(
-    event({
-      type: "turn.completed",
-      sessionId,
-      turnId,
-      stopReason: "end_turn",
-      finalReply: null,
-    }),
-  );
-  presenter.flushInitial();
+  presenter.flushInitial([{ turnId, messageId, prefix: "working" }]);
 
-  expect(output.join("")).toBe(
-    "tail\n[tool] Read requested (c1)\n[turn completed] end_turn (presenter@g1)\n",
-  );
+  expect(output.join("")).toBe("working[tool] Read requested (c1)\n");
 });
 
-test("all initial uncertain identities close before one ordered drain", () => {
+test("prefixes for multiple identities are applied independently", () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));
@@ -214,7 +173,17 @@ test("all initial uncertain identities close before one ordered drain", () => {
   const presenter = createPrettyAttachPresenter();
 
   presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: "one" }),
+    event({ type: "text.delta", sessionId, turnId, messageId, delta: " one" }),
+  );
+  presenter.bufferInitial(
+    event({
+      type: "message",
+      sessionId,
+      turnId,
+      messageId,
+      role: "worker",
+      content: "full one",
+    }),
   );
   presenter.bufferInitial(
     event({
@@ -222,77 +191,45 @@ test("all initial uncertain identities close before one ordered drain", () => {
       sessionId,
       turnId,
       messageId: secondMessageId,
-      delta: "two",
+      delta: " two",
     }),
   );
-  presenter.flushInitial();
-  expect(presenter.isDeferring()).toBe(true);
-  presenter.present(
+  presenter.bufferInitial(
     event({
       type: "message",
       sessionId,
       turnId,
-      messageId,
+      messageId: secondMessageId,
       role: "worker",
-      content: "complete one",
+      content: "full two",
     }),
   );
-  expect(output.join("")).toBe("");
-  expect(presenter.isDeferring()).toBe(true);
+  presenter.flushInitial([
+    { turnId, messageId, prefix: "full" },
+    { turnId, messageId: secondMessageId, prefix: "full" },
+  ]);
 
+  expect(output.join("")).toBe("full one\nfull two\n");
+});
+
+test("clear discards buffered notifications and seeded message state", () => {
+  const output: string[] = [];
+  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
+    output.push(String(chunk));
+    return true;
+  });
+  const presenter = createPrettyAttachPresenter();
+
+  presenter.bufferInitial(
+    event({ type: "text.delta", sessionId, turnId, messageId, delta: "tail" }),
+  );
+  presenter.clear();
+  presenter.clear();
   presenter.present(
-    event({
-      type: "turn.completed",
-      sessionId,
-      turnId,
-      stopReason: "end_turn",
-      finalReply: null,
-    }),
+    event({ type: "text.delta", sessionId, turnId, messageId, delta: "live" }),
   );
 
-  expect(presenter.isDeferring()).toBe(false);
-  expect(output.join("")).toBe(
-    "two\nworker: complete one\n[turn completed] end_turn (presenter@g1)\n",
-  );
-});
-
-test("an initial attach end commits an uncertain known tail before the end marker", () => {
-  const output: string[] = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    output.push(String(chunk));
-    return true;
-  });
-  const presenter = createPrettyAttachPresenter();
-
-  presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: "tail" }),
-  );
-  presenter.bufferInitial({
-    kind: "notification",
-    method: "attach.ended",
-    params: { sessionId, reason: "end_turn" },
-  });
-  presenter.flushInitial();
-
-  expect(output.join("")).toBe("tail\n[attach ended] presenter@g1: end_turn\n");
-});
-
-test("clear drops an uncertain tail without inventing a terminal boundary", () => {
-  const output: string[] = [];
-  vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
-    output.push(String(chunk));
-    return true;
-  });
-  const presenter = createPrettyAttachPresenter();
-
-  presenter.bufferInitial(
-    event({ type: "text.delta", sessionId, turnId, messageId, delta: "tail" }),
-  );
-  presenter.flushInitial();
-  presenter.clear();
-  presenter.clear();
-
-  expect(output.join("")).toBe("");
+  expect(output.join("")).toBe("live");
 });
 
 test("equal text from different message identities is never deduplicated", () => {
@@ -315,7 +252,7 @@ test("equal text from different message identities is never deduplicated", () =>
       }),
     );
   }
-  presenter.flushInitial();
+  presenter.flushInitial([]);
 
   expect(output.join("")).toBe("worker: same\nworker: same\n");
 });

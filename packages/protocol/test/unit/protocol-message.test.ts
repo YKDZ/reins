@@ -217,6 +217,23 @@ describe("per-method 参数与结果 schema", () => {
     ok(protocolResultSchemaFor("attach"), {
       sessionId: "reviewer@g7",
       replayed: 0,
+      replayPrefixes: [{ turnId: "t1", messageId: "m1", prefix: "missing" }],
+    });
+    bad(protocolResultSchemaFor("attach"), {
+      sessionId: "reviewer@g7",
+      replayed: 0,
+    });
+    bad(protocolResultSchemaFor("attach"), {
+      sessionId: "reviewer@g7",
+      replayed: 0,
+      replayPrefixes: [
+        {
+          turnId: "t1",
+          messageId: "m1",
+          prefix: "missing",
+          sessionId: "reviewer@g7",
+        },
+      ],
     });
     ok(protocolResultSchemaFor("resolvePermission"), {
       sessionId: "reviewer@g7",
@@ -283,6 +300,21 @@ describe("错误码扩展", () => {
     ok(machineErrorSchema, { code: "protocol_error" });
     ok(machineErrorSchema, { code: "capability_query_failed" });
     ok(machineErrorSchema, { code: "internal_error" });
+    ok(machineErrorSchema, {
+      code: "attach_replay_unavailable",
+      reason: "message_suffix_mismatch",
+      sessionId: "reviewer@g7",
+      turnId: "t1",
+      messageId: "m1",
+    });
+    bad(machineErrorSchema, {
+      code: "attach_replay_unavailable",
+      reason: "message_suffix_mismatch",
+      sessionId: "reviewer@g7",
+      turnId: "t1",
+      messageId: "m1",
+      content: "secret body",
+    });
   });
 });
 
