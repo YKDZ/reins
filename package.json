@@ -12,6 +12,7 @@
     "format:write": "node --conditions=source scripts/run-root-owned-task.ts format:write",
     "lint": "node --conditions=source scripts/run-root-owned-task.ts lint",
     "lint:fix": "node --conditions=source scripts/run-root-owned-task.ts lint:fix",
+    "reins": "node --conditions=source scripts/run-development-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "devDependencies": {
