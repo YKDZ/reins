@@ -101,10 +101,16 @@ export function isInputError(value: unknown): value is InputError {
 
 export function isOutputError(value: unknown): value is OutputError {
   if (typeof value !== "object" || value === null) return false;
-  const candidate = value as { code?: unknown; reason?: unknown };
+  const candidate = value as {
+    code?: unknown;
+    reason?: unknown;
+    systemCode?: unknown;
+  };
   return (
     candidate.code === "output_error" &&
-    candidate.reason === "stdout_write_failed"
+    candidate.reason === "stdout_write_failed" &&
+    (candidate.systemCode === undefined ||
+      typeof candidate.systemCode === "string")
   );
 }
 
@@ -155,9 +161,28 @@ export function exitCodeForError(error: CliError): number {
     case "method_not_found":
     case "unknown_harness":
       return EXIT_USAGE;
-    default:
+    case "output_error":
+    case "input_error":
+    case "session_not_found":
+    case "session_killed":
+    case "session_terminating":
+    case "daemon_shutting_down":
+    case "permission_not_pending":
+    case "permission_resolution_mismatch":
+    case "diagnostic_not_found":
+    case "session_name_conflict":
+    case "unsupported_feature":
+    case "daemon_timeout":
+    case "invalid_daemon_response":
+    case "daemon_start_failed":
+    case "daemon_disconnected":
+    case "diagnostics_unavailable":
+    case "capability_query_failed":
+    case "internal_error":
+    case "diagnostics_store_corrupt":
       return EXIT_RESOURCE;
   }
+  return assertNever(error);
 }
 
 // oxlint-disable-next-line typescript/consistent-return -- StopReason 是闭集；新增成员必须触发编译期穷尽检查。
@@ -181,4 +206,8 @@ export class ExitError extends Error {
     super(message ?? `exit ${code}`);
     this.code = code;
   }
+}
+
+function assertNever(value: never): never {
+  throw new Error(`Unhandled CLI error: ${String(value)}`);
 }

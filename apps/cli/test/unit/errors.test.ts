@@ -4,7 +4,12 @@ import { machineErrorSchema } from "@reins/protocol";
 import * as v from "valibot";
 import { expect, test } from "vitest";
 
-import { outputError, toCliError } from "../../src/errors.ts";
+import {
+  EXIT_RESOURCE,
+  exitCodeForError,
+  outputError,
+  toCliError,
+} from "../../src/errors.ts";
 
 test("local exception cause is UTF-8 bounded without splitting non-ASCII text", () => {
   const error = toCliError(new Error("é".repeat(3_000)));
@@ -29,4 +34,15 @@ test("a local stdout failure remains a typed output error", () => {
     systemCode: "EIO",
   });
   expect(v.safeParse(machineErrorSchema, error).success).toBe(false);
+  expect(exitCodeForError(error)).toBe(EXIT_RESOURCE);
+});
+
+test("an output error with a non-string system code is rejected", () => {
+  const error = toCliError({
+    code: "output_error",
+    reason: "stdout_write_failed",
+    systemCode: 5,
+  });
+
+  expect(error.code).toBe("internal_error");
 });

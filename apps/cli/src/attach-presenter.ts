@@ -12,6 +12,7 @@ export type PrettyAttachPresenter = {
 type MessageState = {
   streamed: string;
   snapshotSeen: boolean;
+  boundaryUncertain: boolean;
 };
 
 function messageIdentity(
@@ -35,12 +36,43 @@ export function createPrettyAttachPresenter(): PrettyAttachPresenter {
   const initial: ProtocolNotification[] = [];
   const messages = new Map<string, MessageState>();
 
+  const holdUncertainDelta = (
+    event: Extract<DomainEvent, { type: "text.delta" }>,
+  ): void => {
+    const key = messageIdentity(event);
+    const state = messages.get(key) ?? {
+      streamed: "",
+      snapshotSeen: false,
+      boundaryUncertain: true,
+    };
+    state.streamed += event.delta;
+    messages.set(key, state);
+  };
+
+  const flushUncertain = (matches: (key: string) => boolean): void => {
+    for (const [key, state] of messages) {
+      if (!matches(key) || !state.boundaryUncertain || state.snapshotSeen) {
+        continue;
+      }
+      if (state.streamed.length > 0) {
+        process.stdout.write(state.streamed);
+        completeStreamedLine(state.streamed);
+      }
+      state.boundaryUncertain = false;
+      state.snapshotSeen = true;
+    }
+  };
+
   const presentEvent = (event: DomainEvent): void => {
     if (event.type === "text.delta") {
       const key = messageIdentity(event);
-      const state = messages.get(key) ?? { streamed: "", snapshotSeen: false };
+      const state = messages.get(key) ?? {
+        streamed: "",
+        snapshotSeen: false,
+        boundaryUncertain: false,
+      };
       if (!state.snapshotSeen) {
-        process.stdout.write(event.delta);
+        if (!state.boundaryUncertain) process.stdout.write(event.delta);
         state.streamed += event.delta;
       }
       messages.set(key, state);
@@ -50,22 +82,38 @@ export function createPrettyAttachPresenter(): PrettyAttachPresenter {
       const key = messageIdentity(event);
       const state = messages.get(key);
       if (state?.snapshotSeen === true) return;
+      if (state?.boundaryUncertain === true) {
+        writeSnapshot(event);
+        messages.set(key, {
+          streamed: event.content,
+          snapshotSeen: true,
+          boundaryUncertain: false,
+        });
+        return;
+      }
       if (state !== undefined && state.streamed === event.content) {
         completeStreamedLine(state.streamed);
         state.snapshotSeen = true;
         return;
       }
       writeSnapshot(event);
-      messages.set(key, { streamed: event.content, snapshotSeen: true });
+      messages.set(key, {
+        streamed: event.content,
+        snapshotSeen: true,
+        boundaryUncertain: false,
+      });
       return;
     }
-    printNotification("event", event, "pretty");
     if (event.type === "turn.completed") {
       const turnPrefix = `${event.sessionId}\0${event.turnId}\0`;
+      flushUncertain((key) => key.startsWith(turnPrefix));
+      printNotification("event", event, "pretty");
       for (const key of messages.keys()) {
         if (key.startsWith(turnPrefix)) messages.delete(key);
       }
+      return;
     }
+    printNotification("event", event, "pretty");
   };
 
   return {
@@ -95,21 +143,30 @@ export function createPrettyAttachPresenter(): PrettyAttachPresenter {
           const event = notification.params;
           if (
             event.type === "text.delta" &&
-            snapshots.has(messageIdentity(event)) &&
+            !snapshots.has(messageIdentity(event))
+          ) {
+            holdUncertainDelta(event);
+            continue;
+          }
+          if (
+            event.type === "text.delta" &&
             !complete.has(messageIdentity(event))
           ) {
             continue;
           }
           presentEvent(event);
         } else {
+          flushUncertain(() => true);
           printNotification(notification.method, notification.params, "pretty");
         }
       }
     },
     present(notification) {
       if (notification.method === "event") presentEvent(notification.params);
-      else
+      else {
+        flushUncertain(() => true);
         printNotification(notification.method, notification.params, "pretty");
+      }
     },
     clear() {
       initial.length = 0;
