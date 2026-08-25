@@ -66,9 +66,34 @@ const textDelta = (uuid: string, text: string): SDKMessage => ({
   session_id: "qs",
 });
 
-const assistantText = (uuid: string, text: string): SDKMessage => ({
+const messageStart = (uuid: string, nativeId: string): SDKMessage => ({
+  type: "stream_event",
+  event: {
+    type: "message_start",
+    message: {
+      id: nativeId,
+      type: "message",
+      role: "assistant",
+      content: [],
+      model: "qwen",
+      stop_reason: null,
+      stop_sequence: null,
+      usage: { input_tokens: 0, output_tokens: 0 },
+    },
+  },
+  parent_tool_use_id: null,
+  uuid,
+  session_id: "qs",
+});
+
+const assistantText = (
+  uuid: string,
+  text: string,
+  nativeId = uuid,
+): SDKMessage => ({
   type: "assistant",
   message: {
+    id: nativeId,
     role: "assistant",
     content: [{ type: "text", text }],
     usage: { input_tokens: 12, output_tokens: 34 },
@@ -89,6 +114,7 @@ const idle = (): SDKMessage => ({
 const assistantEndTurn = (uuid: string, text: string): SDKMessage => ({
   type: "assistant",
   message: {
+    id: uuid,
     role: "assistant",
     content: [{ type: "text", text }],
     stop_reason: "end_turn",
@@ -102,6 +128,7 @@ const assistantEndTurn = (uuid: string, text: string): SDKMessage => ({
 const assistantToolUseBlock = (uuid: string, id: string): SDKMessage => ({
   type: "assistant",
   message: {
+    id: uuid,
     role: "assistant",
     content: [
       {
@@ -136,6 +163,7 @@ const userToolResultBlock = (
 const assistantThinking = (uuid: string): SDKMessage => ({
   type: "assistant",
   message: {
+    id: uuid,
     role: "assistant",
     content: [{ type: "thinking", thinking: "思考中" }],
   },
@@ -147,9 +175,10 @@ const assistantThinking = (uuid: string): SDKMessage => ({
 describe("qoder driver 事件映射", () => {
   test("文本流与回合结束：text.delta、message、turn.completed", async () => {
     const { events, fake } = setup();
+    fake.controls.push(messageStart("start-1", "native-a1"));
     fake.controls.push(textDelta("a1", "分析"));
-    fake.controls.push(textDelta("a1", "完成"));
-    fake.controls.push(assistantText("a1", "分析完成"));
+    fake.controls.push(textDelta("a2", "完成"));
+    fake.controls.push(assistantText("a3", "分析完成", "native-a1"));
     fake.controls.push(idle());
     await flush();
 
@@ -170,6 +199,157 @@ describe("qoder driver 事件映射", () => {
     });
   });
 
+  test("按原生产物去重重复 snapshot 与双工具结果", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(messageStart("start-1", "native-text"));
+    fake.controls.push(textDelta("delta-1", "稳"));
+    fake.controls.push(textDelta("delta-2", "定"));
+    fake.controls.push(assistantText("snapshot-1", "稳定", "native-text"));
+    fake.controls.push(assistantText("snapshot-2", "稳定", "native-text"));
+
+    const twoTools: SDKMessage = {
+      type: "assistant",
+      message: {
+        id: "native-tools",
+        role: "assistant",
+        content: [
+          { type: "tool_use", id: "tc1", name: "Bash", input: {} },
+          { type: "tool_use", id: "tc2", name: "Read", input: {} },
+        ],
+      },
+      parent_tool_use_id: null,
+      uuid: "tools-1",
+      session_id: "qs",
+    };
+    fake.controls.push(twoTools);
+    fake.controls.push({ ...twoTools, uuid: "tools-2" });
+
+    const results: SDKMessage = {
+      type: "user",
+      message: {
+        role: "user",
+        content: [{ type: "tool_result", tool_use_id: "tc1", content: "one" }],
+      },
+      parent_tool_use_id: "tc1",
+      tool_use_result: "duplicate wrapper for one",
+      uuid: "results-1",
+      session_id: "qs",
+    };
+    fake.controls.push(results);
+    const secondResult: SDKMessage = {
+      type: "user",
+      message: { role: "user", content: "wrapper result" },
+      parent_tool_use_id: "tc2",
+      tool_use_result: "two",
+      uuid: "results-2",
+      session_id: "qs",
+    };
+    fake.controls.push(secondResult);
+    fake.controls.push({ ...results, uuid: "results-2" });
+    fake.controls.push({ ...secondResult, uuid: "results-4" });
+    fake.controls.push({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "tool_result",
+            tool_use_id: "unknown-tool",
+            content: "unknown content result",
+          },
+        ],
+      },
+      parent_tool_use_id: null,
+      tool_use_result: "missing native id",
+      uuid: "results-3",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events
+        .filter(
+          (event) => event.type === "text.delta" || event.type === "message",
+        )
+        .map((event) => ({ type: event.type, messageId: event.messageId })),
+    ).toEqual([
+      { type: "text.delta", messageId: "m1" },
+      { type: "text.delta", messageId: "m1" },
+      { type: "message", messageId: "m1" },
+    ]);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "tool.requested" || event.type === "tool.completed",
+      ),
+    ).toEqual([
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+      },
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c2",
+        name: "Read",
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "Bash",
+        result: "one",
+        isError: false,
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c2",
+        name: "Read",
+        result: "two",
+        isError: false,
+      },
+    ]);
+  });
+
+  test("没有稳定原生 assistant id 时不从外层 uuid 制造消息身份", async () => {
+    const { events, fake } = setup();
+    fake.controls.push(textDelta("outer-delta", "不可关联"));
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        role: "assistant",
+        content: [{ type: "text", text: "仍不可关联" }],
+        stop_reason: "end_turn",
+      },
+      parent_tool_use_id: null,
+      uuid: "outer-snapshot",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events.filter(
+        (event) => event.type === "text.delta" || event.type === "message",
+      ),
+    ).toEqual([]);
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual([
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: null,
+      },
+    ]);
+  });
+
   test("assistant stop_reason=end_turn 合成回合终态", async () => {
     const { events, fake } = setup();
     fake.controls.push(assistantEndTurn("a1", "回答完毕"));
@@ -187,6 +367,33 @@ describe("qoder driver 事件映射", () => {
       finalReply: "回答完毕",
       usage: expect.objectContaining({ input_tokens: 5, output_tokens: 6 }),
     });
+  });
+
+  test("缺少 usage 时不填造 token 字段", async () => {
+    const { events, fake } = setup();
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "native-final",
+        role: "assistant",
+        content: [{ type: "text", text: "完成" }],
+        stop_reason: "end_turn",
+      },
+      parent_tool_use_id: null,
+      uuid: "outer-final",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual([
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: "完成",
+      },
+    ]);
   });
 
   test("message_delta 的 end_turn 合成回合终态（partial 模式）", async () => {

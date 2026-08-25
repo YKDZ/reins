@@ -6,7 +6,11 @@ import type {
 } from "@reins/protocol";
 import { makeTextEvidence } from "@reins/protocol";
 
-import { derivePermissionOptions, mapSdkMessage } from "./mapper.ts";
+import {
+  createQoderMappingState,
+  derivePermissionOptions,
+  mapSdkMessage,
+} from "./mapper.ts";
 import type {
   CanUseTool,
   PermissionResult,
@@ -48,6 +52,7 @@ export function createQoderDriver(deps: {
     let query: ReturnType<QoderSdk["query"]> | null = null;
     let abortController: AbortController | null = null;
     let session: HarnessSession<PendingEntry> | null = null;
+    let mappingState = createQoderMappingState();
     let terminating = false;
     let runPromise: Promise<void> | null = null;
 
@@ -90,7 +95,7 @@ export function createQoderDriver(deps: {
       let readFailed = false;
       try {
         for await (const message of query) {
-          const events = mapSdkMessage(session, message);
+          const events = mapSdkMessage(session, mappingState, message);
           for (const event of events) {
             emit(event);
           }
@@ -132,6 +137,7 @@ export function createQoderDriver(deps: {
             // 回合终态作废未决请求：直接丢弃，不结算、不写文案。
           },
         });
+        mappingState = createQoderMappingState();
         session.beginTurn(spec.turnId);
         abortController = new AbortController();
         stream = createAsyncQueue<SDKUserMessage>();
