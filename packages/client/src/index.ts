@@ -41,7 +41,7 @@ type ClientMachineErrorCode =
   | "daemon_timeout";
 
 function clientMachineError(code: ClientMachineErrorCode): MachineError {
-  return { code };
+  return { code } satisfies MachineError;
 }
 
 // 协议客户端：请求/响应按 requestId 关联，通知分发给订阅者；
