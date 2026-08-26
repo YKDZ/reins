@@ -10,6 +10,7 @@ import {
   truncate,
   unlink,
 } from "node:fs/promises";
+import { dirname } from "node:path";
 
 import type { AdvisoryFileLease } from "./diagnostics-store-lock.ts";
 
@@ -22,8 +23,10 @@ export type DiagnosticsFileOperation =
   | "readdir"
   | "rename"
   | "stat"
+  | "sync"
   | "truncate"
-  | "unlink";
+  | "unlink"
+  | "writeFile";
 
 export type BeforeDiagnosticsFileOperation = (
   operation: DiagnosticsFileOperation,
@@ -107,9 +110,62 @@ export class LeaseGuardedDiagnosticsFilesystem {
     });
   }
 
+  async replaceFileAtomically(
+    path: string,
+    temporaryPath: string,
+    data: Buffer,
+    mode: number,
+  ): Promise<void> {
+    await this.#removeIfExists(temporaryPath);
+    let temporaryMayExist = true;
+    let handle: Awaited<ReturnType<typeof open>> | undefined;
+    try {
+      handle = await this.#run(
+        "open",
+        temporaryPath,
+        async () => await open(temporaryPath, "wx", mode),
+      );
+      const temporaryHandle = handle;
+      await this.#run("writeFile", temporaryPath, async () => {
+        await temporaryHandle.writeFile(data);
+      });
+      await this.chmod(temporaryPath, mode);
+      await this.#run("sync", temporaryPath, async () => {
+        await temporaryHandle.sync();
+      });
+      await temporaryHandle.close();
+      handle = undefined;
+      await this.#run("rename", path, async () => {
+        await rename(temporaryPath, path);
+      });
+      temporaryMayExist = false;
+      await this.syncDirectory(dirname(path));
+    } finally {
+      await handle?.close().catch(() => undefined);
+      if (temporaryMayExist) {
+        await this.#removeIfExists(temporaryPath).catch(() => undefined);
+      }
+    }
+  }
+
   async close(): Promise<void> {
     await this.#lease.assertHeld();
     await this.#lease.close();
+  }
+
+  async syncDirectory(path: string): Promise<void> {
+    await this.#run("sync", path, async () => {
+      let handle: Awaited<ReturnType<typeof open>> | undefined;
+      try {
+        handle = await open(path, "r");
+        await handle.sync();
+      } catch (error) {
+        if (process.platform === "win32") return;
+        throw error;
+      } finally {
+        await handle?.close();
+      }
+    });
   }
 
   async #run<T>(
@@ -121,5 +177,20 @@ export class LeaseGuardedDiagnosticsFilesystem {
     await this.#beforeOperation?.(operation, path);
     await this.#lease.assertHeld();
     return await action();
+  }
+
+  async #removeIfExists(path: string): Promise<void> {
+    try {
+      await this.unlink(path);
+    } catch (error) {
+      if (
+        error instanceof Error &&
+        "code" in error &&
+        error.code === "ENOENT"
+      ) {
+        return;
+      }
+      throw error;
+    }
   }
 }

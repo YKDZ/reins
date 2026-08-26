@@ -1,6 +1,6 @@
 import { mkdtemp, rm } from "node:fs/promises";
 import { access } from "node:fs/promises";
-import { connect } from "node:net";
+import { connect, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -12,6 +12,7 @@ import {
   isTransportError,
   type TransportConnection,
 } from "../../src/index.ts";
+import { wrapUnixSocket } from "../../src/unix-socket.ts";
 
 const flush = (): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, 0));
@@ -121,6 +122,38 @@ describe("Unix socket 传输", () => {
     expect((errors[0] as Error & { code?: string }).code).toBe("invalid_frame");
   });
 
+  test("非法 UTF-8 以排除 LF 的原始 frame bytes 计数", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "reins-transport-"));
+    dirs.push(dir);
+    const socketPath = join(dir, "reins.sock");
+
+    const server = createUnixSocketServer({ path: socketPath });
+    servers.push(server);
+    await server.listen();
+    const accepted: TransportConnection[] = [];
+    server.onConnection((connection) => {
+      accepted.push(connection);
+    });
+
+    const raw = connect(socketPath);
+    await waitFor(() => accepted.length > 0);
+    const errors: unknown[] = [];
+    accepted[0]?.onEvent((event) => {
+      if (event.kind === "error") errors.push(event.error);
+    });
+    raw.end(Buffer.from([0x80, 0x0a]));
+    await waitFor(() => errors.length > 0);
+
+    const error = errors[0];
+    if (!isTransportError(error)) throw new Error("Expected transport error");
+    expect(error.fact).toEqual({
+      kind: "transport_failure",
+      operation: "read",
+      reason: "invalid_frame",
+      inputBytes: 1,
+    });
+  });
+
   test("server.close 移除 socket 文件并通知连接关闭", async () => {
     const dir = await mkdtemp(join(tmpdir(), "reins-transport-"));
     dirs.push(dir);
@@ -159,8 +192,158 @@ describe("Unix socket 传输", () => {
     await first.listen();
 
     const second = createUnixSocketServer({ path: socketPath });
-    await expect(second.listen()).rejects.toMatchObject({
+    const failure: unknown = await second
+      .listen()
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
       code: "address_in_use",
+      message: "address_in_use",
+      fact: {
+        kind: "transport_failure",
+        operation: "listen",
+        reason: "io_error",
+      },
     });
+    expect(JSON.stringify(failure).includes(socketPath)).toBe(false);
+  });
+
+  test("普通 listen I/O 失败在 socket adapter 原点归一化为安全事实", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "reins-transport-"));
+    dirs.push(dir);
+    const server = createUnixSocketServer({
+      path: join(dir, "missing", "reins.sock"),
+    });
+    servers.push(server);
+
+    const failure: unknown = await server
+      .listen()
+      .catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "io_error",
+      message: "io_error",
+      fact: {
+        kind: "transport_failure",
+        operation: "listen",
+        reason: "io_error",
+      },
+    });
+    expect(JSON.stringify(failure).includes(dir)).toBe(false);
+  });
+
+  test("connect I/O 失败不暴露 socket 原始错误", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "reins-transport-"));
+    dirs.push(dir);
+
+    const failure: unknown = await createUnixSocketClient(
+      join(dir, "missing.sock"),
+    ).catch((error: unknown) => error);
+    expect(failure).toMatchObject({
+      code: "io_error",
+      message: "io_error",
+      fact: {
+        kind: "transport_failure",
+        operation: "connect",
+        reason: "io_error",
+      },
+    });
+    expect(JSON.stringify(failure).includes(dir)).toBe(false);
+  });
+
+  test("peer destroy 与多次 write 只产生一个真实 provenance failure", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "reins-transport-"));
+    dirs.push(dir);
+    const socketPath = join(dir, "reins.sock");
+    const rawServer = createNetServer((socket) => {
+      socket.once("data", () => socket.destroy());
+    });
+    await new Promise<void>((resolve, reject) => {
+      rawServer.once("error", reject);
+      rawServer.listen(socketPath, resolve);
+    });
+
+    try {
+      const client = await createUnixSocketClient(socketPath);
+      clients.push(client);
+      const observations: Array<
+        { kind: "error"; operation: string } | { kind: "closed" }
+      > = [];
+      client.onEvent((event) => {
+        if (event.kind === "error") {
+          observations.push({
+            kind: "error",
+            operation: event.error.fact.operation,
+          });
+        }
+        if (event.kind === "closed") observations.push({ kind: "closed" });
+      });
+      const body = "x".repeat(2 * 1024 * 1024);
+      for (let index = 0; index < 16; index += 1) {
+        client.send({ body, index });
+      }
+      await waitFor(() =>
+        observations.some((event) => event.kind === "closed"),
+      );
+
+      const failures = observations.filter(
+        (event): event is { kind: "error"; operation: string } =>
+          event.kind === "error",
+      );
+      expect(failures).toHaveLength(1);
+      expect(["connection", "write"]).toContain(failures[0]?.operation);
+      expect(failures.some((failure) => failure.operation === "read")).toBe(
+        false,
+      );
+      expect(observations.map((event) => event.kind)).toEqual([
+        "error",
+        "closed",
+      ]);
+    } finally {
+      await new Promise<void>((resolve) => rawServer.close(() => resolve()));
+    }
+  });
+
+  test("idle established socket error 产生 connection failure 后关闭", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "reins-transport-"));
+    dirs.push(dir);
+    const socketPath = join(dir, "reins.sock");
+    const rawServer = createNetServer(() => {});
+    await new Promise<void>((resolve, reject) => {
+      rawServer.once("error", reject);
+      rawServer.listen(socketPath, resolve);
+    });
+    const raw = connect(socketPath);
+    await new Promise<void>((resolve, reject) => {
+      raw.once("connect", resolve);
+      raw.once("error", reject);
+    });
+    const connection = wrapUnixSocket(raw);
+    const events: Array<{ kind: string; operation?: string }> = [];
+    const serializedFailures: string[] = [];
+    connection.onEvent((event) => {
+      if (event.kind === "error") {
+        serializedFailures.push(JSON.stringify(event.error));
+      }
+      events.push(
+        event.kind === "error"
+          ? { kind: "error", operation: event.error.fact.operation }
+          : { kind: event.kind },
+      );
+    });
+
+    try {
+      const secretSentinel = ["idle", "socket", "sentinel"].join("-");
+      raw.destroy(new Error(secretSentinel));
+      await waitFor(() => events.some((event) => event.kind === "closed"));
+      expect(events).toEqual([
+        { kind: "error", operation: "connection" },
+        { kind: "closed" },
+      ]);
+      expect(
+        serializedFailures.some((failure) => failure.includes(secretSentinel)),
+      ).toBe(false);
+    } finally {
+      raw.destroy();
+      await new Promise<void>((resolve) => rawServer.close(() => resolve()));
+    }
   });
 });

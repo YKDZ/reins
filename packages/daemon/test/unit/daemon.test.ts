@@ -1917,8 +1917,9 @@ describe("daemon 空闲退出", () => {
     expect(fake.calls.starts).toBe(0);
   });
 
-  test("启动与 transport 收口同时失败时保留启动根因", async () => {
-    const startError = new Error("transport listen rejected");
+  test("启动与 transport 收口同时失败时保留已归一化的启动根因", async () => {
+    const secretSentinel = ["listen", "root", "sentinel"].join("-");
+    const startError = new Error(secretSentinel);
     const closeError = new Error("transport close rejected");
     const daemon = createDaemon({
       transport: {
@@ -1943,9 +1944,29 @@ describe("daemon 空闲退出", () => {
       .catch((error: unknown) => error);
     expect(failure).toBeInstanceOf(AggregateError);
     expect(failure).toMatchObject({
-      cause: startError,
-      errors: [startError, closeError],
+      cause: {
+        code: "io_error",
+        fact: {
+          kind: "transport_failure",
+          operation: "listen",
+          reason: "io_error",
+        },
+      },
+      errors: [
+        {
+          code: "io_error",
+          fact: {
+            kind: "transport_failure",
+            operation: "listen",
+            reason: "io_error",
+          },
+        },
+        closeError,
+      ],
     });
+    const aggregate = failure as AggregateError;
+    expect(aggregate.errors[0]).toBe(aggregate.cause);
+    expect(String(aggregate.cause).includes(secretSentinel)).toBe(false);
   });
 
   test("transport close 拒绝不撤销已建立的 daemon stopped logical commit", async () => {

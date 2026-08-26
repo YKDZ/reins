@@ -1,7 +1,12 @@
 import { basename, dirname, join } from "node:path";
 
 import {
+  diagnosticIdSchema,
   diagnosticRecordSchema,
+  sessionIdSchema,
+  textEvidenceSchema,
+  turnIdSchema,
+  utcMillisecondTimestampSchema,
   type DiagnosticRecord,
   type DiagnosticsParams,
   type DiagnosticsResult,
@@ -30,7 +35,44 @@ const ACTIVE_FILE = "active.ndjson";
 const LOCK_TARGET = "writer-lease";
 const BOOTSTRAP_LOCK_TARGET = "diagnostics-bootstrap-lease";
 const SEGMENT_PATTERN = /^segment-(\d{12})\.ndjson$/;
+const MIGRATION_TEMP_SUFFIX = ".transport-migration";
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+const legacyV1TransportEntries = {
+  source: v.literal("daemon"),
+  harness: v.optional(v.pipe(v.string(), v.minLength(1))),
+  v: v.literal(1),
+  diagnosticId: diagnosticIdSchema,
+  recordedAt: utcMillisecondTimestampSchema,
+  severity: v.literal("error"),
+  kind: v.literal("transport_failure"),
+  operation: v.picklist(["listen", "connect", "read", "write", "close"]),
+  reason: v.picklist(["io_error", "timeout", "disconnected"]),
+  message: textEvidenceSchema,
+} as const;
+
+const legacyV1TransportFailureRecordSchema = v.pipe(
+  v.union([
+    v.strictObject(legacyV1TransportEntries),
+    v.strictObject({
+      ...legacyV1TransportEntries,
+      sessionId: sessionIdSchema,
+      turnId: v.optional(turnIdSchema),
+    }),
+  ]),
+  v.check((record) => {
+    switch (record.operation) {
+      case "listen":
+        return record.reason === "io_error";
+      case "connect":
+        return record.reason === "io_error" || record.reason === "timeout";
+      case "read":
+      case "write":
+      case "close":
+        return true;
+    }
+  }),
+);
 
 export type DiagnosticsStoreHealth =
   | {
@@ -96,6 +138,11 @@ type Segment = {
   bytes: number;
 };
 
+type ParsedRecords = {
+  records: DiagnosticRecord[];
+  migratedLegacy: boolean;
+};
+
 export function openDiagnosticsStore(
   options: DiagnosticsStoreOptions,
 ): Promise<DiagnosticsStore> {
@@ -145,6 +192,8 @@ export async function openDiagnosticsStoreInternal(
       ...loaded,
     });
     await store.initializeRetention();
+    // 上次 rename 后的目录 sync 可能失败；成功 open 必须重新跨过持久化屏障。
+    await filesystem.syncDirectory(options.directory);
     return store;
   } catch (error) {
     await filesystem.close().catch(() => undefined);
@@ -498,6 +547,10 @@ async function loadFiles(
     .filter((name) => SEGMENT_PATTERN.test(name))
     .sort();
   const segments: Segment[] = [];
+  const migrations: Array<{
+    path: string;
+    records: DiagnosticRecord[];
+  }> = [];
   let nextSegment = 0;
   for (const name of segmentNames) {
     const path = join(directory, name);
@@ -506,11 +559,15 @@ async function loadFiles(
     const bytes = await filesystem.readFile(path);
     if (bytes.length > 0 && bytes.at(-1) !== 0x0a)
       corrupt("Immutable segment has an incomplete line");
+    const parsed = parseCompleteLines(bytes, name);
     segments.push({
       path,
-      records: parseCompleteLines(bytes, name),
+      records: parsed.records,
       bytes: bytes.length,
     });
+    if (parsed.migratedLegacy) {
+      migrations.push({ path, records: parsed.records });
+    }
     const match = SEGMENT_PATTERN.exec(name)!;
     nextSegment = Math.max(nextSegment, Number(match[1]) + 1);
   }
@@ -550,37 +607,74 @@ async function loadFiles(
       activeBytes = Buffer.concat([activeBytes, Buffer.from("\n")]);
     }
   }
+  const parsedActive = parseCompleteLines(activeBytes, ACTIVE_FILE);
+  if (parsedActive.migratedLegacy) {
+    migrations.push({ path: activePath, records: parsedActive.records });
+  }
+  for (const migration of migrations) {
+    const bytes = serializeRecords(migration.records);
+    await filesystem.replaceFileAtomically(
+      migration.path,
+      migration.path + MIGRATION_TEMP_SUFFIX,
+      bytes,
+      0o600,
+    );
+    await verifyMode(
+      filesystem,
+      migration.path,
+      0o600,
+      migration.path === activePath
+        ? "diagnostics file"
+        : "diagnostics segment",
+    );
+    const segment = segments.find(
+      (candidate) => candidate.path === migration.path,
+    );
+    if (segment !== undefined) segment.bytes = bytes.length;
+    if (migration.path === activePath) activeBytes = bytes;
+  }
   return {
     segments,
-    activeRecords: parseCompleteLines(activeBytes, ACTIVE_FILE),
+    activeRecords: parsedActive.records,
     activeBytes: activeBytes.length,
     nextSegment,
     repairs,
   };
 }
 
-function parseCompleteLines(bytes: Buffer, file: string): DiagnosticRecord[] {
+function parseCompleteLines(bytes: Buffer, file: string): ParsedRecords {
   let text: string;
   try {
     text = strictUtf8.decode(bytes);
   } catch {
     corrupt(`Invalid UTF-8 in ${file}`);
   }
-  if (text.length === 0) return [];
+  if (text.length === 0) return { records: [], migratedLegacy: false };
   const lines = text.endsWith("\n")
     ? text.slice(0, -1).split("\n")
     : text.split("\n");
-  return lines.map((line) => {
+  let migratedLegacy = false;
+  const records = lines.map((line) => {
     try {
-      return parseRecord(JSON.parse(line));
+      const parsed = parseRecordWithMigration(JSON.parse(line));
+      migratedLegacy ||= parsed.migratedLegacy;
+      return parsed.record;
     } catch (error) {
       if (error instanceof DiagnosticsStoreError) throw error;
       corrupt(`Invalid diagnostic record in ${file}`);
     }
   });
+  return { records, migratedLegacy };
 }
 
 function parseRecord(input: unknown): DiagnosticRecord {
+  return parseRecordWithMigration(input).record;
+}
+
+function parseRecordWithMigration(input: unknown): {
+  record: DiagnosticRecord;
+  migratedLegacy: boolean;
+} {
   if (typeof input !== "object" || input === null || !("v" in input)) {
     corrupt("Diagnostic record has no schema version");
   }
@@ -591,8 +685,21 @@ function parseRecord(input: unknown): DiagnosticRecord {
       corrupt("Diagnostic record has an unknown schema version");
   }
   const parsed = v.safeParse(diagnosticRecordSchema, input);
-  if (!parsed.success) corrupt("Diagnostic record does not match schema v1");
-  return parsed.output;
+  if (parsed.success) return { record: parsed.output, migratedLegacy: false };
+  const legacy = v.safeParse(legacyV1TransportFailureRecordSchema, input);
+  if (!legacy.success) corrupt("Diagnostic record does not match schema v1");
+  const migrated = { ...legacy.output };
+  Reflect.deleteProperty(migrated, "message");
+  const current = v.safeParse(diagnosticRecordSchema, migrated);
+  if (!current.success) corrupt("Diagnostic record does not match schema v1");
+  return { record: current.output, migratedLegacy: true };
+}
+
+function serializeRecords(records: readonly DiagnosticRecord[]): Buffer {
+  if (records.length === 0) return Buffer.alloc(0);
+  return Buffer.from(
+    `${records.map((record) => JSON.stringify(record)).join("\n")}\n`,
+  );
 }
 
 async function ensurePrivateDirectory(

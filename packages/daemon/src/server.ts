@@ -20,6 +20,7 @@ import type {
   TurnId,
   SpawnParams,
   StopReason,
+  TransportFailureFact,
   WaitParams,
 } from "@reins/protocol";
 import {
@@ -27,19 +28,48 @@ import {
   harnessCapabilitySchema,
   makeErrorCause,
   makeTextEvidence,
+  parseTransportFailureFact,
   protocolMethodSchema,
   protocolParamsSchemaFor,
   protocolRequestSchema,
   requestIdSchema,
 } from "@reins/protocol";
-import type { TransportConnection, TransportServer } from "@reins/transport";
+import {
+  createTransportError,
+  transportFailureFactOf,
+  type TransportConnection,
+  type TransportServer,
+} from "@reins/transport";
 import * as v from "valibot";
 
+import {
+  orderDiagnosticsAcceptance,
+  type OrderedDiagnosticsRuntime,
+} from "./diagnostics-acceptance.ts";
 import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
 export const DEFAULT_EVENT_LOG_LIMIT = 1000;
+
+const listenIoFailure = parseTransportFailureFact({
+  kind: "transport_failure",
+  operation: "listen",
+  reason: "io_error",
+}) as Extract<TransportFailureFact, { operation: "listen" }>;
+const connectionIoFailure = parseTransportFailureFact({
+  kind: "transport_failure",
+  operation: "connection",
+  reason: "io_error",
+}) as Extract<
+  TransportFailureFact,
+  { operation: "connection"; reason: "io_error" }
+>;
+const writeIoFailure = parseTransportFailureFact({
+  kind: "transport_failure",
+  operation: "write",
+  reason: "io_error",
+}) as Extract<TransportFailureFact, { operation: "write" }>;
 
 type AttachSubscription = {
   readonly sessionId: SessionId;
@@ -78,19 +108,28 @@ type ProtocolServerOptions = {
   transport: TransportServer<ProtocolMessage>;
   machine: SessionMachine;
   adapters: AdapterRegistry;
-  diagnostics: DiagnosticsRuntime;
+  diagnostics: OrderedDiagnosticsRuntime;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 };
 
 type ProtocolServerTestingOptions = {
   beforeAttachReplay?: (sessionId: SessionId) => void;
+  onDiagnosticsQueryAccepted?: () => void;
 };
 
 export function createProtocolServer(
-  options: ProtocolServerOptions,
+  options: Omit<ProtocolServerOptions, "diagnostics"> & {
+    diagnostics: DiagnosticsRuntime;
+  },
 ): ProtocolServer {
-  return createProtocolServerInternal(options, {});
+  return createProtocolServerInternal(
+    {
+      ...options,
+      diagnostics: orderDiagnosticsAcceptance(options.diagnostics),
+    },
+    {},
+  );
 }
 
 // 包内测试缝；不从 @reins/daemon 的公共入口导出。
@@ -109,8 +148,10 @@ export function createProtocolServerInternal(
   const eventLog = new Map<SessionId, EventHistory>();
   const observations = new Map<SessionId, Observation>();
   const knownSessions = new Set<SessionId>();
-  const transportFailureConnections = new WeakSet<
-    TransportConnection<ProtocolMessage>
+  const transportFailureConnections = new WeakMap<
+    TransportConnection<ProtocolMessage>,
+    | { status: "pending"; queued: TransportFailureFact | undefined }
+    | { status: "accepted" }
   >();
   let idleTimer: ReturnType<typeof setTimeout> | null = null;
   let quiescing = false;
@@ -171,7 +212,10 @@ export function createProtocolServerInternal(
     try {
       connection.send(message);
     } catch (error) {
-      recordTransportFailure(connection, "write", error);
+      recordTransportFailure(
+        connection,
+        transportFailureFactOf(error) ?? writeIoFailure,
+      );
       cleanupConnection(connection);
     }
   }
@@ -203,17 +247,45 @@ export function createProtocolServerInternal(
 
   function recordTransportFailure(
     connection: TransportConnection<ProtocolMessage>,
-    operation: "read" | "write",
-    error: unknown,
+    fact: TransportFailureFact,
   ): void {
-    if (transportFailureConnections.has(connection)) return;
-    transportFailureConnections.add(connection);
-    void recordDiagnostic({
-      kind: "transport_failure",
-      operation,
-      reason: "io_error",
-      message: makeTextEvidence(String(error)),
-    }).catch(() => undefined);
+    const current = transportFailureConnections.get(connection);
+    if (current?.status === "accepted") return;
+    if (current?.status === "pending") {
+      current.queued ??= fact;
+      return;
+    }
+    const pending: {
+      status: "pending";
+      queued: TransportFailureFact | undefined;
+    } = {
+      status: "pending",
+      queued: undefined,
+    };
+    transportFailureConnections.set(connection, pending);
+    const causalAttempt = options.diagnostics.runCausal(async (record) => {
+      let candidate: TransportFailureFact | undefined = fact;
+      while (candidate !== undefined) {
+        let accepted = false;
+        try {
+          accepted =
+            (await record({
+              ...candidate,
+              source: "daemon",
+            })) !== undefined;
+        } catch {
+          accepted = false;
+        }
+        if (accepted) {
+          transportFailureConnections.set(connection, { status: "accepted" });
+          return;
+        }
+        candidate = pending.queued;
+        pending.queued = undefined;
+      }
+      transportFailureConnections.delete(connection);
+    });
+    void causalAttempt.catch(() => undefined);
   }
 
   function hasLiveSessions(): boolean {
@@ -411,6 +483,12 @@ export function createProtocolServerInternal(
   ): void {
     const parsed = v.safeParse(protocolRequestSchema, raw);
     if (!parsed.success) {
+      void recordDiagnostic({
+        kind: "protocol_violation",
+        operation: "validate_daemon_request",
+        stage: "envelope",
+        reason: "invalid_shape",
+      }).catch(() => undefined);
       const requestId = requestIdOf(raw);
       if (requestId === null) return;
       const method =
@@ -688,6 +766,7 @@ export function createProtocolServerInternal(
         };
       }
       case "diagnostics":
+        testing.onDiagnosticsQueryAccepted?.();
         if (options.diagnostics.health().status === "degraded") {
           throw { code: "diagnostics_unavailable" } satisfies MachineError;
         }
@@ -727,7 +806,10 @@ export function createProtocolServerInternal(
         else pendingMessages.push({ connection, message: event.message });
       }
       if (event.kind === "error") {
-        recordTransportFailure(connection, "read", event.error);
+        recordTransportFailure(
+          connection,
+          transportFailureFactOf(event.error) ?? connectionIoFailure,
+        );
         cleanupConnection(connection);
       }
       if (event.kind === "closed") cleanupConnection(connection);
@@ -770,13 +852,13 @@ export function createProtocolServerInternal(
         try {
           await options.transport.listen();
         } catch (error) {
-          await recordDiagnostic({
-            kind: "transport_failure",
-            operation: "listen",
-            reason: "io_error",
-            message: makeTextEvidence(String(error)),
+          const fact = transportFailureFactOf(error);
+          await recordDiagnostic(fact ?? listenIoFailure);
+          if (fact !== undefined) throw error;
+          throw createTransportError({
+            code: "io_error",
+            fact: listenIoFailure,
           });
-          throw error;
         }
         const diagnosticId = await recordDiagnostic({
           kind: "lifecycle",

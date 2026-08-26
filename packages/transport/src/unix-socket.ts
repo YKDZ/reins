@@ -10,15 +10,19 @@ import {
   type TransportServer,
 } from "./transport.ts";
 
-function wrapSocket<TMessage>(socket: Socket): TransportConnection<TMessage> {
+/** @internal 仅供 Unix Adapter 及其真实 socket contract test 使用。 */
+export function wrapUnixSocket<TMessage>(
+  socket: Socket,
+): TransportConnection<TMessage> {
   const listeners = new Set<(event: TransportEvent<TMessage>) => void>();
   let closed = false;
+  let failureEmitted = false;
   const decoder = createNdjsonDecoder({
     onMessage(message) {
       emit({ kind: "message", message: message as TMessage });
     },
     onError(error) {
-      emit({ kind: "error", error });
+      emitFailure(error);
     },
   });
 
@@ -28,47 +32,63 @@ function wrapSocket<TMessage>(socket: Socket): TransportConnection<TMessage> {
     }
   }
 
-  socket.setEncoding("utf8");
-  socket.on("data", (chunk: string) => {
+  function emitFailure(
+    error: Extract<TransportEvent<TMessage>, { kind: "error" }>["error"],
+  ): void {
+    if (closed || failureEmitted) return;
+    failureEmitted = true;
+    emit({ kind: "error", error });
+  }
+
+  function emitIoFailure(operation: "connection" | "write"): void {
+    emitFailure(
+      createTransportError({
+        code: "io_error",
+        fact: {
+          kind: "transport_failure",
+          operation,
+          reason: "io_error",
+        },
+      }),
+    );
+  }
+
+  socket.on("data", (chunk: Buffer) => {
     decoder.push(chunk);
   });
   socket.on("end", () => {
     decoder.end();
   });
-  socket.on("close", () => {
+  socket.on("close", (hadError) => {
     decoder.end();
     if (closed) return;
+    if (hadError) emitIoFailure("connection");
     closed = true;
     emit({ kind: "closed" });
   });
   socket.on("error", (error) => {
     if (isTransportError(error)) {
-      emit({ kind: "error", error });
+      emitFailure(error);
     } else {
-      emit({
-        kind: "error",
-        error: createTransportError(
-          "transport_closed",
-          `socket error: ${String(error)}`,
-        ),
-      });
+      emitIoFailure("connection");
     }
   });
 
   return {
     send(message) {
       if (closed || socket.destroyed) {
-        throw createTransportError("transport_closed", "connection closed");
+        throw createTransportError({
+          code: "transport_closed",
+          fact: {
+            kind: "transport_failure",
+            operation: "write",
+            reason: "disconnected",
+          },
+        });
       }
       socket.write(encodeNdjson(message), (error) => {
         if (error !== null) {
-          emit({
-            kind: "error",
-            error: createTransportError(
-              "transport_closed",
-              `write failed: ${String(error)}`,
-            ),
-          });
+          emitIoFailure("write");
         }
       });
     },
@@ -99,7 +119,7 @@ export function createUnixSocketServer<TMessage = unknown>(options: {
     async listen() {
       if (server !== null) return;
       server = createServer((socket) => {
-        const connection = wrapSocket<TMessage>(socket);
+        const connection = wrapUnixSocket<TMessage>(socket);
         connections.add(connection);
         connection.onEvent((event) => {
           if (event.kind === "closed") connections.delete(connection);
@@ -115,13 +135,26 @@ export function createUnixSocketServer<TMessage = unknown>(options: {
           server = null;
           if (error.code === "EADDRINUSE") {
             reject(
-              createTransportError(
-                "address_in_use",
-                `socket address already in use: ${options.path}`,
-              ),
+              createTransportError({
+                code: "address_in_use",
+                fact: {
+                  kind: "transport_failure",
+                  operation: "listen",
+                  reason: "io_error",
+                },
+              }),
             );
           } else {
-            reject(error);
+            reject(
+              createTransportError({
+                code: "io_error",
+                fact: {
+                  kind: "transport_failure",
+                  operation: "listen",
+                  reason: "io_error",
+                },
+              }),
+            );
           }
         };
         const onListening = (): void => {
@@ -159,11 +192,22 @@ export function createUnixSocketClient<TMessage = unknown>(
 ): Promise<TransportConnection<TMessage>> {
   return new Promise((resolve, reject) => {
     const socket = connect(path);
-    const connection = wrapSocket<TMessage>(socket);
-    socket.once("error", (error) => {
-      reject(error);
-    });
+    const onConnectError = (): void => {
+      reject(
+        createTransportError({
+          code: "io_error",
+          fact: {
+            kind: "transport_failure",
+            operation: "connect",
+            reason: "io_error",
+          },
+        }),
+      );
+    };
+    socket.once("error", onConnectError);
     socket.once("connect", () => {
+      const connection = wrapUnixSocket<TMessage>(socket);
+      socket.removeListener("error", onConnectError);
       resolve(connection);
     });
   });

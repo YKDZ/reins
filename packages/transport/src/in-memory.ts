@@ -17,7 +17,14 @@ function makeEndpoint<TMessage>(
   return {
     send(message) {
       if (self.closed) {
-        throw createTransportError("transport_closed", "connection closed");
+        throw createTransportError({
+          code: "transport_closed",
+          fact: {
+            kind: "transport_failure",
+            operation: "write",
+            reason: "disconnected",
+          },
+        });
       }
       queueMicrotask(() => {
         if (peer.closed) return;

@@ -9,12 +9,15 @@ import type { ErrorCause, ProtocolMessage } from "@reins/protocol";
 import { makeErrorCause } from "@reins/protocol";
 import {
   createUnixSocketClient,
+  isTransportErrorCode,
   resolveReinsSocketPath,
   type TransportConnection,
+  type TransportErrorCode,
 } from "@reins/transport";
 import lockfile from "proper-lockfile";
 
 import { machineError } from "./errors.ts";
+import { transportErrorMessage } from "./grammar.ts";
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -143,11 +146,13 @@ export async function ensureDaemon(
   if (startup !== undefined) {
     await Promise.race([startup.done, sleep(STARTUP_REPORT_DRAIN_TIMEOUT_MS)]);
   }
-  const reportedCause = startup?.cause();
+  const reportedFailure = startup?.failure();
   startup?.close();
   await releaseLaunch?.();
   const cause =
-    reportedCause ??
+    (reportedFailure?.kind === "transport"
+      ? makeErrorCause("io", transportErrorMessage(reportedFailure.code))
+      : reportedFailure?.cause) ??
     (spawnError === undefined && launchError === undefined
       ? child === undefined || !hasExited(child)
         ? makeErrorCause(
@@ -183,7 +188,10 @@ function isLaunchLockContention(error: unknown): boolean {
 
 function collectStartupReport(stream: Readable | null | undefined): {
   done: Promise<void>;
-  cause(): ErrorCause | undefined;
+  failure():
+    | { kind: "cause"; cause: ErrorCause }
+    | { kind: "transport"; code: TransportErrorCode }
+    | undefined;
   close(): void;
 } {
   let text = "";
@@ -211,13 +219,18 @@ function collectStartupReport(stream: Readable | null | undefined): {
   }
   return {
     done,
-    cause() {
+    failure() {
       for (const line of text.trim().split("\n").reverse()) {
         try {
           const parsed = JSON.parse(line) as {
             v?: unknown;
             cause?: { kind?: unknown; message?: unknown };
+            transport?: { code?: unknown };
           };
+          const transportCode = parsed.transport?.code;
+          if (parsed.v === 1 && isTransportErrorCode(transportCode)) {
+            return { kind: "transport", code: transportCode };
+          }
           const kind = parsed.cause?.kind;
           const message = parsed.cause?.message;
           if (
@@ -229,7 +242,7 @@ function collectStartupReport(stream: Readable | null | undefined): {
               kind === "timeout" ||
               kind === "closed")
           ) {
-            return makeErrorCause(kind, message);
+            return { kind: "cause", cause: makeErrorCause(kind, message) };
           }
         } catch {
           // 启动报告不是完整 JSON 时继续查找；最终回退到进程状态。

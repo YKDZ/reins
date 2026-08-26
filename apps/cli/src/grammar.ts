@@ -1,4 +1,5 @@
 import type { InvalidParamIssue, MachineError } from "@reins/protocol";
+import type { TransportErrorCode } from "@reins/transport";
 import type { CommanderError } from "commander";
 
 import {
@@ -19,6 +20,21 @@ export type RenderedErrorItem = {
 export type RenderedError = {
   readonly items: readonly [RenderedErrorItem, ...RenderedErrorItem[]];
 };
+
+export function transportErrorMessage(code: TransportErrorCode): string {
+  switch (code) {
+    case "address_in_use":
+      return "Daemon socket address is already in use";
+    case "invalid_frame":
+      return "Daemon transport received an invalid frame";
+    case "transport_closed":
+      return "Daemon transport connection closed";
+    case "io_error":
+      return "Daemon transport I/O failed";
+    case "timeout":
+      return "Daemon transport operation timed out";
+  }
+}
 
 function renderedError(message: string, suggestion?: string): RenderedError {
   return { items: [renderedErrorItem(message, suggestion)] };

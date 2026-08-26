@@ -1214,21 +1214,85 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
+  defineDaemonGlobalDiagnostic(
+    {
+      kind: v.literal("protocol_violation"),
+      operation: v.literal("validate_daemon_request"),
+      stage: v.literal("envelope"),
+      reason: v.literal("invalid_shape"),
+    },
+    "error",
+  ),
 ] as const;
 
-function defineTransportFailure<
+function defineTransportFailure<const TEntries extends v.ObjectEntries>(
+  entries: TEntries,
+) {
+  return {
+    fact: v.strictObject(entries),
+    ...defineDaemonDiagnostic(entries, "error"),
+  } as const;
+}
+
+function defineTransportFailurePair<
   const TOperation extends string,
   const TReason extends string,
 >(operation: TOperation, reason: TReason) {
-  return defineDaemonDiagnostic(
-    {
-      kind: v.literal("transport_failure"),
-      operation: v.literal(operation),
-      reason: v.literal(reason),
-      message: textEvidenceSchema,
-    },
-    "error",
-  );
+  return defineTransportFailure({
+    kind: v.literal("transport_failure"),
+    operation: v.literal(operation),
+    reason: v.literal(reason),
+  });
+}
+
+const transportFailureDefinitions = [
+  defineTransportFailure({
+    kind: v.literal("transport_failure"),
+    operation: v.literal("read"),
+    reason: v.literal("invalid_frame"),
+    inputBytes: v.pipe(
+      v.number(),
+      v.integer(),
+      v.minValue(0),
+      v.maxValue(Number.MAX_SAFE_INTEGER),
+    ),
+  }),
+  defineTransportFailurePair("listen", "io_error"),
+  defineTransportFailurePair("connect", "io_error"),
+  defineTransportFailurePair("connect", "timeout"),
+  defineTransportFailurePair("connection", "io_error"),
+  defineTransportFailurePair("read", "io_error"),
+  defineTransportFailurePair("read", "timeout"),
+  defineTransportFailurePair("read", "disconnected"),
+  defineTransportFailurePair("write", "io_error"),
+  defineTransportFailurePair("write", "timeout"),
+  defineTransportFailurePair("write", "disconnected"),
+  defineTransportFailurePair("close", "io_error"),
+  defineTransportFailurePair("close", "timeout"),
+  defineTransportFailurePair("close", "disconnected"),
+] as const;
+
+export const transportFailureFactSchema = v.union(
+  selectDefinitionField(transportFailureDefinitions, "fact"),
+);
+type ParsedTransportFailureFact = v.InferOutput<
+  typeof transportFailureFactSchema
+>;
+export type TransportFailureFact =
+  ParsedTransportFailureFact extends infer TFact
+    ? TFact extends object
+      ? Readonly<TFact>
+      : never
+    : never;
+
+export function parseTransportFailureFact(
+  input: unknown,
+): TransportFailureFact {
+  const parsed = v.safeParse(transportFailureFactSchema, input);
+  if (!parsed.success) {
+    throw new TypeError("Invalid transport failure fact");
+  }
+  return Object.freeze({ ...parsed.output });
 }
 
 function defineStorageFailure<
@@ -1247,18 +1311,7 @@ function defineStorageFailure<
 }
 
 const remainingDiagnosticDefinitions = [
-  defineTransportFailure("listen", "io_error"),
-  defineTransportFailure("connect", "io_error"),
-  defineTransportFailure("connect", "timeout"),
-  defineTransportFailure("read", "io_error"),
-  defineTransportFailure("read", "timeout"),
-  defineTransportFailure("read", "disconnected"),
-  defineTransportFailure("write", "io_error"),
-  defineTransportFailure("write", "timeout"),
-  defineTransportFailure("write", "disconnected"),
-  defineTransportFailure("close", "io_error"),
-  defineTransportFailure("close", "timeout"),
-  defineTransportFailure("close", "disconnected"),
+  ...transportFailureDefinitions,
   defineStorageFailure("initialize", "unavailable"),
   defineStorageFailure("initialize", "io_error"),
   defineStorageFailure("initialize", "corrupt"),
@@ -1532,16 +1585,11 @@ type WorkerShapeProtocolViolationFact = {
   reason: "invalid_shape" | "unexpected_message";
   message?: TextEvidence | undefined;
 };
-type TransportFailurePair =
-  | { operation: "listen"; reason: "io_error" }
-  | { operation: "connect"; reason: "io_error" | "timeout" }
-  | {
-      operation: "read" | "write" | "close";
-      reason: "io_error" | "timeout" | "disconnected";
-    };
-type TransportFailureFact = TransportFailurePair & {
-  kind: "transport_failure";
-  message: TextEvidence;
+type DaemonRequestProtocolViolationFact = {
+  kind: "protocol_violation";
+  operation: "validate_daemon_request";
+  stage: "envelope";
+  reason: "invalid_shape";
 };
 type StorageFailurePair =
   | {
@@ -1586,6 +1634,7 @@ export type DiagnosticInput =
   | (ScopedControlAssociation & AuthorizationFailureFact)
   | (ControlAssociation & ProtocolViolationFact)
   | (AdapterAssociation & WorkerShapeProtocolViolationFact)
+  | ({ source: "daemon" } & DaemonRequestProtocolViolationFact)
   | WorkerEventProtocolViolationFact
   | (DaemonAssociation & TransportFailureFact)
   | (DaemonAssociation & (StorageFailureFact | TailRepairedFact))

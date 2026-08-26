@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
@@ -28,7 +29,12 @@ import {
   turnIdSchema,
   type WorkerEventRejection,
 } from "@reins/protocol";
-import { createInMemoryTransportServer } from "@reins/transport";
+import {
+  createTransportError,
+  createInMemoryTransportServer,
+  createUnixSocketClient,
+  createUnixSocketServer,
+} from "@reins/transport";
 import type {
   TransportConnection,
   TransportEvent,
@@ -71,6 +77,240 @@ afterEach(async () => {
 });
 
 describe("daemon diagnostic error dispatch", () => {
+  test("malformed NDJSON produces closed secret-safe diagnostics through the real transport and store", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-safe-transport-"));
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () =>
+        v.parse(daemonGenerationSchema, "safetransport"),
+    });
+    const socketPath = join(root, "reins.sock");
+    const transport = createUnixSocketServer<ProtocolMessage>({
+      path: socketPath,
+    });
+    const daemon = createDaemon({
+      transport,
+      adapters: new Map(),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: runtime,
+    });
+    const running = daemon.start();
+    await waitForDaemonLifecycle(runtime);
+    const secretSentinel = ["ticket11", "secret", "sentinel"].join("-");
+    const malformedFrame = `${JSON.stringify({
+      kind: "request",
+      requestId: "unsafe-frame",
+      method: "send",
+      params: {
+        message: {
+          content: [
+            { type: "text", text: "ordinary body" },
+            {
+              type: "tool_result",
+              content: secretSentinel,
+            },
+          ],
+        },
+      },
+    }).slice(0, -1)},\n`;
+    const raw = connect(socketPath);
+    try {
+      await new Promise<void>((resolve, reject) => {
+        raw.once("connect", resolve);
+        raw.once("error", reject);
+      });
+      const rawClosed = new Promise<void>((resolve) => {
+        raw.once("close", () => resolve());
+      });
+      raw.end(malformedFrame);
+      await rawClosed;
+
+      const client = await createUnixSocketClient<ProtocolMessage>(socketPath);
+      try {
+        const requestId = v.parse(requestIdSchema, "safe-query");
+        const nextResponse = new Promise<ProtocolResponse>((resolve) => {
+          const unsubscribe = client.onEvent((event) => {
+            if (
+              event.kind === "message" &&
+              event.message.kind === "response" &&
+              event.message.requestId === requestId
+            ) {
+              unsubscribe();
+              resolve(event.message);
+            }
+          });
+        });
+        client.send({
+          kind: "request",
+          requestId,
+          method: "diagnostics",
+          params: { kinds: ["transport_failure"] },
+        });
+        const response = await nextResponse;
+
+        if (!("result" in response)) {
+          throw new Error("Expected queried transport diagnostics");
+        }
+        const invalidRequestId = v.parse(requestIdSchema, "invalid-shape");
+        const invalidResponse = new Promise<ProtocolResponse>((resolve) => {
+          const unsubscribe = client.onEvent((event) => {
+            if (
+              event.kind === "message" &&
+              event.message.kind === "response" &&
+              event.message.requestId === invalidRequestId
+            ) {
+              unsubscribe();
+              resolve(event.message);
+            }
+          });
+        });
+        client.send({
+          kind: "request",
+          requestId: invalidRequestId,
+          method: "initialize",
+          params: {},
+          extraEvidence: secretSentinel,
+        } as unknown as ProtocolMessage);
+        await expect(invalidResponse).resolves.toMatchObject({
+          error: { code: "protocol_error" },
+        });
+
+        const protocolRequestId = v.parse(requestIdSchema, "protocol-query");
+        const nextProtocolResponse = new Promise<ProtocolResponse>(
+          (resolve) => {
+            const unsubscribe = client.onEvent((event) => {
+              if (
+                event.kind === "message" &&
+                event.message.kind === "response" &&
+                event.message.requestId === protocolRequestId
+              ) {
+                unsubscribe();
+                resolve(event.message);
+              }
+            });
+          },
+        );
+        client.send({
+          kind: "request",
+          requestId: protocolRequestId,
+          method: "diagnostics",
+          params: { kinds: ["protocol_violation"] },
+        });
+        const protocolResponse = await nextProtocolResponse;
+        expect(protocolResponse).toMatchObject({
+          result: {
+            records: [
+              {
+                kind: "protocol_violation",
+                operation: "validate_daemon_request",
+                stage: "envelope",
+                reason: "invalid_shape",
+              },
+            ],
+            truncated: false,
+          },
+        });
+        if (!("result" in protocolResponse)) {
+          throw new Error("Expected queried protocol diagnostics");
+        }
+        const transportResult = v.parse(
+          diagnosticsResultSchema,
+          response.result,
+        );
+        const protocolResult = v.parse(
+          diagnosticsResultSchema,
+          protocolResponse.result,
+        );
+        if (
+          !("records" in transportResult) ||
+          !("records" in protocolResult) ||
+          transportResult.records[0] === undefined ||
+          protocolResult.records[0] === undefined
+        ) {
+          throw new Error("Expected filtered diagnostic records");
+        }
+        expect(Object.keys(transportResult.records[0]).sort()).toEqual([
+          "diagnosticId",
+          "inputBytes",
+          "kind",
+          "operation",
+          "reason",
+          "recordedAt",
+          "severity",
+          "source",
+          "v",
+        ]);
+        expect(Object.keys(protocolResult.records[0]).sort()).toEqual([
+          "diagnosticId",
+          "kind",
+          "operation",
+          "reason",
+          "recordedAt",
+          "severity",
+          "source",
+          "stage",
+          "v",
+        ]);
+        const queryText = JSON.stringify([response.result, protocolResponse]);
+        const prettyText = JSON.stringify(
+          [transportResult, protocolResult],
+          null,
+          2,
+        );
+        const files = await readdir(state.diagnosticsDirectory, {
+          withFileTypes: true,
+        });
+        const storeText = (
+          await Promise.all(
+            files
+              .filter((entry) => entry.isFile())
+              .map(
+                async (entry) =>
+                  await readFile(
+                    join(state.diagnosticsDirectory, entry.name),
+                    "utf8",
+                  ),
+              ),
+          )
+        ).join("\n");
+        expect(queryText.includes(secretSentinel)).toBe(false);
+        expect(prettyText.includes(secretSentinel)).toBe(false);
+        expect(storeText.includes(secretSentinel)).toBe(false);
+        expect(queryText.includes("ordinary body")).toBe(false);
+        expect(storeText.includes("tool_result")).toBe(false);
+        expect(response).toMatchObject({
+          result: {
+            records: [
+              {
+                kind: "transport_failure",
+                operation: "read",
+                reason: "invalid_frame",
+                inputBytes: Buffer.byteLength(malformedFrame, "utf8") - 1,
+              },
+            ],
+            truncated: false,
+          },
+        });
+      } finally {
+        client.close();
+      }
+    } finally {
+      raw.destroy();
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+
   test("queries a synchronously registered worker rejection without polling", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "reins-daemon-immediate-rejection-query-"),
@@ -1243,7 +1483,172 @@ describe("daemon diagnostic error dispatch", () => {
     }
   });
 
-  test("records one transport failure when response write and read error both fail", async () => {
+  test("diagnostics query 只等待 acceptance watermark 前的因果工作", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-query-watermark-"));
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () =>
+        v.parse(daemonGenerationSchema, "querywatermark"),
+    });
+    let releasePre!: () => void;
+    const preReleased = new Promise<void>((resolve) => {
+      releasePre = resolve;
+    });
+    let preEntered!: () => void;
+    const preRecordEntered = new Promise<void>((resolve) => {
+      preEntered = resolve;
+    });
+    let preCompleted!: () => void;
+    const preRecordCompleted = new Promise<void>((resolve) => {
+      preCompleted = resolve;
+    });
+    let completePost!: () => void;
+    const postCompleted = new Promise<void>((resolve) => {
+      completePost = resolve;
+    });
+    let protocolViolations = 0;
+    let queryCalls = 0;
+    let postRecordEntered = false;
+    const diagnostics: DiagnosticsRuntime = {
+      generation: runtime.generation,
+      sessionId: (name) => runtime.sessionId(name),
+      async record(input) {
+        if (input.kind !== "protocol_violation") {
+          return await runtime.record(input);
+        }
+        protocolViolations += 1;
+        if (protocolViolations === 1) {
+          preEntered();
+          await preReleased;
+          const result = await runtime.record(input);
+          preCompleted();
+          return result;
+        }
+        postRecordEntered = true;
+        const result = await runtime.record(input);
+        completePost();
+        return result;
+      },
+      query(params) {
+        queryCalls += 1;
+        return runtime.query(params);
+      },
+      health: () => runtime.health(),
+      close: () => runtime.close(),
+    };
+    let queryAccepted!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      queryAccepted = resolve;
+    });
+    const transport = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemonForTest({
+      transport,
+      adapters: new Map(),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics,
+      onDiagnosticsQueryAccepted: queryAccepted,
+    });
+    const running = daemon.start();
+    await waitForDaemonLifecycle(runtime);
+    const preClient = transport.connect();
+    const queryClient = transport.connect();
+    const postClient = transport.connect();
+    await Promise.resolve();
+
+    const sendInvalid = async (
+      client: TransportConnection<ProtocolMessage>,
+      requestId: string,
+    ): Promise<void> => {
+      const responded = new Promise<void>((resolve) => {
+        const unsubscribe = client.onEvent((event) => {
+          if (
+            event.kind === "message" &&
+            event.message.kind === "response" &&
+            event.message.requestId === requestId
+          ) {
+            unsubscribe();
+            resolve();
+          }
+        });
+      });
+      client.send({
+        kind: "request",
+        requestId: v.parse(requestIdSchema, requestId),
+        method: "diagnostics",
+        params: {},
+        extra: "invalid-shape",
+      } as unknown as ProtocolMessage);
+      await responded;
+    };
+
+    try {
+      await sendInvalid(preClient, "pre-watermark");
+      await preRecordEntered;
+      const response = new Promise<ProtocolResponse>((resolve) => {
+        const unsubscribe = queryClient.onEvent((event) => {
+          if (
+            event.kind === "message" &&
+            event.message.kind === "response" &&
+            event.message.requestId === "watermarked-query"
+          ) {
+            unsubscribe();
+            resolve(event.message);
+          }
+        });
+      });
+      queryClient.send({
+        kind: "request",
+        requestId: v.parse(requestIdSchema, "watermarked-query"),
+        method: "diagnostics",
+        params: { kinds: ["protocol_violation"] },
+      });
+      await accepted;
+      await sendInvalid(postClient, "post-watermark");
+      expect(postRecordEntered).toBe(false);
+
+      releasePre();
+      await preRecordCompleted;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(queryCalls).toBe(1);
+      await expect(response).resolves.toMatchObject({
+        result: {
+          records: [
+            {
+              kind: "protocol_violation",
+              operation: "validate_daemon_request",
+            },
+          ],
+          truncated: false,
+        },
+      });
+      await postCompleted;
+      await expect(
+        diagnostics.query({ kinds: ["protocol_violation"] }),
+      ).resolves.toMatchObject({
+        records: [
+          { operation: "validate_daemon_request" },
+          { operation: "validate_daemon_request" },
+        ],
+        truncated: false,
+      });
+    } finally {
+      releasePre();
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+
+  test("普通 write Error 归一化且同连接后续 read failure 去重", async () => {
     const root = await mkdtemp(
       join(tmpdir(), "reins-daemon-transport-failure-"),
     );
@@ -1261,14 +1666,20 @@ describe("daemon diagnostic error dispatch", () => {
       allocateGeneration: async () =>
         v.parse(daemonGenerationSchema, "transport"),
     });
-    const writeFailure = new Error("界".repeat(30_000));
-    const writeFailureText = String(writeFailure);
+    const secretSentinel = ["plain", "write", "sentinel"].join("-");
+    let inspectedUnbrandedError = false;
+    const unbrandedFailure = new Proxy(new Error(secretSentinel), {
+      get() {
+        inspectedUnbrandedError = true;
+        throw new Error("Unbranded transport error was inspected");
+      },
+    });
     let listener:
       | ((event: TransportEvent<ProtocolMessage>) => void)
       | undefined;
     const connection: TransportConnection<ProtocolMessage> = {
       send() {
-        throw writeFailure;
+        throw unbrandedFailure;
       },
       onEvent(next) {
         listener = next;
@@ -1324,8 +1735,13 @@ describe("daemon diagnostic error dispatch", () => {
       }
       receive?.({
         kind: "error",
-        error: Object.assign(new Error("read failed"), {
-          code: "transport_closed" as const,
+        error: createTransportError({
+          code: "io_error",
+          fact: {
+            kind: "transport_failure",
+            operation: "read",
+            reason: "io_error",
+          },
         }),
       });
       const client = queryTransport.connect();
@@ -1375,10 +1791,6 @@ describe("daemon diagnostic error dispatch", () => {
               kind: "transport_failure",
               operation: "write",
               reason: "io_error",
-              message: {
-                truncated: true,
-                originalBytes: Buffer.byteLength(writeFailureText, "utf8"),
-              },
             },
           ],
           truncated: false,
@@ -1396,11 +1808,278 @@ describe("daemon diagnostic error dispatch", () => {
         throw new Error("Expected one queried transport diagnostic");
       }
       const record = result.records[0];
-      const retainedBytes = Buffer.byteLength(record.message.text, "utf8");
-      expect(retainedBytes).toBeGreaterThan(4 * 1024);
-      expect(retainedBytes).toBeLessThanOrEqual(64 * 1024);
-      expect(record.message.text.endsWith("界")).toBe(true);
+      expect(Object.keys(record).sort()).toEqual([
+        "diagnosticId",
+        "kind",
+        "operation",
+        "reason",
+        "recordedAt",
+        "severity",
+        "source",
+        "v",
+      ]);
+      expect(inspectedUnbrandedError).toBe(false);
     } finally {
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+
+  test("普通 listen Error 只以闭合事实进入真实 store 与 query", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-listen-failure-"));
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () =>
+        v.parse(daemonGenerationSchema, "listenfailure"),
+    });
+    const secretSentinel = ["plain", "listen", "sentinel"].join("-");
+    const daemon = createDaemon({
+      transport: {
+        async listen() {
+          throw new Error(secretSentinel);
+        },
+        onConnection() {
+          return () => {};
+        },
+        async close() {},
+      },
+      adapters: new Map(),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: runtime,
+    });
+
+    try {
+      const failure: unknown = await daemon
+        .start()
+        .catch((error: unknown) => error);
+      expect(failure).toMatchObject({
+        code: "io_error",
+        message: "io_error",
+        fact: {
+          kind: "transport_failure",
+          operation: "listen",
+          reason: "io_error",
+        },
+      });
+      const result = await runtime.query({ kinds: ["transport_failure"] });
+      expect(result).toMatchObject({
+        records: [
+          {
+            kind: "transport_failure",
+            operation: "listen",
+            reason: "io_error",
+          },
+        ],
+        truncated: false,
+      });
+      const files = await readdir(state.diagnosticsDirectory, {
+        withFileTypes: true,
+      });
+      const storeText = (
+        await Promise.all(
+          files
+            .filter((entry) => entry.isFile())
+            .map(
+              async (entry) =>
+                await readFile(
+                  join(state.diagnosticsDirectory, entry.name),
+                  "utf8",
+                ),
+            ),
+        )
+      ).join("\n");
+      expect(JSON.stringify([failure, result]).includes(secretSentinel)).toBe(
+        false,
+      );
+      expect(storeText.includes(secretSentinel)).toBe(false);
+    } finally {
+      await runtime.close();
+    }
+  });
+
+  test("未接受的 transport fact 不占用连接级去重槽", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-dedup-retry-"));
+    directories.push(root);
+    const state: DaemonState = {
+      directory: root,
+      diagnosticsDirectory: join(root, "diagnostics"),
+      durable: true,
+      retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+    };
+    const runtime = await openDiagnosticsRuntimeForTest({
+      resolveState: async () => state,
+      openStore: async () =>
+        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+      allocateGeneration: async () =>
+        v.parse(daemonGenerationSchema, "dedupretry"),
+    });
+    let rejectFirstTransport = true;
+    let releaseRejectedTransport!: () => void;
+    const rejectedTransportReleased = new Promise<void>((resolve) => {
+      releaseRejectedTransport = resolve;
+    });
+    let enterRejectedTransport!: () => void;
+    const rejectedTransportEntered = new Promise<void>((resolve) => {
+      enterRejectedTransport = resolve;
+    });
+    let enterAcceptedTransport!: () => void;
+    const acceptedTransportEntered = new Promise<void>((resolve) => {
+      enterAcceptedTransport = resolve;
+    });
+    let releaseAcceptedTransport!: () => void;
+    const acceptedTransportReleased = new Promise<void>((resolve) => {
+      releaseAcceptedTransport = resolve;
+    });
+    let diagnosticsQueryCalls = 0;
+    const diagnostics: DiagnosticsRuntime = {
+      generation: runtime.generation,
+      sessionId: (name) => runtime.sessionId(name),
+      async record(input) {
+        if (input.kind === "transport_failure" && rejectFirstTransport) {
+          rejectFirstTransport = false;
+          enterRejectedTransport();
+          await rejectedTransportReleased;
+          return undefined;
+        }
+        if (input.kind === "transport_failure") {
+          enterAcceptedTransport();
+          await acceptedTransportReleased;
+        }
+        return await runtime.record(input);
+      },
+      query: (params) => {
+        diagnosticsQueryCalls += 1;
+        return runtime.query(params);
+      },
+      health: () => runtime.health(),
+      close: () => runtime.close(),
+    };
+    let accept:
+      | ((connection: TransportConnection<ProtocolMessage>) => void)
+      | undefined;
+    const queryTransport = createInMemoryTransportServer<ProtocolMessage>();
+    const transport: TransportServer<ProtocolMessage> = {
+      listen: () => queryTransport.listen(),
+      close: () => queryTransport.close(),
+      onConnection(listener) {
+        accept = listener;
+        const unsubscribeQueryTransport = queryTransport.onConnection(listener);
+        return () => {
+          accept = undefined;
+          unsubscribeQueryTransport();
+        };
+      },
+    };
+    const secretSentinel = ["dedup", "retry", "sentinel"].join("-");
+    let listener:
+      | ((event: TransportEvent<ProtocolMessage>) => void)
+      | undefined;
+    const connection: TransportConnection<ProtocolMessage> = {
+      send() {
+        throw new Error(secretSentinel);
+      },
+      onEvent(next) {
+        listener = next;
+        return () => {
+          listener = undefined;
+        };
+      },
+      close() {},
+    };
+    let queryAccepted!: () => void;
+    const acceptedQuery = new Promise<void>((resolve) => {
+      queryAccepted = resolve;
+    });
+    const daemon = createDaemonForTest({
+      transport,
+      adapters: new Map(),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics,
+      onDiagnosticsQueryAccepted: queryAccepted,
+    });
+    const running = daemon.start();
+    await waitForDaemonLifecycle(runtime);
+
+    try {
+      accept?.(connection);
+      const receive = listener;
+      receive?.({
+        kind: "message",
+        message: {
+          kind: "request",
+          requestId: v.parse(requestIdSchema, "dedup-first"),
+          method: "initialize",
+          params: {},
+        },
+      });
+      await rejectedTransportEntered;
+      receive?.({
+        kind: "error",
+        error: createTransportError({
+          code: "io_error",
+          fact: {
+            kind: "transport_failure",
+            operation: "read",
+            reason: "io_error",
+          },
+        }),
+      });
+      const client = queryTransport.connect();
+      await Promise.resolve();
+      const response = new Promise<ProtocolResponse>((resolve) => {
+        const unsubscribe = client.onEvent((event) => {
+          if (
+            event.kind === "message" &&
+            event.message.kind === "response" &&
+            event.message.requestId === "dedup-query"
+          ) {
+            unsubscribe();
+            resolve(event.message);
+          }
+        });
+      });
+      client.send({
+        kind: "request",
+        requestId: v.parse(requestIdSchema, "dedup-query"),
+        method: "diagnostics",
+        params: { kinds: ["transport_failure"] },
+      });
+      await acceptedQuery;
+      releaseRejectedTransport();
+      await acceptedTransportEntered;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      expect(diagnosticsQueryCalls).toBe(0);
+      releaseAcceptedTransport();
+      await expect(response).resolves.toMatchObject({
+        result: {
+          records: [
+            {
+              kind: "transport_failure",
+              operation: "read",
+              reason: "io_error",
+            },
+          ],
+          truncated: false,
+        },
+      });
+      const storeText = await readFile(
+        join(state.diagnosticsDirectory, "active.ndjson"),
+        "utf8",
+      );
+      expect(storeText.includes(secretSentinel)).toBe(false);
+    } finally {
+      releaseRejectedTransport();
+      releaseAcceptedTransport();
       await daemon.stop();
       await running;
       await runtime.close();

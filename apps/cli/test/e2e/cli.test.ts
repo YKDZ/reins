@@ -1,11 +1,20 @@
 import { Buffer } from "node:buffer";
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdtemp, readFile, rm } from "node:fs/promises";
+import {
+  access,
+  mkdir,
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { sessionIdSchema } from "@reins/protocol";
+import { makeDiagnosticId, sessionIdSchema } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -485,6 +494,155 @@ describe("CLI 进程边界（缝 D）", () => {
       ],
       truncated: false,
     });
+  });
+
+  test("真实 malformed transport diagnostic 经正式 CLI 输出 JSON 与 pretty", async () => {
+    const { env: baseEnv, socketPath } = await freshEnv();
+    const env = { ...baseEnv, REINS_IDLE_TIMEOUT_MS: "5000" };
+    const daemon = await startDaemon(env);
+    const secretSentinel = ["cli", "transport", "sentinel"].join("-");
+    const frame = Buffer.from(
+      `{"ordinary":"body","tool_result":{"content":"${secretSentinel}"}\n`,
+    );
+    try {
+      await new Promise<void>((resolve, reject) => {
+        const raw = connect(socketPath);
+        raw.once("connect", () => raw.end(frame));
+        raw.once("close", () => resolve());
+        raw.once("error", reject);
+      });
+
+      const json = await runCli(
+        ["diagnostics", "--kind", "transport_failure"],
+        env,
+      );
+      expect(json.exitCode).toBe(0);
+      const result = JSON.parse(json.stdout) as {
+        records: Array<Record<string, unknown>>;
+        truncated: boolean;
+      };
+      expect(result).toMatchObject({
+        records: [
+          {
+            source: "daemon",
+            kind: "transport_failure",
+            operation: "read",
+            reason: "invalid_frame",
+            inputBytes: frame.length - 1,
+            severity: "error",
+            v: 1,
+          },
+        ],
+        truncated: false,
+      });
+      expect(result.records).toHaveLength(1);
+      expect(Object.keys(result.records[0] ?? {}).sort()).toEqual([
+        "diagnosticId",
+        "inputBytes",
+        "kind",
+        "operation",
+        "reason",
+        "recordedAt",
+        "severity",
+        "source",
+        "v",
+      ]);
+      expect(json.stdout).toBe(`${JSON.stringify(result)}\n`);
+
+      const pretty = await runCli(
+        ["--pretty", "diagnostics", "--kind", "transport_failure"],
+        env,
+      );
+      expect(pretty.exitCode).toBe(0);
+      expect(pretty.stdout).toBe(
+        `${JSON.stringify(result.records, null, 2)}\ntruncated: false\n`,
+      );
+      expect(
+        [json.stdout, json.stderr, pretty.stdout, pretty.stderr].map((text) =>
+          text.includes(secretSentinel),
+        ),
+      ).toEqual([false, false, false, false]);
+      expect([json.stderr, pretty.stderr]).toEqual(["", ""]);
+    } finally {
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        await stopDaemon(daemon, socketPath);
+      }
+    }
+  });
+
+  test("legacy v1 transport TextEvidence 不进入正式 CLI JSON 与 pretty", async () => {
+    const { env, socketPath } = await freshEnv();
+    const stateDirectory = env.REINS_STATE_DIR;
+    if (stateDirectory === undefined)
+      throw new Error("state directory is required");
+    const diagnosticsDirectory = join(stateDirectory, "diagnostics");
+    await mkdir(diagnosticsDirectory, { recursive: true, mode: 0o700 });
+    const secretSentinel = ["legacy", "cli", "sentinel"].join("-");
+    const diagnosticId = makeDiagnosticId("legacy", "cli");
+    const legacy = {
+      source: "daemon",
+      kind: "transport_failure",
+      operation: "write",
+      reason: "io_error",
+      message: {
+        text: secretSentinel,
+        truncated: false,
+        originalBytes: Buffer.byteLength(secretSentinel),
+      },
+      v: 1,
+      diagnosticId,
+      recordedAt: "2026-08-26T00:00:00.000Z",
+      severity: "error",
+    } as const;
+    const activePath = join(diagnosticsDirectory, "active.ndjson");
+    await writeFile(activePath, `${JSON.stringify(legacy)}\n`, { mode: 0o600 });
+    const daemon = await startDaemon(env);
+    try {
+      const json = await runCli(["diagnostics", "--id", diagnosticId], env);
+      expect(json.exitCode).toBe(0);
+      const result = JSON.parse(json.stdout) as {
+        record: Record<string, unknown>;
+      };
+      const safeRecord = {
+        source: "daemon",
+        v: 1,
+        diagnosticId,
+        recordedAt: legacy.recordedAt,
+        severity: "error",
+        kind: "transport_failure",
+        operation: "write",
+        reason: "io_error",
+      };
+      expect(result).toEqual({ record: safeRecord });
+      const pretty = await runCli(
+        ["--pretty", "diagnostics", "--id", diagnosticId],
+        env,
+      );
+      expect(pretty.exitCode).toBe(0);
+      expect(pretty.stdout).toBe(`${JSON.stringify(safeRecord, null, 2)}\n`);
+      expect(
+        [json.stdout, json.stderr, pretty.stdout, pretty.stderr].map((text) =>
+          text.includes(secretSentinel),
+        ),
+      ).toEqual([false, false, false, false]);
+      const canonicalFiles = (await readdir(diagnosticsDirectory)).filter(
+        (name) =>
+          name === "active.ndjson" || /^segment-\d{12}\.ndjson$/u.test(name),
+      );
+      const canonicalText = await Promise.all(
+        canonicalFiles.map(
+          async (name) =>
+            await readFile(join(diagnosticsDirectory, name), "utf8"),
+        ),
+      );
+      expect(canonicalText.some((text) => text.includes(secretSentinel))).toBe(
+        false,
+      );
+    } finally {
+      if (daemon.exitCode === null && daemon.signalCode === null) {
+        await stopDaemon(daemon, socketPath);
+      }
+    }
   });
 
   test("diagnostics rejects exact id combined with filters before daemon use", async () => {
@@ -2256,6 +2414,42 @@ describe("CLI 域错误（不夹带 usage）", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
     expect(Date.now() - started).toBeLessThan(6_500);
   }, 10_000);
+
+  test("真实 address-in-use 启动失败只由 CLI 集中 grammar 造句", async () => {
+    const { dir, env: baseEnv } = await freshEnv();
+    const secretSentinel = ["socket", "path", "sentinel"].join("-");
+    const occupiedPath = join(dir, `${secretSentinel}.sock`);
+    await writeFile(occupiedPath, "occupied", { mode: 0o600 });
+    const result = await runCli(
+      ["capabilities"],
+      { ...baseEnv, REINS_SOCKET: occupiedPath },
+      { timeoutMs: 7_000 },
+    );
+    expect(result.exitCode).toBe(65);
+    expect(JSON.parse(result.stdout)).toEqual({
+      code: "daemon_start_failed",
+      cause: {
+        kind: "io",
+        message: "Daemon socket address is already in use",
+      },
+      message: "Daemon socket address is already in use",
+    });
+    const pretty = await runCli(
+      ["--pretty", "capabilities"],
+      { ...baseEnv, REINS_SOCKET: occupiedPath },
+      { timeoutMs: 7_000 },
+    );
+    expect(pretty.exitCode).toBe(65);
+    expect(pretty.stdout).toBe("");
+    expect(pretty.stderr).toBe(
+      "error: Daemon socket address is already in use\n",
+    );
+    expect(
+      [result.stdout, result.stderr, pretty.stdout, pretty.stderr].map((text) =>
+        text.includes(secretSentinel),
+      ),
+    ).toEqual([false, false, false, false]);
+  }, 15_000);
 
   test("诊断 append 失败时 unexpected error 不产生悬空 diagnosticId", async () => {
     const { dir, env } = await freshEnv();

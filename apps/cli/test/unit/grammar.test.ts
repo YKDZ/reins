@@ -2,7 +2,21 @@ import type { MachineError } from "@reins/protocol";
 import { expect, test } from "vitest";
 
 import { outputError } from "../../src/errors.ts";
-import { jsonErrorMessage, renderCliError } from "../../src/grammar.ts";
+import {
+  jsonErrorMessage,
+  renderCliError,
+  transportErrorMessage,
+} from "../../src/grammar.ts";
+
+test.each([
+  ["address_in_use", "Daemon socket address is already in use"],
+  ["invalid_frame", "Daemon transport received an invalid frame"],
+  ["transport_closed", "Daemon transport connection closed"],
+  ["io_error", "Daemon transport I/O failed"],
+  ["timeout", "Daemon transport operation timed out"],
+] as const)("transport code %s 只在集中 grammar 造句", (code, message) => {
+  expect(transportErrorMessage(code)).toBe(message);
+});
 
 test("invalid_params renders every protocol issue in order", () => {
   const error = {

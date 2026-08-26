@@ -20,6 +20,7 @@ import {
 import {
   createUnixSocketServer,
   resolveReinsSocketPath,
+  transportErrorCodeOf,
 } from "@reins/transport";
 
 import { createDaemon, runDaemonLifecycle } from "./daemon.ts";
@@ -163,11 +164,14 @@ function reportStartupFailure(error: unknown): void {
   const fd = Number(rawFd);
   if (!Number.isSafeInteger(fd) || fd < 3) return;
   try {
+    const transportCode = transportErrorCodeOf(error);
     writeFileSync(
       fd,
       `${JSON.stringify({
         v: 1,
-        cause: makeErrorCause("exception", String(error)),
+        ...(transportCode === undefined
+          ? { cause: makeErrorCause("exception", String(error)) }
+          : { transport: { code: transportCode } }),
       })}\n`,
     );
     closeSync(fd);
