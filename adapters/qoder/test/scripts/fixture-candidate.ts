@@ -17,6 +17,7 @@ import {
   type RecordedQoderFixtureMetadata,
   type RecordedQoderFixtureName,
 } from "../../src/fixture-projection.ts";
+import { loadRecordedQoderFixtureSource } from "../../src/testing.ts";
 import { assertMatchesKnownCredentialPolicy } from "./fixture-files.ts";
 import { assertQoderProjectionSemanticEquivalence } from "./fixture-fingerprint.ts";
 import { validateRecordedFixture } from "./fixture-validation.ts";
@@ -32,6 +33,15 @@ const legacyMetadataKeys = [
   "sha256",
   "uniqueNativeToolCount",
 ] as const;
+
+class FixtureCandidateAcceptanceError extends Error {
+  readonly code = "fixture_candidate_rejected";
+
+  constructor() {
+    super("Recorded Qoder candidate was rejected by the fixture loader");
+    this.name = "FixtureCandidateAcceptanceError";
+  }
+}
 
 function sha256(value: string): string {
   return createHash("sha256").update(value).digest("hex");
@@ -211,6 +221,15 @@ export async function prepareFixtureCandidate(options: {
     )
   ) {
     throw new Error("Recorded Qoder candidate roundtrip mismatch");
+  }
+  try {
+    loadRecordedQoderFixtureSource(options.name, {
+      raw: jsonl,
+      metadataRaw: metadata,
+      sdkVersion: options.installedSdkVersion,
+    });
+  } catch {
+    throw new FixtureCandidateAcceptanceError();
   }
   return { jsonl, metadata, facts };
 }

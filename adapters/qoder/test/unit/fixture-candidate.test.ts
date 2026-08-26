@@ -20,6 +20,7 @@ import {
   replaceFixturePairs,
 } from "../scripts/fixture-files.ts";
 import { installRecordedFixtureCandidates } from "../scripts/fixture-install.ts";
+import { readImmutableGitSource } from "../scripts/migrate-fixtures.ts";
 
 const temporaryDirectories: string[] = [];
 
@@ -63,7 +64,57 @@ function metadataBytes(metadata: object): string {
   return `${JSON.stringify(metadata, null, 2)}\n`;
 }
 
+async function immutableSourceWithoutFinalEndTurn(): Promise<{
+  raw: string;
+  metadataRaw: string;
+}> {
+  const revision = "e3b522c4adc037319bf065590b2faab616ca47c6";
+  const base = "adapters/qoder/test/fixtures/two-tools";
+  const [sourceRaw, sourceMetadataRaw] = await Promise.all([
+    readImmutableGitSource(revision, `${base}.jsonl`),
+    readImmutableGitSource(revision, `${base}.metadata.json`),
+  ]);
+  const messages = sourceRaw
+    .trimEnd()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const retained = messages.filter((message) => {
+    if (message.type !== "stream_event") return true;
+    const event = message.event as
+      | { type?: unknown; delta?: { stop_reason?: unknown } }
+      | undefined;
+    return !(
+      event?.type === "message_delta" && event.delta?.stop_reason === "end_turn"
+    );
+  });
+  expect(messages).toHaveLength(retained.length + 1);
+  const raw = `${retained.map((message) => JSON.stringify(message)).join("\n")}\n`;
+  const metadata = JSON.parse(sourceMetadataRaw) as Record<string, unknown>;
+  return {
+    raw,
+    metadataRaw: metadataBytes({
+      ...metadata,
+      lineCount: retained.length,
+      sha256: createHash("sha256").update(raw).digest("hex"),
+    }),
+  };
+}
+
 describe("Qoder fixture candidate acceptance", () => {
+  test("正式loader拒绝的缺失end-turn source不能成为candidate", async () => {
+    const source = await immutableSourceWithoutFinalEndTurn();
+
+    await expect(
+      prepareFixtureCandidate({
+        name: "two-tools",
+        sourceRaw: source.raw,
+        sourceMetadataRaw: source.metadataRaw,
+        installedSdkVersion: "1.0.23",
+        minimumNativeToolCount: 2,
+      }),
+    ).rejects.toMatchObject({ code: "fixture_candidate_rejected" });
+  });
+
   test("record-mode原子安装pair与独立anchor后内置loader立即接受", async () => {
     const fixture = await source();
     const candidate = await prepareFixtureCandidate({
