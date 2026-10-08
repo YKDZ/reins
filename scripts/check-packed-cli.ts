@@ -1,6 +1,9 @@
-import { spawn, spawnSync, type ChildProcess } from "node:child_process";
+// 正式发行包的 npm 干净安装 smoke：安装兼容性与既有业务场景断言留在本入口，
+// 环境准备之外的一切进程生命周期（启动、就绪、超时、停止、完整日志）走
+// scripts/packed-cli-fixtures 的窄共享接缝，供后续 Docker 正式包 smoke 复用。
 import { createHash } from "node:crypto";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
@@ -12,8 +15,26 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { setTimeout as delay } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
 
+import {
+  isCleanStop,
+  startDaemon,
+  stopDaemon,
+} from "./packed-cli-fixtures/daemon.ts";
+import {
+  createFactRecorder,
+  type FactRecorder,
+} from "./packed-cli-fixtures/evidence.ts";
+import {
+  runLoggedCommand,
+  waitForPathRemoval,
+} from "./packed-cli-fixtures/process.ts";
+import { locateInstalledSdk } from "./packed-cli-fixtures/sdk.ts";
+import type {
+  DaemonHandle,
+  LoggedCommandResult,
+} from "./packed-cli-fixtures/types.ts";
 import {
   assertReleaseVersionAuthority,
   readJsonObject,
@@ -27,6 +48,17 @@ type CommandResult = {
   readonly stderr: string;
 };
 
+// 本次行动拥有的资源：调用方指定的证据目录之外的临时安装/runtime 与本次启动的进程。
+type OwnedResources = {
+  temporaryRoot: string | undefined;
+  runtimeRoot: string | undefined;
+  directDaemon: DaemonHandle | undefined;
+};
+
+const adapterFixtureSource = fileURLToPath(
+  new URL("./packed-cli-fixtures/adapter-fixture.ts", import.meta.url),
+);
+
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
 }
@@ -35,90 +67,38 @@ function readManifest(directory: string): Record<string, unknown> {
   return readJsonObject(join(directory, "package.json"));
 }
 
-function run(
-  command: string,
-  args: readonly string[],
-  options?: {
-    readonly cwd?: string;
-    readonly env?: NodeJS.ProcessEnv;
-  },
-): CommandResult {
-  const result = spawnSync(command, [...args], {
-    cwd: options?.cwd,
-    env: options?.env,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-  });
-  if (result.error !== undefined) throw result.error;
+// 兼容原入口的断言形状：命令结果 + 从进程启动即完整落盘的日志。
+function toCommandResult(result: LoggedCommandResult): CommandResult {
   return {
-    status: result.status ?? 1,
+    status: result.exit.exitCode ?? 1,
     stdout: result.stdout,
     stderr: result.stderr,
   };
-}
-
-function requireSuccess(
-  label: string,
-  command: string,
-  args: readonly string[],
-  options?: Parameters<typeof run>[2],
-): CommandResult {
-  const result = run(command, args, options);
-  if (result.status !== 0) {
-    throw new Error(
-      `${label} failed with exit ${result.status}\n${result.stdout}${result.stderr}`,
-    );
-  }
-  return result;
 }
 
 function assertOutput(
   label: string,
   result: CommandResult,
   expected: { status: number; stderr: string },
+  logPath: string,
 ): void {
   if (result.status !== expected.status || result.stderr !== expected.stderr) {
     throw new Error(
-      `${label} returned exit ${result.status}\n${result.stdout}${result.stderr}`,
+      `${label} returned exit ${result.status}\n${result.stdout}${result.stderr}\nFull log: ${logPath}`,
     );
   }
 }
 
-async function waitForRemoval(path: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (existsSync(path)) {
-    if (Date.now() >= deadline)
-      throw new Error(`Timed out waiting for removal: ${path}`);
-    await delay(25);
+function requireSuccess(
+  label: string,
+  result: CommandResult,
+  logPath: string,
+): void {
+  if (result.status !== 0) {
+    throw new Error(
+      `${label} failed with exit ${result.status}\n${result.stdout}${result.stderr}\nFull log: ${logPath}`,
+    );
   }
-}
-
-async function waitForPresence(path: string, timeoutMs: number): Promise<void> {
-  const deadline = Date.now() + timeoutMs;
-  while (!existsSync(path)) {
-    if (Date.now() >= deadline)
-      throw new Error(`Timed out waiting for path: ${path}`);
-    await delay(25);
-  }
-}
-
-async function stopChild(
-  child: ChildProcess,
-  timeoutMs: number,
-): Promise<void> {
-  if (child.exitCode !== null || child.signalCode !== null) return;
-  const closed = new Promise<void>((resolve) => {
-    child.once("close", () => resolve());
-  });
-  child.kill("SIGTERM");
-  const stopped = await Promise.race([
-    closed.then(() => true),
-    delay(timeoutMs).then(() => false),
-  ]);
-  if (stopped) return;
-  child.kill("SIGKILL");
-  await closed;
-  throw new Error("Timed out stopping packed daemon");
 }
 
 function filesRecursively(directory: string): string[] {
@@ -131,25 +111,40 @@ function filesRecursively(directory: string): string[] {
   return files;
 }
 
-const repository = process.cwd();
-const releaseIdentity = assertReleaseVersionAuthority(repository);
-const expectedRuntimeDependencies =
-  resolveReleaseRuntimeDependencies(repository);
+// 停止事实判定与业务断言：干净停止的分类走共享模块，本入口只保留场景断言。
+async function smokePackedCli(
+  evidenceDirectory: string,
+  recorder: FactRecorder,
+  owned: OwnedResources,
+): Promise<void> {
+  const repository = process.cwd();
+  const releaseIdentity = assertReleaseVersionAuthority(repository);
+  const expectedRuntimeDependencies =
+    resolveReleaseRuntimeDependencies(repository);
 
-const temporaryRoot = mkdtempSync(join(tmpdir(), "reins-packed-cli-"));
-const installDirectory = join(temporaryRoot, "install");
-const runtimeDirectory = join(temporaryRoot, "runtime");
-const artifactDirectory = join(process.cwd(), ".artifacts", "release");
-const tarballName = releaseTarballName(
-  releaseIdentity.name,
-  releaseIdentity.version,
-);
-const tarball = join(artifactDirectory, tarballName);
-let runningDaemon: ChildProcess | undefined;
+  // 环境准备：临时安装/runtime 目录归本入口所有；日志写入调用方证据目录。
+  owned.temporaryRoot = mkdtempSync(join(tmpdir(), "reins-packed-cli-"));
+  const temporaryRoot = owned.temporaryRoot;
+  const installDirectory = join(temporaryRoot, "install");
+  // Linux 宿主磁盘的 fsync 延迟会耗尽自动启动窗口；小型运行状态使用独立 tmpfs。
+  owned.runtimeRoot = mkdtempSync(
+    join(
+      process.platform === "linux" ? "/dev/shm" : tmpdir(),
+      "reins-packed-runtime-",
+    ),
+  );
+  const runtimeDirectory = owned.runtimeRoot;
+  const logsDirectory = join(evidenceDirectory, "npm-smoke-logs");
+  const artifactDirectory = join(repository, ".artifacts", "release");
+  const tarballName = releaseTarballName(
+    releaseIdentity.name,
+    releaseIdentity.version,
+  );
+  const tarball = join(artifactDirectory, tarballName);
 
-try {
   mkdirSync(installDirectory);
-  mkdirSync(runtimeDirectory);
+  // 证据目录由调用方指定且可能被复用：日志目录按幂等方式准备。
+  mkdirSync(logsDirectory, { recursive: true });
 
   const artifacts = readdirSync(artifactDirectory).sort();
   if (
@@ -181,12 +176,27 @@ try {
       2,
     )}\n`,
   );
-  requireSuccess(
-    "clean install",
-    "npm",
-    ["install", "--no-audit", "--no-fund", "--package-lock=false", tarball],
-    { cwd: installDirectory },
+  // npm 专属的干净安装留在原入口；进程观察走共享接缝，完整日志（含安装脚本输出）留证。
+  const installLog = join(logsDirectory, "npm-install.log");
+  const install = toCommandResult(
+    await runLoggedCommand({
+      command: "npm",
+      args: [
+        "install",
+        "--no-audit",
+        "--no-fund",
+        "--package-lock=false",
+        tarball,
+      ],
+      cwd: installDirectory,
+      logPath: installLog,
+    }),
   );
+  requireSuccess("clean install", install, installLog);
+  recorder.record("npm_install", {
+    exitCode: install.status,
+    logPath: installLog,
+  });
 
   const binDirectory = join(installDirectory, "node_modules", ".bin");
   const installedPackage = join(
@@ -234,31 +244,13 @@ try {
       throw new Error(`Packed executable mode is not 0755: ${name}`);
   }
 
-  const qoderWorker = join(
-    installDirectory,
-    "node_modules",
-    "@qodercn-ai",
-    "qodercn-agent-sdk",
-    "dist",
-    "_worker",
-    "qoder-worker-runtime.obf.mjs",
-  );
-  const qoderRuntimeInfo = join(
-    installDirectory,
-    "node_modules",
-    "@qodercn-ai",
-    "qodercn-agent-sdk",
-    "dist",
-    "_worker",
-    "runtime-info.json",
-  );
-  if (
-    !existsSync(qoderRuntimeInfo) ||
-    !existsSync(qoderWorker) ||
-    statSync(qoderWorker).size < 10 * 1024 * 1024
-  ) {
+  // SDK 与额外厂商运行时：从已安装发行包上下文按正常模块解析定位，不假设 npm
+  // 扁平布局；记录实际版本与运行时文件摘要（该下载不在包锁冻结范围）。
+  const sdk = locateInstalledSdk(installedPackage);
+  if (sdk.runtimeEntrypointBytes < 10 * 1024 * 1024) {
     throw new Error("Qoder postinstall did not provision its worker runtime");
   }
+  recorder.record("installed_sdk_identity", sdk);
 
   const maps = filesRecursively(join(installedPackage, "dist")).filter((path) =>
     path.endsWith(".js.map"),
@@ -281,8 +273,15 @@ try {
     }
   }
 
-  const help = run(cli, ["--help"]);
-  assertOutput("packed help", help, { status: 0, stderr: "" });
+  const helpLog = join(logsDirectory, "cli-help.log");
+  const help = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["--help"],
+      logPath: helpLog,
+    }),
+  );
+  assertOutput("packed help", help, { status: 0, stderr: "" }, helpLog);
   if (
     !help.stdout.includes("Usage: reins [options] <command>") ||
     !help.stdout.includes(
@@ -291,14 +290,38 @@ try {
   )
     throw new Error("Packed help omitted canonical command usage");
 
-  const version = run(cli, ["--version"]);
-  assertOutput("packed version", version, { status: 0, stderr: "" });
+  const versionLog = join(logsDirectory, "cli-version.log");
+  const version = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["--version"],
+      logPath: versionLog,
+    }),
+  );
+  assertOutput(
+    "packed version",
+    version,
+    { status: 0, stderr: "" },
+    versionLog,
+  );
   if (version.stdout !== `${releaseIdentity.version}\n`) {
     throw new Error(`Packed version diverged: ${version.stdout}`);
   }
 
-  const usage = run(cli, ["resolve-permission", "test@g2"]);
-  assertOutput("packed usage error", usage, { status: 64, stderr: "" });
+  const usageLog = join(logsDirectory, "cli-usage-error.log");
+  const usage = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["resolve-permission", "test@g2"],
+      logPath: usageLog,
+    }),
+  );
+  assertOutput(
+    "packed usage error",
+    usage,
+    { status: 64, stderr: "" },
+    usageLog,
+  );
   const usageError: unknown = JSON.parse(usage.stdout);
   if (
     !isRecord(usageError) ||
@@ -310,26 +333,10 @@ try {
   )
     throw new Error(`Packed usage error was incomplete: ${usage.stdout}`);
 
-  const adaptersModule = join(temporaryRoot, "fake-adapters.mjs");
-  writeFileSync(
-    adaptersModule,
-    `export default {
-  fixture: {
-    driverFactory() { throw new Error("driver not used"); },
-    async capabilities() {
-      return {
-        harness: "fixture",
-        models: [{
-          id: "fixture-model",
-          displayName: "Fixture model",
-          reasoningEfforts: ["low", "high"],
-        }],
-      };
-    },
-  },
-};
-`,
-  );
+  // adapter 素材：受正式接口类型约束的注册表模块，复制给 daemon 的现有注册表接缝；
+  // 只有 type-only 输入，type import 由 Node 24 类型擦除，运行期不解析 workspace 包。
+  const adaptersModule = join(runtimeDirectory, "adapter-fixture.ts");
+  copyFileSync(adapterFixtureSource, adaptersModule);
 
   const directDirectory = join(runtimeDirectory, "direct");
   mkdirSync(directDirectory);
@@ -341,27 +348,52 @@ try {
     REINS_ADAPTERS_MODULE: adaptersModule,
     REINS_IDLE_TIMEOUT_MS: "10000",
   };
-  runningDaemon = spawn(daemon, [], {
+  owned.directDaemon = await startDaemon({
+    label: "direct packed daemon",
+    executable: daemon,
+    args: [],
     env: directEnv,
-    stdio: ["ignore", "pipe", "pipe"],
+    socketPath: directSocket,
+    logPath: join(logsDirectory, "direct-daemon.log"),
+    readyTimeoutMs: 5_000,
   });
-  await waitForPresence(directSocket, 5_000);
 
-  const directList = run(cli, ["list"], { env: directEnv });
-  assertOutput("direct packed daemon list", directList, {
-    status: 0,
-    stderr: "",
-  });
+  const directListLog = join(logsDirectory, "direct-list.log");
+  const directList = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["list"],
+      env: directEnv,
+      logPath: directListLog,
+    }),
+  );
+  assertOutput(
+    "direct packed daemon list",
+    directList,
+    { status: 0, stderr: "" },
+    directListLog,
+  );
   if (directList.stdout !== "[]\n")
     throw new Error(
       `Packed daemon returned unexpected output: ${directList.stdout}`,
     );
 
-  const capabilities = run(cli, ["capabilities"], { env: directEnv });
-  assertOutput("direct packed daemon capabilities", capabilities, {
-    status: 0,
-    stderr: "",
-  });
+  const capabilitiesLog = join(logsDirectory, "direct-capabilities.log");
+  const capabilities = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["capabilities"],
+      env: directEnv,
+      logPath: capabilitiesLog,
+    }),
+  );
+  assertOutput(
+    "direct packed daemon capabilities",
+    capabilities,
+    { status: 0, stderr: "" },
+    capabilitiesLog,
+  );
+  // 本入口的能力目录由场景作者明确创作（完整 worker 回合归 S2b2）。
   const expectedCapabilities = {
     capabilities: [
       {
@@ -385,11 +417,21 @@ try {
       `Packed capabilities were unexpected: ${capabilities.stdout}`,
     );
   }
+  recorder.record("registry_capabilities", {
+    stdout: JSON.parse(capabilities.stdout) as unknown,
+  });
 
-  await stopChild(runningDaemon, 5_000);
-  runningDaemon = undefined;
-  await waitForRemoval(directSocket, 5_000);
-  await waitForRemoval(`${directSocket}.lock`, 5_000);
+  const directHandle = owned.directDaemon;
+  const directStop = await stopDaemon(directHandle, 5_000);
+  owned.directDaemon = undefined;
+  recorder.record("direct_daemon_stop", directStop);
+  if (!isCleanStop(directStop)) {
+    throw new Error(
+      `Direct daemon did not stop cleanly: ${JSON.stringify(directStop)} (log: ${directHandle.logPath})`,
+    );
+  }
+  await waitForPathRemoval(directSocket, 5_000);
+  await waitForPathRemoval(`${directSocket}.lock`, 5_000);
 
   const automaticDirectory = join(runtimeDirectory, "automatic");
   mkdirSync(automaticDirectory);
@@ -402,43 +444,153 @@ try {
     REINS_IDLE_TIMEOUT_MS: "50",
   };
   delete automaticEnv.REINS_DAEMON_BIN;
-  const automaticList = run(cli, ["list"], { env: automaticEnv });
-  assertOutput("sibling packed daemon list", automaticList, {
-    status: 0,
-    stderr: "",
-  });
+  const automaticListLog = join(logsDirectory, "automatic-list.log");
+  const automaticList = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["list"],
+      env: automaticEnv,
+      logPath: automaticListLog,
+    }),
+  );
+  assertOutput(
+    "sibling packed daemon list",
+    automaticList,
+    { status: 0, stderr: "" },
+    automaticListLog,
+  );
   if (automaticList.stdout !== "[]\n") {
     throw new Error(
       `Sibling daemon returned unexpected output: ${automaticList.stdout}`,
     );
   }
-  await waitForRemoval(automaticSocket, 5_000);
-  await waitForRemoval(`${automaticSocket}.lock`, 5_000);
+  await waitForPathRemoval(automaticSocket, 5_000);
+  await waitForPathRemoval(`${automaticSocket}.lock`, 5_000);
+  recorder.record("automatic_daemon_exit", {
+    socketRemoved: true,
+    logPath: automaticListLog,
+  });
 
   const invalidAdaptersModule = join(temporaryRoot, "invalid-adapters.mjs");
   writeFileSync(invalidAdaptersModule, "export default null;\n");
-  const mappedFailure = run(daemon, ["--adapters", invalidAdaptersModule], {
-    env: {
-      ...process.env,
-      NODE_OPTIONS:
-        `${process.env.NODE_OPTIONS ?? ""} --enable-source-maps`.trim(),
-      REINS_SOCKET: join(runtimeDirectory, "mapped-error.sock"),
-      REINS_STATE_DIR: join(runtimeDirectory, "mapped-error-state"),
-    },
-  });
+  const mappedFailureLog = join(logsDirectory, "daemon-mapped-failure.log");
+  const mappedFailure = toCommandResult(
+    await runLoggedCommand({
+      command: daemon,
+      args: ["--adapters", invalidAdaptersModule],
+      env: {
+        ...process.env,
+        NODE_OPTIONS:
+          `${process.env.NODE_OPTIONS ?? ""} --enable-source-maps`.trim(),
+        REINS_SOCKET: join(runtimeDirectory, "mapped-error.sock"),
+        REINS_STATE_DIR: join(runtimeDirectory, "mapped-error-state"),
+      },
+      logPath: mappedFailureLog,
+    }),
+  );
   if (
     mappedFailure.status === 0 ||
     !mappedFailure.stderr.includes("packages/daemon/src/main.ts:")
   ) {
     throw new Error(
-      `Packed source map did not map the daemon stack\n${mappedFailure.stdout}${mappedFailure.stderr}`,
+      `Packed source map did not map the daemon stack\n${mappedFailure.stdout}${mappedFailure.stderr}\nFull log: ${mappedFailureLog}`,
     );
   }
+  recorder.record("mapped_failure_exit", {
+    status: mappedFailure.status,
+    logPath: mappedFailureLog,
+  });
 
-  process.stdout.write("Packed CLI smoke passed\n");
-} finally {
-  if (runningDaemon !== undefined) {
-    await stopChild(runningDaemon, 5_000).catch(() => undefined);
-  }
-  rmSync(temporaryRoot, { recursive: true, force: true });
+  recorder.record("smoke_result", { status: "passed" });
 }
+
+function recordCleanupFailure(
+  failures: string[],
+  label: string,
+  error: unknown,
+): void {
+  failures.push(`${label} failed: ${String(error)}`);
+}
+
+// 收尾：先兜底停止本次启动的进程，再回收临时安装/runtime；每个清理动作的失败都
+// 保留为原始事实并以非零退出报告，不由 finally 吞掉，也不把失败改成通过。
+async function main(): Promise<void> {
+  const evidenceDirectory =
+    process.env.REINS_SMOKE_EVIDENCE_DIR ??
+    join(process.cwd(), ".artifacts", "packed-cli-smoke");
+  mkdirSync(evidenceDirectory, { recursive: true });
+  const recorder = createFactRecorder(
+    join(evidenceDirectory, "npm-smoke-facts.ndjson"),
+  );
+  const owned: OwnedResources = {
+    temporaryRoot: undefined,
+    runtimeRoot: undefined,
+    directDaemon: undefined,
+  };
+  const cleanupFailures: string[] = [];
+  let primaryFailure: { readonly message: string } | undefined;
+  try {
+    await smokePackedCli(evidenceDirectory, recorder, owned);
+  } catch (error) {
+    primaryFailure =
+      error instanceof Error
+        ? { message: error.message }
+        : { message: `smoke threw a non-Error value (typeof ${typeof error})` };
+  } finally {
+    const handle = owned.directDaemon;
+    if (handle !== undefined) {
+      try {
+        const fact = await stopDaemon(handle, 5_000);
+        // 无条件保存原始停止事实：无论主失败是否已发生、判定干净与否，真实
+        // exit/信号/超时都是必须留证的产品生命周期事实，不能被 finally 丢弃。
+        recorder.record("daemon_fallback_cleanup_stop", fact);
+        if (!isCleanStop(fact)) {
+          cleanupFailures.push(
+            `daemon fallback cleanup left facts: ${JSON.stringify(fact)} (log: ${handle.logPath})`,
+          );
+        }
+      } catch (error) {
+        cleanupFailures.push(
+          `daemon fallback cleanup failed: ${String(error)} (log: ${handle.logPath})`,
+        );
+      }
+    }
+    for (const directory of [owned.runtimeRoot, owned.temporaryRoot]) {
+      if (directory === undefined) continue;
+      try {
+        rmSync(directory, { recursive: true, force: true });
+      } catch (error) {
+        recordCleanupFailure(
+          cleanupFailures,
+          "temporary directory removal",
+          error,
+        );
+      }
+    }
+  }
+  // 留证写入失败同样是独立事实，不能被业务通过掩盖。
+  cleanupFailures.push(...recorder.failures);
+  if (primaryFailure !== undefined) {
+    process.stderr.write(
+      `Packed CLI smoke failed: ${primaryFailure.message}\nEvidence kept: ${evidenceDirectory}\n`,
+    );
+    for (const failure of cleanupFailures) {
+      process.stderr.write(`${failure}\n`);
+    }
+    process.exitCode = 1;
+    return;
+  }
+  if (cleanupFailures.length > 0) {
+    for (const failure of cleanupFailures) {
+      process.stderr.write(`${failure}\n`);
+    }
+    process.stderr.write(
+      `Packed CLI smoke business checks passed but cleanup failed; not reported as success. Evidence kept: ${evidenceDirectory}\n`,
+    );
+    process.exitCode = 1;
+    return;
+  }
+  process.stdout.write("Packed CLI smoke passed\n");
+}
+
+await main();

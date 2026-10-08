@@ -76,9 +76,9 @@ jobs:
           --log-prefix=task
 
   package-smoke:
-    name: Package Smoke
+    name: Package and Disposable Platform
     runs-on: ubuntu-24.04
-    timeout-minutes: 10
+    timeout-minutes: 150
     steps:
       - name: Checkout source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -97,12 +97,12 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Build and verify the release package
+      - name: Verify the release package and disposable platform
         env:
           TURBO_LOG_ORDER: grouped
           TURBO_LOG_PREFIX: task
           TURBO_OUTPUT_LOGS: errors-only
-        run: pnpm deployment
+        run: pnpm exec turbo run test:docker --filter=@reins/test-platform
       - name: Upload the verified release package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -113,3 +113,17 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 3
+      - name: Upload test evidence
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: test-platform-evidence
+          path: |
+            .artifacts/packed-cli-smoke/**
+            .artifacts/acceptance-input/**
+            .artifacts/s1-docker/**/evidence/**
+            .artifacts/acceptance-docker/evidence/**
+            .artifacts/recovery-docker/evidence/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

@@ -6,6 +6,9 @@
     },
     "dockerfile": "Dockerfile"
   },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1.10.1": {}
+  },
   "customizations": {
     "vscode": {
       "extensions": ["oxc.oxc-vscode"]

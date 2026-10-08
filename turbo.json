@@ -168,6 +168,32 @@
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "outputs": []
+    },
+    "//#release:build": {
+      "cache": false,
+      "dependsOn": ["@ykdz/reins#build", "@reins/daemon#build"]
+    },
+    "//#release:verify": {
+      "cache": false,
+      "dependsOn": ["//#release:build"]
+    },
+    "//#release:npm-smoke": {
+      "cache": false,
+      "dependsOn": ["//#release:verify"]
+    },
+    "//#acceptance:prepare": {
+      "cache": false,
+      "dependsOn": ["//#release:verify"]
+    },
+    "test:docker": {
+      "cache": false,
+      "passThroughEnv": [
+        "DOCKER_*",
+        "SSH_AUTH_SOCK",
+        "REMOTE_CONTAINERS_IPC",
+        "REINS_TEST_PLATFORM_IMAGE"
+      ],
+      "dependsOn": ["build", "//#release:npm-smoke", "//#acceptance:prepare"]
     }
   }
 }

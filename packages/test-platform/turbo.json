@@ -1,0 +1,9 @@
+{
+  "extends": ["//"],
+  "tags": ["library"],
+  "tasks": {
+    "test:docker": {
+      "cache": false
+    }
+  }
+}

@@ -246,7 +246,13 @@ async function freshEnv(): Promise<{
   env: NodeJS.ProcessEnv;
   socketPath: string;
 }> {
-  const dir = await mkdtemp(join(tmpdir(), "reins-cli-e2e-"));
+  // 小型运行状态在 Linux 使用 tmpfs，避免磁盘 fsync 延迟耗尽进程协议的超时。
+  const dir = await mkdtemp(
+    join(
+      process.platform === "linux" ? "/dev/shm" : tmpdir(),
+      "reins-cli-e2e-",
+    ),
+  );
   cleanupDirs.push(dir);
   return {
     dir,

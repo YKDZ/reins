@@ -31,6 +31,18 @@ const fixtureDaemon = join(
 const cleanupDirectories: string[] = [];
 const cleanupProcesses: ChildProcess[] = [];
 
+async function createRuntimePath(): Promise<string> {
+  // 安装、可执行夹具与 checkout 留在普通临时目录，只有运行状态使用 tmpfs。
+  const parent = await mkdtemp(
+    join(
+      process.platform === "linux" ? "/dev/shm" : tmpdir(),
+      "reins-dev-runtime-",
+    ),
+  );
+  cleanupDirectories.push(parent);
+  return join(parent, "development");
+}
+
 type CommandResult = {
   readonly status: number;
   readonly stdout: string;
@@ -104,6 +116,7 @@ async function materializeCleanCheckout(destination: string): Promise<void> {
   const excluded = new Set([
     ".artifacts",
     ".git",
+    ".pnpm-store",
     ".scratch",
     ".turbo",
     "dist",
@@ -244,7 +257,7 @@ describe("checkout-isolated development entry", () => {
       PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
       REINS_DAEMON_BIN: join(directory, "global-reins-daemon"),
-      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+      REINS_DEVELOPMENT_ROOT: await createRuntimePath(),
       REINS_SOCKET: globalSocket,
       REINS_STATE_DIR: join(directory, "global-state"),
       REINS_IDLE_TIMEOUT_MS: "200",
@@ -308,7 +321,7 @@ describe("checkout-isolated development entry", () => {
     });
     cleanupProcesses.push(globalDaemon);
     await waitForPath(globalSocket);
-    const developmentRoot = join(directory, "development");
+    const developmentRoot = await createRuntimePath();
     const result = await runDevelopmentCli(["capabilities"], {
       PNPM_CONFIG_REPORTER: "silent",
       REINS_ADAPTERS_MODULE: join(directory, "opaque-adapters.mjs"),
@@ -333,7 +346,7 @@ describe("checkout-isolated development entry", () => {
     const checkoutB = join(directory, "checkout-b");
     await materializeCleanCheckout(checkoutA);
     await materializeCleanCheckout(checkoutB);
-    const runtimeRoot = join(directory, "development");
+    const runtimeRoot = await createRuntimePath();
     const baseEnv = {
       PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
@@ -425,7 +438,7 @@ describe("checkout-isolated development entry", () => {
     const env = {
       PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
-      REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+      REINS_DEVELOPMENT_ROOT: await createRuntimePath(),
       REINS_IDLE_TIMEOUT_MS: "50",
     };
     const spawned = await runDevelopmentCli(
@@ -498,7 +511,7 @@ describe("checkout-isolated development entry", () => {
     cleanupDirectories.push(directory);
     const codexA = await installCodexFixture(directory, "bin-a");
     const codexB = await installCodexFixture(directory, "bin-b");
-    const runtimeRoot = join(directory, "development");
+    const runtimeRoot = await createRuntimePath();
     const originalEnv = {
       PATH: codexA.path,
       PNPM_CONFIG_REPORTER: "silent",
@@ -544,7 +557,7 @@ describe("checkout-isolated development entry", () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-development-test-"));
     cleanupDirectories.push(directory);
     const codex = await installCodexFixture(directory);
-    const runtimeRoot = join(directory, "development");
+    const runtimeRoot = await createRuntimePath();
     const baseEnv = {
       PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
@@ -609,7 +622,7 @@ describe("checkout-isolated development entry", () => {
       {
         NODE_OPTIONS: `--import=${preload}`,
         PNPM_CONFIG_REPORTER: "silent",
-        REINS_DEVELOPMENT_ROOT: join(directory, "development"),
+        REINS_DEVELOPMENT_ROOT: await createRuntimePath(),
         REINS_STDERR_SENTINEL: stderrSentinel,
         REINS_STDIN_RECORD: stdinRecord,
         REINS_STDOUT_SENTINEL: stdoutSentinel,

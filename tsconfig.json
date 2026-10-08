@@ -2,7 +2,11 @@
   "extends": "./tsconfig.config.json",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@reins/daemon": ["./packages/daemon/src/index.ts"],
+      "@reins/protocol": ["./packages/protocol/src/index.ts"]
+    }
   },
   "files": [
     "oxfmt.config.ts",
@@ -10,7 +14,16 @@
     "scripts/build-distribution.ts",
     "scripts/check-boundaries.ts",
     "scripts/check-packed-cli.ts",
+    "scripts/check-pnpm-consumer-round.ts",
     "scripts/check-runtime-language.ts",
+    "scripts/packed-cli-fixtures/adapter-fixture.ts",
+    "scripts/packed-cli-fixtures/daemon.ts",
+    "scripts/packed-cli-fixtures/evidence.ts",
+    "scripts/packed-cli-fixtures/process.ts",
+    "scripts/packed-cli-fixtures/sdk.ts",
+    "scripts/packed-cli-fixtures/simulated-adapter.ts",
+    "scripts/packed-cli-fixtures/types.ts",
+    "scripts/prepare-test-platform-input.ts",
     "scripts/release-package.ts",
     "scripts/run-development-cli.ts",
     "scripts/run-root-owned-task.ts",
