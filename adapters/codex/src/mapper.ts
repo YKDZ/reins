@@ -150,8 +150,7 @@ export function derivePermissionOptions(
       options.push({ outcome: "allow", scope: "session" });
     else if (decision === "decline")
       options.push({ outcome: "deny", feedback: false });
-    else if (decision === "cancel")
-      options.push({ outcome: "deny", feedback: true });
+    // cancel 不携带反馈文本，不能映射为要求调用方反馈的 deny。
   }
   return options;
 }

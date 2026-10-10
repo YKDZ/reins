@@ -2,14 +2,11 @@ import {
   isCommandOutcomeUnknown,
   type CommandOutcomeUnknown,
 } from "@reins/client";
-import type { MachineError, StopReason } from "@reins/protocol";
+import type { MachineError } from "@reins/protocol";
 import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
 import * as v from "valibot";
 
 export const EXIT_OK = 0;
-export const EXIT_FAILED = 1;
-export const EXIT_CANCELLED = 2;
-export const EXIT_KILLED = 3;
 export const EXIT_TIMEOUT = 4;
 export const EXIT_USAGE = 64;
 export const EXIT_RESOURCE = 65;
@@ -206,20 +203,6 @@ export function exitCodeForError(error: CliError): number {
       return EXIT_RESOURCE;
   }
   return assertNever(error);
-}
-
-// oxlint-disable-next-line typescript/consistent-return -- StopReason 是闭集；新增成员必须触发编译期穷尽检查。
-export function exitCodeForStopReason(reason: StopReason): number {
-  switch (reason) {
-    case "end_turn":
-      return EXIT_OK;
-    case "failed":
-      return EXIT_FAILED;
-    case "cancelled":
-      return EXIT_CANCELLED;
-    case "killed":
-      return EXIT_KILLED;
-  }
 }
 
 export class ExitError extends Error {

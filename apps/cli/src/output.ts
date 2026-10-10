@@ -127,36 +127,6 @@ export function printWaitResult(result: WaitResult, mode: OutputMode): void {
   }
 }
 
-export function printRunResult(
-  result: {
-    sessionId: string;
-    stopReason: string;
-    finalReply: string | null;
-    usage?: Record<string, unknown>;
-  },
-  mode: OutputMode,
-): void {
-  if (mode === "json") {
-    printJsonLine({
-      sessionId: result.sessionId,
-      stopReason: result.stopReason,
-      finalReply: result.finalReply,
-      ...(result.usage === undefined ? {} : { usage: result.usage }),
-    });
-    return;
-  }
-  if (result.stopReason === "killed") {
-    process.stdout.write(`Session ${result.sessionId} was killed\n`);
-    return;
-  }
-  process.stdout.write(
-    `Turn completed: ${result.stopReason} (${result.sessionId})\n`,
-  );
-  if (result.finalReply !== null && result.finalReply !== undefined) {
-    process.stdout.write(`${result.finalReply}\n`);
-  }
-}
-
 export function printInterruptResult(
   outcomes: ProtocolResult<"interrupt">,
   mode: OutputMode,

@@ -8,31 +8,20 @@ import type {
   PermissionOption,
   PermissionResolution,
   ProtocolNotification,
-  SpawnParams,
 } from "@reins/protocol";
-import { STOP_REASONS } from "@reins/protocol";
 
 import {
   createPrettyAttachPresenter,
   type PrettyAttachPresenter,
 } from "./attach-presenter.ts";
-import {
-  ExitError,
-  EXIT_RESOURCE,
-  exitCodeForStopReason,
-  inputError,
-} from "./errors.ts";
+import { ExitError, EXIT_RESOURCE, inputError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
-import { printNotification, printRunResult } from "./output.ts";
+import { printNotification } from "./output.ts";
 
 export type AttachRuntimeOptions = {
   params: AttachParams;
   mode: OutputMode;
   input?: NodeJS.ReadableStream;
-  quiet?: boolean;
-  onTurnCompleted?: (
-    event: Extract<DomainEvent, { type: "turn.completed" }>,
-  ) => void;
 };
 
 function optionLabel(option: PermissionOption, index: number): string {
@@ -210,9 +199,7 @@ export async function runAttach(
       options.mode === "pretty" ? createPromptInput(input) : undefined;
     let pendingEnd: AttachEnded | undefined;
     const presenter: PrettyAttachPresenter | undefined =
-      options.mode === "pretty" && options.quiet !== true
-        ? createPrettyAttachPresenter()
-        : undefined;
+      options.mode === "pretty" ? createPrettyAttachPresenter() : undefined;
 
     // oxlint-disable-next-line unicorn/consistent-function-scoping
     let unsubscribe = (): void => {};
@@ -303,18 +290,16 @@ export async function runAttach(
     };
     unsubscribe = client.onNotification(
       (notification: ProtocolNotification) => {
-        if (options.quiet !== true) {
-          if (presenter === undefined) {
-            printNotification(
-              notification.method,
-              notification.params,
-              options.mode,
-            );
-          } else if (attachReady) {
-            presenter.present(notification);
-          } else {
-            presenter.bufferInitial(notification);
-          }
+        if (presenter === undefined) {
+          printNotification(
+            notification.method,
+            notification.params,
+            options.mode,
+          );
+        } else if (attachReady) {
+          presenter.present(notification);
+        } else {
+          presenter.bufferInitial(notification);
         }
         if (
           notification.method === "event" &&
@@ -324,7 +309,6 @@ export async function runAttach(
             notification.params.sessionId,
             notification.params.turnId,
           );
-          options.onTurnCompleted?.(notification.params);
         }
         if (notification.method === "attach.ended") {
           if (!attachReady) {
@@ -417,58 +401,4 @@ export async function runAttach(
       });
   });
   return await ended;
-}
-
-// run：spawn 后 attach 首个回合（exitOn 覆盖全部终态），按终态抛退出码。
-export async function runAndWait(
-  client: ReinsClient,
-  params: { spawn: SpawnParams; mode: OutputMode },
-): Promise<never> {
-  const spawnResponse = await client.request("spawn", params.spawn);
-  if ("error" in spawnResponse) throw spawnResponse.error;
-  const sessionId = spawnResponse.result.sessionId;
-  const holder: {
-    finalTurn: Extract<DomainEvent, { type: "turn.completed" }> | null;
-  } = { finalTurn: null };
-  const ended = await runAttach(client, {
-    params: {
-      sessionId,
-      exitOn: [...STOP_REASONS],
-    },
-    mode: params.mode,
-    quiet: true,
-    onTurnCompleted: (event) => {
-      holder.finalTurn = event;
-    },
-  });
-  if (ended.reason === "session_killed") {
-    printRunResult(
-      { sessionId, stopReason: "killed", finalReply: null },
-      params.mode,
-    );
-    throw new ExitError(exitCodeForStopReason("killed"), "session killed");
-  }
-  if (holder.finalTurn !== null) {
-    printRunResult(
-      {
-        sessionId,
-        stopReason: holder.finalTurn.stopReason,
-        finalReply: holder.finalTurn.finalReply,
-        ...(holder.finalTurn.usage === undefined
-          ? {}
-          : { usage: holder.finalTurn.usage }),
-      },
-      params.mode,
-    );
-    throw new ExitError(
-      exitCodeForStopReason(holder.finalTurn.stopReason),
-      `run ended: ${holder.finalTurn.stopReason}`,
-    );
-  }
-  // 理论不可达：attach 的 exitOn 覆盖全部终态，只会在 turn.completed 或
-  // session_killed 时结束；兜底按 ended.reason 退出。
-  throw new ExitError(
-    exitCodeForStopReason(ended.reason),
-    `run ended: ${ended.reason}`,
-  );
 }
