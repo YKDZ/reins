@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import { createReinsClient } from "@reins/client";
 import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
 import type {
+  ConsumerContext,
   DiagnosticsResult,
   DomainEvent,
   ProtocolNotification,
@@ -113,7 +114,9 @@ async function runFixture(
       ],
     ]),
   });
-  const client = createReinsClient(daemon.connect());
+  const client = createReinsClient(daemon.connect(), {
+    consumerContext: "conformance" as ConsumerContext,
+  });
   const events: DomainEvent[] = [];
   let resolveEnded!: (
     ended: Extract<ProtocolNotification, { method: "attach.ended" }>["params"],
@@ -128,6 +131,8 @@ async function runFixture(
     else resolveEnded(notification.params);
   });
   try {
+    const handshake = await client.initialize();
+    if ("error" in handshake) throw new Error(JSON.stringify(handshake.error));
     const spawned = await client.request("spawn", {
       sessionName: "conformance" as SpawnParams["sessionName"],
       harness: "qoder",

@@ -66,7 +66,12 @@ function runDevelopmentCli(
   return new Promise((resolve, reject) => {
     const child = spawn("pnpm", ["reins", "--", ...args], {
       cwd,
-      env: { ...process.env, ...env },
+      // launcher 显式注入消费者绑定；调用方 env 仍可覆盖。
+      env: {
+        REINS_CONSUMER_CONTEXT: "development-entry",
+        ...process.env,
+        ...env,
+      },
       stdio: ["pipe", "pipe", "pipe"],
     });
     const stdout: Buffer[] = [];
@@ -423,6 +428,7 @@ describe("checkout-isolated development entry", () => {
       checkoutA,
       {
         ...envA,
+        REINS_CONSUMER_CONTEXT: "development-entry",
         REINS_DAEMON_BIN: join(checkoutA, "packages/daemon/dist/main.js"),
         REINS_SOCKET: join(runtimeRoot, oldRuntimeDirectory, "reins.sock"),
         REINS_STATE_DIR: join(runtimeRoot, oldRuntimeDirectory, "state"),
@@ -542,6 +548,7 @@ describe("checkout-isolated development entry", () => {
       repository,
       {
         ...originalEnv,
+        REINS_CONSUMER_CONTEXT: "development-entry",
         REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
         REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
         REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),
@@ -595,6 +602,7 @@ describe("checkout-isolated development entry", () => {
       repository,
       {
         ...originalEnv,
+        REINS_CONSUMER_CONTEXT: "development-entry",
         REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
         REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
         REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),

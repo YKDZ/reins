@@ -213,6 +213,7 @@ function testEnv(dir: string): NodeJS.ProcessEnv {
     REINS_DAEMON_BIN: daemonBin,
     REINS_ADAPTERS_MODULE: fixturesModule,
     REINS_IDLE_TIMEOUT_MS: "300",
+    REINS_CONSUMER_CONTEXT: "cli-e2e",
   };
 }
 
@@ -597,7 +598,9 @@ describe("CLI 进程边界（缝 D）", () => {
       },
       v: 1,
       diagnosticId,
-      recordedAt: "2026-08-26T00:00:00.000Z",
+      // 固定历史时刻会随真实时钟超出默认 7 天保留窗口，令本用例变成日期敏感；
+      // 归属反例与时间无关。
+      recordedAt: new Date().toISOString(),
       severity: "error",
     } as const;
     const activePath = join(diagnosticsDirectory, "active.ndjson");
@@ -1169,6 +1172,7 @@ describe("CLI 进程边界（缝 D）", () => {
     if (requestsPath === undefined)
       throw new Error("requests file is required");
     expect((await readFile(requestsPath, "utf8")).trim().split("\n")).toEqual([
+      "initialize",
       "attach",
     ]);
     await waitForFixtureExit(fixtureEnv);
@@ -2528,5 +2532,35 @@ describe("CLI 域错误（不夹带 usage）", () => {
     );
     expect(result.stderr).not.toContain("suggestion:");
     expect(result.stderr).not.toContain("usage:");
+  });
+});
+
+describe("CLI 消费者绑定握手（01 票）", () => {
+  test("缺少消费者绑定的 CLI 在触达 daemon 前拒绝且不创建 socket", async () => {
+    const { env, socketPath } = await freshEnv();
+    const unboundEnv: NodeJS.ProcessEnv = { ...env };
+    delete unboundEnv.REINS_CONSUMER_CONTEXT;
+    const result = await runCli(["list"], unboundEnv);
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      code: "consumer_context_required",
+    });
+    expect(await pathExists(socketPath)).toBe(false);
+  });
+
+  test("带绑定的真实 CLI 经 daemon 完成创建与查询", async () => {
+    const { env } = await freshEnv();
+    const spawned = await runCli(
+      ["spawn", "fake", "hello", "--name", "bound-session"],
+      env,
+    );
+    expect(spawned.exitCode).toBe(0);
+    const sessionId = sessionIdFrom(spawned);
+    expect(sessionId).toMatch(/@g/u);
+
+    const listed = await runCli(["list"], env);
+    expect(listed.exitCode).toBe(0);
+    expect(listed.stdout).toContain(sessionId);
+    await runCli(["kill", sessionId], env);
   });
 });

@@ -12,6 +12,8 @@ import type {
   ProtocolResult,
   SpawnParams,
 } from "@reins/protocol";
+import { consumerContextSchema } from "@reins/protocol";
+import * as v from "valibot";
 
 import { runAndWait, runAttach } from "./attach.ts";
 import { CapabilityStore } from "./capabilities.ts";
@@ -21,7 +23,7 @@ import type {
   CommandName,
 } from "./command-spec.ts";
 import { ensureDaemon } from "./daemon.ts";
-import { ExitError, EXIT_TIMEOUT } from "./errors.ts";
+import { ExitError, EXIT_TIMEOUT, machineError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 import {
   printCapabilitiesResult,
@@ -35,13 +37,29 @@ import {
   printWaitResult,
 } from "./output.ts";
 
+// 握手属于"daemon 可用"判定的一部分，与 ensureDaemon 的 5s 就绪预算同源。
+const HANDSHAKE_TIMEOUT_MS = 5_000;
+
 async function withClient<T>(
   mode: OutputMode,
   run: (client: ReinsClient) => Promise<T>,
 ): Promise<T> {
+  // 消费者绑定由 launcher 环境显式给出；缺失或非法即在触达 daemon 前拒绝，
+  // 不采用全局默认，也不把它暴露成 agent 参数。
+  const consumerContext = v.safeParse(
+    consumerContextSchema,
+    process.env.REINS_CONSUMER_CONTEXT ?? "",
+  );
+  if (!consumerContext.success) {
+    throw machineError({ code: "consumer_context_required" });
+  }
   const { connection } = await ensureDaemon(process.env);
-  const client = createReinsClient(connection);
+  const client = createReinsClient(connection, {
+    consumerContext: consumerContext.output,
+  });
   try {
+    const handshake = await client.initialize(HANDSHAKE_TIMEOUT_MS);
+    if ("error" in handshake) throw handshake.error;
     return await run(client);
   } finally {
     client.close();

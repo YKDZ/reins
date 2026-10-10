@@ -83,6 +83,16 @@ if (mode === "cold-launch-barrier") {
         if (newline === -1) break;
         const request = JSON.parse(input.slice(0, newline));
         input = input.slice(newline + 1);
+        if (request.method === "initialize") {
+          socket.write(
+            `${JSON.stringify({
+              kind: "response",
+              requestId: request.requestId,
+              result: { protocolMajorVersion: 1, daemonGeneration: "gfixture" },
+            })}\n`,
+          );
+          continue;
+        }
         socket.write(
           `${JSON.stringify({
             kind: "response",
@@ -202,6 +212,17 @@ const server = createServer((socket) => {
       const request = JSON.parse(line);
       if (requestsFile !== undefined) {
         appendFileSync(requestsFile, `${request.method}\n`);
+      }
+      // 消费者绑定握手是连接建立的一部分；各 mode 的反例仍作用在领域请求上。
+      if (request.method === "initialize") {
+        socket.write(
+          `${JSON.stringify({
+            kind: "response",
+            requestId: request.requestId,
+            result: { protocolMajorVersion: 1, daemonGeneration: "gfixture" },
+          })}\n`,
+        );
+        continue;
       }
       if (mode === "timeout") continue;
       if (mode === "attach-long-replay" && request.method === "attach") {
