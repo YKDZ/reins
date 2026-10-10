@@ -1,3 +1,6 @@
+import { statSync } from "node:fs";
+import { resolve } from "node:path";
+
 import {
   createReinsClient,
   type ProtocolResponseFor,
@@ -82,6 +85,21 @@ function spawnParamsFromOptions(
   messageParts: readonly string[],
   options: WorkerOptions,
 ): SpawnParams {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  let cwdIdentity: NonNullable<SpawnParams["cwdIdentity"]>;
+  try {
+    const directory = statSync(cwd, { bigint: true });
+    if (!directory.isDirectory()) throw new Error("Not a directory");
+    cwdIdentity = {
+      device: String(directory.dev),
+      inode: String(directory.ino),
+    };
+  } catch {
+    throw machineError({
+      code: "invalid_params",
+      issues: [{ issue: "invalid_value", path: "cwd" }],
+    });
+  }
   const authorizationMode =
     options.authorizationMode === "interactive"
       ? ("interactive" as const)
@@ -97,7 +115,8 @@ function spawnParamsFromOptions(
     ...(options.reasoning === undefined
       ? {}
       : { reasoning: options.reasoning }),
-    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    cwd,
+    cwdIdentity,
     ...(authorizationMode === undefined ? {} : { authorizationMode }),
     ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     ...(options.captureHarnessStderr === true
@@ -168,6 +187,7 @@ async function runList(ctx: CommandInvocationFor<"list">): Promise<void> {
   const options = ctx.options;
   await withClient(ctx.mode, async (client) => {
     const params: ListFilter = {
+      ...(options.session === undefined ? {} : { sessionId: options.session }),
       ...(options.harness === undefined ? {} : { harness: options.harness }),
       ...(options.state === undefined ? {} : { state: options.state }),
       ...(options.name === undefined ? {} : { sessionName: options.name }),

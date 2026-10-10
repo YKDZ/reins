@@ -1,3 +1,5 @@
+import { stat } from "node:fs/promises";
+
 import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
@@ -797,6 +799,22 @@ export function createProtocolServerInternal(
         return await aggregateCapabilities();
       case "spawn":
         const spawnParams = request.params as SpawnParams;
+        try {
+          const directory = await stat(spawnParams.cwd, { bigint: true });
+          if (
+            !directory.isDirectory() ||
+            (spawnParams.cwdIdentity !== undefined &&
+              (spawnParams.cwdIdentity.device !== String(directory.dev) ||
+                spawnParams.cwdIdentity.inode !== String(directory.ino)))
+          ) {
+            throw new Error("Not a directory");
+          }
+        } catch {
+          throw {
+            code: "invalid_params",
+            issues: [{ issue: "invalid_value", path: "cwd" }],
+          } satisfies MachineError;
+        }
         if (
           spawnParams.captureHarnessStderr === true &&
           options.adapters.has(spawnParams.harness) &&
@@ -808,9 +826,7 @@ export function createProtocolServerInternal(
             feature: "capture_harness_stderr",
           } satisfies MachineError;
         }
-        return {
-          sessionId: await options.machine.spawn(spawnParams),
-        };
+        return await options.machine.spawn(spawnParams);
       case "send": {
         const params = request.params as SendParams;
         assertSessionScope(params.sessionId);

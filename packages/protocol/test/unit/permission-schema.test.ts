@@ -181,23 +181,29 @@ describe("工具生命周期事件", () => {
 describe("授权模式与决议命令", () => {
   test("spawn 接受 authorizationMode，拒绝已移除的 permissionMode", () => {
     ok(spawnParamsSchema, {
+      cwd: "/tmp",
       harness: "codex",
       message: "x",
       sessionName: "reviewer",
       authorizationMode: "interactive",
     });
     ok(spawnParamsSchema, {
+      cwd: "/tmp",
       harness: "codex",
       message: "x",
       sessionName: "reviewer",
       authorizationMode: "allowAll",
     });
     bad(spawnParamsSchema, {
+      cwd: "/tmp",
+      sessionName: "reviewer",
       harness: "codex",
       message: "x",
       authorizationMode: "yolo",
     });
     bad(spawnParamsSchema, {
+      cwd: "/tmp",
+      sessionName: "reviewer",
       harness: "codex",
       message: "x",
       permissionMode: "yolo",
