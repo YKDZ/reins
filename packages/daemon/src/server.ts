@@ -887,23 +887,12 @@ export function createProtocolServerInternal(
       }
       case "kill": {
         const params = request.params as KillParams;
-        const owned = params.ids.filter((id) => !isForeignSession(id));
-        const results =
-          owned.length === 0
-            ? []
-            : await options.machine.kill(
-                owned.length === params.ids.length
-                  ? params
-                  : { ...params, ids: owned },
-              );
-        const byId = new Map(
-          results.map((result) => [result.sessionId, result]),
-        );
-        return params.ids.map(
-          (sessionId) =>
-            byId.get(sessionId) ??
-            ({ sessionId, status: "not_found" as const } satisfies KillResult),
-        );
+        return isForeignSession(params.sessionId)
+          ? ({
+              sessionId: params.sessionId,
+              status: "not_found",
+            } satisfies KillResult)
+          : await options.machine.kill(params);
       }
       case "list": {
         const listed = options.machine.list(

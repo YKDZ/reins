@@ -431,7 +431,9 @@ describe("routing driver invariants", () => {
         message: "start",
       });
 
-      await expect(machine.kill({ ids: [sessionId] })).rejects.toMatchObject({
+      await expect(
+        machine.kill({ sessionId: sessionId }),
+      ).rejects.toMatchObject({
         code: "internal_error",
         diagnosticId: fallbackId,
       });

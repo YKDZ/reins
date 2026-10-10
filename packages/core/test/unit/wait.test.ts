@@ -97,9 +97,10 @@ describe("wait", () => {
       cwd: "/tmp/demo",
     });
 
-    await expect(machine.kill({ ids: [id] })).resolves.toEqual([
-      { sessionId: id, status: "killed" },
-    ]);
+    await expect(machine.kill({ sessionId: id })).resolves.toEqual({
+      sessionId: id,
+      status: "killed",
+    });
     await expect(machine.wait({ ids: [id] })).resolves.toEqual({
       status: "completed",
       results: [{ sessionId: id, status: "killed" }],

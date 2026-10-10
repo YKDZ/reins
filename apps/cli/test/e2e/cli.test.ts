@@ -2386,9 +2386,10 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const { env } = await freshEnv();
     const result = await runCli(["kill", missingSessionId], env);
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual([
-      { sessionId: missingSessionId, status: "not_found" },
-    ]);
+    expect(JSON.parse(result.stdout)).toEqual({
+      sessionId: missingSessionId,
+      status: "not_found",
+    });
   });
 
   test("daemon 不可达返回 daemon_start_failed", async () => {
@@ -2468,9 +2469,10 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     });
 
     const killed = await runCli(["kill", firstSessionId], env);
-    expect(JSON.parse(killed.stdout)).toEqual([
-      { sessionId: firstSessionId, status: "killed" },
-    ]);
+    expect(JSON.parse(killed.stdout)).toEqual({
+      sessionId: firstSessionId,
+      status: "killed",
+    });
     const afterKill = await runCli(
       ["spawn", "fake", "third", "--name", "reused-name"],
       env,
@@ -2537,9 +2539,10 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     });
 
     const foreignKill = await runCli(["kill", sessionId], beta);
-    expect(JSON.parse(foreignKill.stdout)).toEqual([
-      { sessionId, status: "not_found" },
-    ]);
+    expect(JSON.parse(foreignKill.stdout)).toEqual({
+      sessionId,
+      status: "not_found",
+    });
 
     const foreignWait = await runCli(
       ["wait", sessionId, "--timeout", "50"],
@@ -2555,8 +2558,6 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     expect(ownerList.stdout).toContain(sessionId);
 
     const killed = await runCli(["kill", sessionId], alpha);
-    expect(JSON.parse(killed.stdout)).toEqual([
-      { sessionId, status: "killed" },
-    ]);
+    expect(JSON.parse(killed.stdout)).toEqual({ sessionId, status: "killed" });
   });
 });
