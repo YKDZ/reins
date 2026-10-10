@@ -827,26 +827,6 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(JSON.parse(sessions.stdout)).toEqual([]);
   });
 
-  test("JSON interactive run is rejected before spawning", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      [
-        "run",
-        "fake",
-        "hello",
-        "--name",
-        "interactive-run",
-        "--authorization-mode",
-        "interactive",
-      ],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      code: "usage_error",
-      issues: [{ issue: "invalid_combination" }],
-    });
-  });
   test("capabilities 输出能力矩阵（JSON 默认）", async () => {
     const { env } = await freshEnv();
     const result = await runCli(["capabilities"], env);
@@ -878,7 +858,7 @@ describe("CLI 进程边界（缝 D）", () => {
     await runCli(["kill", sessionId], env);
   });
 
-  test("spawn 接受合法 --authorization-mode 与 --meta", async () => {
+  test("spawn 接受合法 --authorization-mode", async () => {
     const { env } = await freshEnv();
     const result = await runCli(
       [
@@ -887,8 +867,6 @@ describe("CLI 进程边界（缝 D）", () => {
         "hi",
         "--authorization-mode",
         "allow-all",
-        "--meta",
-        '{"a":1}',
         "--name",
         "test-session",
       ],
@@ -898,94 +876,6 @@ describe("CLI 进程边界（缝 D）", () => {
     const sessionId = sessionIdFrom(result);
     expect(sessionId).toMatch(/@g/u);
     await runCli(["kill", sessionId], env);
-  });
-
-  test("run 默认只返回紧凑最终结果，不流式回放事件", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["run", "fake", "hello", "--name", "test-session"],
-      env,
-    );
-    expect(result.exitCode).toBe(0);
-    const parsed = JSON.parse(result.stdout) as {
-      sessionId: string;
-      stopReason: string;
-      finalReply: string | null;
-    };
-    expect(parsed).toMatchObject({ stopReason: "end_turn", finalReply: "ok" });
-    expect(parsed.sessionId).toMatch(/@g/u);
-    expect(result.stdout).not.toContain('"method":"event"');
-    await runCli(["kill", parsed.sessionId], env);
-  });
-
-  test.each([
-    ["failed", 1],
-    ["cancelled", 2],
-  ])("run preserves %s stop reason exit code", async (harness, exitCode) => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["run", harness, "hello", "--name", `run-${harness}`],
-      env,
-    );
-    expect(result.exitCode).toBe(exitCode);
-    expect(JSON.parse(result.stdout)).toMatchObject({ stopReason: harness });
-    expect(result.stdout).not.toContain('"method":"event"');
-  });
-
-  test("run observes a real second-connection kill as compact exit 3", async () => {
-    const { env, socketPath } = await freshEnv();
-    const daemon = await startDaemon(env);
-    const running = startCli(
-      ["run", "hang", "hello", "--name", "run-killed"],
-      env,
-    );
-    let sessionId: string | undefined;
-    try {
-      await waitFor(async () => {
-        const listed = await runCli(["list", "--name", "run-killed"], env);
-        return JSON.parse(listed.stdout).length === 1;
-      });
-      const listed = await runCli(["list", "--name", "run-killed"], env);
-      sessionId = (JSON.parse(listed.stdout) as Array<{ sessionId: string }>)[0]
-        ?.sessionId;
-      if (sessionId === undefined) throw new Error("run session is missing");
-      const exit = waitForExit(running.child, 10_000);
-      expect((await runCli(["kill", sessionId], env)).exitCode).toBe(0);
-      expect(await exit).toBe(3);
-      const output = JSON.parse(running.stdout.join("")) as {
-        stopReason: string;
-      };
-      expect(output.stopReason).toBe("killed");
-      expect(running.stdout.join("")).not.toContain('"method":"event"');
-      expect(running.stderr.join("")).toBe("");
-    } finally {
-      if (
-        running.child.exitCode === null &&
-        running.child.signalCode === null
-      ) {
-        running.child.kill("SIGKILL");
-      }
-      await waitForExit(running.child, 2_000);
-      if (sessionId !== undefined) await runCli(["kill", sessionId], env);
-      if (daemon.exitCode === null && daemon.signalCode === null) {
-        await stopDaemon(daemon, socketPath);
-      }
-    }
-  }, 15_000);
-
-  test("--pretty run 输出人类可读最终结果", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["--pretty", "run", "fake", "hello", "--name", "test-session"],
-      env,
-    );
-    expect(result.exitCode).toBe(0);
-    const sessionId =
-      /^Turn completed: end_turn \((.+@g[a-z0-9]+)\)\nok\n$/u.exec(
-        result.stdout,
-      )?.[1];
-    expect(sessionId).toBeDefined();
-    await runCli(["kill", sessionId ?? ""], env);
   });
 
   test("attach 仍默认流式回放事件（JSON 诊断视图）", async () => {
@@ -1801,7 +1691,6 @@ function constraintCase(
     }
   };
   let field: string;
-  let modes: readonly ("json" | "pretty")[] | undefined;
   switch (constraint.type) {
     case "exclusive":
       add(constraint.field);
@@ -1817,11 +1706,6 @@ function constraintCase(
       add(constraint.until, "2026-01-01T00:00:00.000Z");
       field = `${flagDisplay(option(constraint.since).flags)}, ${flagDisplay(option(constraint.until).flags)}`;
       break;
-    case "forbiddenModeValue":
-      add(constraint.field, constraint.value);
-      field = flagDisplay(option(constraint.field).flags);
-      modes = [constraint.mode];
-      break;
     default:
       return assertNever(constraint);
   }
@@ -1833,7 +1717,6 @@ function constraintCase(
     hint: constraint.hint,
     suggestionContains: [constraint.hint],
     specName: spec.name,
-    ...(modes === undefined ? {} : { modes }),
   };
 }
 
@@ -2140,7 +2023,7 @@ describe("CLI 输出金样（逐字节）", () => {
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
       "error: Unknown command 'spwan'. Did you mean 'spawn'?\n" +
-        "suggestion: Allowed: spawn, send, wait, interrupt, kill, list, attach, run, diagnostics, capabilities, resolve-permission, retry\n" +
+        "suggestion: Allowed: spawn, send, wait, interrupt, kill, list, attach, diagnostics, capabilities, resolve-permission, retry\n" +
         "usage: reins [options] <command>\n",
     );
   });
@@ -2298,22 +2181,22 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("pretty permission EOF is a typed terminal error on stderr", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(
-      ["--pretty", "run", "permission", "do it", "--name", "prompt-eof"],
+    const spawned = await runCli(
+      ["spawn", "permission", "do it", "--name", "prompt-eof"],
       env,
-      { timeoutMs: 3_000 },
     );
+    expect(spawned.exitCode).toBe(0);
+    const sessionId = sessionIdFrom(spawned);
+    const result = await runCli(["--pretty", "attach", sessionId], env, {
+      timeoutMs: 3_000,
+    });
     expect(result.exitCode).toBe(65);
     expect(result.stdout).toContain("Permission requested:");
     expect(result.stderr).toBe(
       "error: Permission input closed before a choice was received\n",
     );
     expect(result.stderr).not.toContain("usage:");
-    const listed = await runCli(["list", "--name", "prompt-eof"], env);
-    const sessionId = (
-      JSON.parse(listed.stdout) as Array<{ sessionId: string }>
-    )[0]?.sessionId;
-    if (sessionId !== undefined) await runCli(["kill", sessionId], env);
+    await runCli(["kill", sessionId], env);
   });
 
   test("完整进程将无响应 daemon 区分为 daemon_timeout 并清理子进程", async () => {

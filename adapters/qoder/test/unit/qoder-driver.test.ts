@@ -1308,7 +1308,7 @@ describe("permission 桥", () => {
     });
   });
 
-  test("deny feedback：翻译为 message，缺省给默认文案", async () => {
+  test("deny feedback：原样翻译调用方 message", async () => {
     const { fake, driver } = setup();
     const canUseTool = fake.controls.lastOptions()?.canUseTool;
     const resultPromise = canUseTool?.(
@@ -1395,4 +1395,34 @@ describe("interrupt 与 kill", () => {
         .map((input) => input.reason),
     ).toEqual(["initialized", "closed"]);
   });
+});
+
+test("adapter refuses unavailable session scope and preserves the caller feedback callback", async () => {
+  const { fake, driver } = setup();
+  const callback = fake.controls.lastOptions()!.canUseTool!;
+  const answer = callback(
+    "Bash",
+    { command: "caller command" },
+    { signal: new AbortController().signal, toolUseID: "native-tool" },
+  );
+  await flush();
+  const before = fake.controls.delivered().length;
+  expect(() =>
+    driver.resolvePermission(sessionId, permissionId, {
+      outcome: "allow",
+      scope: "session",
+    }),
+  ).toThrow(
+    expect.objectContaining({ code: "permission_resolution_mismatch" }),
+  );
+  driver.resolvePermission(sessionId, permissionId, {
+    outcome: "deny",
+    feedback: "  caller feedback\nsecond line  ",
+  });
+  await expect(answer).resolves.toEqual({
+    behavior: "deny",
+    message: "  caller feedback\nsecond line  ",
+    toolUseID: "native-tool",
+  });
+  expect(fake.controls.delivered()).toHaveLength(before);
 });

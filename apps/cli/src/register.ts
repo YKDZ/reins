@@ -138,7 +138,6 @@ function constraintHelp(
   switch (constraint.type) {
     case "exclusive":
     case "requires":
-    case "forbiddenModeValue":
       return `${flag(constraint.field)}: ${constraint.hint}`;
     case "orderedTime":
       return `${flag(constraint.since)} / ${flag(constraint.until)}: ${constraint.hint}`;

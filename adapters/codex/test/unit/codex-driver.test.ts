@@ -774,3 +774,33 @@ describe("codex driver", () => {
 });
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
+
+test("adapter rejects an out-of-menu answer without consuming the original native request", async () => {
+  const { fake, driver } = setup();
+  await flush();
+  fake.controls.pushInbound({
+    kind: "request",
+    id: 70,
+    method: "item/commandExecution/requestApproval",
+    input: {},
+    availableDecisions: ["accept"],
+    requestedPermissions: {},
+  });
+  await flush();
+  expect(() =>
+    driver.resolvePermission(sessionId, permissionId, {
+      outcome: "deny",
+      feedback: "caller only",
+    }),
+  ).toThrow(
+    expect.objectContaining({ code: "permission_resolution_mismatch" }),
+  );
+  expect(fake.controls.responded()).toEqual([]);
+  driver.resolvePermission(sessionId, permissionId, {
+    outcome: "allow",
+    scope: "once",
+  });
+  expect(fake.controls.responded()).toEqual([
+    { id: 70, result: { decision: "accept" } },
+  ]);
+});

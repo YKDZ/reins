@@ -6,6 +6,7 @@ import {
 } from "@reins/adapter-kit";
 import {
   makeTextEvidence,
+  type MachineError,
   type WorkerDriver,
   type AdapterDriverFactory,
   type WorkerSpec,
@@ -131,6 +132,21 @@ export function createCodexDriver(deps: {
         );
         return;
       }
+      const options = derivePermissionOptions(message);
+      if (options.length === 0) {
+        void session.diagnostic({
+          kind: "compatibility_gap",
+          operation: "receive_worker_request",
+          reason: "unsupported_request",
+          message: makeTextEvidence("No supported approval decisions"),
+        });
+        transport?.respondError(
+          message.id,
+          -32601,
+          "No supported approval decisions",
+        );
+        return;
+      }
       const permissionId = session.requestPermission(
         message.method === "item/commandExecution/requestApproval"
           ? "tool:commandExecution"
@@ -138,7 +154,7 @@ export function createCodexDriver(deps: {
             ? "tool:fileChange"
             : "tool:permissions",
         message.input,
-        derivePermissionOptions(message),
+        options,
         message,
       );
       pendingByRequest.set(message.id, permissionId);
@@ -200,6 +216,17 @@ export function createCodexDriver(deps: {
 
     const driver: WorkerDriver = {
       start(spec: WorkerSpec) {
+        const unsupported =
+          spec.agent !== undefined
+            ? "agent"
+            : spec.sandbox !== undefined
+              ? "sandbox"
+              : undefined;
+        if (unsupported !== undefined)
+          throw {
+            code: "unsupported_feature",
+            feature: unsupported,
+          } satisfies MachineError;
         session = new HarnessSession<CodexApproval>({
           sessionId: spec.sessionId,
           emit,
@@ -221,20 +248,6 @@ export function createCodexDriver(deps: {
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.reasoning === undefined ? {} : { effort: spec.reasoning }),
         };
-        const unsupportedFields = [
-          ...(spec.agent === undefined ? [] : (["agent"] as const)),
-          ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
-        ];
-        const [firstUnsupportedField, ...otherUnsupportedFields] =
-          unsupportedFields;
-        if (firstUnsupportedField !== undefined) {
-          void session.diagnostic({
-            kind: "mapping_gap",
-            operation: "spawn",
-            reason: "unsupported_input",
-            fields: [firstUnsupportedField, ...otherUnsupportedFields],
-          });
-        }
         void (async () => {
           try {
             await transport?.request("initialize", {
@@ -328,7 +341,7 @@ export function createCodexDriver(deps: {
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {
-        const entry = session?.takePending(permissionId);
+        const entry = session?.takePending(permissionId, resolution);
         if (entry === undefined) {
           if (session !== null) {
             void session.diagnostic({
@@ -339,7 +352,11 @@ export function createCodexDriver(deps: {
               permissionId,
             });
           }
-          return;
+          throw {
+            code: "permission_not_pending",
+            sessionId,
+            permissionId,
+          } satisfies MachineError;
         }
         pendingByRequest.delete(entry.id);
         transport?.respond(entry.id, resolutionToResponse(entry, resolution));

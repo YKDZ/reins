@@ -19,7 +19,7 @@ import type {
 import { consumerContextSchema } from "@reins/protocol";
 import * as v from "valibot";
 
-import { runAndWait, runAttach } from "./attach.ts";
+import { runAttach } from "./attach.ts";
 import { CapabilityStore } from "./capabilities.ts";
 import type {
   CommandInvocation,
@@ -77,9 +77,7 @@ function requireResult<M extends ProtocolMethod>(
   return response.result;
 }
 
-type WorkerOptions =
-  | CommandInvocationFor<"spawn">["options"]
-  | CommandInvocationFor<"run">["options"];
+type WorkerOptions = CommandInvocationFor<"spawn">["options"];
 
 function spawnParamsFromOptions(
   harness: string,
@@ -122,9 +120,6 @@ function spawnParamsFromOptions(
     ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     ...(options.captureHarnessStderr === true
       ? { captureHarnessStderr: true }
-      : {}),
-    ...("meta" in options && options.meta !== undefined
-      ? { meta: options.meta }
       : {}),
   };
 }
@@ -212,16 +207,6 @@ async function runAttachCommand(
   };
   await withClient(ctx.mode, async (client) => {
     await runAttach(client, { params, mode: ctx.mode });
-  });
-}
-
-async function runRun(ctx: CommandInvocationFor<"run">): Promise<void> {
-  const [harness, messageParts] = ctx.args;
-  const params = spawnParamsFromOptions(harness, messageParts, ctx.options);
-  await withClient(ctx.mode, async (client) => {
-    const validation = await new CapabilityStore(client).validateSpawn(params);
-    if (validation !== null) throw validation;
-    await runAndWait(client, { spawn: params, mode: ctx.mode });
   });
 }
 
@@ -350,7 +335,6 @@ export const handlers = {
   kill: runKill,
   list: runList,
   attach: runAttachCommand,
-  run: runRun,
   diagnostics: runDiagnostics,
   capabilities: runCapabilities,
   "resolve-permission": runResolvePermission,
@@ -376,8 +360,6 @@ export async function dispatchInvocation(
       return handlers.list(invocation);
     case "attach":
       return handlers.attach(invocation);
-    case "run":
-      return handlers.run(invocation);
     case "diagnostics":
       return handlers.diagnostics(invocation);
     case "capabilities":
