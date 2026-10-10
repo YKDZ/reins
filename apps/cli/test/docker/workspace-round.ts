@@ -2,8 +2,6 @@ import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import {
   appendFile,
-  copyFile,
-  cp,
   mkdir,
   readFile,
   rename,
@@ -91,19 +89,10 @@ await requireCommand(
 const installed = join(base, "consumer", "node_modules", "@ykdz", "reins");
 const context = join(base, "image-context");
 await mkdir(context);
-await cp(join(base, "tools"), join(context, "tools"), {
-  recursive: true,
-  filter: (source) =>
-    !source.endsWith("/docker") && !source.endsWith("/docker-native"),
-});
-await cp(
-  join(base, "consumer", "node_modules"),
-  join(context, "node_modules"),
-  { recursive: true, dereference: true },
-);
-await copyFile(
-  join(base, "codex-adapter.ts"),
-  join(context, "codex-adapter.ts"),
+// 直接将独立消费者的安装树作为 build context，避免在慢文件系统逐文件再复制一遍。
+await writeFile(
+  join(base, ".dockerignore"),
+  "tools/docker\ntools/docker-native\ncandidate.tgz\nevidence\n",
 );
 await writeFile(
   join(context, "codex"),
@@ -112,10 +101,18 @@ await writeFile(
 );
 await writeFile(
   join(context, "Dockerfile"),
-  `FROM ${nodeImage}\nCOPY tools /opt/reins/tools\nRUN ln -s /opt/reins/tools/git /usr/local/bin/git\nCOPY node_modules /opt/reins/node_modules\nRUN ln -s /opt/reins/node_modules/@ykdz/reins/dist /opt/reins/dist\nCOPY codex-adapter.ts /opt/reins/codex-adapter.ts\nCOPY codex /opt/reins/harnesses/codex/bin/codex\nENV REINS_ADAPTERS_MODULE=/opt/reins/codex-adapter.ts\n`,
+  `FROM ${nodeImage}\nCOPY tools /usr/local/bin\nCOPY consumer/node_modules /opt/reins/node_modules\nCOPY consumer/node_modules/@ykdz/reins/dist /opt/reins/dist\nCOPY codex-adapter.ts /opt/reins/codex-adapter.ts\nCOPY image-context/codex /opt/reins/harnesses/codex/bin/codex\nENV REINS_ADAPTERS_MODULE=/opt/reins/codex-adapter.ts\n`,
 );
 const imageTag = `reins-wrr02-material-${process.pid}:candidate`;
-await requireCommand("docker", ["build", "--quiet", "-t", imageTag, context]);
+await requireCommand("docker", [
+  "build",
+  "--quiet",
+  "-t",
+  imageTag,
+  "-f",
+  join(context, "Dockerfile"),
+  base,
+]);
 const image = await requireCommand("docker", [
   "image",
   "inspect",
