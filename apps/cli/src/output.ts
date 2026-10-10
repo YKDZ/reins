@@ -7,7 +7,9 @@ import type {
   SessionInfo,
   SendAck,
   WaitResult,
+  SpawnAck,
 } from "@reins/protocol";
+import { encodeTurnHandle } from "@reins/protocol";
 
 import { fullUsageFor, type CommandSpec } from "./command-spec.ts";
 import type { CliError } from "./errors.ts";
@@ -60,14 +62,17 @@ export function printError(
   }
 }
 
-export function printSpawnResult(
-  result: { sessionId: string },
-  mode: OutputMode,
-): void {
+export function printSpawnResult(result: SpawnAck, mode: OutputMode): void {
+  const turnHandle = encodeTurnHandle({
+    sessionId: result.sessionId,
+    turnId: result.turnId,
+  });
   if (mode === "json") {
-    printJsonLine(result);
+    printJsonLine({ sessionId: result.sessionId, turnHandle, cwd: result.cwd });
   } else {
-    process.stdout.write(`Created session ${result.sessionId}\n`);
+    process.stdout.write(
+      `Created session ${result.sessionId}\nTurn ${turnHandle}\nWorking directory ${result.cwd}\n`,
+    );
   }
 }
 
@@ -189,17 +194,45 @@ export function printListResult(
   sessions: SessionInfo[],
   mode: OutputMode,
 ): void {
+  const projected = sessions.map((session) => {
+    const { lastCompletedTurn, ...rest } = session;
+    const { activeTurnId: _activeTurnId, ...common } = rest as typeof rest & {
+      activeTurnId?: string;
+    };
+    return {
+      ...common,
+      ...(session.state === "busy"
+        ? {
+            activeTurnHandle: encodeTurnHandle({
+              sessionId: session.sessionId,
+              turnId: session.activeTurnId,
+            }),
+          }
+        : {}),
+      ...(lastCompletedTurn === undefined
+        ? {}
+        : {
+            lastCompletedTurn: {
+              turnHandle: encodeTurnHandle({
+                sessionId: session.sessionId,
+                turnId: lastCompletedTurn.turnId,
+              }),
+              stopReason: lastCompletedTurn.stopReason,
+            },
+          }),
+    };
+  });
   if (mode === "json") {
-    printJsonLine(sessions);
+    printJsonLine(projected);
     return;
   }
   if (sessions.length === 0) {
     process.stdout.write("No sessions found\n");
     return;
   }
-  for (const session of sessions) {
+  for (const session of projected) {
     process.stdout.write(
-      `${session.sessionId}\t${session.harness}\t${session.state}\t${session.model ?? "-"}\t${session.turns}\t${session.lastStopReason ?? "-"}\n`,
+      `${session.sessionId}\t${session.harness}\t${session.state}\t${session.model ?? "-"}\t${session.turns}\t${session.lastCompletedTurn?.stopReason ?? "-"}\t${session.cwd}\t${session.activeTurnHandle ?? "-"}\t${session.lastCompletedTurn?.turnHandle ?? "-"}\n`,
     );
   }
 }

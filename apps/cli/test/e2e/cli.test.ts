@@ -1202,7 +1202,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(result.exitCode).toBe(0);
-    const sessionId = /^Created session (.+)\n$/u.exec(result.stdout)?.[1];
+    const sessionId = /^Created session (.+)\n/u.exec(result.stdout)?.[1];
     expect(sessionId).toBeDefined();
     await runCli(["kill", sessionId ?? ""], env);
   });

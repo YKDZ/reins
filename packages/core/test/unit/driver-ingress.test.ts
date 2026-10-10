@@ -29,7 +29,7 @@ describe("driver event ingress ownership", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("best-effort-registration"),
       harness: "codex",
       message: "start",
@@ -91,7 +91,7 @@ describe("driver event ingress ownership", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
 
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("spawn-terminal-projection"),
       harness: "codex",
       message: "one",
@@ -130,12 +130,14 @@ describe("driver event ingress ownership", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const spawn = async (name: string) =>
-      await machine.spawn({
-        sessionName: ids.sessionName(name),
-        harness: "codex",
-        message: "start",
-        cwd: "/tmp/demo",
-      });
+      (
+        await machine.spawn({
+          sessionName: ids.sessionName(name),
+          harness: "codex",
+          message: "start",
+          cwd: "/tmp/demo",
+        })
+      ).sessionId;
     const active = await spawn("typed-active");
 
     fake.controls.emit({
@@ -427,7 +429,7 @@ describe("driver event ingress ownership", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("projected-turn"),
       harness: "codex",
       message: "one",
@@ -498,7 +500,7 @@ describe("driver event ingress ownership", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("terminal-projection"),
       harness: "codex",
       message: "one",
@@ -552,7 +554,7 @@ describe("driver event ingress ownership", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("completed-turn-ownership"),
       harness: "codex",
       message: "one",
@@ -705,7 +707,7 @@ describe("driver event ingress ownership", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("rollback-scope"),
       harness: "codex",
       message: "one",
@@ -796,13 +798,13 @@ describe("driver event ingress ownership", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const first = await machine.spawn({
+    const { sessionId: first } = await machine.spawn({
       sessionName: ids.sessionName("ingress-one"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",
     });
-    const second = await machine.spawn({
+    const { sessionId: second } = await machine.spawn({
       sessionName: ids.sessionName("ingress-two"),
       harness: "codex",
       message: "two",
@@ -960,7 +962,7 @@ describe("driver event ingress ownership", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("bounded-turn-scopes"),
       harness: "codex",
       message: "one",
@@ -1017,7 +1019,7 @@ describe("driver event ingress ownership", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("permission-scope"),
       harness: "codex",
       message: "one",

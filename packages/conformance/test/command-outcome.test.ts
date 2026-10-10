@@ -74,6 +74,7 @@ test("命令结果恢复：ACK 丢失后新客户端恢复原 spawn，原消息�
   await client.initialize();
   const params = {
     harness: "fake",
+    cwd: "/tmp",
     sessionName: "lost-ack" as SessionName,
     message: "sensitive-message",
   };
@@ -132,6 +133,7 @@ test("命令结果恢复：超时不取消原执行，重连显式加入仍在�
     await recovery.initialize();
     await client.request("spawn", {
       harness: "fake",
+      cwd: "/tmp",
       sessionName: "inflight" as SessionName,
       message: "initial",
     });

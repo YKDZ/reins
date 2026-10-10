@@ -1,10 +1,12 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { mkdtemp, rm, access } from "node:fs/promises";
+import { mkdtemp, rm, access, stat } from "node:fs/promises";
 import { createConnection, createServer, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { parseRetryToken } from "@reins/client";
+import { decodeTurnHandle } from "@reins/protocol";
 import { afterEach, expect, test } from "vitest";
 
 const root = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -178,6 +180,13 @@ test("真实 CLI 在 ACK 丢失后显式恢复原结果，正常重启后旧 tok
   expect(lost.stdout).not.toContain("sensitive original message");
   expect(lost.stdout).not.toContain('"commandId"');
   expect(lost.stdout).not.toContain('"daemonGeneration"');
+  const projected = parseRetryToken(unknown.retryToken);
+  const cwdStat = await stat(process.cwd(), { bigint: true });
+  expect(projected.spawnContext).toEqual({
+    cwd: process.cwd(),
+    cwdIdentity: { device: String(cwdStat.dev), inode: String(cwdStat.ino) },
+  });
+  expect(JSON.stringify(projected)).not.toContain("sensitive original message");
   const params = JSON.stringify({
     harness: "fake",
     message: "sensitive original message",
@@ -188,14 +197,24 @@ test("真实 CLI 在 ACK 丢失后显式恢复原结果，正常重启后旧 tok
     env,
   );
   expect(recovered.code).toBe(0);
-  const session = JSON.parse(recovered.stdout) as { sessionId: string };
+  const session = JSON.parse(recovered.stdout) as {
+    sessionId: string;
+    turnHandle: string;
+    cwd: string;
+  };
+  expect(session.cwd).toBe(process.cwd());
+  expect(decodeTurnHandle(session.turnHandle)).toMatchObject({
+    sessionId: session.sessionId,
+  });
   expect(session.sessionId).toMatch(/^recovered@g/);
   const replay = await cli(
     ["retry", unknown.retryToken, "--params", params, "--pretty"],
     env,
   );
   expect(replay.code).toBe(0);
-  expect(replay.stdout).toBe(`Created session ${session.sessionId}\n`);
+  expect(replay.stdout).toBe(
+    `Created session ${session.sessionId}\nTurn ${session.turnHandle}\nWorking directory ${session.cwd}\n`,
+  );
   const listed = await cli(["list"], env);
   expect(JSON.parse(listed.stdout)).toHaveLength(1);
   const events = await cli(

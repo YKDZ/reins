@@ -411,11 +411,11 @@ describe("daemon diagnostic error dispatch", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: v.parse(sessionNameSchema, "immediate-query"),
       harness: "fake",
       message: "start",
-      cwd: "/tmp/demo",
+      cwd: "/tmp",
     });
 
     emit({ type: "session.killed", sessionId });
@@ -475,11 +475,11 @@ describe("daemon diagnostic error dispatch", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: v.parse(sessionNameSchema, "immediate-close"),
       harness: "fake",
       message: "start",
-      cwd: "/tmp/demo",
+      cwd: "/tmp",
     });
 
     emit({
@@ -579,7 +579,7 @@ describe("daemon diagnostic error dispatch", () => {
         sessionName,
         harness: "fake",
         message: "caller-authored",
-        cwd: "/tmp/demo",
+        cwd: "/tmp",
       });
       if (!("result" in response)) throw new Error("Expected spawn result");
       return (response.result as { sessionId: DomainEvent["sessionId"] })
@@ -1013,6 +1013,7 @@ describe("daemon diagnostic error dispatch", () => {
         method: "spawn",
         params: {
           sessionName: "failed-worker",
+          cwd: "/tmp",
           harness: "fake",
           message: "start",
         },
@@ -1108,6 +1109,7 @@ describe("daemon diagnostic error dispatch", () => {
         method: "spawn",
         params: {
           sessionName: "append-failure",
+          cwd: "/tmp",
           harness: "fake",
           message: "start",
         },
@@ -2232,6 +2234,7 @@ describe("daemon diagnostic error dispatch", () => {
         method: "spawn",
         params: {
           sessionName: "listener-failure",
+          cwd: "/tmp",
           harness: "fake",
           message: "start",
         },

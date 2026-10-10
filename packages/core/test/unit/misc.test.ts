@@ -16,7 +16,7 @@ describe("权限与事件", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-8"),
       harness: "codex",
       message: "跑测试",
@@ -58,7 +58,7 @@ describe("权限与事件", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-9"),
       harness: "codex",
       message: "跑测试",
@@ -98,7 +98,7 @@ describe("权限与事件", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-10"),
       harness: "dsh",
       message: "跑构建",
@@ -115,7 +115,10 @@ describe("权限与事件", () => {
     });
 
     expect(machine.list()[0]).toEqual(
-      expect.objectContaining({ state: "idle", lastStopReason: "failed" }),
+      expect.objectContaining({
+        state: "idle",
+        lastCompletedTurn: expect.objectContaining({ stopReason: "failed" }),
+      }),
     );
     await expect(machine.wait({ ids: [id] })).resolves.toEqual({
       status: "completed",
@@ -144,7 +147,7 @@ describe("权限与事件", () => {
     });
     const events: DomainEvent[] = [];
     const unsubscribe = machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-11"),
       harness: "codex",
       message: "开始",
@@ -183,7 +186,7 @@ describe("权限与事件", () => {
       throw new Error("bad listener");
     });
 
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-12"),
       harness: "codex",
       message: "开始",

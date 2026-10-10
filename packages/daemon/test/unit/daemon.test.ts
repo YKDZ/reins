@@ -174,7 +174,10 @@ function makeRequester(
           kind: "request",
           requestId,
           method,
-          params,
+          params:
+            method === "spawn" && typeof params === "object" && params !== null
+              ? { cwd: "/tmp", ...params }
+              : params,
           ...(isSideEffectMethod(method)
             ? { commandId: v.parse(commandIdSchema, "test:" + randomUUID()) }
             : {}),
@@ -416,6 +419,7 @@ describe("daemon 公共接口", () => {
       resolvePermission: unsupported,
       kill: unsupported,
       list: () => [],
+      assertTurnTarget() {},
       subscribe: () => () => undefined,
     };
     let replayHookCalls = 0;
@@ -517,7 +521,12 @@ describe("daemon 协议面（缝 C）", () => {
       kind: "request",
       requestId: "raw1",
       method: "spawn",
-      params: { sessionName: "reviewer", harness: "fake", message: "hello" },
+      params: {
+        sessionName: "reviewer",
+        harness: "fake",
+        message: "hello",
+        cwd: "/tmp",
+      },
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -2358,6 +2367,7 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
     commandId: "test:01234567-0123-4123-8123-0123456789ab",
     params: {
       harness: "fake",
+      cwd: "/tmp",
       sessionName: "recoverable",
       message: "caller original",
     },
@@ -2395,6 +2405,7 @@ test("命令结果恢复：其他消费者不能用原身份取结果或另起�
     commandId: "test:01234567-0123-4123-8123-0123456789ab",
     params: {
       harness: "fake",
+      cwd: "/tmp",
       sessionName: "private-command",
       message: "private",
     },
@@ -2461,6 +2472,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
     "spawn",
     {
       harness: "fake",
+      cwd: "/tmp",
       sessionName: "commands",
       message: "initial",
       authorizationMode: "interactive",
@@ -2552,7 +2564,12 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
     await sendRaw(connection, {
       ...base,
       requestId: "changed",
-      params: { harness: "fake", sessionName: "params", message: "now valid" },
+      params: {
+        harness: "fake",
+        cwd: "/tmp",
+        sessionName: "params",
+        message: "now valid",
+      },
     }),
   ).toMatchObject({ error: { code: "command_id_conflict" } });
   expect(fake.calls.starts).toBe(0);
@@ -2609,7 +2626,12 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
     kind: "request",
     method: "spawn",
     commandId: "test:01234567-0123-4123-8123-0123456789ab",
-    params: { harness: "fake", sessionName: "accepted", message: "original" },
+    params: {
+      harness: "fake",
+      cwd: "/tmp",
+      sessionName: "accepted",
+      message: "original",
+    },
   };
   client.send({
     ...command,

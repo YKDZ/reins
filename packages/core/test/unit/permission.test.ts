@@ -25,7 +25,7 @@ async function spawnInteractive(): Promise<{
   });
   const events: DomainEvent[] = [];
   machine.subscribe((event) => events.push(event));
-  const sessionId = await machine.spawn({
+  const { sessionId } = await machine.spawn({
     sessionName: ids.sessionName("fixture-13"),
     harness: "codex",
     message: "审查这个 PR",
@@ -252,7 +252,7 @@ describe("resolvePermission", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("fixture-15"),
       harness: "codex",
       message: "审查这个 PR",
@@ -317,7 +317,7 @@ describe("resolvePermission", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("fixture-16"),
       harness: "codex",
       message: "审查这个 PR",

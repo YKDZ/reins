@@ -32,6 +32,9 @@ import {
   type SessionName,
   type SessionInfo,
   type SpawnParams,
+  type SpawnAck,
+  type TurnTarget,
+  turnTargetSchema,
   type TurnCompleted,
   type WaitParams,
   type WaitResult,
@@ -209,28 +212,47 @@ function invalidParamsError(
 function toInfo(session: SessionRecord): SessionInfo {
   const lastTurn = session.turns[session.turns.length - 1];
 
-  return {
+  const common = {
     sessionId: session.id,
     sessionName: session.sessionName,
     harness: session.harness,
-    state: session.state,
     model: session.model,
     reasoning: session.reasoning,
     cwd: session.cwd,
     spawnedAt: session.spawnedAt,
     turns: session.turns.length,
-    lastStopReason: lastTurn === undefined ? null : lastTurn.stopReason,
-  } satisfies SessionInfo;
+    ...(lastTurn === undefined
+      ? {}
+      : {
+          lastCompletedTurn: {
+            turnId: lastTurn.turnId,
+            stopReason: lastTurn.stopReason,
+          },
+        }),
+  };
+  if (session.state === "busy")
+    return { ...common, state: "busy", activeTurnId: session.currentTurnId! };
+  if (session.state === "idle")
+    return {
+      ...common,
+      state: "idle",
+      lastCompletedTurn: {
+        turnId: lastTurn!.turnId,
+        stopReason: lastTurn!.stopReason,
+      },
+    };
+  return { ...common, state: "killed" };
 }
 
 export type SessionMachine = {
-  spawn(params: SpawnParams): Promise<SessionId>;
+  spawn(params: SpawnParams): Promise<SpawnAck>;
   send(params: SendParams): Promise<SendAck>;
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): Promise<InterruptAck>;
   resolvePermission(params: ResolvePermissionParams): Promise<void>;
   kill(params: KillParams): Promise<KillResult[]>;
   list(filter?: ListFilter): SessionInfo[];
+  assertTurnTarget(target: TurnTarget): void;
   subscribe(listener: (event: DomainEvent) => void): () => void;
 };
 
@@ -873,7 +895,7 @@ export function createSessionMachine(options: {
       sessionSeq += 1;
       const sessionId = options.identity.session(spec.sessionName);
       const turnId = nextTurnId(sessionId);
-      const cwd = spec.cwd ?? process.cwd();
+      const cwd = spec.cwd;
       const spawnScope: PendingSpawn = {
         token: Symbol(spec.sessionName),
         turn: createTurnScope(turnId),
@@ -945,7 +967,7 @@ export function createSessionMachine(options: {
       if (pendingSpawns.get(sessionId)?.token === spawnScope.token) {
         pendingSpawns.delete(sessionId);
       }
-      return sessionId;
+      return { sessionId, turnId, cwd };
     },
     async send(params) {
       const parsed = v.safeParse(sendParamsSchema, params);
@@ -1202,6 +1224,8 @@ export function createSessionMachine(options: {
           ? [...sessions.values()]
           : [...sessions.values()].filter(
               (session) =>
+                (filter.sessionId === undefined ||
+                  session.id === filter.sessionId) &&
                 (filter.harness === undefined ||
                   session.harness === filter.harness) &&
                 (filter.state === undefined ||
@@ -1210,11 +1234,37 @@ export function createSessionMachine(options: {
                   session.sessionName === filter.sessionName) &&
                 (filter.model === undefined || session.model === filter.model),
             );
-      return matches
-        .map(toInfo)
-        .toSorted((left, right) =>
-          left.sessionId.localeCompare(right.sessionId),
-        );
+      return (
+        matches
+          // 创建事务尚未折叠首回合时，不投影缺少活动回合的中间状态。
+          .filter(
+            (session) =>
+              session.state !== "busy" || session.currentTurnId !== null,
+          )
+          .map(toInfo)
+          .toSorted((left, right) =>
+            left.sessionId.localeCompare(right.sessionId),
+          )
+      );
+    },
+    assertTurnTarget(target) {
+      const parsed = v.safeParse(turnTargetSchema, target);
+      if (!parsed.success) throw invalidParamsError(parsed.issues);
+      const session = sessions.get(parsed.output.sessionId);
+      if (session === undefined)
+        throw machineError({
+          code: "session_not_found",
+          sessionId: parsed.output.sessionId,
+        });
+      if (
+        session.currentTurnId !== parsed.output.turnId &&
+        !session.turns.some((turn) => turn.turnId === parsed.output.turnId)
+      ) {
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
+      }
     },
     subscribe(listener) {
       return bus.subscribe(listener);

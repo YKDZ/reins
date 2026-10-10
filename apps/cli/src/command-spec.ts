@@ -160,7 +160,8 @@ const commandSpecData = [
       {
         name: "cwd",
         flags: "--cwd <path>",
-        description: "working directory",
+        description:
+          "local working directory in the daemon filesystem namespace (default: CLI cwd; relative paths resolve from CLI cwd)",
         kind: { type: "text" },
       },
       {
@@ -270,6 +271,12 @@ const commandSpecData = [
     description: "List sessions",
     args: [],
     options: [
+      {
+        name: "session",
+        flags: "--session <session-handle>",
+        description: "query an exact session",
+        kind: { type: "sessionId", hint: "Expected a valid SessionHandle" },
+      },
       {
         name: "harness",
         flags: "--harness <id>",

@@ -28,7 +28,7 @@ describe("send", () => {
         },
       },
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("steer-failure"),
       harness: "codex",
       message: "work",
@@ -76,7 +76,7 @@ describe("send", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("steer-retry"),
       harness: "codex",
       message: "work",
@@ -135,7 +135,7 @@ describe("send", () => {
       identity: testIdentity,
       diagnostics: { record },
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("steer-recorded"),
       harness: "codex",
       message: "work",
@@ -164,7 +164,7 @@ describe("send", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-17"),
       harness: "codex",
       message: "第一步",
@@ -208,7 +208,7 @@ describe("send", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-18"),
       harness: "codex",
       message: "进行中",
@@ -258,7 +258,7 @@ describe("send", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-19"),
       harness: "qoder",
       message: "进行中",
@@ -307,7 +307,7 @@ describe("send", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-20"),
       harness: "dsh",
       message: "临时",

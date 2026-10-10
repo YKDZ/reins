@@ -231,6 +231,7 @@ test("副作用超时保留命令身份、不泄露原参，也不自动重发",
       "spawn",
       {
         harness: "fake",
+        cwd: "/tmp",
         sessionName: "worker" as never,
         message: "sensitive original",
       },
@@ -322,6 +323,7 @@ test("已关闭客户端确定未发送；安全查询断连保持普通错误",
   await expect(
     client.request("spawn", {
       harness: "fake",
+      cwd: "/tmp",
       sessionName: "unused" as never,
       message: "never-sent",
     }),
@@ -379,7 +381,11 @@ test("显式恢复保留原目录事实，不要求调用方重填 CLI 自动投
   pair.server.send({
     kind: "response",
     requestId: "cli3",
-    result: { sessionId: "original-dir@gab12cd" },
+    result: {
+      sessionId: "original-dir@gab12cd",
+      turnId: "t1",
+      cwd: original.cwd,
+    },
   });
   await recovered;
   client.close();

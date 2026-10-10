@@ -425,6 +425,7 @@ describe("routing driver invariants", () => {
         diagnostics: { record: recordFallback },
       });
       await machine.spawn({
+        cwd: "/tmp",
         sessionName: v.parse(sessionNameSchema, "unrelated"),
         harness: "unrelated",
         message: "start",
