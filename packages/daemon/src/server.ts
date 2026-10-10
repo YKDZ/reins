@@ -30,6 +30,7 @@ import type {
   WaitParams,
 } from "@reins/protocol";
 import {
+  isSideEffectMethod,
   machineErrorSchema,
   harnessCapabilitySchema,
   makeErrorCause,
@@ -168,6 +169,84 @@ export function createProtocolServerInternal(
     ConsumerContext
   >();
   const consumerScope = options.consumerScope;
+  // 账本归属于 daemon 世代；断连只移除观察者，不取消原执行。
+  const commands = new Map<
+    string,
+    {
+      consumer: ConsumerContext | undefined;
+      fingerprint: string;
+      outcome: Promise<{ result: unknown } | { error: MachineError }>;
+    }
+  >();
+  function canonical(value: unknown): string {
+    if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
+    if (value !== null && typeof value === "object")
+      return (
+        "{" +
+        Object.entries(value)
+          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
+          .map(([key, item]) => JSON.stringify(key) + ":" + canonical(item))
+          .join(",") +
+        "}"
+      );
+    return JSON.stringify(value) ?? "null";
+  }
+  async function execute(
+    connection: TransportConnection<ProtocolMessage>,
+    request: ProtocolRequest,
+  ): Promise<{ result: unknown } | { error: MachineError }> {
+    const consumer = consumerBindings.get(connection);
+    if (request.method !== "initialize" && consumer === undefined)
+      return { error: { code: "protocol_error" } };
+    const perform = async (): Promise<
+      { result: unknown } | { error: MachineError }
+    > => {
+      try {
+        const parsed = v.safeParse(
+          protocolParamsSchemaFor(request.method),
+          request.params,
+        );
+        if (!parsed.success) {
+          const issues = parsed.issues.map((issue) => ({
+            issue: "invalid_value" as const,
+            path: issue.path?.map((item) => String(item.key)).join(".") ?? "",
+          }));
+          return {
+            error: {
+              code: "invalid_params" as const,
+              issues: [
+                issues[0] ?? { issue: "invalid_value" as const, path: "" },
+                ...issues.slice(1),
+              ],
+            },
+          };
+        }
+        return { result: await dispatch(connection, request) };
+      } catch (error) {
+        return { error: await toMachineError(error) };
+      }
+    };
+    if (!isSideEffectMethod(request.method)) return perform();
+    if (request.commandId === undefined)
+      return { error: { code: "protocol_error" } };
+    if (request.commandId.split(":")[0] !== options.diagnostics.generation)
+      return { error: { code: "stale_command_id" } };
+    const fingerprint = canonical({
+      method: request.method,
+      params: request.params,
+    });
+    const key = request.commandId;
+    const existing = commands.get(key);
+    if (existing !== undefined)
+      return existing.consumer === consumer &&
+        existing.fingerprint === fingerprint
+        ? existing.outcome
+        : { error: { code: "command_id_conflict" } };
+    // 先登记再调用业务，确保同步发起的重入也只能加入原 Promise。
+    const outcome = Promise.resolve().then(perform);
+    commands.set(key, { consumer, fingerprint, outcome });
+    return outcome;
+  }
   const transportFailureConnections = new WeakMap<
     TransportConnection<ProtocolMessage>,
     | { status: "pending"; queued: TransportFailureFact | undefined }
@@ -536,45 +615,13 @@ export function createProtocolServerInternal(
       return;
     }
     const request = parsed.output;
-    const paramsParsed = v.safeParse(
-      protocolParamsSchemaFor(request.method),
-      request.params,
-    );
-    if (!paramsParsed.success) {
-      const issues = paramsParsed.issues.map((issue) => ({
-        issue: "invalid_value" as const,
-        path: issue.path?.map((item) => String(item.key)).join(".") ?? "",
-      }));
-      const error: MachineError = {
-        code: "invalid_params",
-        issues: [
-          issues[0] ?? { issue: "invalid_value", path: "" },
-          ...issues.slice(1),
-        ],
-      };
+    void execute(connection, request).then((outcome) => {
       sendSafe(connection, {
         kind: "response",
         requestId: request.requestId,
-        error,
+        ...outcome,
       });
-      return;
-    }
-    void dispatch(connection, request).then(
-      (result: unknown) => {
-        sendSafe(connection, {
-          kind: "response",
-          requestId: request.requestId,
-          result,
-        });
-      },
-      async (error: unknown) => {
-        sendSafe(connection, {
-          kind: "response",
-          requestId: request.requestId,
-          error: await toMachineError(error),
-        });
-      },
-    );
+    });
   }
 
   async function aggregateCapabilities(): Promise<CapabilitiesResult> {
@@ -770,11 +817,7 @@ export function createProtocolServerInternal(
     connection: TransportConnection<ProtocolMessage>,
     request: ProtocolRequest,
   ): Promise<unknown> {
-    // 领域动作前必须完成握手绑定；未绑定连接一律以协议错误拒绝，
-    // 不采用全局默认或隐式改投（ADR-0033 / ADR-0037）。
-    if (request.method !== "initialize" && !consumerBindings.has(connection)) {
-      throw { code: "protocol_error" } satisfies MachineError;
-    }
+    // execute 已在接纳时核验并捕获绑定；连接随后关闭不能取消已接纳命令。
     switch (request.method) {
       case "initialize": {
         const params = request.params as InitializeParams;

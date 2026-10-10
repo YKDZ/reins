@@ -1,9 +1,19 @@
+import { randomUUID } from "node:crypto";
+
+import {
+  commandIdSchema,
+  isSideEffectMethod,
+  initializeResultSchema,
+} from "@reins/protocol";
 import { REINS_PROTOCOL_MAJOR_VERSION } from "@reins/protocol";
 import type { ProtocolMessage, ProtocolResponse } from "@reins/protocol";
 import type { TransportConnection } from "@reins/transport";
+import * as v from "valibot";
 import { expect, test } from "vitest";
 
 import { openEphemeralDaemonForTest } from "../../src/testing.ts";
+
+const generations = new WeakMap<TransportConnection<ProtocolMessage>, string>();
 
 async function request(
   connection: TransportConnection<ProtocolMessage>,
@@ -17,10 +27,26 @@ async function request(
         event.message.requestId === message.requestId
       ) {
         unsubscribe();
+        if (message.method === "initialize" && "result" in event.message)
+          generations.set(
+            connection,
+            v.parse(initializeResultSchema, event.message.result)
+              .daemonGeneration,
+          );
         resolve(event.message);
       }
     });
-    connection.send(message);
+    connection.send(
+      isSideEffectMethod(message.method)
+        ? {
+            ...message,
+            commandId: v.parse(
+              commandIdSchema,
+              generations.get(connection) + ":" + randomUUID(),
+            ),
+          }
+        : message,
+    );
   });
 }
 

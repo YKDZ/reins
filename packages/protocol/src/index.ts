@@ -82,6 +82,22 @@ export const toolCallIdSchema = identifier(
   /^[a-z0-9][a-z0-9-]*$/,
 );
 export type ToolCallId = v.InferOutput<typeof toolCallIdSchema>;
+export const commandIdSchema = identifier(
+  "CommandId",
+  /^[a-z0-9]+:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,
+);
+export type CommandId = v.InferOutput<typeof commandIdSchema>;
+export const sideEffectMethodSchema = v.picklist([
+  "spawn",
+  "send",
+  "interrupt",
+  "kill",
+  "resolvePermission",
+]);
+export type SideEffectMethod = v.InferOutput<typeof sideEffectMethodSchema>;
+export function isSideEffectMethod(method: string): method is SideEffectMethod {
+  return v.safeParse(sideEffectMethodSchema, method).success;
+}
 export const requestIdSchema = identifier("RequestId", /^[a-z0-9][a-z0-9-]*$/);
 export type RequestId = v.InferOutput<typeof requestIdSchema>;
 
@@ -1924,6 +1940,8 @@ export const errorCodeSchema = v.union([
   v.literal("session_name_conflict"),
   v.literal("protocol_version_mismatch"),
   v.literal("consumer_context_required"),
+  v.literal("command_id_conflict"),
+  v.literal("stale_command_id"),
   v.literal("daemon_timeout"),
   v.literal("invalid_daemon_response"),
   v.literal("daemon_start_failed"),
@@ -2003,6 +2021,8 @@ const unexpectedError = <const TCode extends UnexpectedErrorCode>(
     diagnosticId: v.optional(diagnosticIdSchema),
   });
 export const machineErrorSchema = v.union([
+  v.strictObject({ code: v.literal("command_id_conflict") }),
+  v.strictObject({ code: v.literal("stale_command_id") }),
   v.strictObject({
     code: v.literal("session_not_found"),
     sessionId: sessionIdSchema,
@@ -2186,6 +2206,7 @@ export const protocolRequestSchema = v.strictObject({
   kind: v.literal("request"),
   requestId: requestIdSchema,
   method: protocolMethodSchema,
+  commandId: v.optional(commandIdSchema),
   params: v.unknown(),
 });
 export type ProtocolRequest = v.InferOutput<typeof protocolRequestSchema>;

@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { connect } from "node:net";
@@ -21,6 +22,9 @@ import type {
 } from "@reins/protocol";
 import {
   WORKER_EVENT_REJECTION_REASONS,
+  isSideEffectMethod,
+  commandIdSchema,
+  initializeResultSchema,
   diagnosticsResultSchema,
   makeDiagnosticId,
   diagnosticIdSchema,
@@ -107,6 +111,25 @@ async function bindConsumer(
   if ("error" in settled) {
     throw new Error(`Handshake failed: ${settled.error.code}`);
   }
+  const generation = v.parse(
+    initializeResultSchema,
+    settled.result,
+  ).daemonGeneration;
+  const send = client.send.bind(client);
+  client.send = (message) =>
+    send(
+      message.kind === "request" &&
+        isSideEffectMethod(message.method) &&
+        message.commandId === undefined
+        ? {
+            ...message,
+            commandId: v.parse(
+              commandIdSchema,
+              generation + ":" + randomUUID(),
+            ),
+          }
+        : message,
+    );
 }
 
 afterEach(async () => {

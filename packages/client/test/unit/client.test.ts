@@ -207,3 +207,273 @@ test("a request made after close rejects without installing a timer", async () =
     vi.useRealTimers();
   }
 });
+
+test("副作用超时保留命令身份、不泄露原参，也不自动重发", async () => {
+  const pair = createInMemoryTransportPair();
+  const client = createReinsClient(pair.client as never, binding);
+  const sent: unknown[] = [];
+  pair.server.onEvent((event) => {
+    if (event.kind === "message") sent.push(event.message);
+  });
+  const handshake = client.initialize();
+  pair.server.send({
+    kind: "response",
+    requestId: "cli1",
+    result: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      daemonGeneration: "ab12cd",
+    },
+  });
+  await handshake;
+  let error: unknown;
+  try {
+    await client.request(
+      "spawn",
+      {
+        harness: "fake",
+        cwd: "/tmp",
+        sessionName: "worker" as never,
+        message: "sensitive original",
+      },
+      5,
+    );
+  } catch (caught) {
+    error = JSON.parse((caught as Error).message);
+  }
+  expect(error).toMatchObject({
+    code: "command_outcome_unknown",
+    cause: "timeout",
+    method: "spawn",
+    daemonGeneration: "ab12cd",
+    commandId: expect.stringMatching(/^ab12cd:/),
+    retryToken: expect.any(String),
+  });
+  expect(JSON.stringify(error)).not.toContain("sensitive original");
+  expect(sent).toHaveLength(2);
+  client.close();
+});
+
+test.each([
+  ["send", { sessionId: "worker@gab12cd", message: "private-message" }],
+  ["interrupt", { ids: ["worker@gab12cd"] }],
+  ["kill", { ids: ["worker@gab12cd"] }],
+  [
+    "resolvePermission",
+    {
+      sessionId: "worker@gab12cd",
+      permissionId: "p1",
+      resolution: { outcome: "deny", feedback: "private-feedback" },
+    },
+  ],
+] as const)(
+  "%s 自动取得命令身份，断连为未知且不复制原参数",
+  async (method, params) => {
+    const pair = createInMemoryTransportPair();
+    const client = createReinsClient(pair.client as never, binding);
+    const sent: Array<Record<string, unknown>> = [];
+    pair.server.onEvent((event) => {
+      if (event.kind === "message")
+        sent.push(event.message as Record<string, unknown>);
+    });
+    const initialized = client.initialize();
+    pair.server.send({
+      kind: "response",
+      requestId: "cli1",
+      result: {
+        protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+        daemonGeneration: "ab12cd",
+      },
+    });
+    await initialized;
+    const pending = client.request(method, params as never);
+    await Promise.resolve();
+    pair.server.close();
+    let error: unknown;
+    try {
+      await pending;
+    } catch (caught) {
+      error = JSON.parse((caught as Error).message);
+    }
+    expect(error).toMatchObject({
+      code: "command_outcome_unknown",
+      cause: "disconnected",
+      method,
+      targets: ["worker@gab12cd"],
+    });
+    expect(JSON.stringify(error)).not.toContain("private-message");
+    expect(JSON.stringify(error)).not.toContain("private-feedback");
+    expect(sent[1]).toMatchObject({
+      method,
+      params,
+      commandId: expect.stringMatching(/^ab12cd:/),
+    });
+    expect(sent).toHaveLength(2);
+    client.close();
+  },
+);
+
+test("已关闭客户端确定未发送；安全查询断连保持普通错误", async () => {
+  const pair = createInMemoryTransportPair();
+  const send = vi.spyOn(pair.client, "send");
+  const client = createReinsClient(pair.client as never, binding);
+  const pending = client.request("list", {});
+  pair.server.close();
+  await expect(pending).rejects.toThrow('"code":"daemon_disconnected"');
+
+  await expect(
+    client.request("spawn", {
+      harness: "fake",
+      cwd: "/tmp",
+      sessionName: "unused" as never,
+      message: "never-sent",
+    }),
+  ).rejects.toThrow('"code":"daemon_disconnected"');
+  expect(send).toHaveBeenCalledTimes(1);
+  client.close();
+});
+
+test("显式恢复保留原目录事实，不要求调用方重填 CLI 自动投影的目录身份", async () => {
+  const pair = createInMemoryTransportPair();
+  const client = createReinsClient(pair.client as never, binding);
+  const sent: Array<Record<string, unknown>> = [];
+  pair.server.onEvent((event) => {
+    if (event.kind === "message")
+      sent.push(event.message as Record<string, unknown>);
+  });
+  const initialized = client.initialize();
+  pair.server.send({
+    kind: "response",
+    requestId: "cli1",
+    result: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      daemonGeneration: "ab12cd",
+    },
+  });
+  await initialized;
+  const caller = {
+    harness: "fake",
+    sessionName: "original-dir",
+    message: "private initial task",
+  };
+  const original = {
+    ...caller,
+    cwd: "/original/absolute/path",
+    cwdIdentity: { device: "43", inode: "9876" },
+  };
+  let token: string | undefined;
+  try {
+    await client.request("spawn", original as never, 5);
+  } catch (error) {
+    token = (JSON.parse((error as Error).message) as { retryToken: string })
+      .retryToken;
+  }
+  expect(token).toEqual(expect.any(String));
+  expect(
+    Buffer.from(token!.slice(7), "base64url").toString("utf8"),
+  ).not.toContain("private initial task");
+  const recovered = client.retry(token!, caller);
+  await Promise.resolve();
+  expect(sent[2]).toMatchObject({
+    method: "spawn",
+    params: original,
+    commandId: sent[1]?.commandId,
+  });
+  pair.server.send({
+    kind: "response",
+    requestId: "cli3",
+    result: {
+      sessionId: "original-dir@gab12cd",
+      turnId: "t1",
+      cwd: original.cwd,
+    },
+  });
+  await recovered;
+  client.close();
+});
+
+test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读请求保留无效响应语义", async () => {
+  const pair = createInMemoryTransportPair();
+  const client = createReinsClient(pair.client as never, binding);
+  const initialized = client.initialize();
+  pair.server.send({
+    kind: "response",
+    requestId: "cli1",
+    result: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      daemonGeneration: "ab12cd",
+    },
+  });
+  await initialized;
+  const pending = Promise.allSettled([
+    client.request("spawn", {
+      harness: "fake",
+      cwd: "/tmp",
+      sessionName: "invalid" as never,
+      message: "private task",
+    }),
+    client.request("kill", { ids: ["worker@gab12cd" as never] }),
+    client.request("capabilities", {}),
+  ]);
+  pair.server.send({ kind: "response", requestId: "cli2", result: {} });
+  const failures = (await pending).map((result) => {
+    expect(result.status).toBe("rejected");
+    if (result.status !== "rejected") throw new Error("Expected rejection");
+    return JSON.parse((result.reason as Error).message) as unknown;
+  });
+  expect(failures).toMatchObject([
+    {
+      code: "command_outcome_unknown",
+      cause: "invalid_daemon_response",
+      method: "spawn",
+      commandId: expect.stringMatching(/^ab12cd:/),
+      retryToken: expect.any(String),
+    },
+    {
+      code: "command_outcome_unknown",
+      cause: "invalid_daemon_response",
+      method: "kill",
+      commandId: expect.stringMatching(/^ab12cd:/),
+      retryToken: expect.any(String),
+    },
+    { code: "invalid_daemon_response" },
+  ]);
+  expect(JSON.stringify(failures)).not.toContain("private task");
+  client.close();
+});
+
+test("副作用已知机器错误仍原样返回且连接继续接收已知成功", async () => {
+  const pair = createInMemoryTransportPair();
+  const client = createReinsClient(pair.client as never, binding);
+  const initialized = client.initialize();
+  pair.server.send({
+    kind: "response",
+    requestId: "cli1",
+    result: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      daemonGeneration: "ab12cd",
+    },
+  });
+  await initialized;
+  const failed = client.request("send", {
+    sessionId: "missing@gab12cd" as never,
+    message: "caller task",
+  });
+  const error = {
+    code: "session_not_found",
+    sessionId: "missing@gab12cd",
+  };
+  pair.server.send({ kind: "response", requestId: "cli2", error });
+  await expect(failed).resolves.toEqual({
+    kind: "response",
+    requestId: "cli2",
+    error,
+  });
+  const succeeded = client.request("kill", { ids: [] });
+  pair.server.send({ kind: "response", requestId: "cli3", result: [] });
+  await expect(succeeded).resolves.toEqual({
+    kind: "response",
+    requestId: "cli3",
+    result: [],
+  });
+  client.close();
+});

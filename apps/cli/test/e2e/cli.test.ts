@@ -2140,7 +2140,7 @@ describe("CLI 输出金样（逐字节）", () => {
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
       "error: Unknown command 'spwan'. Did you mean 'spawn'?\n" +
-        "suggestion: Allowed: spawn, send, wait, interrupt, kill, list, attach, run, diagnostics, capabilities, resolve-permission\n" +
+        "suggestion: Allowed: spawn, send, wait, interrupt, kill, list, attach, run, diagnostics, capabilities, resolve-permission, retry\n" +
         "usage: reins [options] <command>\n",
     );
   });

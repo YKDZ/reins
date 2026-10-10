@@ -16,7 +16,7 @@ test("local exception cause is UTF-8 bounded without splitting non-ASCII text", 
 
   expect(error.code).toBe("internal_error");
   expect(v.safeParse(machineErrorSchema, error).success).toBe(true);
-  if (!("cause" in error) || error.cause === undefined) {
+  if (error.code !== "internal_error" || error.cause === undefined) {
     throw new Error("Expected an internal error cause");
   }
   expect(Buffer.byteLength(error.cause.message, "utf8")).toBeLessThanOrEqual(

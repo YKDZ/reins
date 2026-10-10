@@ -87,6 +87,10 @@ class ControlledClient implements ReinsClient {
     throw new Error("attach does not drive the handshake");
   }
 
+  retry(): never {
+    throw new Error("attach does not recover commands");
+  }
+
   request<M extends ProtocolMethod>(
     method: M,
     params: ProtocolParams<M>,
