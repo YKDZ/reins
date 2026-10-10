@@ -21,7 +21,7 @@ describe("spawn", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
 
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("fixture-21"),
       harness: "codex",
       message: "审查这个 PR",
@@ -42,7 +42,8 @@ describe("spawn", () => {
         reasoning: null,
         cwd: "/tmp/demo",
         turns: 0,
-        lastStopReason: null,
+        activeTurnId: events.find((event) => event.type === "turn.started")
+          ?.turnId,
       }),
     ]);
   });
@@ -113,12 +114,14 @@ describe("spawn", () => {
     const fake = createFakeDriver({
       start: (spec) => {
         if (spec.sessionName === ids.sessionName("outer")) {
-          nestedSpawn = machine.spawn({
-            sessionName: ids.sessionName("inner"),
-            harness: "codex",
-            message: "inner",
-            cwd: "/tmp/demo",
-          });
+          nestedSpawn = machine
+            .spawn({
+              sessionName: ids.sessionName("inner"),
+              harness: "codex",
+              message: "inner",
+              cwd: "/tmp/demo",
+            })
+            .then((ack) => ack.sessionId);
           fake.controls.emit({
             type: "text.delta",
             sessionId: spec.sessionId,
@@ -142,7 +145,7 @@ describe("spawn", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
 
-    const outer = await machine.spawn({
+    const { sessionId: outer } = await machine.spawn({
       sessionName: ids.sessionName("outer"),
       harness: "codex",
       message: "outer",

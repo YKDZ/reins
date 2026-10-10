@@ -1,5 +1,9 @@
+import { statSync } from "node:fs";
+import { resolve } from "node:path";
+
 import {
   createReinsClient,
+  parseRetryToken,
   type ProtocolResponseFor,
   type ReinsClient,
 } from "@reins/client";
@@ -23,7 +27,7 @@ import type {
   CommandName,
 } from "./command-spec.ts";
 import { ensureDaemon } from "./daemon.ts";
-import { ExitError, EXIT_TIMEOUT, machineError } from "./errors.ts";
+import { ExitError, EXIT_TIMEOUT, machineError, usageError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 import {
   printCapabilitiesResult,
@@ -82,6 +86,21 @@ function spawnParamsFromOptions(
   messageParts: readonly string[],
   options: WorkerOptions,
 ): SpawnParams {
+  const cwd = resolve(options.cwd ?? process.cwd());
+  let cwdIdentity: NonNullable<SpawnParams["cwdIdentity"]>;
+  try {
+    const directory = statSync(cwd, { bigint: true });
+    if (!directory.isDirectory()) throw new Error("Not a directory");
+    cwdIdentity = {
+      device: String(directory.dev),
+      inode: String(directory.ino),
+    };
+  } catch {
+    throw machineError({
+      code: "invalid_params",
+      issues: [{ issue: "invalid_value", path: "cwd" }],
+    });
+  }
   const authorizationMode =
     options.authorizationMode === "interactive"
       ? ("interactive" as const)
@@ -97,7 +116,8 @@ function spawnParamsFromOptions(
     ...(options.reasoning === undefined
       ? {}
       : { reasoning: options.reasoning }),
-    ...(options.cwd === undefined ? {} : { cwd: options.cwd }),
+    cwd,
+    cwdIdentity,
     ...(authorizationMode === undefined ? {} : { authorizationMode }),
     ...(options.sandbox === undefined ? {} : { sandbox: options.sandbox }),
     ...(options.captureHarnessStderr === true
@@ -168,6 +188,7 @@ async function runList(ctx: CommandInvocationFor<"list">): Promise<void> {
   const options = ctx.options;
   await withClient(ctx.mode, async (client) => {
     const params: ListFilter = {
+      ...(options.session === undefined ? {} : { sessionId: options.session }),
       ...(options.harness === undefined ? {} : { harness: options.harness }),
       ...(options.state === undefined ? {} : { state: options.state }),
       ...(options.name === undefined ? {} : { sessionName: options.name }),
@@ -279,6 +300,49 @@ type HandlerMap = {
 };
 
 export const handlers = {
+  retry: async (ctx: CommandInvocationFor<"retry">) => {
+    const [token] = ctx.args;
+    let identity: ReturnType<typeof parseRetryToken>;
+    try {
+      identity = parseRetryToken(token);
+    } catch {
+      throw usageError({
+        issue: "invalid_value",
+        field: "token",
+        hint: "Use the RetryToken from command_outcome_unknown",
+      });
+    }
+    await withClient(ctx.mode, async (client) => {
+      const response = await client.retry(token, ctx.options.params);
+      const result = requireResult(response);
+      {
+        // 恢复保留原方法的输出；不显示内部命令身份。
+        switch (identity.method) {
+          case "spawn":
+            printSpawnResult(result as ProtocolResult<"spawn">, ctx.mode);
+            break;
+          case "send":
+            printSendAck(result as ProtocolResult<"send">, ctx.mode);
+            break;
+          case "interrupt":
+            printInterruptResult(
+              result as ProtocolResult<"interrupt">,
+              ctx.mode,
+            );
+            break;
+          case "kill":
+            printKillResult(result as ProtocolResult<"kill">, ctx.mode);
+            break;
+          case "resolvePermission":
+            printResolvePermissionAck(
+              result as ProtocolResult<"resolvePermission">,
+              ctx.mode,
+            );
+            break;
+        }
+      }
+    });
+  },
   spawn: runSpawn,
   send: runSend,
   wait: runWait,
@@ -296,6 +360,8 @@ export async function dispatchInvocation(
   invocation: CommandInvocation,
 ): Promise<void> {
   switch (invocation.command) {
+    case "retry":
+      return handlers.retry(invocation);
     case "spawn":
       return handlers.spawn(invocation);
     case "send":

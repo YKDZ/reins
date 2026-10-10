@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { connect } from "node:net";
@@ -21,6 +22,9 @@ import type {
 } from "@reins/protocol";
 import {
   WORKER_EVENT_REJECTION_REASONS,
+  isSideEffectMethod,
+  commandIdSchema,
+  initializeResultSchema,
   diagnosticsResultSchema,
   makeDiagnosticId,
   diagnosticIdSchema,
@@ -107,6 +111,25 @@ async function bindConsumer(
   if ("error" in settled) {
     throw new Error(`Handshake failed: ${settled.error.code}`);
   }
+  const generation = v.parse(
+    initializeResultSchema,
+    settled.result,
+  ).daemonGeneration;
+  const send = client.send.bind(client);
+  client.send = (message) =>
+    send(
+      message.kind === "request" &&
+        isSideEffectMethod(message.method) &&
+        message.commandId === undefined
+        ? {
+            ...message,
+            commandId: v.parse(
+              commandIdSchema,
+              generation + ":" + randomUUID(),
+            ),
+          }
+        : message,
+    );
 }
 
 afterEach(async () => {
@@ -388,11 +411,11 @@ describe("daemon diagnostic error dispatch", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: v.parse(sessionNameSchema, "immediate-query"),
       harness: "fake",
       message: "start",
-      cwd: "/tmp/demo",
+      cwd: "/tmp",
     });
 
     emit({ type: "session.killed", sessionId });
@@ -452,11 +475,11 @@ describe("daemon diagnostic error dispatch", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: v.parse(sessionNameSchema, "immediate-close"),
       harness: "fake",
       message: "start",
-      cwd: "/tmp/demo",
+      cwd: "/tmp",
     });
 
     emit({
@@ -556,7 +579,7 @@ describe("daemon diagnostic error dispatch", () => {
         sessionName,
         harness: "fake",
         message: "caller-authored",
-        cwd: "/tmp/demo",
+        cwd: "/tmp",
       });
       if (!("result" in response)) throw new Error("Expected spawn result");
       return (response.result as { sessionId: DomainEvent["sessionId"] })
@@ -990,6 +1013,7 @@ describe("daemon diagnostic error dispatch", () => {
         method: "spawn",
         params: {
           sessionName: "failed-worker",
+          cwd: "/tmp",
           harness: "fake",
           message: "start",
         },
@@ -1085,6 +1109,7 @@ describe("daemon diagnostic error dispatch", () => {
         method: "spawn",
         params: {
           sessionName: "append-failure",
+          cwd: "/tmp",
           harness: "fake",
           message: "start",
         },
@@ -2209,6 +2234,7 @@ describe("daemon diagnostic error dispatch", () => {
         method: "spawn",
         params: {
           sessionName: "listener-failure",
+          cwd: "/tmp",
           harness: "fake",
           message: "start",
         },

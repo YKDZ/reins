@@ -1,3 +1,7 @@
+import {
+  isCommandOutcomeUnknown,
+  type CommandOutcomeUnknown,
+} from "@reins/client";
 import type { MachineError, StopReason } from "@reins/protocol";
 import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
 import * as v from "valibot";
@@ -75,7 +79,12 @@ export type OutputError = {
   readonly systemCode?: string;
 };
 
-export type CliError = MachineError | UsageError | InputError | OutputError;
+export type CliError =
+  | MachineError
+  | Omit<CommandOutcomeUnknown, "commandId" | "daemonGeneration">
+  | UsageError
+  | InputError
+  | OutputError;
 
 export function outputError(systemCode?: string): OutputError {
   return {
@@ -131,6 +140,14 @@ export function isUsageError(value: unknown): value is UsageError {
 }
 
 export function toCliError(error: unknown): CliError {
+  if (isCommandOutcomeUnknown(error))
+    return {
+      code: error.code,
+      cause: error.cause,
+      method: error.method,
+      retryToken: error.retryToken,
+      ...(error.targets === undefined ? {} : { targets: error.targets }),
+    };
   if (isUsageError(error)) return error;
   if (isMachineError(error)) return error;
   if (isInputError(error)) return error;
@@ -138,6 +155,7 @@ export function toCliError(error: unknown): CliError {
   if (error instanceof Error) {
     try {
       const parsed = JSON.parse(error.message) as unknown;
+      if (isCommandOutcomeUnknown(parsed)) return toCliError(parsed);
       if (isMachineError(parsed)) return parsed;
     } catch {
       // 非 JSON 错误体，按内部错误包装
@@ -163,6 +181,9 @@ export function exitCodeForError(error: CliError): number {
     case "method_not_found":
     case "unknown_harness":
       return EXIT_USAGE;
+    case "command_outcome_unknown":
+    case "command_id_conflict":
+    case "stale_command_id":
     case "output_error":
     case "input_error":
     case "session_not_found":

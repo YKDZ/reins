@@ -160,7 +160,8 @@ const commandSpecData = [
       {
         name: "cwd",
         flags: "--cwd <path>",
-        description: "working directory",
+        description:
+          "local working directory in the daemon filesystem namespace (default: CLI cwd; relative paths resolve from CLI cwd)",
         kind: { type: "text" },
       },
       {
@@ -270,6 +271,12 @@ const commandSpecData = [
     description: "List sessions",
     args: [],
     options: [
+      {
+        name: "session",
+        flags: "--session <session-handle>",
+        description: "query an exact session",
+        kind: { type: "sessionId", hint: "Expected a valid SessionHandle" },
+      },
       {
         name: "harness",
         flags: "--harness <id>",
@@ -572,6 +579,31 @@ const commandSpecData = [
       },
     ],
   }),
+  defineCommand({
+    name: "retry",
+    description:
+      "Explicitly recover an uncertain command using its RetryToken and unchanged original parameters",
+    args: [
+      {
+        name: "token",
+        description: "RetryToken from command_outcome_unknown",
+        kind: { type: "text" },
+      },
+    ],
+    options: [
+      {
+        name: "params",
+        flags: "--params <json>",
+        required: true,
+        description:
+          "original caller parameters as JSON; the token retains the original directory facts",
+        kind: {
+          type: "jsonObject",
+          hint: "Supply the original parameters without changing their meaning",
+        },
+      },
+    ],
+  }),
 ] as const satisfies readonly CommandSpec[];
 
 export type CommandName = (typeof commandSpecData)[number]["name"];
@@ -818,6 +850,13 @@ function invocationFromParsed(
     N extends CommandName,
   >(): CommandInvocationFor<N>["options"] => options;
   switch (name) {
+    case "retry":
+      return {
+        command: "retry",
+        args: typedArgs<"retry">(),
+        options: typedOptions<"retry">(),
+        mode,
+      };
     case "spawn":
       return {
         command: "spawn",

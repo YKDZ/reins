@@ -233,7 +233,7 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-2"),
       harness: "codex",
       message: "第一步",
@@ -294,7 +294,7 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-3"),
       harness: "codex",
       message: "进行中",
@@ -343,7 +343,7 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("concurrent-kill"),
       harness: "codex",
       message: "start",
@@ -396,7 +396,7 @@ describe("driver 抛错时动作整体回滚", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("verified-failure"),
       harness: "codex",
       message: "start",

@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import * as v from "valibot";
 
 // —— 会话与状态 ——
@@ -29,6 +31,45 @@ export const sessionIdSchema = v.pipe(
 export type SessionId = v.InferOutput<typeof sessionIdSchema>;
 export const turnIdSchema = identifier("TurnId", /^[a-z0-9][a-z0-9-]*$/);
 export type TurnId = v.InferOutput<typeof turnIdSchema>;
+export const sessionHandleSchema = sessionIdSchema;
+export type SessionHandle = SessionId;
+export const turnTargetSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
+});
+export type TurnTarget = v.InferOutput<typeof turnTargetSchema>;
+
+function turnHandleChecksum(value: string): string {
+  // 校验覆盖完整父子地址，用于发现抄写错配；它不是所有权或授权凭据。
+  return createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
+export const turnHandleSchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    const match = /^([^/]+)\/([a-z0-9-]+)\.([a-f0-9]{8})$/u.exec(value);
+    return (
+      match !== null &&
+      v.safeParse(sessionIdSchema, match[1]).success &&
+      v.safeParse(turnIdSchema, match[2]).success &&
+      turnHandleChecksum(`${match[1]}/${match[2]}`) === match[3]
+    );
+  }),
+  v.brand<string, "TurnHandle">("TurnHandle"),
+);
+export type TurnHandle = v.InferOutput<typeof turnHandleSchema>;
+
+export function encodeTurnHandle(target: TurnTarget): TurnHandle {
+  const parsed = v.parse(turnTargetSchema, target);
+  const value = `${parsed.sessionId}/${parsed.turnId}`;
+  return v.parse(turnHandleSchema, `${value}.${turnHandleChecksum(value)}`);
+}
+
+export function decodeTurnHandle(handle: string): TurnTarget {
+  const value = v.parse(turnHandleSchema, handle);
+  const [sessionId, suffix] = value.split("/");
+  return v.parse(turnTargetSchema, { sessionId, turnId: suffix!.slice(0, -9) });
+}
 export const permissionIdSchema = identifier(
   "PermissionId",
   /^[a-z0-9][a-z0-9-]*$/,
@@ -41,6 +82,22 @@ export const toolCallIdSchema = identifier(
   /^[a-z0-9][a-z0-9-]*$/,
 );
 export type ToolCallId = v.InferOutput<typeof toolCallIdSchema>;
+export const commandIdSchema = identifier(
+  "CommandId",
+  /^[a-z0-9]+:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,
+);
+export type CommandId = v.InferOutput<typeof commandIdSchema>;
+export const sideEffectMethodSchema = v.picklist([
+  "spawn",
+  "send",
+  "interrupt",
+  "kill",
+  "resolvePermission",
+]);
+export type SideEffectMethod = v.InferOutput<typeof sideEffectMethodSchema>;
+export function isSideEffectMethod(method: string): method is SideEffectMethod {
+  return v.safeParse(sideEffectMethodSchema, method).success;
+}
 export const requestIdSchema = identifier("RequestId", /^[a-z0-9][a-z0-9-]*$/);
 export type RequestId = v.InferOutput<typeof requestIdSchema>;
 
@@ -219,13 +276,30 @@ export const spawnParamsSchema = v.strictObject({
   agent: v.optional(v.string()),
   model: v.optional(v.string()),
   reasoning: v.optional(v.string()),
-  cwd: v.optional(v.string()),
+  cwd: v.pipe(
+    v.string(),
+    v.startsWith("/"),
+    v.check((path) => !path.includes("\0")),
+  ),
+  cwdIdentity: v.optional(
+    v.strictObject({
+      // 本机 CLI 投影的目录对象证据，只在接受边界比对，不作运行期身份。
+      device: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
+      inode: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
+    }),
+  ),
   authorizationMode: v.optional(authorizationModeSchema),
   sandbox: v.optional(v.string()),
   captureHarnessStderr: v.optional(v.boolean()),
   meta: v.optional(v.record(v.string(), v.unknown())),
 });
 export type SpawnParams = v.InferOutput<typeof spawnParamsSchema>;
+export const spawnAckSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
+  cwd: v.string(),
+});
+export type SpawnAck = v.InferOutput<typeof spawnAckSchema>;
 
 export const sendParamsSchema = v.strictObject({
   sessionId: sessionIdSchema,
@@ -304,6 +378,7 @@ export const killParamsSchema = v.strictObject({
 export type KillParams = v.InferOutput<typeof killParamsSchema>;
 
 export const listFilterSchema = v.strictObject({
+  sessionId: v.optional(sessionIdSchema),
   harness: v.optional(v.string()),
   state: v.optional(sessionStateSchema),
   sessionName: v.optional(sessionNameSchema),
@@ -324,18 +399,34 @@ export const killResultSchema = v.strictObject({
 });
 export type KillResult = v.InferOutput<typeof killResultSchema>;
 
-export const sessionInfoSchema = v.strictObject({
+const completedTurnSummarySchema = v.strictObject({
+  turnId: turnIdSchema,
+  stopReason: stopReasonSchema,
+});
+const sessionInfoFields = {
   sessionId: sessionIdSchema,
   sessionName: sessionNameSchema,
   harness: v.string(),
-  state: sessionStateSchema,
   model: v.nullable(v.string()),
   reasoning: v.nullable(v.string()),
   cwd: v.string(),
   spawnedAt: v.string(),
   turns: v.number(),
-  lastStopReason: v.nullable(stopReasonSchema),
-});
+  lastCompletedTurn: v.optional(completedTurnSummarySchema),
+};
+export const sessionInfoSchema = v.variant("state", [
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("busy"),
+    activeTurnId: turnIdSchema,
+  }),
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("idle"),
+    lastCompletedTurn: completedTurnSummarySchema,
+  }),
+  v.strictObject({ ...sessionInfoFields, state: v.literal("killed") }),
+]);
 export type SessionInfo = v.InferOutput<typeof sessionInfoSchema>;
 
 // —— 领域事件 ——
@@ -1849,6 +1940,8 @@ export const errorCodeSchema = v.union([
   v.literal("session_name_conflict"),
   v.literal("protocol_version_mismatch"),
   v.literal("consumer_context_required"),
+  v.literal("command_id_conflict"),
+  v.literal("stale_command_id"),
   v.literal("daemon_timeout"),
   v.literal("invalid_daemon_response"),
   v.literal("daemon_start_failed"),
@@ -1928,6 +2021,8 @@ const unexpectedError = <const TCode extends UnexpectedErrorCode>(
     diagnosticId: v.optional(diagnosticIdSchema),
   });
 export const machineErrorSchema = v.union([
+  v.strictObject({ code: v.literal("command_id_conflict") }),
+  v.strictObject({ code: v.literal("stale_command_id") }),
   v.strictObject({
     code: v.literal("session_not_found"),
     sessionId: sessionIdSchema,
@@ -2111,6 +2206,7 @@ export const protocolRequestSchema = v.strictObject({
   kind: v.literal("request"),
   requestId: requestIdSchema,
   method: protocolMethodSchema,
+  commandId: v.optional(commandIdSchema),
   params: v.unknown(),
 });
 export type ProtocolRequest = v.InferOutput<typeof protocolRequestSchema>;
@@ -2215,7 +2311,7 @@ export function protocolParamsSchemaFor<M extends ProtocolMethod>(
 
 const protocolResultSchemas = {
   initialize: initializeResultSchema,
-  spawn: v.strictObject({ sessionId: sessionIdSchema }),
+  spawn: spawnAckSchema,
   send: sendAckSchema,
   wait: waitResultSchema,
   interrupt: interruptAckSchema,

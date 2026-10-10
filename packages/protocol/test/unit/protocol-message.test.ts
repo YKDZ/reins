@@ -153,6 +153,7 @@ describe("per-method 参数与结果 schema", () => {
     bad(protocolResultSchemaFor("initialize"), {});
     bad(protocolResultSchemaFor("initialize"), { protocolMajorVersion: 1 });
     ok(protocolParamsSchemaFor("spawn"), {
+      cwd: "/tmp",
       harness: "qoder",
       message: "hello",
       sessionName: "reviewer",
@@ -190,7 +191,11 @@ describe("per-method 参数与结果 schema", () => {
   });
 
   test("每个方法都有对应的结果 schema 且按契约拒绝非法结果", () => {
-    ok(protocolResultSchemaFor("spawn"), { sessionId: "reviewer@g7" });
+    ok(protocolResultSchemaFor("spawn"), {
+      sessionId: "reviewer@g7",
+      turnId: "t1",
+      cwd: "/tmp",
+    });
     bad(protocolResultSchemaFor("spawn"), {});
     ok(protocolResultSchemaFor("send"), {
       sessionId: "reviewer@g7",
@@ -223,8 +228,34 @@ describe("per-method 参数与结果 schema", () => {
         sessionName: "reviewer",
         spawnedAt: "2026-01-01T00:00:00.000Z",
         turns: 1,
-        lastStopReason: "end_turn",
+        lastCompletedTurn: { turnId: "t1", stopReason: "end_turn" },
       },
+    ]);
+    const snapshot = {
+      sessionId: "reviewer@g7",
+      harness: "codex",
+      model: null,
+      reasoning: null,
+      cwd: "/tmp",
+      sessionName: "reviewer",
+      spawnedAt: "2026-01-01T00:00:00.000Z",
+      turns: 1,
+    };
+    ok(protocolResultSchemaFor("list"), [
+      { ...snapshot, state: "busy", activeTurnId: "t1" },
+    ]);
+    bad(protocolResultSchemaFor("list"), [{ ...snapshot, state: "busy" }]);
+    bad(protocolResultSchemaFor("list"), [{ ...snapshot, state: "idle" }]);
+    bad(protocolResultSchemaFor("list"), [
+      {
+        ...snapshot,
+        state: "idle",
+        activeTurnId: "t1",
+        lastCompletedTurn: { turnId: "t1", stopReason: "end_turn" },
+      },
+    ]);
+    bad(protocolResultSchemaFor("list"), [
+      { ...snapshot, state: "killed", activeTurnId: "t1" },
     ]);
     ok(protocolResultSchemaFor("attach"), {
       sessionId: "reviewer@g7",
