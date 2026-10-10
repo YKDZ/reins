@@ -91,7 +91,7 @@ export function parseRetryToken(
 }
 export const commandOutcomeUnknownSchema = v.strictObject({
   code: v.literal("command_outcome_unknown"),
-  cause: v.picklist(["timeout", "disconnected"]),
+  cause: v.picklist(["timeout", "disconnected", "invalid_daemon_response"]),
   method: sideEffectMethodSchema,
   commandId: commandIdSchema,
   daemonGeneration: daemonGenerationSchema,
@@ -129,7 +129,7 @@ export function createReinsClient(
     {
       resolve: (response: ProtocolResponse) => void;
       reject: (error: Error) => void;
-      unknown?: (cause: "timeout" | "disconnected") => Error;
+      unknown?: (cause: CommandOutcomeUnknown["cause"]) => Error;
     }
   >();
   const listeners = new Set<NotificationListener>();
@@ -142,7 +142,13 @@ export function createReinsClient(
     terminalReason = reason;
     const error = new Error(JSON.stringify(reason));
     for (const entry of pending.values())
-      entry.reject(entry.unknown?.("disconnected") ?? error);
+      entry.reject(
+        entry.unknown?.(
+          reason.code === "invalid_daemon_response"
+            ? "invalid_daemon_response"
+            : "disconnected",
+        ) ?? error,
+      );
     pending.clear();
     for (const listener of Array.from(closedListeners)) listener(reason);
   };
@@ -206,7 +212,7 @@ export function createReinsClient(
               : { cwdIdentity: supplied.cwdIdentity }),
           })
         : undefined;
-    const unknown = (cause: "timeout" | "disconnected"): Error => {
+    const unknown = (cause: CommandOutcomeUnknown["cause"]): Error => {
       const identity = {
         method,
         commandId,
@@ -258,21 +264,19 @@ export function createReinsClient(
       pending.set(requestId, {
         ...(commandId === undefined ? {} : { unknown }),
         resolve: (response) => {
+          if ("error" in response) {
+            settle(() => resolve(response));
+            return;
+          }
+          const parsed = v.safeParse(
+            protocolResultSchemaFor(method),
+            response.result,
+          );
+          if (!parsed.success) {
+            terminate(clientMachineError("invalid_daemon_response"));
+            return;
+          }
           settle(() => {
-            if ("error" in response) {
-              resolve(response);
-              return;
-            }
-            const parsed = v.safeParse(
-              protocolResultSchemaFor(method),
-              response.result,
-            );
-            if (!parsed.success) {
-              const reason = clientMachineError("invalid_daemon_response");
-              reject(new Error(JSON.stringify(reason)));
-              terminate(reason);
-              return;
-            }
             if (method === "initialize")
               generation = (parsed.output as ProtocolResult<"initialize">)
                 .daemonGeneration;

@@ -390,3 +390,90 @@ test("显式恢复保留原目录事实，不要求调用方重填 CLI 自动投
   await recovered;
   client.close();
 });
+
+test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读请求保留无效响应语义", async () => {
+  const pair = createInMemoryTransportPair();
+  const client = createReinsClient(pair.client as never, binding);
+  const initialized = client.initialize();
+  pair.server.send({
+    kind: "response",
+    requestId: "cli1",
+    result: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      daemonGeneration: "ab12cd",
+    },
+  });
+  await initialized;
+  const pending = Promise.allSettled([
+    client.request("spawn", {
+      harness: "fake",
+      cwd: "/tmp",
+      sessionName: "invalid" as never,
+      message: "private task",
+    }),
+    client.request("kill", { ids: ["worker@gab12cd" as never] }),
+    client.request("capabilities", {}),
+  ]);
+  pair.server.send({ kind: "response", requestId: "cli2", result: {} });
+  const failures = (await pending).map((result) => {
+    expect(result.status).toBe("rejected");
+    if (result.status !== "rejected") throw new Error("Expected rejection");
+    return JSON.parse((result.reason as Error).message) as unknown;
+  });
+  expect(failures).toMatchObject([
+    {
+      code: "command_outcome_unknown",
+      cause: "invalid_daemon_response",
+      method: "spawn",
+      commandId: expect.stringMatching(/^ab12cd:/),
+      retryToken: expect.any(String),
+    },
+    {
+      code: "command_outcome_unknown",
+      cause: "invalid_daemon_response",
+      method: "kill",
+      commandId: expect.stringMatching(/^ab12cd:/),
+      retryToken: expect.any(String),
+    },
+    { code: "invalid_daemon_response" },
+  ]);
+  expect(JSON.stringify(failures)).not.toContain("private task");
+  client.close();
+});
+
+test("副作用已知机器错误仍原样返回且连接继续接收已知成功", async () => {
+  const pair = createInMemoryTransportPair();
+  const client = createReinsClient(pair.client as never, binding);
+  const initialized = client.initialize();
+  pair.server.send({
+    kind: "response",
+    requestId: "cli1",
+    result: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      daemonGeneration: "ab12cd",
+    },
+  });
+  await initialized;
+  const failed = client.request("send", {
+    sessionId: "missing@gab12cd" as never,
+    message: "caller task",
+  });
+  const error = {
+    code: "session_not_found",
+    sessionId: "missing@gab12cd",
+  };
+  pair.server.send({ kind: "response", requestId: "cli2", error });
+  await expect(failed).resolves.toEqual({
+    kind: "response",
+    requestId: "cli2",
+    error,
+  });
+  const succeeded = client.request("kill", { ids: [] });
+  pair.server.send({ kind: "response", requestId: "cli3", result: [] });
+  await expect(succeeded).resolves.toEqual({
+    kind: "response",
+    requestId: "cli3",
+    result: [],
+  });
+  client.close();
+});

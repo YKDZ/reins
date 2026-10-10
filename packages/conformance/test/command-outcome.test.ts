@@ -166,3 +166,90 @@ test("命令结果恢复：超时不取消原执行，重连显式加入仍在�
     recovery.close();
   }
 });
+
+test("命令结果恢复：损坏的匹配 ACK 保留原身份，新连接取回原结果且不重复执行", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: { harness: "fake", models: [] },
+  });
+  const daemon = await openEphemeralDaemonForTest({
+    adapters: new Map([["fake", fake.adapter]]),
+  });
+  daemons.push(daemon);
+  const transport = daemon.connect();
+  let originalAck: unknown;
+  let commandId: unknown;
+  let spawnRequestId: unknown;
+  const client = createReinsClient(
+    {
+      send(message) {
+        if (message.kind === "request" && message.method === "spawn") {
+          commandId = message.commandId;
+          spawnRequestId = message.requestId;
+        }
+        transport.send(message);
+      },
+      close: () => transport.close(),
+      onEvent: (listener) =>
+        transport.onEvent((event) => {
+          if (
+            event.kind === "message" &&
+            event.message.kind === "response" &&
+            event.message.requestId === spawnRequestId &&
+            "result" in event.message
+          ) {
+            originalAck = event.message.result;
+            listener({
+              kind: "message",
+              message: { ...event.message, result: {} },
+            });
+          } else listener(event);
+        }),
+    },
+    { consumerContext: "test-consumer" as ConsumerContext },
+  );
+  const recovery = createReinsClient(daemon.connect(), {
+    consumerContext: "test-consumer" as ConsumerContext,
+  });
+  try {
+    await client.initialize();
+    const params = {
+      harness: "fake",
+      cwd: "/tmp",
+      sessionName: "invalid-ack" as SessionName,
+      message: "caller authored private task",
+    };
+    let unknown: { retryToken: string } | undefined;
+    try {
+      await client.request("spawn", params);
+    } catch (error) {
+      unknown = JSON.parse((error as Error).message);
+    }
+    expect(originalAck).toEqual({
+      sessionId: "invalid-ack@gtest",
+      turnId: "t1",
+      cwd: "/tmp",
+    });
+    expect(fake.calls.starts).toBe(1);
+    expect(unknown).toMatchObject({
+      code: "command_outcome_unknown",
+      cause: "invalid_daemon_response",
+      commandId,
+      daemonGeneration: "test",
+      retryToken: expect.any(String),
+    });
+    expect(JSON.stringify(unknown)).not.toContain(params.message);
+    expect(parseRetryToken(unknown!.retryToken).commandId).toBe(commandId);
+    await recovery.initialize();
+    expect(await recovery.request("list", {})).toMatchObject({
+      result: [{ sessionId: "invalid-ack@gtest" }],
+    });
+    expect(await recovery.retry(unknown!.retryToken, params)).toMatchObject({
+      result: originalAck,
+    });
+    expect(fake.calls.starts).toBe(1);
+  } finally {
+    client.close();
+    recovery.close();
+  }
+});
