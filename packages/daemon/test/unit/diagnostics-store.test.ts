@@ -18,6 +18,7 @@ import {
   makeDiagnosticId,
   sessionIdSchema,
   turnIdSchema,
+  type ConsumerContext,
   type DiagnosticRecord,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -1364,6 +1365,144 @@ describe("DiagnosticsStore contract", () => {
     await expect(
       openDiagnosticsStore({ directory, maxAgeMs: Number.POSITIVE_INFINITY }),
     ).rejects.toMatchObject({ code: "invalid_configuration" });
+  });
+});
+
+describe("DiagnosticsStore 消费者归属（01 票第 2、3 项）", () => {
+  const alpha = "alpha" as ConsumerContext;
+  const beta = "beta" as ConsumerContext;
+
+  test("范围只隐藏他人记录，无主全局记录对所有人可见", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const globalRecord = record("g", "2026-08-20T00:00:01.000Z");
+    const firstAlpha = record("a", "2026-08-20T00:00:02.000Z");
+    const secondAlpha = record("b", "2026-08-20T00:00:03.000Z");
+    const foreign = record("c", "2026-08-20T00:00:04.000Z");
+    await store.append(globalRecord);
+    await store.append(firstAlpha, alpha);
+    await store.append(secondAlpha, alpha);
+    await store.append(foreign, beta);
+
+    await expect(store.query({}, alpha)).resolves.toEqual({
+      records: [globalRecord, firstAlpha, secondAlpha],
+      truncated: false,
+    });
+    await expect(store.query({}, beta)).resolves.toEqual({
+      records: [globalRecord, foreign],
+      truncated: false,
+    });
+    await expect(store.query({})).resolves.toEqual({
+      records: [globalRecord, firstAlpha, secondAlpha, foreign],
+      truncated: false,
+    });
+    await store.close();
+  });
+
+  test("他人 diagnosticId 与真实缺失按同一 diagnostic_not_found 呈现", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const globalRecord = record("g", "2026-08-20T00:00:01.000Z");
+    const own = record("o", "2026-08-20T00:00:02.000Z");
+    const foreign = record("f", "2026-08-20T00:00:03.000Z");
+    await store.append(globalRecord);
+    await store.append(own, alpha);
+    await store.append(foreign, beta);
+
+    await expect(
+      store.query({ diagnosticId: own.diagnosticId }, alpha),
+    ).resolves.toEqual({ record: own });
+    await expect(
+      store.query({ diagnosticId: globalRecord.diagnosticId }, alpha),
+    ).resolves.toEqual({ record: globalRecord });
+    await expect(
+      store.query({ diagnosticId: foreign.diagnosticId }, alpha),
+    ).rejects.toMatchObject({ code: "diagnostic_not_found" });
+    await expect(
+      store.query({ diagnosticId: makeDiagnosticId("1", "missing") }, alpha),
+    ).rejects.toMatchObject({ code: "diagnostic_not_found" });
+    await store.close();
+  });
+
+  test("消费者范围先于 limit 与 truncated 生效", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const owned: DiagnosticRecord[] = [];
+    for (const [counter, consumer] of [
+      ["1", alpha],
+      ["2", beta],
+      ["3", alpha],
+      ["4", beta],
+      ["5", alpha],
+    ] as const) {
+      const candidate = record(counter, `2026-08-20T00:00:0${counter}.000Z`);
+      owned.push(candidate);
+      await store.append(candidate, consumer);
+    }
+
+    await expect(store.query({ limit: 2 }, alpha)).resolves.toEqual({
+      records: [owned[2], owned[4]],
+      truncated: true,
+    });
+    await expect(store.query({ limit: 3 }, alpha)).resolves.toEqual({
+      records: [owned[0], owned[2], owned[4]],
+      truncated: false,
+    });
+    await store.close();
+  });
+
+  test("归属随记录持久化，reopen 后范围一致", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const globalRecord = record("g", "2026-08-20T00:00:01.000Z");
+    const own = record("o", "2026-08-20T00:00:02.000Z");
+    const foreign = record("f", "2026-08-20T00:00:03.000Z");
+    await store.append(globalRecord);
+    await store.append(own, alpha);
+    await store.append(foreign, beta);
+    await store.close();
+
+    const reopened = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    await expect(reopened.query({}, alpha)).resolves.toEqual({
+      records: [globalRecord, own],
+      truncated: false,
+    });
+    await expect(
+      reopened.query({ diagnosticId: foreign.diagnosticId }, alpha),
+    ).rejects.toMatchObject({ code: "diagnostic_not_found" });
+    await reopened.close();
+  });
+
+  test("磁盘上的非法归属标记按 corrupt fail closed", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStore({ directory });
+    await store.append(record("1", "2026-08-20T00:00:00.000Z"), alpha);
+    await store.close();
+    const line = await readFile(join(directory, "active.ndjson"), "utf8");
+    await writeFile(
+      join(directory, "active.ndjson"),
+      line.replace('"consumer":"alpha"', '"consumer":""'),
+      { mode: 0o600 },
+    );
+
+    await expect(openDiagnosticsStore({ directory })).rejects.toMatchObject({
+      code: "diagnostics_store_corrupt",
+    });
   });
 });
 

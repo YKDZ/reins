@@ -2563,4 +2563,51 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     expect(listed.stdout).toContain(sessionId);
     await runCli(["kill", sessionId], env);
   });
+
+  test("另一消费者绑定的真实 CLI 把他人会话按不存在呈现", async () => {
+    const { env } = await freshEnv();
+    const alpha = { ...env, REINS_CONSUMER_CONTEXT: "cli-alpha" };
+    const beta = { ...env, REINS_CONSUMER_CONTEXT: "cli-beta" };
+
+    const spawned = await runCli(
+      ["spawn", "fake", "hello", "--name", "owned-session"],
+      alpha,
+    );
+    expect(spawned.exitCode).toBe(0);
+    const sessionId = sessionIdFrom(spawned);
+
+    const foreignList = await runCli(["list"], beta);
+    expect(foreignList.exitCode).toBe(0);
+    expect(JSON.parse(foreignList.stdout)).toEqual([]);
+
+    const foreignSend = await runCli(["send", sessionId, "intrude"], beta);
+    expect(foreignSend.exitCode).toBe(65);
+    expect(JSON.parse(foreignSend.stdout)).toMatchObject({
+      code: "session_not_found",
+      sessionId,
+    });
+
+    const foreignKill = await runCli(["kill", sessionId], beta);
+    expect(JSON.parse(foreignKill.stdout)).toEqual([
+      { sessionId, status: "not_found" },
+    ]);
+
+    const foreignWait = await runCli(
+      ["wait", sessionId, "--timeout", "50"],
+      beta,
+    );
+    expect(foreignWait.exitCode).toBe(65);
+    expect(JSON.parse(foreignWait.stdout)).toMatchObject({
+      code: "session_not_found",
+    });
+
+    const ownerList = await runCli(["list"], alpha);
+    expect(ownerList.exitCode).toBe(0);
+    expect(ownerList.stdout).toContain(sessionId);
+
+    const killed = await runCli(["kill", sessionId], alpha);
+    expect(JSON.parse(killed.stdout)).toEqual([
+      { sessionId, status: "killed" },
+    ]);
+  });
 });

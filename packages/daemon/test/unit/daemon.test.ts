@@ -2181,3 +2181,145 @@ describe("daemon 空闲退出", () => {
     expect(events.at(-1)).toMatchObject({ type: "session.killed" });
   });
 });
+
+describe("daemon 消费者范围（01 票第 2 项）", () => {
+  test("异消费者的句柄动作与查询把他人会话按不存在呈现", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const alphaClient = server.connect();
+    const betaClient = server.connect();
+    await flush();
+    const alpha = makeRequester(alphaClient, "alpha");
+    const beta = makeRequester(betaClient, "beta");
+
+    const spawned = await alpha("spawn", {
+      sessionName: "owned-by-alpha",
+      harness: "fake",
+      message: "hello",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
+    fake.controls.completeTurn();
+
+    expect(resultOf(await alpha("list", {}))).toHaveLength(1);
+
+    const sent = await beta("send", { sessionId, message: "侵入" });
+    expect(sent).toMatchObject({ error: { code: "session_not_found" } });
+    expect(fake.calls.delivered).toEqual([]);
+
+    const waited = await beta("wait", { ids: [sessionId], timeoutMs: 1000 });
+    expect(waited).toMatchObject({ error: { code: "session_not_found" } });
+
+    const interrupted = await beta("interrupt", { ids: [sessionId] });
+    expect(interrupted).toMatchObject({ error: { code: "session_not_found" } });
+    expect(fake.calls.interrupted).toEqual([]);
+
+    const attached = await beta("attach", { sessionId });
+    expect(attached).toMatchObject({ error: { code: "session_not_found" } });
+
+    const killed = await beta("kill", { ids: [sessionId] });
+    expect(resultOf(killed)).toEqual([{ sessionId, status: "not_found" }]);
+    expect(fake.calls.terminated).toEqual([]);
+
+    expect(resultOf(await beta("list", {}))).toEqual([]);
+
+    const alphaKilled = await alpha("kill", { ids: [sessionId] });
+    expect(resultOf(alphaKilled)).toEqual([{ sessionId, status: "killed" }]);
+  });
+
+  test("同一消费者绑定跨短连接保持范围", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const firstAlpha = server.connect();
+    await flush();
+    const sessionId = (
+      resultOf(
+        await makeRequester(firstAlpha, "alpha")("spawn", {
+          sessionName: "short-lived",
+          harness: "fake",
+          message: "hello",
+        }),
+      ) as { sessionId: string }
+    ).sessionId;
+    fake.controls.completeTurn();
+    firstAlpha.close();
+    await flush();
+
+    const secondAlpha = makeRequester(server.connect(), "alpha");
+    await flush();
+    const listed = await secondAlpha("list", {});
+    expect(
+      (resultOf(listed) as Array<{ sessionId: string }>).map(
+        (session) => session.sessionId,
+      ),
+    ).toContain(sessionId);
+    const sent = await secondAlpha("send", {
+      sessionId,
+      message: "同绑定续用",
+    });
+    expect(resultOf(sent)).toMatchObject({ deliveryPoint: "new_turn" });
+
+    const intruder = makeRequester(server.connect(), "beta");
+    await flush();
+    expect(resultOf(await intruder("list", {}))).toEqual([]);
+    expect(
+      await intruder("send", { sessionId, message: "越域" }),
+    ).toMatchObject({ error: { code: "session_not_found" } });
+  });
+
+  test("挂起权限只能由会话归属消费者决议", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+      autoPermission: {
+        options: [
+          { outcome: "allow", scope: "once" },
+          { outcome: "deny", feedback: false },
+        ],
+      },
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const alphaClient = server.connect();
+    await flush();
+    const alpha = makeRequester(alphaClient, "alpha");
+    const collector = collectNotifications(alphaClient);
+    const spawned = await alpha("spawn", {
+      sessionName: "guarded",
+      harness: "fake",
+      message: "hello",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
+    await alpha("attach", { sessionId });
+    const permissionEvent = collector.events.find(
+      (event) => event.type === "permission.requested",
+    );
+    expect(permissionEvent).toBeDefined();
+    const permissionId = (
+      permissionEvent as Extract<DomainEvent, { type: "permission.requested" }>
+    ).permissionId;
+
+    const beta = makeRequester(server.connect(), "beta");
+    await flush();
+    await expect(
+      beta("resolvePermission", {
+        sessionId,
+        permissionId,
+        resolution: { outcome: "allow", scope: "once" },
+      }),
+    ).resolves.toMatchObject({ error: { code: "session_not_found" } });
+    expect(fake.calls.resolved).toEqual([]);
+
+    const resolved = await alpha("resolvePermission", {
+      sessionId,
+      permissionId,
+      resolution: { outcome: "allow", scope: "once" },
+    });
+    expect(resultOf(resolved)).toMatchObject({ sessionId, permissionId });
+    expect(fake.calls.resolved).toEqual([{ outcome: "allow", scope: "once" }]);
+  });
+});

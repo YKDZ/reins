@@ -5,6 +5,7 @@ import type {
   DiagnosticsResult,
 } from "@reins/protocol";
 
+import type { ConsumerScope } from "./consumer-scope.ts";
 import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 
 type RecordDiagnostic = (
@@ -21,6 +22,7 @@ export type OrderedDiagnosticsRuntime = DiagnosticsRuntime & {
  */
 export function orderDiagnosticsAcceptance(
   runtime: DiagnosticsRuntime,
+  consumerScope: ConsumerScope,
 ): OrderedDiagnosticsRuntime {
   let tail: Promise<void> | undefined;
 
@@ -63,18 +65,34 @@ export function orderDiagnosticsAcceptance(
     );
   }
 
-  const recordNow: RecordDiagnostic = (input) => runtime.record(input);
+  const recordNow: RecordDiagnostic = (input) => {
+    const consumer = consumerScope.ownerForFact(input);
+    return consumer === undefined
+      ? runtime.record(input)
+      : runtime.record(input, consumer);
+  };
 
   return {
     generation: runtime.generation,
     sessionId: (name) => runtime.sessionId(name),
     record(input) {
       const acceptedInput = structuredClone(input);
-      return enqueue(() => runtime.record(acceptedInput));
+      // 归属在接纳点按请求因果确定，队列把 operation 延后也不改变所有权。
+      const consumer = consumerScope.ownerForFact(acceptedInput);
+      return enqueue(() =>
+        consumer === undefined
+          ? runtime.record(acceptedInput)
+          : runtime.record(acceptedInput, consumer),
+      );
     },
     query(params: DiagnosticsParams): Promise<DiagnosticsResult> {
       const acceptedParams = structuredClone(params);
-      return enqueue(() => runtime.query(acceptedParams));
+      const scope = consumerScope.current();
+      return enqueue(() =>
+        scope === undefined
+          ? runtime.query(acceptedParams)
+          : runtime.query(acceptedParams, scope),
+      );
     },
     runCausal(operation) {
       return enqueue(() => operation(recordNow));

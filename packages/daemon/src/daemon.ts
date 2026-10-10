@@ -9,6 +9,7 @@ import {
 } from "@reins/protocol";
 import type { TransportServer } from "@reins/transport";
 
+import { createConsumerScope } from "./consumer-scope.ts";
 import { orderDiagnosticsAcceptance } from "./diagnostics-acceptance.ts";
 import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
@@ -70,7 +71,11 @@ export function createDaemonInternal(
     onEvent?: (event: DomainEvent) => void;
   },
 ): Daemon {
-  const diagnostics = orderDiagnosticsAcceptance(options.diagnostics);
+  const consumerScope = createConsumerScope();
+  const diagnostics = orderDiagnosticsAcceptance(
+    options.diagnostics,
+    consumerScope,
+  );
   const coreDiagnostics = {
     async record(fact: CoreDiagnosticFact) {
       const unsafe = fact as unknown as Record<string, unknown>;
@@ -92,6 +97,7 @@ export function createDaemonInternal(
       adapters: options.adapters,
       machine,
       diagnostics,
+      consumerScope,
       ...(options.idleTimeoutMs === undefined
         ? {}
         : { idleTimeoutMs: options.idleTimeoutMs }),
