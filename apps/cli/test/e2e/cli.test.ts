@@ -2564,6 +2564,72 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     await runCli(["kill", sessionId], env);
   });
 
+  test("同一 daemon 世代内显式会话名不可复用", async () => {
+    const { env } = await freshEnv();
+    const first = await runCli(
+      ["spawn", "fake", "hello", "--name", "reused-name"],
+      env,
+    );
+    expect(first.exitCode).toBe(0);
+    const firstSessionId = sessionIdFrom(first);
+    expect(firstSessionId).toMatch(/@g/u);
+
+    const duplicate = await runCli(
+      ["spawn", "fake", "again", "--name", "reused-name"],
+      env,
+    );
+    expect(duplicate.exitCode).toBe(65);
+    expect(JSON.parse(duplicate.stdout)).toMatchObject({
+      code: "session_name_conflict",
+      sessionName: "reused-name",
+    });
+
+    const killed = await runCli(["kill", firstSessionId], env);
+    expect(JSON.parse(killed.stdout)).toEqual([
+      { sessionId: firstSessionId, status: "killed" },
+    ]);
+    const afterKill = await runCli(
+      ["spawn", "fake", "third", "--name", "reused-name"],
+      env,
+    );
+    expect(afterKill.exitCode, afterKill.stdout).toBe(65);
+    expect(JSON.parse(afterKill.stdout)).toMatchObject({
+      code: "session_name_conflict",
+      sessionName: "reused-name",
+    });
+    const listed = await runCli(["list", "--name", "reused-name"], env);
+    expect(listed.exitCode).toBe(0);
+    expect(
+      (JSON.parse(listed.stdout) as Array<{ sessionId: string }>).map(
+        (session) => session.sessionId,
+      ),
+    ).toEqual([firstSessionId]);
+  });
+
+  test("消费者绑定不作为领域动作参数暴露", async () => {
+    const { env, socketPath } = await freshEnv();
+    const withFlag = await runCli(
+      ["spawn", "fake", "hello", "--consumer-context", "explicit"],
+      env,
+    );
+    expect(withFlag.exitCode).toBe(64);
+    expect(withFlag.stdout).not.toContain("consumerContext");
+    expect(await pathExists(socketPath)).toBe(false);
+
+    const binding = env.REINS_CONSUMER_CONTEXT ?? "";
+    const spawned = await runCli(
+      ["spawn", "fake", "hello", "--name", "opaque-binding"],
+      env,
+    );
+    expect(spawned.exitCode).toBe(0);
+    expect(spawned.stdout).not.toContain(binding);
+    const sessionId = sessionIdFrom(spawned);
+    const listed = await runCli(["list"], env);
+    expect(listed.exitCode).toBe(0);
+    expect(listed.stdout).not.toContain(binding);
+    await runCli(["kill", sessionId], env);
+  });
+
   test("另一消费者绑定的真实 CLI 把他人会话按不存在呈现", async () => {
     const { env } = await freshEnv();
     const alpha = { ...env, REINS_CONSUMER_CONTEXT: "cli-alpha" };
