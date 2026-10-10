@@ -176,7 +176,7 @@ describe("per-method 参数与结果 schema", () => {
       message: "legacy explanation",
     };
     bad(protocolParamsSchemaFor("interrupt"), legacyInterruptParams);
-    ok(protocolParamsSchemaFor("kill"), { ids: ["reviewer@g7"] });
+    ok(protocolParamsSchemaFor("kill"), { sessionId: "reviewer@g7" });
     ok(protocolParamsSchemaFor("list"), { state: "busy" });
     bad(protocolParamsSchemaFor("list"), { state: "nope" });
     ok(protocolParamsSchemaFor("attach"), {
@@ -215,9 +215,10 @@ describe("per-method 参数与结果 schema", () => {
     ok(protocolResultSchemaFor("interrupt"), [
       { sessionId: "reviewer@g7", status: "requested", turnId: "t1" },
     ]);
-    ok(protocolResultSchemaFor("kill"), [
-      { sessionId: "reviewer@g7", status: "killed" },
-    ]);
+    ok(protocolResultSchemaFor("kill"), {
+      sessionId: "reviewer@g7",
+      status: "killed",
+    });
     ok(protocolResultSchemaFor("list"), [
       {
         sessionId: "reviewer@g7",

@@ -207,7 +207,7 @@ describe("resolvePermission", () => {
       }),
     ).rejects.toEqual(expect.objectContaining({ code: "session_not_found" }));
 
-    await machine.kill({ ids: [sessionId] });
+    await machine.kill({ sessionId: sessionId });
     await expect(
       machine.resolvePermission({
         sessionId,

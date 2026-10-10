@@ -418,9 +418,10 @@ describe("checkout-isolated development entry", () => {
       checkoutA,
     );
     expect(killed.status, killed.stderr).toBe(0);
-    expect(JSON.parse(killed.stdout)).toEqual([
-      { sessionId, status: "not_found" },
-    ]);
+    expect(JSON.parse(killed.stdout)).toEqual({
+      sessionId,
+      status: "not_found",
+    });
 
     const cleanup = await runCommand(
       process.execPath,
@@ -501,15 +502,14 @@ describe("checkout-isolated development entry", () => {
     );
     expect(JSON.parse(listed.stdout)).toHaveLength(2);
 
-    const killed = await runDevelopmentCli(
-      ["kill", sessionId, secondSessionId],
-      env,
-    );
-    expect(killed.status, killed.stderr).toBe(0);
-    expect(JSON.parse(killed.stdout)).toEqual([
-      { sessionId, status: "killed" },
-      { sessionId: secondSessionId, status: "killed" },
-    ]);
+    for (const target of [sessionId, secondSessionId]) {
+      const killed = await runDevelopmentCli(["kill", target], env);
+      expect(killed.status, killed.stderr).toBe(0);
+      expect(JSON.parse(killed.stdout)).toEqual({
+        sessionId: target,
+        status: "killed",
+      });
+    }
   }, 120_000);
 
   test("isolates a live daemon when PATH changes", async () => {

@@ -269,7 +269,7 @@ export type SessionMachine = {
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): Promise<InterruptAck>;
   resolvePermission(params: ResolvePermissionParams): Promise<void>;
-  kill(params: KillParams): Promise<KillResult[]>;
+  kill(params: KillParams): Promise<KillResult>;
   list(filter?: ListFilter): SessionInfo[];
   assertTurnTarget(target: TurnTarget): void;
   subscribe(listener: (event: DomainEvent) => void): () => void;
@@ -1204,53 +1204,57 @@ export function createSessionMachine(options: {
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
       }
-      const results: KillResult[] = [];
-      for (const id of parsed.output.ids) {
-        const session = sessions.get(id);
-        if (session === undefined) {
-          results.push({ sessionId: id, status: "not_found" });
-          continue;
-        }
-        if (session.state === "killed") {
-          results.push({ sessionId: id, status: "killed" });
-          continue;
-        }
-        let termination = terminations.get(id);
-        if (termination === undefined) {
-          termination = (async () => {
-            try {
-              // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
-              await driver.terminate(id);
-              // 停止后先结算原生已接受或拒绝的消息，避免 kill 越过其事实。
-              await pendingDeliveries.get(id)?.settled;
-              bus.transaction(
-                [{ type: "session.killed", sessionId: id }],
-                () => {},
-              );
-            } catch (error) {
-              throw await unexpectedFailure(options.diagnostics, error, {
+      const id = parsed.output.sessionId;
+      const session = sessions.get(id);
+      if (session === undefined) {
+        return { sessionId: id, status: "not_found" };
+      }
+      if (session.state === "killed") {
+        return { sessionId: id, status: "killed" };
+      }
+      let termination = terminations.get(id);
+      if (termination === undefined) {
+        termination = (async () => {
+          try {
+            // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
+            await driver.terminate(id);
+            // 停止后先结算原生已接受或拒绝的消息，避免 kill 越过其事实。
+            await pendingDeliveries.get(id)?.settled;
+            // 停止期间自然终态可能已提交；只补仍活动的回合，且先于会话终态。
+            const terminalEvents: DomainEvent[] = [];
+            if (session.currentTurnId !== null) {
+              terminalEvents.push({
+                type: "turn.completed",
                 sessionId: id,
-                ...(session.currentTurnId === null
-                  ? {}
-                  : { turnId: session.currentTurnId }),
-                kind: "request_failure",
-                operation: "kill",
-                stage: "terminate",
-                reason: "upstream_error",
-                message: evidence(error),
+                turnId: session.currentTurnId,
+                stopReason: "killed",
+                finalReply: null,
               });
             }
-          })();
-          terminations.set(id, termination);
-          const clearTermination = () => {
-            if (terminations.get(id) === termination) terminations.delete(id);
-          };
-          void termination.then(clearTermination, clearTermination);
-        }
-        await termination;
-        results.push({ sessionId: id, status: "killed" });
+            terminalEvents.push({ type: "session.killed", sessionId: id });
+            bus.transaction(terminalEvents, () => {});
+          } catch (error) {
+            throw await unexpectedFailure(options.diagnostics, error, {
+              sessionId: id,
+              ...(session.currentTurnId === null
+                ? {}
+                : { turnId: session.currentTurnId }),
+              kind: "request_failure",
+              operation: "kill",
+              stage: "terminate",
+              reason: "upstream_error",
+              message: evidence(error),
+            });
+          }
+        })();
+        terminations.set(id, termination);
+        const clearTermination = () => {
+          if (terminations.get(id) === termination) terminations.delete(id);
+        };
+        void termination.then(clearTermination, clearTermination);
       }
-      return results;
+      await termination;
+      return { sessionId: id, status: "killed" };
     },
     list(filter) {
       const matches =

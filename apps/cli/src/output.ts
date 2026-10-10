@@ -145,17 +145,15 @@ export function printInterruptResult(
   }
 }
 
-export function printKillResult(results: KillResult[], mode: OutputMode): void {
+export function printKillResult(result: KillResult, mode: OutputMode): void {
   if (mode === "json") {
-    printJsonLine(results);
+    printJsonLine(result);
     return;
   }
-  for (const result of results) {
-    if (result.status === "killed") {
-      process.stdout.write(`Killed ${result.sessionId}\n`);
-    } else {
-      process.stdout.write(`Session ${result.sessionId} not found\n`);
-    }
+  if (result.status === "killed") {
+    process.stdout.write(`Killed ${result.sessionId}\n`);
+  } else {
+    process.stdout.write(`Session ${result.sessionId} not found\n`);
   }
 }
 

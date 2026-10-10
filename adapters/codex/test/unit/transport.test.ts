@@ -58,6 +58,23 @@ async function waitUntil(predicate: () => boolean | Promise<boolean>) {
   }
 }
 
+async function stopped(pid: number): Promise<boolean> {
+  try {
+    if (process.platform === "linux") {
+      const stat = await readFile(`/proc/${pid}/stat`, "utf8");
+      return ["Z", "X"].includes(
+        stat.slice(stat.lastIndexOf(")") + 2).split(" ")[0]!,
+      );
+    }
+    process.kill(pid, 0);
+    return false;
+  } catch (error) {
+    return ["ESRCH", "ENOENT"].includes(
+      (error as NodeJS.ErrnoException).code ?? "",
+    );
+  }
+}
+
 function signalIfAlive(pid: number): void {
   try {
     process.kill(pid, "SIGKILL");
@@ -338,7 +355,7 @@ describe("codex transport", () => {
         binaryPath: process.execPath,
         binaryArgs: [
           fileURLToPath(
-            new URL("../fixtures/process-tree.mjs", import.meta.url),
+            new URL("../fixtures/process-tree.ts", import.meta.url),
           ),
           pidFile,
         ],
@@ -370,15 +387,8 @@ describe("codex transport", () => {
 
         await transport.close();
         expect(
-          [pids.parent, pids.descendant].every((pid) => {
-            try {
-              process.kill(pid, 0);
-              return false;
-            } catch (error) {
-              return (error as NodeJS.ErrnoException).code === "ESRCH";
-            }
-          }),
-        ).toBe(true);
+          await Promise.all([pids.parent, pids.descendant].map(stopped)),
+        ).toEqual([true, true]);
       } finally {
         try {
           if (pids !== undefined) {
@@ -386,15 +396,10 @@ describe("codex transport", () => {
             for (const pid of [pids.parent, pids.descendant]) {
               signalIfAlive(pid);
             }
-            await waitUntil(() =>
-              [pids!.parent, pids!.descendant].every((pid) => {
-                try {
-                  process.kill(pid, 0);
-                  return false;
-                } catch (error) {
-                  return (error as NodeJS.ErrnoException).code === "ESRCH";
-                }
-              }),
+            await waitUntil(async () =>
+              (
+                await Promise.all([pids!.parent, pids!.descendant].map(stopped))
+              ).every(Boolean),
             );
           }
         } finally {

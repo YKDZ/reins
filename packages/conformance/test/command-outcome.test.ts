@@ -137,7 +137,7 @@ test("命令结果恢复：超时不取消原执行，重连显式加入仍在�
       sessionName: "inflight" as SessionName,
       message: "initial",
     });
-    const params = { ids: [testIdentity.session("inflight")] };
+    const params = { sessionId: testIdentity.session("inflight") };
     let token: string | undefined;
     try {
       await client.request("kill", params, 5);
@@ -157,7 +157,7 @@ test("命令结果恢复：超时不取消原执行，重连显式加入仍在�
     expect(fake.calls.terminated).toHaveLength(1);
     release();
     expect(await joined).toMatchObject({
-      result: [{ sessionId: "inflight@gtest", status: "killed" }],
+      result: { sessionId: "inflight@gtest", status: "killed" },
     });
     expect(fake.calls.terminated).toHaveLength(1);
   } finally {

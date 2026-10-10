@@ -129,7 +129,7 @@ describe("interrupt", () => {
       message: "临时",
       cwd: "/tmp/demo",
     });
-    await machine.kill({ ids: [id] });
+    await machine.kill({ sessionId: id });
 
     await expect(machine.interrupt({ ids: [id] })).rejects.toEqual(
       expect.objectContaining({ code: "session_killed" }),

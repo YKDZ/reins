@@ -147,7 +147,7 @@ describe("send", () => {
       message: "临时",
       cwd: "/tmp/demo",
     });
-    await machine.kill({ ids: [id] });
+    await machine.kill({ sessionId: id });
 
     await expect(
       machine.send({ placement: "new_turn", sessionId: id, message: "hi" }),

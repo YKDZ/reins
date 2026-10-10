@@ -931,8 +931,8 @@ describe("daemon 协议面（缝 C）", () => {
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
     fake.controls.completeTurn();
 
-    const killed = await requester("kill", { ids: [sessionId] });
-    expect(resultOf(killed)).toEqual([{ sessionId, status: "killed" }]);
+    const killed = await requester("kill", { sessionId: sessionId });
+    expect(resultOf(killed)).toEqual({ sessionId, status: "killed" });
     expect(fake.calls.terminated).toEqual([sessionId]);
 
     const waited = await requester("wait", {
@@ -1442,7 +1442,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     expect(collector.ended).toEqual([]);
 
-    await requester("kill", { ids: [sessionId] });
+    await requester("kill", { sessionId: sessionId });
     await waitFor(() => collector.ended.length === 1);
     expect(collector.ended).toEqual([{ sessionId, reason: "session_killed" }]);
   });
@@ -1513,7 +1513,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
     fake.controls.completeTurn();
-    await requester("kill", { ids: [sessionId] });
+    await requester("kill", { sessionId: sessionId });
 
     const collector = collectNotifications(client);
     const attached = await requester("attach", { sessionId });
@@ -1918,7 +1918,7 @@ describe("daemon 空闲退出", () => {
       // kill 全部清理后才空闲退出
       const client2 = server.connect();
       await flush();
-      await makeRequester(client2).request("kill", { ids: [sessionId] });
+      await makeRequester(client2).request("kill", { sessionId: sessionId });
       client2.close();
       await flush();
       vi.advanceTimersByTime(100);
@@ -2264,14 +2264,14 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const attached = await beta("attach", { sessionId });
     expect(attached).toMatchObject({ error: { code: "session_not_found" } });
 
-    const killed = await beta("kill", { ids: [sessionId] });
-    expect(resultOf(killed)).toEqual([{ sessionId, status: "not_found" }]);
+    const killed = await beta("kill", { sessionId: sessionId });
+    expect(resultOf(killed)).toEqual({ sessionId, status: "not_found" });
     expect(fake.calls.terminated).toEqual([]);
 
     expect(resultOf(await beta("list", {}))).toEqual([]);
 
-    const alphaKilled = await alpha("kill", { ids: [sessionId] });
-    expect(resultOf(alphaKilled)).toEqual([{ sessionId, status: "killed" }]);
+    const alphaKilled = await alpha("kill", { sessionId: sessionId });
+    expect(resultOf(alphaKilled)).toEqual({ sessionId, status: "killed" });
   });
 
   test("同一消费者绑定跨短连接保持范围", async () => {
@@ -2554,11 +2554,11 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       kind: "request",
       requestId: "changed-method",
       method: "kill",
-      params: { ids: [sessionId] },
+      params: { sessionId: sessionId },
       commandId: "test:00000003-0123-4123-8123-0123456789ab",
     }),
   ).toMatchObject({ error: { code: "command_id_conflict" } });
-  expect(await command("kill", { ids: [sessionId] }, "6")).toHaveProperty(
+  expect(await command("kill", { sessionId: sessionId }, "6")).toHaveProperty(
     "result",
   );
   expect(fake.calls.starts).toBe(1);

@@ -263,7 +263,7 @@ test.each([
     },
   ],
   ["interrupt", { ids: ["worker@gab12cd"] }],
-  ["kill", { ids: ["worker@gab12cd"] }],
+  ["kill", { sessionId: "worker@gab12cd" }],
   [
     "resolvePermission",
     {
@@ -418,7 +418,7 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
       sessionName: "invalid" as never,
       message: "private task",
     }),
-    client.request("kill", { ids: ["worker@gab12cd" as never] }),
+    client.request("kill", { sessionId: "worker@gab12cd" as never }),
     client.request("capabilities", {}),
   ]);
   pair.server.send({ kind: "response", requestId: "cli2", result: {} });
@@ -476,12 +476,18 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
     requestId: "cli2",
     error,
   });
-  const succeeded = client.request("kill", { ids: [] });
-  pair.server.send({ kind: "response", requestId: "cli3", result: [] });
+  const succeeded = client.request("kill", {
+    sessionId: "worker@gab12cd" as never,
+  });
+  pair.server.send({
+    kind: "response",
+    requestId: "cli3",
+    result: { sessionId: "worker@gab12cd", status: "killed" },
+  });
   await expect(succeeded).resolves.toEqual({
     kind: "response",
     requestId: "cli3",
-    result: [],
+    result: { sessionId: "worker@gab12cd", status: "killed" },
   });
   client.close();
 });

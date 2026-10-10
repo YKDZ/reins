@@ -725,7 +725,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
 
       const killed = await spawn("typed-killed-daemon");
-      await request("kill", { ids: [killed] });
+      await request("kill", { sessionId: killed });
       emit({
         type: "message",
         sessionId: killed,

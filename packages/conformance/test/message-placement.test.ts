@@ -423,15 +423,17 @@ test.each(["active_turn", "new_turn"] as const)(
     );
     for (let i = 0; i < 20; i++) await Promise.resolve();
     expect(calls.delivered).toHaveLength(1);
-    const killing = client.request("kill", { ids: [spawned.result.sessionId] });
+    const killing = client.request("kill", {
+      sessionId: spawned.result.sessionId,
+    });
     for (let i = 0; i < 20; i++) await Promise.resolve();
     accept();
     expect(await sending).toHaveProperty("result");
     expect(await killing).toHaveProperty("result");
     expect(events.map((event) => event.type)).toEqual(
       placement === "active_turn"
-        ? ["message", "session.killed"]
-        : ["turn.started", "message", "session.killed"],
+        ? ["message", "turn.completed", "session.killed"]
+        : ["turn.started", "message", "turn.completed", "session.killed"],
     );
   },
 );

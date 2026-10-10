@@ -278,7 +278,7 @@ describe("driver event ingress ownership", () => {
     });
 
     const killed = await spawn("typed-killed");
-    await machine.kill({ ids: [killed] });
+    await machine.kill({ sessionId: killed });
     fake.controls.emit({
       type: "message",
       sessionId: killed,

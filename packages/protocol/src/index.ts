@@ -389,7 +389,7 @@ export type ResolvePermissionAck = v.InferOutput<
 >;
 
 export const killParamsSchema = v.strictObject({
-  ids: v.array(sessionIdSchema),
+  sessionId: sessionIdSchema,
 });
 export type KillParams = v.InferOutput<typeof killParamsSchema>;
 
@@ -2346,7 +2346,7 @@ const protocolResultSchemas = {
   send: sendAckSchema,
   wait: waitResultSchema,
   interrupt: interruptAckSchema,
-  kill: v.array(killResultSchema),
+  kill: killResultSchema,
   list: v.array(sessionInfoSchema),
   attach: attachResultSchema,
   resolvePermission: resolvePermissionAckSchema,
