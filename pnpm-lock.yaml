@@ -238,6 +238,9 @@ importers:
 
   apps/workspace-manager:
     dependencies:
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../../packages/protocol
       '@reins/transport':
         specifier: workspace:*
         version: link:../../packages/transport
@@ -247,7 +250,15 @@ importers:
       '@reins/workspace-runtime':
         specifier: workspace:*
         version: link:../../packages/workspace-runtime
+      proper-lockfile:
+        specifier: 'catalog:'
+        version: 4.1.2
+      valibot:
+        specifier: 'catalog:'
+        version: 1.4.2(typescript@7.0.2)
     dependenciesMeta:
+      '@reins/protocol':
+        injected: false
       '@reins/transport':
         injected: false
       '@reins/workspace-protocol':
@@ -261,6 +272,9 @@ importers:
       '@types/node':
         specifier: 'catalog:'
         version: 24.13.3
+      '@types/proper-lockfile':
+        specifier: 'catalog:'
+        version: 4.1.4
       oxfmt:
         specifier: 'catalog:'
         version: 0.58.0
@@ -313,6 +327,9 @@ importers:
       '@reins/transport':
         specifier: workspace:*
         version: link:../transport
+      '@reins/workspace-protocol':
+        specifier: workspace:*
+        version: link:../workspace-protocol
       valibot:
         specifier: 'catalog:'
         version: 1.4.2(typescript@7.0.2)
@@ -320,6 +337,8 @@ importers:
       '@reins/protocol':
         injected: false
       '@reins/transport':
+        injected: false
+      '@reins/workspace-protocol':
         injected: false
     devDependencies:
       '@reins/typescript-config':
@@ -668,6 +687,9 @@ importers:
       '@reins/workspace-protocol':
         specifier: workspace:*
         version: link:../workspace-protocol
+      valibot:
+        specifier: 'catalog:'
+        version: 1.4.2(typescript@7.0.2)
     dependenciesMeta:
       '@reins/client':
         injected: false

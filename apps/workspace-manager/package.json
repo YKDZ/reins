@@ -14,13 +14,17 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
     "@reins/workspace-protocol": "workspace:*",
-    "@reins/workspace-runtime": "workspace:*"
+    "@reins/workspace-runtime": "workspace:*",
+    "proper-lockfile": "catalog:",
+    "valibot": "catalog:"
   },
   "devDependencies": {
     "@reins/typescript-config": "workspace:*",
     "@types/node": "catalog:",
+    "@types/proper-lockfile": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
@@ -34,6 +38,9 @@
       "injected": false
     },
     "@reins/workspace-runtime": {
+      "injected": false
+    },
+    "@reins/protocol": {
       "injected": false
     }
   },

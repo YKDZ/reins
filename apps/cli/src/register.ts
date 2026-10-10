@@ -16,6 +16,7 @@ import { dispatchInvocation } from "./commands.ts";
 import { ExitError, exitCodeForError, toCliError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 import { printError } from "./output.ts";
+import { registerWorkspaceCommands } from "./workspace.ts";
 
 function readReleaseVersion(): string {
   let manifest: unknown;
@@ -67,6 +68,8 @@ export function registerCommands(program: Command): void {
           : fullUsageFor(spec);
       },
     });
+
+  registerWorkspaceCommands(program);
 
   for (const spec of commandSpecs) {
     const command = program

@@ -21,7 +21,8 @@
   },
   "bin": {
     "reins": "./dist/reins.js",
-    "reins-daemon": "./dist/reins-daemon.js"
+    "reins-daemon": "./dist/reins-daemon.js",
+    "reins-workspace-manager": "./dist/reins-workspace-manager.js"
   },
   "files": [
     "dist"
@@ -45,7 +46,8 @@
     "postbuild": "node -e \"const fs = require('node:fs'); fs.copyFileSync('dist/cli.js', 'dist/reins.js'); if (process.platform !== 'win32') fs.chmodSync('dist/reins.js', 0o755)\"",
     "test": "vitest run test/unit --reporter=agent",
     "test:e2e": "vitest run test/e2e --reporter=agent",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "test:docker": "vitest run test/docker --reporter=agent"
   },
   "dependencies": {
     "@reins/client": "workspace:*",

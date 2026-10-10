@@ -32,7 +32,8 @@
     "@reins/event-journal": "workspace:*",
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
-    "@reins/workspace-protocol": "workspace:*"
+    "@reins/workspace-protocol": "workspace:*",
+    "valibot": "catalog:"
   },
   "devDependencies": {
     "@reins/typescript-config": "workspace:*",
