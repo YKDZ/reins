@@ -16,7 +16,12 @@ import type {
   ProtocolResult,
   SpawnParams,
 } from "@reins/protocol";
-import { consumerContextSchema } from "@reins/protocol";
+import {
+  consumerContextSchema,
+  decodeTurnHandle,
+  turnHandleSchema,
+  sessionIdSchema,
+} from "@reins/protocol";
 import * as v from "valibot";
 
 import { runAttach } from "./attach.ts";
@@ -136,10 +141,30 @@ async function runSpawn(ctx: CommandInvocationFor<"spawn">): Promise<void> {
 }
 
 async function runSend(ctx: CommandInvocationFor<"send">): Promise<void> {
-  const [sessionId, messageParts] = ctx.args;
+  const [target, messageParts] = ctx.args;
+  const placement = ctx.options.placement;
+  const parsed = v.safeParse(
+    placement === "active_turn" ? turnHandleSchema : sessionIdSchema,
+    target,
+  );
+  if (!parsed.success)
+    throw usageError({
+      issue: "invalid_value",
+      target: "argument",
+      field: "target",
+      value: target,
+      hint:
+        placement === "active_turn"
+          ? "Expected a valid TurnHandle"
+          : "Expected a valid SessionHandle",
+    });
+  const address =
+    placement === "active_turn"
+      ? { placement, ...decodeTurnHandle(target) }
+      : { placement, sessionId: v.parse(sessionIdSchema, target) };
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("send", {
-      sessionId,
+      ...address,
       message: messageParts.join(" "),
     });
     printSendAck(requireResult(response), ctx.mode);

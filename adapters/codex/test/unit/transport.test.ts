@@ -588,6 +588,7 @@ describe("codex transport", () => {
         method: "turn/completed",
         params: {
           turn: {
+            id: "turn1",
             status: "failed",
             error: { message: "Requested reasoning effort is unsupported" },
           },
@@ -602,6 +603,7 @@ describe("codex transport", () => {
         method: "turn/completed",
         params: {
           turn: {
+            id: "turn1",
             status: "failed",
             error: { message: "Requested reasoning effort is unsupported" },
           },
@@ -635,14 +637,14 @@ describe("codex transport", () => {
     fake.stdout.write(
       `${JSON.stringify({
         method: "turn/completed",
-        params: { turn: { status: "completed", error: null } },
+        params: { turn: { id: "turn1", status: "completed", error: null } },
       })}\n`,
     );
 
     await expect(iterator.next()).resolves.toMatchObject({
       value: {
         method: "turn/completed",
-        params: { turn: { status: "completed", error: null } },
+        params: { turn: { id: "turn1", status: "completed", error: null } },
       },
     });
     expect(diagnostics).toHaveLength(2);
@@ -953,7 +955,7 @@ describe("codex transport", () => {
     fake.stdout.write(
       `${JSON.stringify({
         method: "turn/completed",
-        params: { turn: { status: "completed", error: null } },
+        params: { turn: { id: "turn1", status: "completed", error: null } },
       })}\n`,
     );
     fake.stdout.end();

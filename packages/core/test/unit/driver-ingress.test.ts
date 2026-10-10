@@ -445,7 +445,7 @@ describe("driver event ingress ownership", () => {
     });
     events.length = 0;
 
-    await machine.send({ sessionId, message: "next" });
+    await machine.send({ placement: "new_turn", sessionId, message: "next" });
 
     expect(events.map((event) => event.type)).toEqual([
       "turn.started",
@@ -517,7 +517,7 @@ describe("driver event ingress ownership", () => {
     events.length = 0;
 
     await expect(
-      machine.send({ sessionId, message: "fails" }),
+      machine.send({ placement: "new_turn", sessionId, message: "fails" }),
     ).rejects.toMatchObject({
       code: "internal_error",
     });
@@ -535,7 +535,7 @@ describe("driver event ingress ownership", () => {
       expect.objectContaining({ sessionId, state: "idle", turns: 1 }),
     ]);
 
-    await machine.send({ sessionId, message: "retry" });
+    await machine.send({ placement: "new_turn", sessionId, message: "retry" });
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
   });
 
@@ -568,7 +568,7 @@ describe("driver event ingress ownership", () => {
       finalReply: null,
       usage: {},
     });
-    await machine.send({ sessionId, message: "two" });
+    await machine.send({ placement: "new_turn", sessionId, message: "two" });
     fake.controls.emit({
       type: "permission.requested",
       sessionId,
@@ -645,142 +645,6 @@ describe("driver event ingress ownership", () => {
     expect(machine.list()).toEqual([
       expect.objectContaining({ sessionId, state: "idle", turns: 2 }),
     ]);
-  });
-
-  test("rolls back action-local ownership when boundary delivery throws", async () => {
-    let attempts = 0;
-    const diagnostics: CoreDiagnosticFact[] = [];
-    const fake = createFakeDriver({
-      deliver: (sessionId, turnId) => {
-        attempts += 1;
-        fake.controls.emit({
-          type: "text.delta",
-          sessionId,
-          turnId,
-          messageId: ids.message("mretry"),
-          delta: `attempt ${attempts}`,
-        });
-        fake.controls.emit({
-          type: "message",
-          sessionId,
-          turnId,
-          messageId: ids.message("mretry"),
-          role: "worker",
-          content: `complete ${attempts}`,
-        });
-        fake.controls.emit({
-          type: "tool.requested",
-          sessionId,
-          turnId,
-          toolCallId: ids.toolCall("cretry"),
-          name: "Read",
-        });
-        fake.controls.emit({
-          type: "tool.completed",
-          sessionId,
-          turnId,
-          toolCallId: ids.toolCall("cretry"),
-          name: "Read",
-          result: `complete ${attempts}`,
-          isError: false,
-        });
-        fake.controls.emit({
-          type: "permission.requested",
-          sessionId,
-          turnId,
-          permissionId: ids.permission("pretry"),
-          kind: "tool:Bash",
-          options: [{ outcome: "allow", scope: "once" }],
-        });
-        if (attempts === 1) throw new Error("retry boundary");
-      },
-    });
-    const machine = createSessionMachine({
-      driverFactory: fake.factory,
-      identity: testIdentity,
-      diagnostics: {
-        async record(input) {
-          diagnostics.push(input);
-          return undefined;
-        },
-      },
-    });
-    const events: DomainEvent[] = [];
-    machine.subscribe((event) => events.push(event));
-    const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("rollback-scope"),
-      harness: "codex",
-      message: "one",
-      cwd: "/tmp/demo",
-    });
-    await machine.send({ sessionId, message: "queued" });
-
-    fake.controls.emit({
-      type: "tool.completed",
-      sessionId,
-      turnId: ids.turn("t1"),
-      toolCallId: ids.toolCall("cboundary1"),
-      name: "Read",
-      result: "first boundary",
-      isError: false,
-    });
-    fake.controls.emit({
-      type: "tool.completed",
-      sessionId,
-      turnId: ids.turn("t1"),
-      toolCallId: ids.toolCall("cboundary2"),
-      name: "Read",
-      result: "retry boundary",
-      isError: false,
-    });
-
-    await vi.waitFor(() =>
-      expect(
-        diagnostics.filter((input) => input.kind === "request_failure"),
-      ).toHaveLength(1),
-    );
-    expect(
-      diagnostics.filter((input) => input.kind === "protocol_violation"),
-    ).toEqual([]);
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "text.delta" &&
-          event.messageId === ids.message("mretry"),
-      ),
-    ).toHaveLength(1);
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "message" && event.messageId === ids.message("mretry"),
-      ),
-    ).toHaveLength(1);
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "tool.requested" &&
-          event.toolCallId === ids.toolCall("cretry"),
-      ),
-    ).toHaveLength(1);
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "tool.completed" &&
-          event.toolCallId === ids.toolCall("cretry"),
-      ),
-    ).toHaveLength(1);
-    expect(
-      events.filter(
-        (event) =>
-          event.type === "permission.requested" &&
-          event.permissionId === ids.permission("pretry"),
-      ),
-    ).toHaveLength(1);
-    await machine.resolvePermission({
-      sessionId,
-      permissionId: ids.permission("pretry"),
-      resolution: { outcome: "allow", scope: "once" },
-    });
   });
 
   test("scopes worker ids to their protocol parent and rejects only local conflicts", async () => {
@@ -995,7 +859,11 @@ describe("driver event ingress ownership", () => {
         usage: {},
       });
       if (index < 30) {
-        const ack = await machine.send({ sessionId, message: `next ${index}` });
+        const ack = await machine.send({
+          placement: "new_turn",
+          sessionId,
+          message: `next ${index}`,
+        });
         expect(ack.turnId).toBe(ids.turn(`t${index + 1}`));
       }
     }
@@ -1049,7 +917,11 @@ describe("driver event ingress ownership", () => {
       finalReply: null,
       usage: {},
     });
-    const next = await machine.send({ sessionId, message: "next" });
+    const next = await machine.send({
+      placement: "new_turn",
+      sessionId,
+      message: "next",
+    });
     fake.controls.emit({ ...request, turnId: next.turnId });
 
     await vi.waitFor(() => expect(diagnostics).toHaveLength(1));

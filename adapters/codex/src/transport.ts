@@ -66,6 +66,8 @@ function validatedUtf8Prefix(bytes: Buffer): {
 // adapter 私有：边界已写入 protocol_violation，调用方只需终止控制流。
 export class ProtocolBoundaryError extends AlreadyDiagnosedError {}
 
+export class CodexRequestError extends Error {}
+
 export type CodexChild = {
   readonly stdin: NodeJS.WritableStream;
   readonly stdout: NodeJS.ReadableStream;
@@ -226,6 +228,7 @@ export type InboundMessage =
       method: "turn/completed";
       params: {
         turn: {
+          id: string;
           status: "completed" | "interrupted" | "failed" | "inProgress";
           error: { message: string } | null;
         };
@@ -255,7 +258,7 @@ export type CodexRequestResultMap = {
   initialize: Record<string, never>;
   "thread/start": { thread: { id: string } };
   "turn/start": { turn: { id: string } };
-  "turn/steer": Record<string, never>;
+  "turn/steer": { turnId: string };
   "turn/interrupt": Record<string, never>;
   "thread/delete": Record<string, never>;
   "model/list": { data: readonly CodexModel[] };
@@ -866,7 +869,12 @@ export function createCodexTransport(options: {
         : { kind: "notification", method, params: { tokenUsage } };
     }
     if (method === "turn/completed") {
-      if (!isRecord(params.turn)) return null;
+      if (
+        !isRecord(params.turn) ||
+        typeof params.turn.id !== "string" ||
+        params.turn.id.length === 0
+      )
+        return null;
       const status = params.turn.status;
       const error = params.turn.error;
       let parsedError: { message: string } | null = null;
@@ -883,6 +891,7 @@ export function createCodexTransport(options: {
             method,
             params: {
               turn: {
+                id: params.turn.id,
                 status,
                 error: parsedError,
               },
@@ -1098,6 +1107,10 @@ export function createCodexTransport(options: {
       return isRecord(result.turn) && typeof result.turn.id === "string"
         ? { turn: { id: result.turn.id } }
         : null;
+    if (method === "turn/steer")
+      return typeof result.turnId === "string" && result.turnId.length > 0
+        ? { turnId: result.turnId }
+        : null;
     if (method === "model/list") {
       if (!Array.isArray(result.data)) return null;
       const data: CodexModel[] = [];
@@ -1111,7 +1124,9 @@ export function createCodexTransport(options: {
     return {};
   }
 
-  function validResponseError(value: unknown): boolean {
+  function validResponseError(
+    value: unknown,
+  ): value is { code: number; message: string } {
     return (
       isRecord(value) &&
       typeof value.code === "number" &&
@@ -1229,7 +1244,7 @@ export function createCodexTransport(options: {
     }
     if (hasError) {
       if (validResponseError(message.error)) {
-        entry.reject(new Error(JSON.stringify(message.error)));
+        entry.reject(new CodexRequestError(JSON.stringify(message.error)));
       } else {
         void protocolViolation(
           "validate_worker_response",

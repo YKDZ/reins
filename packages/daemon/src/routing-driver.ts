@@ -111,9 +111,11 @@ export function createRoutingDriverFactory(
           throw error;
         }
       },
-      deliver(sessionId, turnId, message) {
-        driverFor(sessionId).deliver(sessionId, turnId, message);
-        sessionTurn.set(sessionId, turnId);
+      async deliver(sessionId, turnId, message, placement) {
+        const driver = driverFor(sessionId);
+        await driver.deliver(sessionId, turnId, message, placement);
+        if (drivers.get(sessionId) === driver)
+          sessionTurn.set(sessionId, turnId);
       },
       interrupt(sessionId) {
         driverFor(sessionId).interrupt(sessionId);

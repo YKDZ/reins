@@ -59,7 +59,6 @@ type SessionRecord = {
   state: "busy" | "idle" | "killed";
   currentTurnId: TurnId | null;
   activeTurn: TurnScope | null;
-  inbox: Array<{ messageId: MessageId; text: string }>;
   pendingPermissions: Map<
     PermissionId,
     { turnId: TurnId; options: PermissionOption[] }
@@ -96,6 +95,26 @@ type IngressActionFrame = {
   accepting: boolean;
   readonly projections: Map<SessionId, IngressProjection>;
 };
+
+type PendingDelivery = {
+  readonly projection: IngressProjection;
+  readonly events: DomainEvent[];
+  readonly creating: boolean;
+  readonly settled: Promise<void>;
+  readonly settle: () => void;
+  count: number;
+};
+
+function createPendingDelivery(
+  projection: IngressProjection,
+  creating: boolean,
+): PendingDelivery {
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  return { projection, creating, events: [], count: 0, settled, settle };
+}
 
 type WorkerEventIngressDecision =
   | { status: "accepted" }
@@ -280,6 +299,9 @@ export function createSessionMachine(options: {
   const pendingSpawns = new Map<SessionId, PendingSpawn>();
   const terminations = new Map<SessionId, Promise<void>>();
   const ingressActions: IngressActionFrame[] = [];
+  // 接受响应与终态通知可能在同一轮到达；只暂存本会话事件，
+  // 保证已接受 caller 事实先于该回合终态，拒绝后仍释放真实终态。
+  const pendingDeliveries = new Map<SessionId, PendingDelivery>();
 
   let bus: EventBus;
   let driver: WorkerDriver;
@@ -310,7 +332,6 @@ export function createSessionMachine(options: {
           state: "busy",
           currentTurnId: null,
           activeTurn: null,
-          inbox: [],
           pendingPermissions: new Map(),
           usedPermissionIds: new Set(),
           turns: [],
@@ -331,18 +352,12 @@ export function createSessionMachine(options: {
         break;
       case "message":
         session?.activeTurn?.messages.set(event.messageId, "complete");
-        if (session !== undefined && session.inbox.length > 0) {
-          deliverInbox(session);
-        }
         break;
       case "tool.requested":
         session?.activeTurn?.tools.set(event.toolCallId, "requested");
         break;
       case "tool.completed":
         session?.activeTurn?.tools.set(event.toolCallId, "complete");
-        if (session !== undefined && session.inbox.length > 0) {
-          deliverInbox(session);
-        }
         break;
       case "turn.completed":
         if (session !== undefined) {
@@ -364,7 +379,6 @@ export function createSessionMachine(options: {
           session.state = "killed";
           session.currentTurnId = null;
           session.activeTurn = null;
-          session.inbox = [];
           session.pendingPermissions.clear();
           session.usedPermissionIds.clear();
         }
@@ -388,46 +402,6 @@ export function createSessionMachine(options: {
     settleWaiters();
   };
 
-  function deliverInbox(session: SessionRecord): void {
-    while (session.inbox.length > 0) {
-      const item = session.inbox[0]!;
-      const turnId = session.currentTurnId;
-      if (turnId === null) break;
-      try {
-        driverTransaction(
-          [
-            {
-              type: "message",
-              sessionId: session.id,
-              turnId,
-              messageId: item.messageId,
-              role: "caller",
-              content: item.text,
-            },
-          ],
-          new Map([[session.id, projectSession(session.id)]]),
-          () => {
-            driver.deliver(session.id, turnId, item.text);
-          },
-        );
-        session.inbox.shift();
-      } catch (error) {
-        if (!v.safeParse(machineErrorSchema, error).success) {
-          recordBestEffort(options.diagnostics, {
-            sessionId: session.id,
-            turnId,
-            kind: "request_failure",
-            operation: "send",
-            stage: "steer",
-            reason: "upstream_error",
-            message: evidence(error),
-          });
-        }
-        break;
-      }
-    }
-  }
-
   function activeProjection(
     sessionId: SessionId,
   ): IngressProjection | undefined {
@@ -437,7 +411,7 @@ export function createSessionMachine(options: {
       const projection = frame.projections.get(sessionId);
       if (projection !== undefined) return projection;
     }
-    return undefined;
+    return pendingDeliveries.get(sessionId)?.projection;
   }
 
   function projectSession(sessionId: SessionId): IngressProjection {
@@ -832,7 +806,9 @@ export function createSessionMachine(options: {
         }
       }
     }
-    bus.publish(event);
+    const delivering = pendingDeliveries.get(event.sessionId);
+    if (delivering === undefined) bus.publish(event);
+    else delivering.events.push(event);
   };
 
   function collectOutcomes(ids: ReadonlySet<SessionId>): WaitOutcome[] {
@@ -983,28 +959,39 @@ export function createSessionMachine(options: {
         throw machineError({ code: "session_killed", sessionId });
       }
       assertNotTerminating(sessionId);
+      if (
+        parsed.output.placement === "new_turn" &&
+        (session.state !== "idle" || pendingDeliveries.has(sessionId))
+      ) {
+        throw machineError({ code: "session_busy", sessionId });
+      }
       messageSeq += 1;
       const messageId = v.parse(messageIdSchema, `m${messageSeq}`);
-      if (session.state === "idle") {
+      if (parsed.output.placement === "new_turn") {
         const turnId = nextTurnId(sessionId);
+        const started: DomainEvent = {
+          type: "turn.started",
+          sessionId,
+          turnId,
+        };
+        const projection = projectSession(sessionId);
+        projectEvent(projection, started);
+        const delivery = createPendingDelivery(projection, true);
+        pendingDeliveries.set(sessionId, delivery);
         try {
-          driverTransaction(
-            [
-              { type: "turn.started", sessionId, turnId },
-              {
-                type: "message",
-                sessionId,
-                turnId,
-                messageId,
-                role: "caller",
-                content: message,
-              },
-            ],
-            new Map([[sessionId, projectSession(sessionId)]]),
-            () => {
-              driver.deliver(sessionId, turnId, message);
+          await driver.deliver(sessionId, turnId, message, "new_turn");
+          bus.publish([
+            started,
+            {
+              type: "message",
+              sessionId,
+              turnId,
+              messageId,
+              role: "caller",
+              content: message,
             },
-          );
+            ...delivery.events,
+          ]);
         } catch (error) {
           throw await unexpectedFailure(options.diagnostics, error, {
             sessionId,
@@ -1015,19 +1002,64 @@ export function createSessionMachine(options: {
             reason: "upstream_error",
             message: evidence(error),
           });
+        } finally {
+          pendingDeliveries.delete(sessionId);
+          delivery.settle();
         }
         return { sessionId, turnId, messageId, deliveryPoint: "new_turn" };
       }
-      session.inbox.push({ messageId, text: message });
-      if (session.currentTurnId === null) {
-        throw new Error("Busy session is missing its current turn");
+      const turnId = parsed.output.turnId;
+      if (pendingDeliveries.get(sessionId)?.creating)
+        throw machineError({ code: "turn_not_active", sessionId, turnId });
+      const current = activeProjection(sessionId) ?? session;
+      if (current.currentTurnId !== turnId) {
+        if (
+          session.turns.some((turn) => turn.turnId === turnId) ||
+          activeProjection(sessionId)?.completedTurnIds.has(turnId)
+        )
+          throw machineError({ code: "turn_not_active", sessionId, turnId });
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
       }
-      return {
-        sessionId,
-        turnId: session.currentTurnId,
-        messageId,
-        deliveryPoint: "boundary",
-      };
+      const delivery =
+        pendingDeliveries.get(sessionId) ??
+        createPendingDelivery(projectSession(sessionId), false);
+      delivery.count += 1;
+      pendingDeliveries.set(sessionId, delivery);
+      try {
+        await driver.deliver(sessionId, turnId, message, "active_turn");
+        bus.publish({
+          type: "message",
+          sessionId,
+          turnId,
+          messageId,
+          role: "caller",
+          content: message,
+        });
+      } catch (error) {
+        throw await unexpectedFailure(options.diagnostics, error, {
+          sessionId,
+          turnId,
+          kind: "request_failure",
+          operation: "send",
+          stage: "steer",
+          reason: "upstream_error",
+          message: evidence(error),
+        });
+      } finally {
+        delivery.count -= 1;
+        if (delivery.count === 0) {
+          try {
+            bus.publish(delivery.events);
+          } finally {
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+          }
+        }
+      }
+      return { sessionId, turnId, messageId, deliveryPoint: "active_turn" };
     },
     async wait(params) {
       const parsed = v.safeParse(waitParamsSchema, params);
@@ -1189,6 +1221,8 @@ export function createSessionMachine(options: {
             try {
               // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
               await driver.terminate(id);
+              // 停止后先结算原生已接受或拒绝的消息，避免 kill 越过其事实。
+              await pendingDeliveries.get(id)?.settled;
               bus.transaction(
                 [{ type: "session.killed", sessionId: id }],
                 () => {},

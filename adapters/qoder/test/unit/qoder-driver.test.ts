@@ -802,12 +802,17 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
-  test("同一 active turn 的 deliver 保留未完成 tool state", async () => {
+  test("拒绝 active_turn 后保留未完成 tool state", async () => {
     const { events, fake, driver } = setup();
     fake.controls.push(assistantToolUseBlock("request-t1", "tc-active"));
     await flush();
 
-    driver.deliver(sessionId, firstTurnId, "补充消息");
+    await expect(
+      driver.deliver(sessionId, firstTurnId, "补充消息", "active_turn"),
+    ).rejects.toMatchObject({
+      code: "unsupported_feature",
+      feature: "active_turn",
+    });
     fake.controls.push(userToolResultBlock("result-t1", "tc-active", "ok"));
     await flush();
 
@@ -836,14 +841,19 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
-  test("同一 active turn 的 deliver 保留 pending snapshot", async () => {
+  test("拒绝 active_turn 后保留 pending snapshot", async () => {
     const { events, fake, driver } = setup();
     fake.controls.push(
       assistantText("snapshot-t1", "pending", "native-active"),
     );
     await flush();
 
-    driver.deliver(sessionId, firstTurnId, "补充消息");
+    await expect(
+      driver.deliver(sessionId, firstTurnId, "补充消息", "active_turn"),
+    ).rejects.toMatchObject({
+      code: "unsupported_feature",
+      feature: "active_turn",
+    });
     fake.controls.push(idle());
     await flush();
 
@@ -885,7 +895,7 @@ describe("qoder driver 事件映射", () => {
       [],
     );
 
-    driver.deliver(sessionId, secondTurnId, "继续");
+    await driver.deliver(sessionId, secondTurnId, "继续", "new_turn");
     fake.controls.push(
       userToolResultBlock("late-after-deliver", "tc-shared", "late"),
     );
@@ -938,7 +948,7 @@ describe("qoder driver 事件映射", () => {
     fake.controls.push(idle());
     await flush();
 
-    driver.deliver(sessionId, secondTurnId, "继续");
+    await driver.deliver(sessionId, secondTurnId, "继续", "new_turn");
     fake.controls.push(messageStart("start-t2", "native-shared"));
     fake.controls.push(textDelta("delta-t2", "two"));
     fake.controls.push(assistantText("snapshot-t2", "two", "native-shared"));
@@ -1425,4 +1435,30 @@ test("adapter refuses unavailable session scope and preserves the caller feedbac
     toolUseID: "native-tool",
   });
   expect(fake.controls.delivered()).toHaveLength(before);
+});
+
+test("QoderCN 无精确原生接受入口时 active_turn 在输入副作用前类型化拒绝", async () => {
+  const { driver, fake } = setup();
+  await flush();
+  const before = fake.controls.delivered();
+  try {
+    await expect(
+      Promise.resolve().then(() =>
+        driver.deliver(
+          sessionId,
+          firstTurnId,
+          "rejected private task",
+          "active_turn",
+        ),
+      ),
+    ).rejects.toMatchObject({
+      code: "unsupported_feature",
+      feature: "active_turn",
+    });
+    await flush();
+    expect(fake.controls.delivered()).toEqual(before);
+  } finally {
+    fake.controls.end();
+    await driver.terminate(sessionId);
+  }
 });
