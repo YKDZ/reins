@@ -103,6 +103,26 @@ function randomGeneration(
   }
 }
 
+// 耐久 generation 的持久文件只保存单调递增的状态谱系计数器；对外发布的
+// generation token 再把一次 daemon 启动的随机 boot epoch 折叠进低位。计数器
+// 保证同一谱系内跨重启与并发启动不复用；boot epoch 保证删除／回滚／替换把
+// 计数器恢复到旧值时，重新分配的 token 仍与旧标识不同，从而让旧引用失效而非
+// 冒充原命名空间连续（ADR-0023 §7、GLOSSARY 状态谱系、spec 正式控制协议段）。
+const generationEpochBits = 40n;
+
+function renderDurableGeneration(
+  counter: bigint,
+  epoch: bigint,
+): DaemonGeneration {
+  return parseGeneration(
+    ((counter << generationEpochBits) | epoch).toString(36),
+  );
+}
+
+function randomBootEpoch(randomBytes: (size: number) => Buffer): bigint {
+  return BigInt(randomBytes(5).readUIntBE(0, 5));
+}
+
 export type GenerationAllocatorLease = {
   allocate(): Promise<DaemonGeneration>;
   close(): Promise<void>;
@@ -125,22 +145,28 @@ export async function acquireGenerationAllocator(
     };
   }
 
+  // 先抽 boot epoch 再取得 lease：randomBootEpoch 可因随机源抛错，若在持锁后
+  // 才执行，则 acquire reject 而 allocator 尚未交付调用方，lease 无从 close 而
+  // 泄漏，同 state 的后续准备会被这把锁阻塞（ADR-0023 §7 启动失败须释放）。
+  const epoch = randomBootEpoch(randomBytes);
   const lease = await acquireAdvisoryFileLease(
     join(state.directory, "generation-allocator"),
     options?.lock ?? { timeoutMs: 30_000 },
   );
-  return new DurableGenerationAllocator(state.directory, lease);
+  return new DurableGenerationAllocator(state.directory, lease, epoch);
 }
 
 class DurableGenerationAllocator implements GenerationAllocatorLease {
   readonly #directory: string;
   readonly #lease: AdvisoryFileLease;
+  readonly #epoch: bigint;
   #tail: Promise<void> = Promise.resolve();
   #closed = false;
 
-  constructor(directory: string, lease: AdvisoryFileLease) {
+  constructor(directory: string, lease: AdvisoryFileLease, epoch: bigint) {
     this.#directory = directory;
     this.#lease = lease;
+    this.#epoch = epoch;
   }
 
   allocate(): Promise<DaemonGeneration> {
@@ -149,10 +175,10 @@ class DurableGenerationAllocator implements GenerationAllocatorLease {
     }
     const allocation = this.#tail.then(async () => {
       await this.#lease.assertHeld();
-      const current = await readGeneration(join(this.#directory, "generation"));
-      const next = parseGeneration((current + 1n).toString(36));
-      await persistGeneration(this.#directory, next);
-      return next;
+      const counter =
+        (await readGeneration(join(this.#directory, "generation"))) + 1n;
+      await persistGeneration(this.#directory, counter.toString(36));
+      return renderDurableGeneration(counter, this.#epoch);
     });
     this.#tail = allocation.then(
       () => undefined,
