@@ -3,8 +3,10 @@ import { open, rename, rm } from "node:fs/promises";
 import { join } from "node:path";
 
 import {
+  daemonGenerationSchema,
   makeDiagnosticId,
   sessionIdSchema,
+  type DaemonGeneration,
   type DiagnosticId,
   type SessionId,
   type SessionName,
@@ -18,12 +20,7 @@ import {
 } from "./diagnostics-store-lock.ts";
 import type { DaemonState } from "./state.ts";
 
-export const daemonGenerationSchema = v.pipe(
-  v.string(),
-  v.regex(/^[0-9a-z]+$/),
-  v.brand<string, "DaemonGeneration">("DaemonGeneration"),
-);
-export type DaemonGeneration = v.InferOutput<typeof daemonGenerationSchema>;
+export { daemonGenerationSchema, type DaemonGeneration };
 
 function parseGeneration(value: string): DaemonGeneration {
   return v.parse(daemonGenerationSchema, value);

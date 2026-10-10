@@ -1,7 +1,11 @@
 import { rm } from "node:fs/promises";
 
 import type { ProtocolMessage } from "@reins/protocol";
-import { protocolResponseSchema, requestIdSchema } from "@reins/protocol";
+import {
+  protocolResponseSchema,
+  REINS_PROTOCOL_MAJOR_VERSION,
+  requestIdSchema,
+} from "@reins/protocol";
 import {
   createInMemoryTransportServer,
   type TransportConnection,
@@ -52,7 +56,10 @@ async function waitUntilReady(
       kind: "request",
       requestId,
       method: "initialize",
-      params: {},
+      params: {
+        protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+        consumerContext: "daemon-readiness",
+      },
     });
   });
 }

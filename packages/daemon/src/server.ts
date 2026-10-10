@@ -3,10 +3,13 @@ import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
   CapabilitiesResult,
+  ConsumerContext,
   DaemonDiagnosticFact,
   DomainEvent,
   DiagnosticsParams,
   HarnessCapability,
+  InitializeParams,
+  InitializeResult,
   InterruptParams,
   KillParams,
   ListFilter,
@@ -32,6 +35,7 @@ import {
   protocolMethodSchema,
   protocolParamsSchemaFor,
   protocolRequestSchema,
+  REINS_PROTOCOL_MAJOR_VERSION,
   requestIdSchema,
 } from "@reins/protocol";
 import {
@@ -148,6 +152,11 @@ export function createProtocolServerInternal(
   const eventLog = new Map<SessionId, EventHistory>();
   const observations = new Map<SessionId, Observation>();
   const knownSessions = new Set<SessionId>();
+  // initialize 握手建立的连接级消费者绑定；连接关闭即释放。
+  const consumerBindings = new Map<
+    TransportConnection<ProtocolMessage>,
+    ConsumerContext
+  >();
   const transportFailureConnections = new WeakMap<
     TransportConnection<ProtocolMessage>,
     | { status: "pending"; queued: TransportFailureFact | undefined }
@@ -722,9 +731,31 @@ export function createProtocolServerInternal(
     connection: TransportConnection<ProtocolMessage>,
     request: ProtocolRequest,
   ): Promise<unknown> {
+    // 领域动作前必须完成握手绑定；未绑定连接一律以协议错误拒绝，
+    // 不采用全局默认或隐式改投（ADR-0033 / ADR-0037）。
+    if (request.method !== "initialize" && !consumerBindings.has(connection)) {
+      throw { code: "protocol_error" } satisfies MachineError;
+    }
     switch (request.method) {
-      case "initialize":
-        return {};
+      case "initialize": {
+        const params = request.params as InitializeParams;
+        if (params.protocolMajorVersion !== REINS_PROTOCOL_MAJOR_VERSION) {
+          throw {
+            code: "protocol_version_mismatch",
+            requestedProtocolMajorVersion: params.protocolMajorVersion,
+            supportedProtocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+          } satisfies MachineError;
+        }
+        const bound = consumerBindings.get(connection);
+        if (bound !== undefined && bound !== params.consumerContext) {
+          throw { code: "protocol_error" } satisfies MachineError;
+        }
+        consumerBindings.set(connection, params.consumerContext);
+        return {
+          protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+          daemonGeneration: options.diagnostics.generation,
+        } satisfies InitializeResult;
+      }
       case "capabilities":
         return await aggregateCapabilities();
       case "spawn":
@@ -821,6 +852,7 @@ export function createProtocolServerInternal(
   function cleanupConnection(
     connection: TransportConnection<ProtocolMessage>,
   ): void {
+    consumerBindings.delete(connection);
     for (const subscription of Array.from(attachSubscriptions)) {
       if (subscription.connection === connection) {
         attachSubscriptions.delete(subscription);

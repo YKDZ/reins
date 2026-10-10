@@ -158,6 +158,8 @@ export function exitCodeForError(error: CliError): number {
     case "usage_error":
     case "invalid_params":
     case "protocol_error":
+    case "protocol_version_mismatch":
+    case "consumer_context_required":
     case "method_not_found":
     case "unknown_harness":
       return EXIT_USAGE;

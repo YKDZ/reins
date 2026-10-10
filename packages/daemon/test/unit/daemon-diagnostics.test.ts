@@ -27,6 +27,7 @@ import {
   requestIdSchema,
   sessionNameSchema,
   turnIdSchema,
+  REINS_PROTOCOL_MAJOR_VERSION,
   type WorkerEventRejection,
 } from "@reins/protocol";
 import {
@@ -68,15 +69,49 @@ async function waitForDaemonLifecycle(
   }
 }
 
+let handshakeSeq = 0;
+
+// 领域动作前必须在同一连接完成 initialize 握手；此 helper 只服务测试装配。
+async function bindConsumer(
+  client: TransportConnection<ProtocolMessage>,
+  consumerContext = "test-consumer",
+): Promise<void> {
+  handshakeSeq += 1;
+  const requestId = v.parse(requestIdSchema, `handshake-${String(handshakeSeq)}`);
+  const response = new Promise<ProtocolResponse>((resolve) => {
+    const unsubscribe = client.onEvent((event) => {
+      if (
+        event.kind === "message" &&
+        event.message.kind === "response" &&
+        event.message.requestId === requestId
+      ) {
+        unsubscribe();
+        resolve(event.message);
+      }
+    });
+  });
+  client.send({
+    kind: "request",
+    requestId,
+    method: "initialize",
+    params: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext,
+    },
+  });
+  const settled = await response;
+  if ("error" in settled) {
+    throw new Error(`Handshake failed: ${settled.error.code}`);
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     directories
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
-});
-
-describe("daemon diagnostic error dispatch", () => {
+});describe("daemon diagnostic error dispatch", () => {
   test("malformed NDJSON produces closed secret-safe diagnostics through the real transport and store", async () => {
     const root = await mkdtemp(join(tmpdir(), "reins-daemon-safe-transport-"));
     directories.push(root);
@@ -136,6 +171,7 @@ describe("daemon diagnostic error dispatch", () => {
 
       const client = await createUnixSocketClient<ProtocolMessage>(socketPath);
       try {
+        await bindConsumer(client);
         const requestId = v.parse(requestIdSchema, "safe-query");
         const nextResponse = new Promise<ProtocolResponse>((resolve) => {
           const unsubscribe = client.onEvent((event) => {
@@ -490,6 +526,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await waitForDaemonLifecycle(runtime);
+    await bindConsumer(client);
     let requestSeq = 0;
     const request = async (method: ProtocolMethod, params: unknown) => {
       requestSeq += 1;
@@ -820,7 +857,10 @@ describe("daemon diagnostic error dispatch", () => {
     const runtime = await openDiagnosticsRuntimeForTest({
       resolveState: async () => state,
       openStore: async () =>
-        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+        await openDiagnosticsStoreForTest({
+          directory: state.diagnosticsDirectory,
+          now: () => new Date("2026-08-20T00:00:00.000Z"),
+        }),
       allocateGeneration: async () => v.parse(daemonGenerationSchema, "query"),
       now: () => new Date("2026-08-20T00:00:00.000Z"),
     });
@@ -846,6 +886,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     const request = async (requestId: string, params: unknown) => {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -929,6 +970,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -1022,6 +1064,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await waitForDaemonLifecycle(runtime);
+    await bindConsumer(client);
     rejectAppend = true;
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
@@ -1086,6 +1129,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await waitForDaemonLifecycle(runtime);
+    await bindConsumer(client);
     rejectQuery = true;
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
@@ -1176,6 +1220,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -1307,6 +1352,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -1443,7 +1489,10 @@ describe("daemon diagnostic error dispatch", () => {
         kind: "request",
         requestId: v.parse(requestIdSchema, "snapshot-ready"),
         method: "initialize",
-        params: {},
+        params: {
+          protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+          consumerContext: "test-consumer",
+        },
       });
       await ready;
       blockQueries = true;
@@ -1563,6 +1612,7 @@ describe("daemon diagnostic error dispatch", () => {
     const queryClient = transport.connect();
     const postClient = transport.connect();
     await Promise.resolve();
+    await bindConsumer(queryClient);
 
     const sendInvalid = async (
       client: TransportConnection<ProtocolMessage>,
@@ -1723,7 +1773,10 @@ describe("daemon diagnostic error dispatch", () => {
           kind: "request",
           requestId: v.parse(requestIdSchema, "transport-failure"),
           method: "initialize",
-          params: {},
+          params: {
+            protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+            consumerContext: "test-consumer",
+          },
         },
       });
       await Promise.resolve();
@@ -1746,6 +1799,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
       const client = queryTransport.connect();
       await Promise.resolve();
+      await bindConsumer(client);
       const query = async (attempt: number): Promise<ProtocolResponse> => {
         const requestId = v.parse(requestIdSchema, `query-${attempt}`);
         const response = new Promise<ProtocolResponse>((resolve) => {
@@ -2019,7 +2073,10 @@ describe("daemon diagnostic error dispatch", () => {
           kind: "request",
           requestId: v.parse(requestIdSchema, "dedup-first"),
           method: "initialize",
-          params: {},
+          params: {
+            protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+            consumerContext: "test-consumer",
+          },
         },
       });
       await rejectedTransportEntered;
@@ -2036,6 +2093,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
       const client = queryTransport.connect();
       await Promise.resolve();
+      await bindConsumer(client);
       const response = new Promise<ProtocolResponse>((resolve) => {
         const unsubscribe = client.onEvent((event) => {
           if (
@@ -2131,6 +2189,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -2179,7 +2238,10 @@ describe("daemon diagnostic error dispatch", () => {
     const runtime = await openDiagnosticsRuntimeForTest({
       resolveState: async () => state,
       openStore: async () =>
-        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+        await openDiagnosticsStoreForTest({
+          directory: state.diagnosticsDirectory,
+          now: () => now,
+        }),
       allocateGeneration: async () =>
         v.parse(daemonGenerationSchema, "filters"),
       now: () => now,
@@ -2223,6 +2285,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     let sequence = 0;
     const request = async (params: unknown): Promise<ProtocolResponse> => {
       sequence += 1;

@@ -23,6 +23,7 @@ import type {
 import {
   machineErrorSchema,
   makeDiagnosticId,
+  REINS_PROTOCOL_MAJOR_VERSION,
   sessionIdSchema,
   sessionNameSchema,
 } from "@reins/protocol";
@@ -139,8 +140,10 @@ type Requester = {
 
 function makeRequester(
   client: TransportConnection<ProtocolMessage>,
+  consumerContext = "test-consumer",
 ): Requester {
   let seq = 0;
+  let handshake: Promise<ProtocolResponse> | undefined;
   const request = (
     method: ProtocolMethod,
     params: unknown,
@@ -148,22 +151,30 @@ function makeRequester(
   ): Promise<ProtocolResponse> => {
     seq += 1;
     const requestId = `r${seq}` as RequestId;
-    return new Promise<ProtocolResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        unsubscribe();
-        reject(new Error(`请求超时: ${method}`));
-      }, timeoutMs);
-      const unsubscribe = client.onEvent((event) => {
-        if (event.kind !== "message") return;
-        const message = event.message;
-        if (message.kind === "response" && message.requestId === requestId) {
-          clearTimeout(timer);
+    const send = (): Promise<ProtocolResponse> =>
+      new Promise<ProtocolResponse>((resolve, reject) => {
+        const timer = setTimeout(() => {
           unsubscribe();
-          resolve(message);
-        }
+          reject(new Error(`请求超时: ${method}`));
+        }, timeoutMs);
+        const unsubscribe = client.onEvent((event) => {
+          if (event.kind !== "message") return;
+          const message = event.message;
+          if (message.kind === "response" && message.requestId === requestId) {
+            clearTimeout(timer);
+            unsubscribe();
+            resolve(message);
+          }
+        });
+        client.send({ kind: "request", requestId, method, params });
       });
-      client.send({ kind: "request", requestId, method, params });
+    if (method === "initialize") return send();
+    // 领域动作前自动完成一次 initialize 握手（同连接幂等）。
+    handshake ??= request("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext,
     });
+    return handshake.then(() => send());
   };
   const requester = request as Requester;
   requester.request = request;
@@ -435,12 +446,121 @@ describe("daemon 公共接口", () => {
 });
 
 describe("daemon 协议面（缝 C）", () => {
-  test("initialize 返回空结果", async () => {
+  test("initialize 握手交换协议主版本与 daemon 世代并绑定消费者", async () => {
     const { server } = startDaemon(new Map());
     const client = server.connect();
     await flush();
-    const response = await makeRequester(client).request("initialize", {});
-    expect(response).toEqual({ kind: "response", requestId: "r1", result: {} });
+    const response = await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+    });
+    expect(response).toEqual({
+      kind: "response",
+      requestId: "r1",
+      result: { protocolMajorVersion: 1, daemonGeneration: "test" },
+    });
+  });
+
+  test("协议主版本不匹配返回 protocol_version_mismatch 类型化错误", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    const response = await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 2,
+      consumerContext: "alpha",
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      requestId: "r1",
+      error: {
+        code: "protocol_version_mismatch",
+        requestedProtocolMajorVersion: 2,
+        supportedProtocolMajorVersion: 1,
+      },
+    });
+  });
+
+  test("initialize 缺少消费者上下文按参数校验拒绝，不采用默认绑定", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    const response = await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 1,
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      error: { code: "invalid_params" },
+    });
+  });
+
+  test("未绑定消费者的连接在领域动作触达领域前被拒绝", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const client = server.connect();
+    await flush();
+    const response = await sendRaw(client, {
+      kind: "request",
+      requestId: "raw1",
+      method: "spawn",
+      params: { sessionName: "reviewer", harness: "fake", message: "hello" },
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      requestId: "raw1",
+      error: { code: "protocol_error" },
+    });
+    expect(fake.calls.starts).toBe(0);
+  });
+
+  test("版本不匹配失败后连接仍未绑定，领域动作继续被拒绝", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 99,
+      consumerContext: "alpha",
+    });
+    const response = await sendRaw(client, {
+      kind: "request",
+      requestId: "raw1",
+      method: "list",
+      params: {},
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      requestId: "raw1",
+      error: { code: "protocol_error" },
+    });
+  });
+
+  test("重复握手更换消费者被拒绝，同消费者握手幂等", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    await requester.request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+    });
+    const conflicting = await requester.request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "beta",
+    });
+    expect(conflicting).toMatchObject({
+      kind: "response",
+      error: { code: "protocol_error" },
+    });
+    const idempotent = await requester.request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+    });
+    expect(idempotent).toMatchObject({
+      kind: "response",
+      result: { protocolMajorVersion: 1, daemonGeneration: "test" },
+    });
   });
 
   test("spawn 返回 sessionId，attach 回放历史事件并在 exitOn 命中时结束", async () => {
@@ -924,7 +1044,7 @@ describe("daemon 协议面（缝 C）", () => {
       if (event.kind !== "message") return;
       if (
         event.message.kind === "response" &&
-        event.message.requestId === "r2"
+        event.message.requestId === "r3"
       ) {
         order.push("response");
       }
@@ -1901,10 +2021,16 @@ describe("daemon 空闲退出", () => {
     });
     const startup = daemon.start();
     const client = server.connect();
-    const response = makeRequester(client).request("spawn", {
-      sessionName: "queued-start",
-      harness: "fake",
-      message: "must not start",
+    // 故意在握手缺席时排队 spawn：验证启动失败路径不会放行领域动作。
+    const response = sendRaw(client, {
+      kind: "request",
+      requestId: "raw1",
+      method: "spawn",
+      params: {
+        sessionName: "queued-start",
+        harness: "fake",
+        message: "must not start",
+      },
     });
 
     await expect(startup).rejects.toThrow(
@@ -1912,6 +2038,7 @@ describe("daemon 空闲退出", () => {
     );
     await daemon.stop();
     await expect(response).resolves.toMatchObject({
+      requestId: "raw1",
       error: { code: "daemon_shutting_down" },
     });
     expect(fake.calls.starts).toBe(0);
