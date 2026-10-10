@@ -166,7 +166,15 @@ function makeRequester(
             resolve(message);
           }
         });
-        client.send({ kind: "request", requestId, method, params });
+        client.send({
+          kind: "request",
+          requestId,
+          method,
+          params:
+            method === "spawn" && typeof params === "object" && params !== null
+              ? { cwd: "/tmp", ...params }
+              : params,
+        });
       });
     if (method === "initialize") return send();
     // 领域动作前自动完成一次 initialize 握手（同连接幂等）。
@@ -404,6 +412,7 @@ describe("daemon 公共接口", () => {
       resolvePermission: unsupported,
       kill: unsupported,
       list: () => [],
+      assertTurnTarget() {},
       subscribe: () => () => undefined,
     };
     let replayHookCalls = 0;
@@ -505,7 +514,12 @@ describe("daemon 协议面（缝 C）", () => {
       kind: "request",
       requestId: "raw1",
       method: "spawn",
-      params: { sessionName: "reviewer", harness: "fake", message: "hello" },
+      params: {
+        sessionName: "reviewer",
+        harness: "fake",
+        message: "hello",
+        cwd: "/tmp",
+      },
     });
     expect(response).toMatchObject({
       kind: "response",

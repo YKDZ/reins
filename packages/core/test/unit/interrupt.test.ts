@@ -24,7 +24,7 @@ describe("interrupt", () => {
         },
       },
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("interrupt-failure"),
       harness: "codex",
       message: "work",
@@ -54,7 +54,7 @@ describe("interrupt", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-4"),
       harness: "codex",
       message: "重构",
@@ -83,7 +83,7 @@ describe("interrupt", () => {
         sessionId: id,
         state: "idle",
         turns: 1,
-        lastStopReason: "cancelled",
+        lastCompletedTurn: expect.objectContaining({ stopReason: "cancelled" }),
       }),
     );
   });
@@ -95,7 +95,7 @@ describe("interrupt", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-5"),
       harness: "codex",
       message: "收尾",
@@ -123,7 +123,7 @@ describe("interrupt", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-6"),
       harness: "dsh",
       message: "临时",

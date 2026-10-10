@@ -18,7 +18,7 @@ describe("wait", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-22"),
       harness: "codex",
       message: "跑很久的任务",
@@ -41,13 +41,13 @@ describe("wait", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const a = await machine.spawn({
+    const { sessionId: a } = await machine.spawn({
       sessionName: ids.sessionName("fixture-23"),
       harness: "codex",
       message: "甲",
       cwd: "/tmp/demo",
     });
-    const b = await machine.spawn({
+    const { sessionId: b } = await machine.spawn({
       sessionName: ids.sessionName("fixture-24"),
       harness: "qoder",
       message: "乙",
@@ -90,7 +90,7 @@ describe("wait", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-25"),
       harness: "dsh",
       message: "临时任务",

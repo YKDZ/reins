@@ -7,7 +7,7 @@ import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testDiagnostics, testIdentity } from "./ids.ts";
 
 async function spawnBusy(machine: ReturnType<typeof createSessionMachine>) {
-  const id = await machine.spawn({
+  const { sessionId: id } = await machine.spawn({
     sessionName: ids.sessionName("fixture-7"),
     harness: "codex",
     message: "分析",
@@ -82,7 +82,7 @@ describe("回合生命周期", () => {
         sessionId: id,
         state: "idle",
         turns: 1,
-        lastStopReason: "end_turn",
+        lastCompletedTurn: expect.objectContaining({ stopReason: "end_turn" }),
       }),
     ]);
   });
