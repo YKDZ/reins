@@ -3,6 +3,7 @@ import type {
   WorkerDriver,
   AdapterDriverFactory,
   WorkerSpec,
+  MachineError,
 } from "@reins/protocol";
 import { makeTextEvidence } from "@reins/protocol";
 
@@ -128,6 +129,19 @@ export function createQoderDriver(deps: {
 
     const driver: WorkerDriver = {
       start(spec: WorkerSpec) {
+        const unsupported =
+          spec.agent !== undefined
+            ? "agent"
+            : spec.reasoning !== undefined
+              ? "reasoning"
+              : spec.sandbox !== undefined
+                ? "sandbox"
+                : undefined;
+        if (unsupported !== undefined)
+          throw {
+            code: "unsupported_feature",
+            feature: unsupported,
+          } satisfies MachineError;
         terminating = false;
         session = new HarnessSession<PendingEntry>({
           sessionId: spec.sessionId,
@@ -141,21 +155,6 @@ export function createQoderDriver(deps: {
         session.beginTurn(spec.turnId);
         abortController = new AbortController();
         stream = createAsyncQueue<SDKUserMessage>();
-        const unsupportedFields = [
-          ...(spec.agent === undefined ? [] : (["agent"] as const)),
-          ...(spec.reasoning === undefined ? [] : (["reasoning"] as const)),
-          ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
-        ];
-        const [firstUnsupportedField, ...otherUnsupportedFields] =
-          unsupportedFields;
-        if (firstUnsupportedField !== undefined) {
-          void session.diagnostic({
-            kind: "mapping_gap",
-            operation: "spawn",
-            reason: "unsupported_input",
-            fields: [firstUnsupportedField, ...otherUnsupportedFields],
-          });
-        }
         const options: QoderOptions = {
           cwd: spec.cwd,
           persistSession: false,
@@ -220,7 +219,7 @@ export function createQoderDriver(deps: {
         });
       },
       resolvePermission(sessionId, permissionId, resolution) {
-        const entry = session?.takePending(permissionId);
+        const entry = session?.takePending(permissionId, resolution);
         if (entry === undefined) {
           if (session !== null) {
             void session.diagnostic({
@@ -231,7 +230,11 @@ export function createQoderDriver(deps: {
               permissionId,
             });
           }
-          return;
+          throw {
+            code: "permission_not_pending",
+            sessionId,
+            permissionId,
+          } satisfies MachineError;
         }
         if (resolution.outcome === "allow") {
           const sessionRules =

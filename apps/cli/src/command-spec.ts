@@ -92,13 +92,6 @@ export type CommandConstraint =
       readonly since: string;
       readonly until: string;
       readonly hint: string;
-    }
-  | {
-      readonly type: "forbiddenModeValue";
-      readonly mode: OutputMode;
-      readonly field: string;
-      readonly value: string;
-      readonly hint: string;
     };
 
 export const ROOT_USAGE = "[options] <command>";
@@ -188,12 +181,6 @@ const commandSpecData = [
         flags: "--capture-harness-stderr",
         description: "capture harness stderr as diagnostics",
         kind: { type: "boolean" },
-      },
-      {
-        name: "meta",
-        flags: "--meta <json>",
-        description: "arbitrary JSON metadata",
-        kind: { type: "jsonObject", hint: "Expected a JSON object" },
       },
     ],
   }),
@@ -332,96 +319,6 @@ const commandSpecData = [
         variadic: true,
         description: "stop reasons to exit on",
         kind: { type: "enum", values: STOP_REASONS },
-      },
-    ],
-  }),
-  defineCommand({
-    name: "run",
-    description:
-      "Run a worker session to completion and return the final result (agent-facing one-shot; use attach for live transcript)",
-    args: [
-      {
-        name: "harness",
-        description: "harness id from capabilities",
-        kind: {
-          type: "dynamic",
-          source: "harness",
-          hint: "Run 'reins capabilities' to list valid harnesses",
-        },
-      },
-      {
-        name: "message",
-        variadic: true,
-        description: "initial message",
-        kind: { type: "text" },
-      },
-    ],
-    options: [
-      {
-        name: "agent",
-        flags: "--agent <name>",
-        description: "agent profile name",
-        kind: { type: "text" },
-      },
-      {
-        name: "model",
-        flags: "--model <id>",
-        description: "model id from capabilities",
-        kind: {
-          type: "dynamic",
-          source: "model",
-          hint: "Run 'reins capabilities' to list valid models",
-        },
-      },
-      {
-        name: "reasoning",
-        flags: "--reasoning <effort>",
-        description: "reasoning effort supported by the model",
-        kind: {
-          type: "dynamic",
-          source: "reasoning",
-          hint: "Run 'reins capabilities' to list valid reasoning efforts",
-        },
-      },
-      {
-        name: "cwd",
-        flags: "--cwd <path>",
-        description: "working directory",
-        kind: { type: "text" },
-      },
-      {
-        name: "authorizationMode",
-        flags: "--authorization-mode <mode>",
-        description: "interactive | allow-all",
-        kind: { type: "enum", values: ["interactive", "allow-all"] },
-      },
-      {
-        name: "sandbox",
-        flags: "--sandbox <value>",
-        description: "harness-specific sandbox configuration",
-        kind: { type: "text" },
-      },
-      {
-        name: "name",
-        flags: "--name <session-name>",
-        required: true,
-        description: sessionNameHint,
-        kind: { type: "sessionName", hint: sessionNameHint },
-      },
-      {
-        name: "captureHarnessStderr",
-        flags: "--capture-harness-stderr",
-        description: "capture harness stderr as diagnostics",
-        kind: { type: "boolean" },
-      },
-    ],
-    constraints: [
-      {
-        type: "forbiddenModeValue",
-        mode: "json",
-        field: "authorizationMode",
-        value: "interactive",
-        hint: "Use --pretty, or use spawn + attach + resolve-permission",
       },
     ],
   }),
@@ -729,7 +626,6 @@ export function validateCommand(
   spec: CommandSpec,
   args: readonly unknown[],
   options: Record<string, unknown>,
-  mode?: OutputMode,
 ): void {
   spec.args.forEach((arg, index) => {
     const value = args[index];
@@ -782,17 +678,6 @@ export function validateCommand(
             hint: constraint.hint,
           });
         break;
-      case "forbiddenModeValue":
-        if (
-          mode === constraint.mode &&
-          options[constraint.field] === constraint.value
-        )
-          throw usageError({
-            issue: "invalid_combination",
-            field: flagFor(spec, constraint.field),
-            hint: constraint.hint,
-          });
-        break;
       default:
         assertNever(constraint);
     }
@@ -817,7 +702,7 @@ export function parseCommandInvocation(
         : provided;
     if (value !== undefined) materializedOptions[option.name] = value;
   }
-  validateCommand(spec, args, materializedOptions, mode);
+  validateCommand(spec, args, materializedOptions);
   const parsedArgs = spec.args.map((arg, index) =>
     parseFieldValue(arg.kind, args[index], "variadic" in arg && arg.variadic),
   );
@@ -904,13 +789,6 @@ function invocationFromParsed(
         command: "attach",
         args: typedArgs<"attach">(),
         options: typedOptions<"attach">(),
-        mode,
-      };
-    case "run":
-      return {
-        command: "run",
-        args: typedArgs<"run">(),
-        options: typedOptions<"run">(),
         mode,
       };
     case "diagnostics":

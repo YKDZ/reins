@@ -5,10 +5,13 @@ import type {
   MessageId,
   PermissionId,
   PermissionOption,
+  PermissionResolution,
+  MachineError,
   SessionId,
   ToolCallId,
   TurnId,
 } from "@reins/protocol";
+import { isPermissionResolutionAllowed } from "@reins/protocol";
 
 import { noopDiagnosticSink, type DiagnosticSink } from "./diagnostic.ts";
 
@@ -59,7 +62,10 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
   private readonly onClearPending:
     | ((attachments: TAttachment[]) => void)
     | undefined;
-  private readonly pending = new Map<string, { attachment: TAttachment }>();
+  private readonly pending = new Map<
+    string,
+    { attachment: TAttachment; options: PermissionOption[] }
+  >();
   private permissionSeq = 0;
   private messageSeq = 0;
   private toolCallSeq = 0;
@@ -115,7 +121,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
   ): PermissionId {
     this.permissionSeq += 1;
     const permissionId = `p${this.permissionSeq}` as PermissionId;
-    this.pending.set(permissionId, { attachment });
+    this.pending.set(permissionId, { attachment, options });
     this.emit({
       type: "permission.requested",
       sessionId: this.sessionId,
@@ -128,9 +134,22 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     return permissionId;
   }
 
-  takePending(permissionId: PermissionId): TAttachment | undefined {
+  takePending(
+    permissionId: PermissionId,
+    resolution?: PermissionResolution,
+  ): TAttachment | undefined {
     const entry = this.pending.get(permissionId);
     if (entry === undefined) return undefined;
+    if (
+      resolution !== undefined &&
+      !isPermissionResolutionAllowed(entry.options, resolution)
+    ) {
+      throw {
+        code: "permission_resolution_mismatch",
+        sessionId: this.sessionId,
+        permissionId,
+      } satisfies MachineError;
+    }
     this.pending.delete(permissionId);
     return entry.attachment;
   }

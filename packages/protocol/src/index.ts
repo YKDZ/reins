@@ -267,6 +267,14 @@ export function permissionResolutionSchemaFor(
   );
 }
 
+export function isPermissionResolutionAllowed(
+  options: readonly PermissionOption[],
+  resolution: PermissionResolution,
+): boolean {
+  return v.safeParse(permissionResolutionSchemaFor(options), resolution)
+    .success;
+}
+
 // —— 七动作的参数与结果 ——
 
 export const spawnParamsSchema = v.strictObject({
@@ -291,7 +299,6 @@ export const spawnParamsSchema = v.strictObject({
   authorizationMode: v.optional(authorizationModeSchema),
   sandbox: v.optional(v.string()),
   captureHarnessStderr: v.optional(v.boolean()),
-  meta: v.optional(v.record(v.string(), v.unknown())),
 });
 export type SpawnParams = v.InferOutput<typeof spawnParamsSchema>;
 export const spawnAckSchema = v.strictObject({
