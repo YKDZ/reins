@@ -82,6 +82,11 @@ class ControlledClient implements ReinsClient {
     | ((response: ProtocolResponseFor<"attach">) => void)
     | undefined;
 
+  // attach 层接到的是已握手的连接，握手不在本用例边界内。
+  initialize(): never {
+    throw new Error("attach does not drive the handshake");
+  }
+
   request<M extends ProtocolMethod>(
     method: M,
     params: ProtocolParams<M>,

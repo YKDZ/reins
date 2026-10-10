@@ -44,6 +44,34 @@ export type ToolCallId = v.InferOutput<typeof toolCallIdSchema>;
 export const requestIdSchema = identifier("RequestId", /^[a-z0-9][a-z0-9-]*$/);
 export type RequestId = v.InferOutput<typeof requestIdSchema>;
 
+// —— 握手：协议主版本、daemon 世代与消费者绑定 ——
+
+export const REINS_PROTOCOL_MAJOR_VERSION = 1;
+
+// 主版本是兼容性边界；不匹配必须以 protocol_version_mismatch 类型化呈现，
+// 不能被字面量 schema 伪装成参数校验失败（ADR-0033）。
+export const protocolMajorVersionSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(1),
+);
+
+export const daemonGenerationSchema = identifier(
+  "DaemonGeneration",
+  /^[a-z0-9]+$/,
+);
+export type DaemonGeneration = v.InferOutput<typeof daemonGenerationSchema>;
+
+// 消费者上下文是 initialize 必填的内部路由事实；
+// 不作为 agent 参数、成功输出或第四类句柄（ADR-0037）。
+export const consumerContextSchema = v.pipe(
+  v.string(),
+  v.maxLength(64),
+  v.regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  v.brand<string, "ConsumerContext">("ConsumerContext"),
+);
+export type ConsumerContext = v.InferOutput<typeof consumerContextSchema>;
+
 const checksumAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
 const damm36Packed =
   "AAIDAQQGBwUICgsJDA4PDRASExEUFhcVGBobGRweHx0gIiMhAgABAwYEBQcKCAkLDgwNDxIQERMWFBUXGhgZGx4cHR8iICEjAwEAAgcFBAYLCQgKDw0MDhMREBIXFRQWGxkYGh8dHB4jISAiAQMCAAUHBgQJCwoIDQ8ODBETEhAVFxYUGRsaGB0fHhwhIyIgICIjIQACAwEEBgcFCAoLCQwODw0QEhMRFBYXFRgaGxkcHh8dIiAhIwIAAQMGBAUHCggJCw4MDQ8SEBETFhQVFxoYGRseHB0fIyEgIgMBAAIHBQQGCwkICg8NDA4TERASFxUUFhsZGBofHRweISMiIAEDAgAFBwYECQsKCA0PDgwRExIQFRcWFBkbGhgdHx4cHB4fHSAiIyEAAgMBBAYHBQgKCwkMDg8NEBITERQWFxUYGhsZHhwdHyIgISMCAAEDBgQFBwoICQsODA0PEhARExYUFRcaGBkbHx0cHiMhICIDAQACBwUEBgsJCAoPDQwOExEQEhcVFBYbGRgaHR8eHCEjIiABAwIABQcGBAkLCggNDw4MERMSEBUXFhQZGxoYGBobGRweHx0gIiMhAAIDAQQGBwUICgsJDA4PDRASExEUFhcVGhgZGx4cHR8iICEjAgABAwYEBQcKCAkLDgwNDxIQERMWFBUXGxkYGh8dHB4jISAiAwEAAgcFBAYLCQgKDw0MDhMREBIXFRQWGRsaGB0fHhwhIyIgAQMCAAUHBgQJCwoIDQ8ODBETEhAVFxYUFBYXFRgaGxkcHh8dICIjIQACAwEEBgcFCAoLCQwODw0QEhMRFhQVFxoYGRseHB0fIiAhIwIAAQMGBAUHCggJCw4MDQ8SEBETFxUUFhsZGBofHRweIyEgIgMBAAIHBQQGCwkICg8NDA4TERASFRcWFBkbGhgdHx4cISMiIAEDAgAFBwYECQsKCA0PDgwRExIQEBITERQWFxUYGhsZHB4fHSAiIyEAAgMBBAYHBQgKCwkMDg8NEhARExYUFRcaGBkbHhwdHyIgISMCAAEDBgQFBwoICQsODA0PExEQEhcVFBYbGRgaHx0cHiMhICIDAQACBwUEBgsJCAoPDQwOERMSEBUXFhQZGxoYHR8eHCEjIiABAwIABQcGBAkLCggNDw4MDA4PDRASExEUFhcVGBobGRweHx0gIiMhAAIDAQQGBwUICgsJDgwNDxIQERMWFBUXGhgZGx4cHR8iICEjAgABAwYEBQcKCAkLDw0MDhMREBIXFRQWGxkYGh8dHB4jISAiAwEAAgcFBAYLCQgKDQ8ODBETEhAVFxYUGRsaGB0fHhwhIyIgAQMCAAUHBgQJCwoICAoLCQwODw0QEhMRFBYXFRgaGxkcHh8dICIjIQACAwEEBgcFCggJCw4MDQ8SEBETFhQVFxoYGRseHB0fIiAhIwIAAQMGBAUHCwkICg8NDA4TERASFxUUFhsZGBofHRweIyEgIgMBAAIHBQQGCQsKCA0PDgwRExIQFRcWFBkbGhgdHx4cISMiIAEDAgAFBwYEBAYHBQgKCwkMDg8NEBITERQWFxUYGhsZHB4fHSAiIyEAAgMBBgQFBwoICQsODA0PEhARExYUFRcaGBkbHhwdHyIgISMCAAEDBwUEBgsJCAoPDQwOExEQEhcVFBYbGRgaHx0cHiMhICIDAQACBQcGBAkLCggNDw4MERMSEBUXFhQZGxoYHR8eHCEjIiABAwIA";
@@ -1819,6 +1847,8 @@ export const errorCodeSchema = v.union([
   v.literal("diagnostics_unavailable"),
   v.literal("diagnostics_store_corrupt"),
   v.literal("session_name_conflict"),
+  v.literal("protocol_version_mismatch"),
+  v.literal("consumer_context_required"),
   v.literal("daemon_timeout"),
   v.literal("invalid_daemon_response"),
   v.literal("daemon_start_failed"),
@@ -1943,6 +1973,12 @@ export const machineErrorSchema = v.union([
     issues: v.tupleWithRest([invalidParamIssueSchema], invalidParamIssueSchema),
   }),
   v.strictObject({ code: v.literal("protocol_error") }),
+  v.strictObject({
+    code: v.literal("protocol_version_mismatch"),
+    requestedProtocolMajorVersion: v.pipe(v.number(), v.integer()),
+    supportedProtocolMajorVersion: v.pipe(v.number(), v.integer()),
+  }),
+  v.strictObject({ code: v.literal("consumer_context_required") }),
   v.strictObject({
     code: v.literal("unsupported_feature"),
     feature: v.pipe(v.string(), v.minLength(1)),
@@ -2132,8 +2168,17 @@ export const protocolMessageSchema = v.union([
 ]);
 export type ProtocolMessage = v.InferOutput<typeof protocolMessageSchema>;
 
-export const initializeParamsSchema = v.strictObject({});
-export const initializeResultSchema = v.strictObject({});
+export const initializeParamsSchema = v.strictObject({
+  protocolMajorVersion: protocolMajorVersionSchema,
+  consumerContext: consumerContextSchema,
+});
+export type InitializeParams = v.InferOutput<typeof initializeParamsSchema>;
+
+export const initializeResultSchema = v.strictObject({
+  protocolMajorVersion: protocolMajorVersionSchema,
+  daemonGeneration: daemonGenerationSchema,
+});
+export type InitializeResult = v.InferOutput<typeof initializeResultSchema>;
 
 export const attachResultSchema = v.strictObject({
   sessionId: sessionIdSchema,

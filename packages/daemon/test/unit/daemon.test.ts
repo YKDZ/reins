@@ -23,6 +23,7 @@ import type {
 import {
   machineErrorSchema,
   makeDiagnosticId,
+  REINS_PROTOCOL_MAJOR_VERSION,
   sessionIdSchema,
   sessionNameSchema,
 } from "@reins/protocol";
@@ -139,8 +140,10 @@ type Requester = {
 
 function makeRequester(
   client: TransportConnection<ProtocolMessage>,
+  consumerContext = "test-consumer",
 ): Requester {
   let seq = 0;
+  let handshake: Promise<ProtocolResponse> | undefined;
   const request = (
     method: ProtocolMethod,
     params: unknown,
@@ -148,22 +151,30 @@ function makeRequester(
   ): Promise<ProtocolResponse> => {
     seq += 1;
     const requestId = `r${seq}` as RequestId;
-    return new Promise<ProtocolResponse>((resolve, reject) => {
-      const timer = setTimeout(() => {
-        unsubscribe();
-        reject(new Error(`请求超时: ${method}`));
-      }, timeoutMs);
-      const unsubscribe = client.onEvent((event) => {
-        if (event.kind !== "message") return;
-        const message = event.message;
-        if (message.kind === "response" && message.requestId === requestId) {
-          clearTimeout(timer);
+    const send = (): Promise<ProtocolResponse> =>
+      new Promise<ProtocolResponse>((resolve, reject) => {
+        const timer = setTimeout(() => {
           unsubscribe();
-          resolve(message);
-        }
+          reject(new Error(`请求超时: ${method}`));
+        }, timeoutMs);
+        const unsubscribe = client.onEvent((event) => {
+          if (event.kind !== "message") return;
+          const message = event.message;
+          if (message.kind === "response" && message.requestId === requestId) {
+            clearTimeout(timer);
+            unsubscribe();
+            resolve(message);
+          }
+        });
+        client.send({ kind: "request", requestId, method, params });
       });
-      client.send({ kind: "request", requestId, method, params });
+    if (method === "initialize") return send();
+    // 领域动作前自动完成一次 initialize 握手（同连接幂等）。
+    handshake ??= request("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext,
     });
+    return handshake.then(() => send());
   };
   const requester = request as Requester;
   requester.request = request;
@@ -435,12 +446,121 @@ describe("daemon 公共接口", () => {
 });
 
 describe("daemon 协议面（缝 C）", () => {
-  test("initialize 返回空结果", async () => {
+  test("initialize 握手交换协议主版本与 daemon 世代并绑定消费者", async () => {
     const { server } = startDaemon(new Map());
     const client = server.connect();
     await flush();
-    const response = await makeRequester(client).request("initialize", {});
-    expect(response).toEqual({ kind: "response", requestId: "r1", result: {} });
+    const response = await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+    });
+    expect(response).toEqual({
+      kind: "response",
+      requestId: "r1",
+      result: { protocolMajorVersion: 1, daemonGeneration: "test" },
+    });
+  });
+
+  test("协议主版本不匹配返回 protocol_version_mismatch 类型化错误", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    const response = await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 2,
+      consumerContext: "alpha",
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      requestId: "r1",
+      error: {
+        code: "protocol_version_mismatch",
+        requestedProtocolMajorVersion: 2,
+        supportedProtocolMajorVersion: 1,
+      },
+    });
+  });
+
+  test("initialize 缺少消费者上下文按参数校验拒绝，不采用默认绑定", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    const response = await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 1,
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      error: { code: "invalid_params" },
+    });
+  });
+
+  test("未绑定消费者的连接在领域动作触达领域前被拒绝", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const client = server.connect();
+    await flush();
+    const response = await sendRaw(client, {
+      kind: "request",
+      requestId: "raw1",
+      method: "spawn",
+      params: { sessionName: "reviewer", harness: "fake", message: "hello" },
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      requestId: "raw1",
+      error: { code: "protocol_error" },
+    });
+    expect(fake.calls.starts).toBe(0);
+  });
+
+  test("版本不匹配失败后连接仍未绑定，领域动作继续被拒绝", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    await makeRequester(client).request("initialize", {
+      protocolMajorVersion: 99,
+      consumerContext: "alpha",
+    });
+    const response = await sendRaw(client, {
+      kind: "request",
+      requestId: "raw1",
+      method: "list",
+      params: {},
+    });
+    expect(response).toMatchObject({
+      kind: "response",
+      requestId: "raw1",
+      error: { code: "protocol_error" },
+    });
+  });
+
+  test("重复握手更换消费者被拒绝，同消费者握手幂等", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    await requester.request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+    });
+    const conflicting = await requester.request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "beta",
+    });
+    expect(conflicting).toMatchObject({
+      kind: "response",
+      error: { code: "protocol_error" },
+    });
+    const idempotent = await requester.request("initialize", {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+    });
+    expect(idempotent).toMatchObject({
+      kind: "response",
+      result: { protocolMajorVersion: 1, daemonGeneration: "test" },
+    });
   });
 
   test("spawn 返回 sessionId，attach 回放历史事件并在 exitOn 命中时结束", async () => {
@@ -924,7 +1044,7 @@ describe("daemon 协议面（缝 C）", () => {
       if (event.kind !== "message") return;
       if (
         event.message.kind === "response" &&
-        event.message.requestId === "r2"
+        event.message.requestId === "r3"
       ) {
         order.push("response");
       }
@@ -1650,7 +1770,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
   });
 
-  test("路由 driver 按 harness 懒实例化并复用", async () => {
+  test("路由 driver 按会话实例化所选 harness", async () => {
     const fakeA = createFakeHarness({
       harness: "a",
       capability: emptyCapability("a"),
@@ -1683,7 +1803,7 @@ describe("daemon 协议面（缝 C）", () => {
       harness: "b",
       message: "3",
     });
-    expect(fakeA.calls.factoryCalls).toBe(1);
+    expect(fakeA.calls.factoryCalls).toBe(2);
     expect(fakeA.calls.starts).toBe(2);
     expect(fakeB.calls.factoryCalls).toBe(1);
     expect(fakeB.calls.starts).toBe(1);
@@ -1901,10 +2021,16 @@ describe("daemon 空闲退出", () => {
     });
     const startup = daemon.start();
     const client = server.connect();
-    const response = makeRequester(client).request("spawn", {
-      sessionName: "queued-start",
-      harness: "fake",
-      message: "must not start",
+    // 故意在握手缺席时排队 spawn：验证启动失败路径不会放行领域动作。
+    const response = sendRaw(client, {
+      kind: "request",
+      requestId: "raw1",
+      method: "spawn",
+      params: {
+        sessionName: "queued-start",
+        harness: "fake",
+        message: "must not start",
+      },
     });
 
     await expect(startup).rejects.toThrow(
@@ -1912,6 +2038,7 @@ describe("daemon 空闲退出", () => {
     );
     await daemon.stop();
     await expect(response).resolves.toMatchObject({
+      requestId: "raw1",
       error: { code: "daemon_shutting_down" },
     });
     expect(fake.calls.starts).toBe(0);
@@ -2052,5 +2179,147 @@ describe("daemon 空闲退出", () => {
     await lifetime;
     expect(attempts).toBe(2);
     expect(events.at(-1)).toMatchObject({ type: "session.killed" });
+  });
+});
+
+describe("daemon 消费者范围（01 票第 2 项）", () => {
+  test("异消费者的句柄动作与查询把他人会话按不存在呈现", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const alphaClient = server.connect();
+    const betaClient = server.connect();
+    await flush();
+    const alpha = makeRequester(alphaClient, "alpha");
+    const beta = makeRequester(betaClient, "beta");
+
+    const spawned = await alpha("spawn", {
+      sessionName: "owned-by-alpha",
+      harness: "fake",
+      message: "hello",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
+    fake.controls.completeTurn();
+
+    expect(resultOf(await alpha("list", {}))).toHaveLength(1);
+
+    const sent = await beta("send", { sessionId, message: "侵入" });
+    expect(sent).toMatchObject({ error: { code: "session_not_found" } });
+    expect(fake.calls.delivered).toEqual([]);
+
+    const waited = await beta("wait", { ids: [sessionId], timeoutMs: 1000 });
+    expect(waited).toMatchObject({ error: { code: "session_not_found" } });
+
+    const interrupted = await beta("interrupt", { ids: [sessionId] });
+    expect(interrupted).toMatchObject({ error: { code: "session_not_found" } });
+    expect(fake.calls.interrupted).toEqual([]);
+
+    const attached = await beta("attach", { sessionId });
+    expect(attached).toMatchObject({ error: { code: "session_not_found" } });
+
+    const killed = await beta("kill", { ids: [sessionId] });
+    expect(resultOf(killed)).toEqual([{ sessionId, status: "not_found" }]);
+    expect(fake.calls.terminated).toEqual([]);
+
+    expect(resultOf(await beta("list", {}))).toEqual([]);
+
+    const alphaKilled = await alpha("kill", { ids: [sessionId] });
+    expect(resultOf(alphaKilled)).toEqual([{ sessionId, status: "killed" }]);
+  });
+
+  test("同一消费者绑定跨短连接保持范围", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const firstAlpha = server.connect();
+    await flush();
+    const sessionId = (
+      resultOf(
+        await makeRequester(firstAlpha, "alpha")("spawn", {
+          sessionName: "short-lived",
+          harness: "fake",
+          message: "hello",
+        }),
+      ) as { sessionId: string }
+    ).sessionId;
+    fake.controls.completeTurn();
+    firstAlpha.close();
+    await flush();
+
+    const secondAlpha = makeRequester(server.connect(), "alpha");
+    await flush();
+    const listed = await secondAlpha("list", {});
+    expect(
+      (resultOf(listed) as Array<{ sessionId: string }>).map(
+        (session) => session.sessionId,
+      ),
+    ).toContain(sessionId);
+    const sent = await secondAlpha("send", {
+      sessionId,
+      message: "同绑定续用",
+    });
+    expect(resultOf(sent)).toMatchObject({ deliveryPoint: "new_turn" });
+
+    const intruder = makeRequester(server.connect(), "beta");
+    await flush();
+    expect(resultOf(await intruder("list", {}))).toEqual([]);
+    expect(
+      await intruder("send", { sessionId, message: "越域" }),
+    ).toMatchObject({ error: { code: "session_not_found" } });
+  });
+
+  test("挂起权限只能由会话归属消费者决议", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+      autoPermission: {
+        options: [
+          { outcome: "allow", scope: "once" },
+          { outcome: "deny", feedback: false },
+        ],
+      },
+    });
+    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const alphaClient = server.connect();
+    await flush();
+    const alpha = makeRequester(alphaClient, "alpha");
+    const collector = collectNotifications(alphaClient);
+    const spawned = await alpha("spawn", {
+      sessionName: "guarded",
+      harness: "fake",
+      message: "hello",
+    });
+    const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
+    await alpha("attach", { sessionId });
+    const permissionEvent = collector.events.find(
+      (event) => event.type === "permission.requested",
+    );
+    expect(permissionEvent).toBeDefined();
+    const permissionId = (
+      permissionEvent as Extract<DomainEvent, { type: "permission.requested" }>
+    ).permissionId;
+
+    const beta = makeRequester(server.connect(), "beta");
+    await flush();
+    await expect(
+      beta("resolvePermission", {
+        sessionId,
+        permissionId,
+        resolution: { outcome: "allow", scope: "once" },
+      }),
+    ).resolves.toMatchObject({ error: { code: "session_not_found" } });
+    expect(fake.calls.resolved).toEqual([]);
+
+    const resolved = await alpha("resolvePermission", {
+      sessionId,
+      permissionId,
+      resolution: { outcome: "allow", scope: "once" },
+    });
+    expect(resultOf(resolved)).toMatchObject({ sessionId, permissionId });
+    expect(fake.calls.resolved).toEqual([{ outcome: "allow", scope: "once" }]);
   });
 });

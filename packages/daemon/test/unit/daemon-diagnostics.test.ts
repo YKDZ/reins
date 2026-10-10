@@ -25,8 +25,10 @@ import {
   makeDiagnosticId,
   diagnosticIdSchema,
   requestIdSchema,
+  sessionIdSchema,
   sessionNameSchema,
   turnIdSchema,
+  REINS_PROTOCOL_MAJOR_VERSION,
   type WorkerEventRejection,
 } from "@reins/protocol";
 import {
@@ -68,6 +70,45 @@ async function waitForDaemonLifecycle(
   }
 }
 
+let handshakeSeq = 0;
+
+// 领域动作前必须在同一连接完成 initialize 握手；此 helper 只服务测试装配。
+async function bindConsumer(
+  client: TransportConnection<ProtocolMessage>,
+  consumerContext = "test-consumer",
+): Promise<void> {
+  handshakeSeq += 1;
+  const requestId = v.parse(
+    requestIdSchema,
+    `handshake-${String(handshakeSeq)}`,
+  );
+  const response = new Promise<ProtocolResponse>((resolve) => {
+    const unsubscribe = client.onEvent((event) => {
+      if (
+        event.kind === "message" &&
+        event.message.kind === "response" &&
+        event.message.requestId === requestId
+      ) {
+        unsubscribe();
+        resolve(event.message);
+      }
+    });
+  });
+  client.send({
+    kind: "request",
+    requestId,
+    method: "initialize",
+    params: {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext,
+    },
+  });
+  const settled = await response;
+  if ("error" in settled) {
+    throw new Error(`Handshake failed: ${settled.error.code}`);
+  }
+}
+
 afterEach(async () => {
   await Promise.all(
     directories
@@ -75,7 +116,6 @@ afterEach(async () => {
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
 });
-
 describe("daemon diagnostic error dispatch", () => {
   test("malformed NDJSON produces closed secret-safe diagnostics through the real transport and store", async () => {
     const root = await mkdtemp(join(tmpdir(), "reins-daemon-safe-transport-"));
@@ -136,6 +176,7 @@ describe("daemon diagnostic error dispatch", () => {
 
       const client = await createUnixSocketClient<ProtocolMessage>(socketPath);
       try {
+        await bindConsumer(client);
         const requestId = v.parse(requestIdSchema, "safe-query");
         const nextResponse = new Promise<ProtocolResponse>((resolve) => {
           const unsubscribe = client.onEvent((event) => {
@@ -490,6 +531,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await waitForDaemonLifecycle(runtime);
+    await bindConsumer(client);
     let requestSeq = 0;
     const request = async (method: ProtocolMethod, params: unknown) => {
       requestSeq += 1;
@@ -820,7 +862,10 @@ describe("daemon diagnostic error dispatch", () => {
     const runtime = await openDiagnosticsRuntimeForTest({
       resolveState: async () => state,
       openStore: async () =>
-        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+        await openDiagnosticsStoreForTest({
+          directory: state.diagnosticsDirectory,
+          now: () => new Date("2026-08-20T00:00:00.000Z"),
+        }),
       allocateGeneration: async () => v.parse(daemonGenerationSchema, "query"),
       now: () => new Date("2026-08-20T00:00:00.000Z"),
     });
@@ -846,6 +891,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     const request = async (requestId: string, params: unknown) => {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -929,6 +975,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -1022,6 +1069,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await waitForDaemonLifecycle(runtime);
+    await bindConsumer(client);
     rejectAppend = true;
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
@@ -1086,6 +1134,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await waitForDaemonLifecycle(runtime);
+    await bindConsumer(client);
     rejectQuery = true;
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
@@ -1176,6 +1225,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -1307,6 +1357,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -1443,7 +1494,10 @@ describe("daemon diagnostic error dispatch", () => {
         kind: "request",
         requestId: v.parse(requestIdSchema, "snapshot-ready"),
         method: "initialize",
-        params: {},
+        params: {
+          protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+          consumerContext: "test-consumer",
+        },
       });
       await ready;
       blockQueries = true;
@@ -1563,6 +1617,7 @@ describe("daemon diagnostic error dispatch", () => {
     const queryClient = transport.connect();
     const postClient = transport.connect();
     await Promise.resolve();
+    await bindConsumer(queryClient);
 
     const sendInvalid = async (
       client: TransportConnection<ProtocolMessage>,
@@ -1723,7 +1778,10 @@ describe("daemon diagnostic error dispatch", () => {
           kind: "request",
           requestId: v.parse(requestIdSchema, "transport-failure"),
           method: "initialize",
-          params: {},
+          params: {
+            protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+            consumerContext: "test-consumer",
+          },
         },
       });
       await Promise.resolve();
@@ -1746,6 +1804,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
       const client = queryTransport.connect();
       await Promise.resolve();
+      await bindConsumer(client);
       const query = async (attempt: number): Promise<ProtocolResponse> => {
         const requestId = v.parse(requestIdSchema, `query-${attempt}`);
         const response = new Promise<ProtocolResponse>((resolve) => {
@@ -2019,7 +2078,10 @@ describe("daemon diagnostic error dispatch", () => {
           kind: "request",
           requestId: v.parse(requestIdSchema, "dedup-first"),
           method: "initialize",
-          params: {},
+          params: {
+            protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+            consumerContext: "test-consumer",
+          },
         },
       });
       await rejectedTransportEntered;
@@ -2036,6 +2098,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
       const client = queryTransport.connect();
       await Promise.resolve();
+      await bindConsumer(client);
       const response = new Promise<ProtocolResponse>((resolve) => {
         const unsubscribe = client.onEvent((event) => {
           if (
@@ -2131,6 +2194,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     try {
       const response = new Promise<ProtocolResponse>((resolve) => {
         client.onEvent((event) => {
@@ -2179,7 +2243,10 @@ describe("daemon diagnostic error dispatch", () => {
     const runtime = await openDiagnosticsRuntimeForTest({
       resolveState: async () => state,
       openStore: async () =>
-        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+        await openDiagnosticsStoreForTest({
+          directory: state.diagnosticsDirectory,
+          now: () => now,
+        }),
       allocateGeneration: async () =>
         v.parse(daemonGenerationSchema, "filters"),
       now: () => now,
@@ -2223,6 +2290,7 @@ describe("daemon diagnostic error dispatch", () => {
     const running = daemon.start();
     const client = transport.connect();
     await Promise.resolve();
+    await bindConsumer(client);
     let sequence = 0;
     const request = async (params: unknown): Promise<ProtocolResponse> => {
       sequence += 1;
@@ -2294,6 +2362,397 @@ describe("daemon diagnostic error dispatch", () => {
       ).resolves.toMatchObject({
         error: { code: "diagnostic_not_found" },
       });
+    } finally {
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+});
+
+describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
+  const clock = () => new Date("2026-08-20T00:00:00.000Z");
+
+  async function openScopedRuntime(
+    generation: string,
+    directory: string,
+  ): Promise<DiagnosticsRuntime> {
+    return await openDiagnosticsRuntimeForTest({
+      resolveState: async (): Promise<DaemonState> => ({
+        directory,
+        diagnosticsDirectory: join(directory, "diagnostics"),
+        durable: true,
+        retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
+      }),
+      openStore: async (state) =>
+        await openDiagnosticsStoreForTest({
+          directory: state.diagnosticsDirectory,
+          now: clock,
+        }),
+      allocateGeneration: async () =>
+        v.parse(daemonGenerationSchema, generation),
+      now: clock,
+      stderr: (message) => {
+        process.stderr.write(`${message}\n`);
+      },
+    });
+  }
+
+  function scopedDaemon(
+    transport: TransportServer<ProtocolMessage>,
+    runtime: DiagnosticsRuntime,
+  ): { daemon: { stop(): Promise<void> }; running: Promise<void> } {
+    const daemon = createDaemonForTest({
+      transport,
+      adapters: new Map(),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: runtime,
+    });
+    return { daemon, running: daemon.start() };
+  }
+
+  async function request(
+    client: TransportConnection<ProtocolMessage>,
+    label: string,
+    method: ProtocolMethod,
+    params: unknown,
+  ): Promise<ProtocolResponse> {
+    const requestId = v.parse(requestIdSchema, label);
+    const response = new Promise<ProtocolResponse>((resolve) => {
+      const unsubscribe = client.onEvent((event) => {
+        if (
+          event.kind === "message" &&
+          event.message.kind === "response" &&
+          event.message.requestId === requestId
+        ) {
+          unsubscribe();
+          resolve(event.message);
+        }
+      });
+    });
+    client.send({
+      kind: "request",
+      requestId,
+      method,
+      params,
+    } as unknown as ProtocolMessage);
+    return await response;
+  }
+
+  async function query(
+    client: TransportConnection<ProtocolMessage>,
+    label: string,
+    params: unknown,
+  ): Promise<ProtocolResponse> {
+    return await request(client, label, "diagnostics", params);
+  }
+
+  async function rejectEnvelope(
+    client: TransportConnection<ProtocolMessage>,
+    label: string,
+  ): Promise<void> {
+    const requestId = v.parse(requestIdSchema, label);
+    const response = new Promise<ProtocolResponse>((resolve) => {
+      const unsubscribe = client.onEvent((event) => {
+        if (
+          event.kind === "message" &&
+          event.message.kind === "response" &&
+          event.message.requestId === requestId
+        ) {
+          unsubscribe();
+          resolve(event.message);
+        }
+      });
+    });
+    // 顶层多余键使 envelope 解析失败，daemon 记录 protocol_violation。
+    client.send({
+      kind: "request",
+      requestId,
+      method: "send",
+      params: { sessionId: "sess-1", message: "ignored" },
+      ownershipSentinel: label,
+    } as unknown as ProtocolMessage);
+    await expect(response).resolves.toMatchObject({
+      error: { code: "protocol_error" },
+    });
+  }
+
+  function recordsOf(response: ProtocolResponse) {
+    if (!("result" in response)) {
+      throw new Error("Expected diagnostics records response");
+    }
+    const parsed = v.parse(diagnosticsResultSchema, response.result);
+    return "records" in parsed ? parsed.records : [parsed.record];
+  }
+
+  async function boundClient(
+    transport: ReturnType<
+      typeof createInMemoryTransportServer<ProtocolMessage>
+    >,
+    consumer: string,
+  ): Promise<TransportConnection<ProtocolMessage>> {
+    const client = transport.connect();
+    await Promise.resolve();
+    await bindConsumer(client, consumer);
+    return client;
+  }
+
+  async function waitForRecords(
+    client: TransportConnection<ProtocolMessage>,
+    label: string,
+    params: unknown,
+  ): Promise<ProtocolResponse> {
+    for (let attempt = 0; attempt !== 20; attempt += 1) {
+      const response = await query(
+        client,
+        `${label}-${String(attempt)}`,
+        params,
+      );
+      if (recordsOf(response).length > 0) return response;
+      await new Promise((resolve) => {
+        setTimeout(resolve, 5);
+      });
+    }
+    throw new Error("Expected a diagnostic record to be accepted");
+  }
+
+  test("他人请求造成的诊断对 beta 不可见且 exact id 视为不存在", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-scope-diag-"));
+    directories.push(root);
+    const runtime = await openScopedRuntime("scopeone", root);
+    const transport = createInMemoryTransportServer<ProtocolMessage>();
+    const { daemon, running } = scopedDaemon(transport, runtime);
+    const alpha = await boundClient(transport, "alpha");
+    try {
+      await rejectEnvelope(alpha, "alpha-envelope");
+      const owned = await query(alpha, "alpha-query", {
+        kinds: ["protocol_violation"],
+      });
+      expect(owned).toMatchObject({
+        result: { records: [{ stage: "envelope" }], truncated: false },
+      });
+      const foreignId = recordsOf(owned)[0]?.diagnosticId;
+
+      const beta = await boundClient(transport, "beta");
+      await expect(
+        query(beta, "beta-kind-query", { kinds: ["protocol_violation"] }),
+      ).resolves.toMatchObject({
+        result: { records: [], truncated: false },
+      });
+      await expect(
+        query(beta, "beta-exact-query", { diagnosticId: foreignId }),
+      ).resolves.toMatchObject({ error: { code: "diagnostic_not_found" } });
+      const betaAll = recordsOf(await query(beta, "beta-list-query", {}));
+      expect(betaAll.some((entry) => entry.diagnosticId === foreignId)).toBe(
+        false,
+      );
+      // daemon 全局生命周期事实不属于任何消费者，对所有连接可见。
+      expect(
+        recordsOf(
+          await query(beta, "beta-global-query", { sources: ["daemon"] }),
+        )
+          .map((entry) => entry.reason)
+          .includes("started"),
+      ).toBe(true);
+      expect(
+        recordsOf(await query(alpha, "alpha-list-query", {})).some(
+          (entry) => entry.diagnosticId === foreignId,
+        ),
+      ).toBe(true);
+    } finally {
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+
+  test("诊断归属写入真实 store 并在 daemon 重启后保持", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-scope-restart-"));
+    directories.push(root);
+    const first = await openScopedRuntime("scopetwo", root);
+    const firstTransport = createInMemoryTransportServer<ProtocolMessage>();
+    const opened = scopedDaemon(firstTransport, first);
+    const alpha = await boundClient(firstTransport, "alpha");
+    await rejectEnvelope(alpha, "restart-envelope");
+    const foreignId = recordsOf(
+      await query(alpha, "restart-own-query", {
+        kinds: ["protocol_violation"],
+      }),
+    )[0]?.diagnosticId;
+    await opened.daemon.stop();
+    await opened.running;
+    await first.close();
+
+    const second = await openScopedRuntime("scopethree", root);
+    const secondTransport = createInMemoryTransportServer<ProtocolMessage>();
+    const restarted = scopedDaemon(secondTransport, second);
+    try {
+      const intruder = await boundClient(secondTransport, "beta");
+      await expect(
+        query(intruder, "restart-foreign-query", {
+          kinds: ["protocol_violation"],
+        }),
+      ).resolves.toMatchObject({
+        result: { records: [], truncated: false },
+      });
+      await expect(
+        query(intruder, "restart-foreign-exact", { diagnosticId: foreignId }),
+      ).resolves.toMatchObject({ error: { code: "diagnostic_not_found" } });
+
+      const owner = await boundClient(secondTransport, "alpha");
+      expect(
+        recordsOf(await query(owner, "restart-owner-query", {})).some(
+          (entry) => entry.diagnosticId === foreignId,
+        ),
+      ).toBe(true);
+    } finally {
+      await restarted.daemon.stop();
+      await restarted.running;
+      await second.close();
+    }
+  });
+
+  test("会话在请求栈之外产生的事实继承发起会话的消费者归属", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-session-owner-"));
+    directories.push(root);
+    let emit!: (event: DomainEvent) => void;
+    const driverFactory: AdapterDriverFactory = (context) => {
+      emit = context.emit;
+      return {
+        start() {},
+        deliver() {},
+        interrupt() {},
+        resolvePermission() {},
+        async terminate() {},
+      };
+    };
+    const runtime = await openScopedRuntime("scopefour", root);
+    const transport = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemonForTest({
+      transport,
+      adapters: new Map([
+        [
+          "fake",
+          {
+            driverFactory,
+            capabilities: async () => ({ harness: "fake", models: [] }),
+          },
+        ],
+      ]),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: runtime,
+    });
+    const running = daemon.start();
+    const alpha = await boundClient(transport, "alpha");
+    try {
+      const spawned = await request(alpha, "alpha-spawn", "spawn", {
+        sessionName: v.parse(sessionNameSchema, "scoped-session"),
+        harness: "fake",
+        message: "start",
+        cwd: root,
+      });
+      if (!("result" in spawned)) {
+        throw new Error(`Spawn failed: ${JSON.stringify(spawned)}`);
+      }
+      const sessionId = v.parse(
+        sessionIdSchema,
+        (spawned.result as { sessionId: unknown }).sessionId,
+      );
+      // 事件在 spawn 响应之后到达，不处于任何请求的异步上下文中。
+      emit({ type: "session.killed", sessionId });
+
+      const owned = recordsOf(
+        await waitForRecords(alpha, "session-owner", {
+          kinds: ["protocol_violation"],
+          sources: ["core"],
+        }),
+      );
+      expect(owned[0]).toMatchObject({
+        sessionId,
+        operation: "validate_worker_event",
+      });
+      const ownedId = owned[0]?.diagnosticId;
+
+      const beta = await boundClient(transport, "beta");
+      await expect(
+        query(beta, "beta-session-owner", {
+          kinds: ["protocol_violation"],
+          sources: ["core"],
+        }),
+      ).resolves.toMatchObject({
+        result: { records: [], truncated: false },
+      });
+      await expect(
+        query(beta, "beta-session-exact", { diagnosticId: ownedId }),
+      ).resolves.toMatchObject({ error: { code: "diagnostic_not_found" } });
+    } finally {
+      await daemon.stop();
+      await running;
+      await runtime.close();
+    }
+  });
+
+  test("spawn 返回前登记的 harness 事实属于发起请求的消费者", async () => {
+    const root = await mkdtemp(join(tmpdir(), "reins-daemon-spawn-owner-"));
+    directories.push(root);
+    const driverFactory: AdapterDriverFactory = ({ diagnostics }) => ({
+      start(spec) {
+        void diagnostics({
+          kind: "harness_stderr",
+          operation: "worker_process",
+          reason: "stderr_output",
+          sessionId: spec.sessionId,
+          text: { text: "boom", truncated: false, originalBytes: 4 },
+        });
+        throw new Error("start failed");
+      },
+      deliver() {},
+      interrupt() {},
+      resolvePermission() {},
+      async terminate() {},
+    });
+    const runtime = await openScopedRuntime("scopefive", root);
+    const transport = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemonForTest({
+      transport,
+      adapters: new Map([
+        [
+          "fake",
+          {
+            driverFactory,
+            capabilities: async () => ({ harness: "fake", models: [] }),
+          },
+        ],
+      ]),
+      identity: { session: (name) => runtime.sessionId(name) },
+      diagnostics: runtime,
+    });
+    const running = daemon.start();
+    const alpha = await boundClient(transport, "alpha");
+    try {
+      const spawned = await request(alpha, "alpha-failing-spawn", "spawn", {
+        sessionName: v.parse(sessionNameSchema, "failing-session"),
+        harness: "fake",
+        message: "start",
+        cwd: root,
+      });
+      expect(spawned).toMatchObject({ error: expect.any(Object) });
+
+      const owned = await waitForRecords(alpha, "spawn-owner", {
+        kinds: ["harness_stderr"],
+      });
+      expect(recordsOf(owned)[0]).toMatchObject({ harness: "fake" });
+      const ownedId = recordsOf(owned)[0]?.diagnosticId;
+
+      const beta = await boundClient(transport, "beta");
+      await expect(
+        query(beta, "beta-spawn-owner", { kinds: ["harness_stderr"] }),
+      ).resolves.toMatchObject({
+        result: { records: [], truncated: false },
+      });
+      await expect(
+        query(beta, "beta-spawn-exact", { diagnosticId: ownedId }),
+      ).resolves.toMatchObject({ error: { code: "diagnostic_not_found" } });
     } finally {
       await daemon.stop();
       await running;

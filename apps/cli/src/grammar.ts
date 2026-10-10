@@ -303,6 +303,10 @@ function domainMessage(error: MachineError): string {
       return `Unknown protocol method${"method" in error ? `: ${error.method}` : ""}`;
     case "protocol_error":
       return "Protocol error";
+    case "protocol_version_mismatch":
+      return `Daemon protocol major version mismatch: requested ${error.requestedProtocolMajorVersion}, supported ${error.supportedProtocolMajorVersion}`;
+    case "consumer_context_required":
+      return "Consumer context is not bound; set REINS_CONSUMER_CONTEXT or provide an explicit client binding";
     case "capability_query_failed":
       return !("cause" in error) || error.cause === undefined
         ? "Capability query failed"

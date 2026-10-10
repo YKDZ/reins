@@ -257,7 +257,10 @@ describe("DiagnosticsRuntime", () => {
     "close retries a real writer lease without duplicating the logical closed commit",
     async () => {
       const directory = await temporaryDirectory();
-      const store = await openDiagnosticsStoreForTest({ directory });
+      const store = await openDiagnosticsStoreForTest({
+        directory,
+        now: () => new Date("2026-08-20T00:00:00.000Z"),
+      });
       const runtime = await openRuntime(store);
       const blocker = join(directory, "writer-lease.lock", "blocks-rmdir");
       await appendFile(blocker, "failure");
@@ -269,7 +272,10 @@ describe("DiagnosticsRuntime", () => {
       await expect(runtime.close()).resolves.toBeUndefined();
       await expect(runtime.close()).resolves.toBeUndefined();
 
-      const reopened = await openDiagnosticsStoreForTest({ directory });
+      const reopened = await openDiagnosticsStoreForTest({
+        directory,
+        now: () => new Date("2026-08-20T00:00:00.000Z"),
+      });
       const result = await reopened.query({
         sources: ["daemon"],
         kinds: ["lifecycle"],

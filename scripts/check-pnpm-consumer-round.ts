@@ -551,6 +551,7 @@ async function runWorkerRound(
     REINS_SOCKET: socketPath,
     REINS_STATE_DIR: stateDirectory,
     REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_CONSUMER_CONTEXT: "pnpm-consumer-round",
     REINS_IDLE_TIMEOUT_MS: "60000",
     REINS_SIMULATED_OBSERVATION_LOG: observationPath,
   };

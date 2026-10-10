@@ -7,6 +7,7 @@ import {
 import * as v from "valibot";
 import { describe, expect, test } from "vitest";
 
+import { createConsumerScope } from "../../src/consumer-scope.ts";
 import { orderDiagnosticsAcceptance } from "../../src/diagnostics-acceptance.ts";
 import type { DiagnosticsRuntime } from "../../src/diagnostics-recorder.ts";
 import { daemonGenerationSchema } from "../../src/generation.ts";
@@ -53,7 +54,7 @@ describe("diagnostics acceptance ordering", () => {
       health: () => ({ status: "healthy", repairs: [] }),
       async close() {},
     };
-    ordered = orderDiagnosticsAcceptance(runtime);
+    ordered = orderDiagnosticsAcceptance(runtime, createConsumerScope());
 
     const outerRecord = ordered.record(lifecycleFact);
     expect(trace).toEqual(["record-start"]);
@@ -92,7 +93,7 @@ describe("diagnostics acceptance ordering", () => {
       health: () => ({ status: "healthy", repairs: [] }),
       async close() {},
     };
-    const ordered = orderDiagnosticsAcceptance(runtime);
+    const ordered = orderDiagnosticsAcceptance(runtime, createConsumerScope());
 
     await expect(ordered.record(lifecycleFact)).rejects.toThrow(
       "Synchronous record failure",

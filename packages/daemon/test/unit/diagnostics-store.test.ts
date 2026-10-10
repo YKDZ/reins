@@ -18,6 +18,7 @@ import {
   makeDiagnosticId,
   sessionIdSchema,
   turnIdSchema,
+  type ConsumerContext,
   type DiagnosticRecord,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -79,6 +80,11 @@ function withoutLegacyMessage<T extends { message: unknown }>(record: T) {
   return migrated;
 }
 
+// fixture 记录日期必须落在默认 7 天保留窗口内，查询时刻统一用该固定时钟。
+function fixtureClock(): Date {
+  return new Date("2026-08-26T12:00:00.000Z");
+}
+
 afterEach(async () => {
   await Promise.all(
     temporaryDirectories
@@ -92,7 +98,10 @@ describe("DiagnosticsStore contract", () => {
     const directory = await temporaryStoreDirectory();
     const first = record("1", "2026-08-20T00:00:00.000Z");
     const second = record("2", "2026-08-20T00:00:01.000Z");
-    const store = await openDiagnosticsStore({ directory });
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
 
     await store.append(first);
     await store.append(second);
@@ -107,7 +116,10 @@ describe("DiagnosticsStore contract", () => {
     });
     await store.close();
 
-    const reopened = await openDiagnosticsStore({ directory });
+    const reopened = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     await expect(reopened.query({})).resolves.toEqual({
       records: [first, second],
       truncated: false,
@@ -167,7 +179,10 @@ describe("DiagnosticsStore contract", () => {
       Reflect.deleteProperty(migrated, "message");
       return migrated;
     });
-    const reopened = await openDiagnosticsStore({ directory });
+    const reopened = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     try {
       const result = await reopened.query({});
       expect(result).toEqual({
@@ -191,7 +206,10 @@ describe("DiagnosticsStore contract", () => {
       )
     ).join("\n");
     expect(canonicalText.includes(secretSentinel)).toBe(false);
-    const verified = await openDiagnosticsStore({ directory });
+    const verified = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     try {
       await expect(verified.query({})).resolves.toEqual({
         records: expected,
@@ -220,7 +238,10 @@ describe("DiagnosticsStore contract", () => {
       { mode: 0o600 },
     );
 
-    const store = await openDiagnosticsStore({ directory });
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     try {
       await expect(store.query({})).resolves.toEqual({
         records: [
@@ -269,6 +290,7 @@ describe("DiagnosticsStore contract", () => {
     await expect(
       openDiagnosticsStoreForTest({
         directory,
+        now: fixtureClock,
         beforeFileOperation: async (operation) => {
           if (operation !== "rename") return;
           renames += 1;
@@ -287,7 +309,10 @@ describe("DiagnosticsStore contract", () => {
       ),
     ).toBe(false);
 
-    const recovered = await openDiagnosticsStore({ directory });
+    const recovered = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     try {
       await expect(recovered.query({})).resolves.toEqual({
         records: [
@@ -319,6 +344,7 @@ describe("DiagnosticsStore contract", () => {
     await expect(
       openDiagnosticsStoreForTest({
         directory,
+        now: fixtureClock,
         beforeFileOperation: async (operation, path) => {
           if (operation !== "sync") return;
           if (path === temporaryPath) initialFileSyncs += 1;
@@ -361,6 +387,7 @@ describe("DiagnosticsStore contract", () => {
     try {
       const unexpected = await openDiagnosticsStoreForTest({
         directory,
+        now: fixtureClock,
         beforeFileOperation: async (operation, path) => {
           if (operation !== "sync" || path !== directory) return;
           retryDirectorySyncs += 1;
@@ -385,6 +412,7 @@ describe("DiagnosticsStore contract", () => {
     let recoveryDirectorySyncs = 0;
     const recovered = await openDiagnosticsStoreForTest({
       directory,
+      now: fixtureClock,
       beforeFileOperation: async (operation, path) => {
         if (operation === "sync" && path === directory) {
           recoveryDirectorySyncs += 1;
@@ -402,7 +430,10 @@ describe("DiagnosticsStore contract", () => {
     });
     await recovered.close();
 
-    const verified = await openDiagnosticsStore({ directory });
+    const verified = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     try {
       await expect(verified.query({})).resolves.toEqual(recoveredResult);
     } finally {
@@ -431,6 +462,7 @@ describe("DiagnosticsStore contract", () => {
       await expect(
         openDiagnosticsStoreForTest({
           directory,
+          now: fixtureClock,
           beforeFileOperation: async (operation) => {
             if (failed || operation !== failedOperation) return;
             failed = true;
@@ -445,7 +477,10 @@ describe("DiagnosticsStore contract", () => {
         ),
       ).toBe(false);
 
-      const recovered = await openDiagnosticsStore({ directory });
+      const recovered = await openDiagnosticsStoreForTest({
+        directory,
+        now: fixtureClock,
+      });
       try {
         await expect(recovered.query({})).resolves.toEqual({
           records: [withoutLegacyMessage(legacy)],
@@ -535,7 +570,10 @@ describe("DiagnosticsStore contract", () => {
 
   test("filter dimensions compose as OR within and AND across dimensions", async () => {
     const directory = await temporaryStoreDirectory();
-    const store = await openDiagnosticsStore({ directory });
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     const sessionId = v.parse(sessionIdSchema, "reviewer@g1");
     const turnId = v.parse(turnIdSchema, "t1");
     const matching = v.parse(diagnosticRecordSchema, {
@@ -572,7 +610,10 @@ describe("DiagnosticsStore contract", () => {
 
   test("limit selects the latest accepted records and returns them in accept order", async () => {
     const directory = await temporaryStoreDirectory();
-    const store = await openDiagnosticsStore({ directory });
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     const first = record("1", "2026-08-20T00:00:03.000Z");
     const second = record("2", "2026-08-20T00:00:01.000Z");
     const third = record("3", "2026-08-20T00:00:02.000Z");
@@ -595,7 +636,10 @@ describe("DiagnosticsStore contract", () => {
 
   test("an omitted limit selects the latest one hundred matching records", async () => {
     const directory = await temporaryStoreDirectory();
-    const store = await openDiagnosticsStore({ directory });
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     const records = Array.from({ length: 101 }, (_, index) =>
       record(
         String(index + 1),
@@ -623,6 +667,7 @@ describe("DiagnosticsStore contract", () => {
     });
     const store = await openDiagnosticsStoreForTest({
       directory,
+      now: fixtureClock,
       beforeQueryRead: async () => {
         enterQuery();
         await queryReleased;
@@ -705,7 +750,10 @@ describe("DiagnosticsStore contract", () => {
 
   test("a serialized record cannot exceed 256 KiB", async () => {
     const directory = await temporaryStoreDirectory();
-    const store = await openDiagnosticsStore({ directory });
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     const oversized = v.parse(diagnosticRecordSchema, {
       source: "adapter",
       harness: "codex",
@@ -794,7 +842,10 @@ describe("DiagnosticsStore contract", () => {
     });
     await store.close();
 
-    const reopened = await openDiagnosticsStore({ directory });
+    const reopened = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     await expect(reopened.query({})).resolves.toEqual({
       records: [],
       truncated: false,
@@ -802,8 +853,9 @@ describe("DiagnosticsStore contract", () => {
     await reopened.close();
 
     const tightenedDirectory = await temporaryStoreDirectory();
-    const beforeTightening = await openDiagnosticsStore({
+    const beforeTightening = await openDiagnosticsStoreForTest({
       directory: tightenedDirectory,
+      now: fixtureClock,
     });
     await beforeTightening.append(record("2", "2026-08-20T00:00:00.000Z"));
     await beforeTightening.close();
@@ -1144,7 +1196,10 @@ describe("DiagnosticsStore contract", () => {
   test("active tail repair is observable and preserves complete records", async () => {
     const directory = await temporaryStoreDirectory();
     const first = record("1", "2026-08-20T00:00:00.000Z");
-    const initial = await openDiagnosticsStore({ directory });
+    const initial = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
     await initial.append(first);
     await initial.close();
     const activePath = join(directory, "active.ndjson");
@@ -1154,6 +1209,7 @@ describe("DiagnosticsStore contract", () => {
 
     const repairedNewline = await openDiagnosticsStoreForTest({
       directory,
+      now: fixtureClock,
       stderr: (message) => messages.push(message),
     });
     expect(repairedNewline.health()).toEqual({
@@ -1169,6 +1225,7 @@ describe("DiagnosticsStore contract", () => {
     await appendFile(activePath, '{"v":1');
     const repairedPartial = await openDiagnosticsStoreForTest({
       directory,
+      now: fixtureClock,
       stderr: (message) => messages.push(message),
     });
     expect(repairedPartial.health()).toEqual({
@@ -1209,6 +1266,7 @@ describe("DiagnosticsStore contract", () => {
     const segmented = await openDiagnosticsStoreForTest({
       directory: segmentDirectory,
       segmentBytes: 1,
+      now: fixtureClock,
     });
     await segmented.append(record("2", "2026-08-20T00:00:00.000Z"));
     await segmented.append(record("3", "2026-08-20T00:00:01.000Z"));
@@ -1224,8 +1282,9 @@ describe("DiagnosticsStore contract", () => {
     });
 
     const versionDirectory = await temporaryStoreDirectory();
-    const versionStore = await openDiagnosticsStore({
+    const versionStore = await openDiagnosticsStoreForTest({
       directory: versionDirectory,
+      now: fixtureClock,
     });
     await versionStore.close();
     await writeFile(join(versionDirectory, "active.ndjson"), '{"v":2}\n', {
@@ -1306,6 +1365,144 @@ describe("DiagnosticsStore contract", () => {
     await expect(
       openDiagnosticsStore({ directory, maxAgeMs: Number.POSITIVE_INFINITY }),
     ).rejects.toMatchObject({ code: "invalid_configuration" });
+  });
+});
+
+describe("DiagnosticsStore 消费者归属（01 票第 2、3 项）", () => {
+  const alpha = "alpha" as ConsumerContext;
+  const beta = "beta" as ConsumerContext;
+
+  test("范围只隐藏他人记录，无主全局记录对所有人可见", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const globalRecord = record("g", "2026-08-20T00:00:01.000Z");
+    const firstAlpha = record("a", "2026-08-20T00:00:02.000Z");
+    const secondAlpha = record("b", "2026-08-20T00:00:03.000Z");
+    const foreign = record("c", "2026-08-20T00:00:04.000Z");
+    await store.append(globalRecord);
+    await store.append(firstAlpha, alpha);
+    await store.append(secondAlpha, alpha);
+    await store.append(foreign, beta);
+
+    await expect(store.query({}, alpha)).resolves.toEqual({
+      records: [globalRecord, firstAlpha, secondAlpha],
+      truncated: false,
+    });
+    await expect(store.query({}, beta)).resolves.toEqual({
+      records: [globalRecord, foreign],
+      truncated: false,
+    });
+    await expect(store.query({})).resolves.toEqual({
+      records: [globalRecord, firstAlpha, secondAlpha, foreign],
+      truncated: false,
+    });
+    await store.close();
+  });
+
+  test("他人 diagnosticId 与真实缺失按同一 diagnostic_not_found 呈现", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const globalRecord = record("g", "2026-08-20T00:00:01.000Z");
+    const own = record("o", "2026-08-20T00:00:02.000Z");
+    const foreign = record("f", "2026-08-20T00:00:03.000Z");
+    await store.append(globalRecord);
+    await store.append(own, alpha);
+    await store.append(foreign, beta);
+
+    await expect(
+      store.query({ diagnosticId: own.diagnosticId }, alpha),
+    ).resolves.toEqual({ record: own });
+    await expect(
+      store.query({ diagnosticId: globalRecord.diagnosticId }, alpha),
+    ).resolves.toEqual({ record: globalRecord });
+    await expect(
+      store.query({ diagnosticId: foreign.diagnosticId }, alpha),
+    ).rejects.toMatchObject({ code: "diagnostic_not_found" });
+    await expect(
+      store.query({ diagnosticId: makeDiagnosticId("1", "missing") }, alpha),
+    ).rejects.toMatchObject({ code: "diagnostic_not_found" });
+    await store.close();
+  });
+
+  test("消费者范围先于 limit 与 truncated 生效", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const owned: DiagnosticRecord[] = [];
+    for (const [counter, consumer] of [
+      ["1", alpha],
+      ["2", beta],
+      ["3", alpha],
+      ["4", beta],
+      ["5", alpha],
+    ] as const) {
+      const candidate = record(counter, `2026-08-20T00:00:0${counter}.000Z`);
+      owned.push(candidate);
+      await store.append(candidate, consumer);
+    }
+
+    await expect(store.query({ limit: 2 }, alpha)).resolves.toEqual({
+      records: [owned[2], owned[4]],
+      truncated: true,
+    });
+    await expect(store.query({ limit: 3 }, alpha)).resolves.toEqual({
+      records: [owned[0], owned[2], owned[4]],
+      truncated: false,
+    });
+    await store.close();
+  });
+
+  test("归属随记录持久化，reopen 后范围一致", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    const globalRecord = record("g", "2026-08-20T00:00:01.000Z");
+    const own = record("o", "2026-08-20T00:00:02.000Z");
+    const foreign = record("f", "2026-08-20T00:00:03.000Z");
+    await store.append(globalRecord);
+    await store.append(own, alpha);
+    await store.append(foreign, beta);
+    await store.close();
+
+    const reopened = await openDiagnosticsStoreForTest({
+      directory,
+      now: fixtureClock,
+    });
+    await expect(reopened.query({}, alpha)).resolves.toEqual({
+      records: [globalRecord, own],
+      truncated: false,
+    });
+    await expect(
+      reopened.query({ diagnosticId: foreign.diagnosticId }, alpha),
+    ).rejects.toMatchObject({ code: "diagnostic_not_found" });
+    await reopened.close();
+  });
+
+  test("磁盘上的非法归属标记按 corrupt fail closed", async () => {
+    const directory = await temporaryStoreDirectory();
+    const store = await openDiagnosticsStore({ directory });
+    await store.append(record("1", "2026-08-20T00:00:00.000Z"), alpha);
+    await store.close();
+    const line = await readFile(join(directory, "active.ndjson"), "utf8");
+    await writeFile(
+      join(directory, "active.ndjson"),
+      line.replace('"consumer":"alpha"', '"consumer":""'),
+      { mode: 0o600 },
+    );
+
+    await expect(openDiagnosticsStore({ directory })).rejects.toMatchObject({
+      code: "diagnostics_store_corrupt",
+    });
   });
 });
 

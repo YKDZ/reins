@@ -3,12 +3,16 @@ import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
   CapabilitiesResult,
+  ConsumerContext,
   DaemonDiagnosticFact,
   DomainEvent,
   DiagnosticsParams,
   HarnessCapability,
+  InitializeParams,
+  InitializeResult,
   InterruptParams,
   KillParams,
+  KillResult,
   ListFilter,
   MachineError,
   ProtocolMessage,
@@ -32,6 +36,7 @@ import {
   protocolMethodSchema,
   protocolParamsSchemaFor,
   protocolRequestSchema,
+  REINS_PROTOCOL_MAJOR_VERSION,
   requestIdSchema,
 } from "@reins/protocol";
 import {
@@ -42,6 +47,7 @@ import {
 } from "@reins/transport";
 import * as v from "valibot";
 
+import { createConsumerScope, type ConsumerScope } from "./consumer-scope.ts";
 import {
   orderDiagnosticsAcceptance,
   type OrderedDiagnosticsRuntime,
@@ -109,6 +115,7 @@ type ProtocolServerOptions = {
   machine: SessionMachine;
   adapters: AdapterRegistry;
   diagnostics: OrderedDiagnosticsRuntime;
+  consumerScope: ConsumerScope;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 };
@@ -119,14 +126,19 @@ type ProtocolServerTestingOptions = {
 };
 
 export function createProtocolServer(
-  options: Omit<ProtocolServerOptions, "diagnostics"> & {
+  options: Omit<ProtocolServerOptions, "diagnostics" | "consumerScope"> & {
     diagnostics: DiagnosticsRuntime;
   },
 ): ProtocolServer {
+  const consumerScope = createConsumerScope();
   return createProtocolServerInternal(
     {
       ...options,
-      diagnostics: orderDiagnosticsAcceptance(options.diagnostics),
+      consumerScope,
+      diagnostics: orderDiagnosticsAcceptance(
+        options.diagnostics,
+        consumerScope,
+      ),
     },
     {},
   );
@@ -148,6 +160,12 @@ export function createProtocolServerInternal(
   const eventLog = new Map<SessionId, EventHistory>();
   const observations = new Map<SessionId, Observation>();
   const knownSessions = new Set<SessionId>();
+  // initialize 握手建立的连接级消费者绑定；连接关闭即释放。
+  const consumerBindings = new Map<
+    TransportConnection<ProtocolMessage>,
+    ConsumerContext
+  >();
+  const consumerScope = options.consumerScope;
   const transportFailureConnections = new WeakMap<
     TransportConnection<ProtocolMessage>,
     | { status: "pending"; queued: TransportFailureFact | undefined }
@@ -263,28 +281,37 @@ export function createProtocolServerInternal(
       queued: undefined,
     };
     transportFailureConnections.set(connection, pending);
-    const causalAttempt = options.diagnostics.runCausal(async (record) => {
-      let candidate: TransportFailureFact | undefined = fact;
-      while (candidate !== undefined) {
-        let accepted = false;
-        try {
-          accepted =
-            (await record({
-              ...candidate,
-              source: "daemon",
-            })) !== undefined;
-        } catch {
-          accepted = false;
+    const transportFailureConsumer = consumerBindings.get(connection);
+    const runTransportFailureCausal = (): Promise<void> =>
+      options.diagnostics.runCausal(async (record) => {
+        let candidate: TransportFailureFact | undefined = fact;
+        while (candidate !== undefined) {
+          let accepted = false;
+          try {
+            accepted =
+              (await record({
+                ...candidate,
+                source: "daemon",
+              })) !== undefined;
+          } catch {
+            accepted = false;
+          }
+          if (accepted) {
+            transportFailureConnections.set(connection, { status: "accepted" });
+            return;
+          }
+          candidate = pending.queued;
+          pending.queued = undefined;
         }
-        if (accepted) {
-          transportFailureConnections.set(connection, { status: "accepted" });
-          return;
-        }
-        candidate = pending.queued;
-        pending.queued = undefined;
-      }
-      transportFailureConnections.delete(connection);
-    });
+        transportFailureConnections.delete(connection);
+      });
+    const causalAttempt =
+      transportFailureConsumer === undefined
+        ? runTransportFailureCausal()
+        : consumerScope.within(
+            transportFailureConsumer,
+            runTransportFailureCausal,
+          );
     void causalAttempt.catch(() => undefined);
   }
 
@@ -424,6 +451,10 @@ export function createProtocolServerInternal(
   function forwardEvent(event: DomainEvent): void {
     if (event.type === "session.created") {
       knownSessions.add(event.sessionId);
+      // 归属在会话身份产生的那一刻确立，早于任何成功返回。
+      const consumer = consumerScope.current();
+      if (consumer !== undefined)
+        consumerScope.claim(event.sessionId, consumer);
     }
     appendLog(event);
     const observation = observations.get(event.sessionId) ?? { killed: false };
@@ -645,6 +676,7 @@ export function createProtocolServerInternal(
     connection: TransportConnection<ProtocolMessage>,
     params: AttachParams,
   ): { sessionId: SessionId; replayed: number } {
+    assertSessionScope(params.sessionId);
     if (!knownSessions.has(params.sessionId)) {
       throw {
         code: "session_not_found",
@@ -718,13 +750,49 @@ export function createProtocolServerInternal(
     };
   }
 
+  // 会话归属之外的消费者把该会话按不存在呈现，投影与"未知 id"完全一致。
+  function isForeignSession(sessionId: SessionId): boolean {
+    const consumer = consumerScope.current();
+    return (
+      consumer !== undefined && !consumerScope.inScope(consumer, sessionId)
+    );
+  }
+
+  function assertSessionScope(sessionId: SessionId): void {
+    if (isForeignSession(sessionId)) {
+      throw { code: "session_not_found", sessionId } satisfies MachineError;
+    }
+  }
+
   async function dispatch(
     connection: TransportConnection<ProtocolMessage>,
     request: ProtocolRequest,
   ): Promise<unknown> {
+    // 领域动作前必须完成握手绑定；未绑定连接一律以协议错误拒绝，
+    // 不采用全局默认或隐式改投（ADR-0033 / ADR-0037）。
+    if (request.method !== "initialize" && !consumerBindings.has(connection)) {
+      throw { code: "protocol_error" } satisfies MachineError;
+    }
     switch (request.method) {
-      case "initialize":
-        return {};
+      case "initialize": {
+        const params = request.params as InitializeParams;
+        if (params.protocolMajorVersion !== REINS_PROTOCOL_MAJOR_VERSION) {
+          throw {
+            code: "protocol_version_mismatch",
+            requestedProtocolMajorVersion: params.protocolMajorVersion,
+            supportedProtocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+          } satisfies MachineError;
+        }
+        const bound = consumerBindings.get(connection);
+        if (bound !== undefined && bound !== params.consumerContext) {
+          throw { code: "protocol_error" } satisfies MachineError;
+        }
+        consumerBindings.set(connection, params.consumerContext);
+        return {
+          protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+          daemonGeneration: options.diagnostics.generation,
+        } satisfies InitializeResult;
+      }
       case "capabilities":
         return await aggregateCapabilities();
       case "spawn":
@@ -743,22 +811,57 @@ export function createProtocolServerInternal(
         return {
           sessionId: await options.machine.spawn(spawnParams),
         };
-      case "send":
-        return await options.machine.send(request.params as SendParams);
-      case "wait":
-        return await options.machine.wait(request.params as WaitParams);
-      case "interrupt":
-        return await options.machine.interrupt(
-          request.params as InterruptParams,
+      case "send": {
+        const params = request.params as SendParams;
+        assertSessionScope(params.sessionId);
+        return await options.machine.send(params);
+      }
+      case "wait": {
+        const params = request.params as WaitParams;
+        for (const sessionId of params.ids) assertSessionScope(sessionId);
+        return await options.machine.wait(params);
+      }
+      case "interrupt": {
+        const params = request.params as InterruptParams;
+        for (const sessionId of params.ids) assertSessionScope(sessionId);
+        return await options.machine.interrupt(params);
+      }
+      case "kill": {
+        const params = request.params as KillParams;
+        const owned = params.ids.filter((id) => !isForeignSession(id));
+        const results =
+          owned.length === 0
+            ? []
+            : await options.machine.kill(
+                owned.length === params.ids.length
+                  ? params
+                  : { ...params, ids: owned },
+              );
+        const byId = new Map(
+          results.map((result) => [result.sessionId, result]),
         );
-      case "kill":
-        return await options.machine.kill(request.params as KillParams);
-      case "list":
-        return options.machine.list(request.params as ListFilter | undefined);
+        return params.ids.map(
+          (sessionId) =>
+            byId.get(sessionId) ??
+            ({ sessionId, status: "not_found" as const } satisfies KillResult),
+        );
+      }
+      case "list": {
+        const listed = options.machine.list(
+          request.params as ListFilter | undefined,
+        );
+        const consumer = consumerScope.current();
+        return consumer === undefined
+          ? listed
+          : listed.filter((session) =>
+              consumerScope.inScope(consumer, session.sessionId),
+            );
+      }
       case "attach":
         return attach(connection, request.params as AttachParams);
       case "resolvePermission": {
         const params = request.params as ResolvePermissionParams;
+        assertSessionScope(params.sessionId);
         await options.machine.resolvePermission(params);
         return {
           sessionId: params.sessionId,
@@ -793,6 +896,19 @@ export function createProtocolServerInternal(
     }
   }
 
+  // 请求因果贯穿整条处理链：诊断归属、会话声明与范围检查共用这一份绑定。
+  function handleMessageWithBinding(
+    connection: TransportConnection<ProtocolMessage>,
+    message: ProtocolMessage,
+  ): void {
+    const consumer = consumerBindings.get(connection);
+    if (consumer === undefined) {
+      handleMessage(connection, message);
+      return;
+    }
+    consumerScope.within(consumer, () => handleMessage(connection, message));
+  }
+
   function handleConnection(
     connection: TransportConnection<ProtocolMessage>,
   ): void {
@@ -802,7 +918,8 @@ export function createProtocolServerInternal(
     const unsubscribe = connection.onEvent((event) => {
       if (event.kind === "message") {
         if (quiescing) rejectDuringShutdown(connection, event.message);
-        else if (acceptingRequests) handleMessage(connection, event.message);
+        else if (acceptingRequests)
+          handleMessageWithBinding(connection, event.message);
         else pendingMessages.push({ connection, message: event.message });
       }
       if (event.kind === "error") {
@@ -821,6 +938,7 @@ export function createProtocolServerInternal(
   function cleanupConnection(
     connection: TransportConnection<ProtocolMessage>,
   ): void {
+    consumerBindings.delete(connection);
     for (const subscription of Array.from(attachSubscriptions)) {
       if (subscription.connection === connection) {
         attachSubscriptions.delete(subscription);
@@ -873,7 +991,7 @@ export function createProtocolServerInternal(
         acceptingRequests = true;
         for (const pending of pendingMessages.splice(0)) {
           if (connections.has(pending.connection)) {
-            handleMessage(pending.connection, pending.message);
+            handleMessageWithBinding(pending.connection, pending.message);
           }
         }
         scheduleIdleExit();

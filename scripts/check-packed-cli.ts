@@ -346,6 +346,7 @@ async function smokePackedCli(
     REINS_SOCKET: directSocket,
     REINS_STATE_DIR: join(directDirectory, "state"),
     REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_CONSUMER_CONTEXT: "packed-cli-check",
     REINS_IDLE_TIMEOUT_MS: "10000",
   };
   owned.directDaemon = await startDaemon({
@@ -441,6 +442,7 @@ async function smokePackedCli(
     REINS_SOCKET: automaticSocket,
     REINS_STATE_DIR: join(automaticDirectory, "state"),
     REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_CONSUMER_CONTEXT: "packed-cli-check",
     REINS_IDLE_TIMEOUT_MS: "50",
   };
   delete automaticEnv.REINS_DAEMON_BIN;

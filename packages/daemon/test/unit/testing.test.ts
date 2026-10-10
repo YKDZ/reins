@@ -1,3 +1,4 @@
+import { REINS_PROTOCOL_MAJOR_VERSION } from "@reins/protocol";
 import type { ProtocolMessage, ProtocolResponse } from "@reins/protocol";
 import type { TransportConnection } from "@reins/transport";
 import { expect, test } from "vitest";
@@ -64,6 +65,17 @@ test("failed cleanup rejects connections and retries without reopening", async (
     ]),
   });
   const connection = daemon.connect();
+  await expect(
+    request(connection, {
+      kind: "request",
+      requestId: "bind" as never,
+      method: "initialize",
+      params: {
+        protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+        consumerContext: "test-consumer",
+      },
+    }),
+  ).resolves.toMatchObject({ kind: "response", result: expect.any(Object) });
   await expect(
     request(connection, {
       kind: "request",

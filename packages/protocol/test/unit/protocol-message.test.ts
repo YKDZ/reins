@@ -139,7 +139,19 @@ describe("协议 envelope", () => {
 
 describe("per-method 参数与结果 schema", () => {
   test("每个方法都有对应的参数 schema 且按契约拒绝非法输入", () => {
-    ok(protocolParamsSchemaFor("initialize"), {});
+    ok(protocolParamsSchemaFor("initialize"), {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+    });
+    bad(protocolParamsSchemaFor("initialize"), {});
+    bad(protocolParamsSchemaFor("initialize"), { protocolMajorVersion: 1 });
+    bad(protocolParamsSchemaFor("initialize"), { consumerContext: "alpha" });
+    ok(protocolResultSchemaFor("initialize"), {
+      protocolMajorVersion: 1,
+      daemonGeneration: "ab12cd",
+    });
+    bad(protocolResultSchemaFor("initialize"), {});
+    bad(protocolResultSchemaFor("initialize"), { protocolMajorVersion: 1 });
     ok(protocolParamsSchemaFor("spawn"), {
       harness: "qoder",
       message: "hello",
@@ -293,6 +305,17 @@ describe("错误码扩展", () => {
     });
     ok(machineErrorSchema, { code: "method_not_found", method: "x" });
     ok(machineErrorSchema, { code: "protocol_error" });
+    ok(machineErrorSchema, {
+      code: "protocol_version_mismatch",
+      requestedProtocolMajorVersion: 2,
+      supportedProtocolMajorVersion: 1,
+    });
+    bad(machineErrorSchema, { code: "protocol_version_mismatch" });
+    ok(machineErrorSchema, { code: "consumer_context_required" });
+    bad(machineErrorSchema, {
+      code: "consumer_context_required",
+      consumerContext: "alpha",
+    });
     ok(machineErrorSchema, { code: "capability_query_failed" });
     ok(machineErrorSchema, { code: "internal_error" });
   });

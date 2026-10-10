@@ -2,6 +2,7 @@ import {
   diagnosticInputSchema,
   diagnosticRecordSchema,
   makeErrorCause,
+  type ConsumerContext,
   type DiagnosticId,
   type DiagnosticInput,
   type DiagnosticsParams,
@@ -28,8 +29,14 @@ import { resolveDaemonState, type DaemonState } from "./state.ts";
 export type DiagnosticsRuntime = {
   readonly generation: DaemonGeneration;
   sessionId(sessionName: SessionName): SessionId;
-  record(input: DiagnosticInput): Promise<DiagnosticId | undefined>;
-  query(params: DiagnosticsParams): Promise<DiagnosticsResult>;
+  record(
+    input: DiagnosticInput,
+    consumer?: ConsumerContext,
+  ): Promise<DiagnosticId | undefined>;
+  query(
+    params: DiagnosticsParams,
+    scope?: ConsumerContext,
+  ): Promise<DiagnosticsResult>;
   health(): DiagnosticsStoreHealth;
   close(): Promise<void>;
 };
@@ -129,12 +136,21 @@ class RecorderRuntime implements DiagnosticsRuntime {
     return this.#idFactory.session(sessionName);
   }
 
-  record(input: DiagnosticInput): Promise<DiagnosticId | undefined> {
+  record(
+    input: DiagnosticInput,
+    consumer?: ConsumerContext,
+  ): Promise<DiagnosticId | undefined> {
     if (this.#lifecycle !== "open") return Promise.resolve(undefined);
-    return this.#track(this.#record(input), this.#activeRecordOperations);
+    return this.#track(
+      this.#record(input, consumer),
+      this.#activeRecordOperations,
+    );
   }
 
-  async #record(input: DiagnosticInput): Promise<DiagnosticId | undefined> {
+  async #record(
+    input: DiagnosticInput,
+    consumer?: ConsumerContext,
+  ): Promise<DiagnosticId | undefined> {
     const diagnosticId = this.#idFactory.diagnostic();
     if (this.#degraded !== undefined) return undefined;
     const parsedInput = v.safeParse(diagnosticInputSchema, input);
@@ -155,7 +171,7 @@ class RecorderRuntime implements DiagnosticsRuntime {
       return undefined;
     }
     try {
-      await this.#store.append(parsedRecord.output);
+      await this.#store.append(parsedRecord.output, consumer);
       const result = await this.#store.query({
         diagnosticId: parsedRecord.output.diagnosticId,
       });
@@ -176,24 +192,28 @@ class RecorderRuntime implements DiagnosticsRuntime {
     }
   }
 
-  query(params: DiagnosticsParams): Promise<DiagnosticsResult> {
+  query(
+    params: DiagnosticsParams,
+    scope?: ConsumerContext,
+  ): Promise<DiagnosticsResult> {
     if (this.#degraded !== undefined || this.#lifecycle !== "open") {
       return Promise.reject(new Error("Diagnostics store is unavailable"));
     }
     const recordWatermark = [...this.#activeRecordOperations];
-    return this.#track(this.#query(params, recordWatermark));
+    return this.#track(this.#query(params, recordWatermark, scope));
   }
 
   async #query(
     params: DiagnosticsParams,
     recordWatermark: readonly Promise<unknown>[],
+    scope?: ConsumerContext,
   ): Promise<DiagnosticsResult> {
     await Promise.allSettled(recordWatermark);
     if (this.#degraded !== undefined) {
       throw new Error("Diagnostics store is unavailable");
     }
     try {
-      return await this.#store.query(params);
+      return await this.#store.query(params, scope);
     } catch (error) {
       if (
         error instanceof Error &&
