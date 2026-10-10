@@ -145,15 +145,15 @@ export async function acquireGenerationAllocator(
     };
   }
 
+  // 先抽 boot epoch 再取得 lease：randomBootEpoch 可因随机源抛错，若在持锁后
+  // 才执行，则 acquire reject 而 allocator 尚未交付调用方，lease 无从 close 而
+  // 泄漏，同 state 的后续准备会被这把锁阻塞（ADR-0023 §7 启动失败须释放）。
+  const epoch = randomBootEpoch(randomBytes);
   const lease = await acquireAdvisoryFileLease(
     join(state.directory, "generation-allocator"),
     options?.lock ?? { timeoutMs: 30_000 },
   );
-  return new DurableGenerationAllocator(
-    state.directory,
-    lease,
-    randomBootEpoch(randomBytes),
-  );
+  return new DurableGenerationAllocator(state.directory, lease, epoch);
 }
 
 class DurableGenerationAllocator implements GenerationAllocatorLease {

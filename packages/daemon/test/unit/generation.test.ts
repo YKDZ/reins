@@ -148,6 +148,31 @@ describe("daemon generation", () => {
     await allocator.close().catch(() => undefined);
   });
 
+  test("an entropy failure before acquiring the lease does not strand it", async () => {
+    const state = await durableState();
+
+    await expect(
+      acquireGenerationAllocator(state, {
+        randomBytes: () => {
+          throw new Error("entropy_source_failed");
+        },
+      }),
+    ).rejects.toThrow("entropy_source_failed");
+
+    // 失败路径既没持锁也没落盘计数器：随机源抛错发生在取得 lease 之前。
+    await expect(
+      readFile(join(state.directory, "generation")),
+    ).rejects.toMatchObject({ code: "ENOENT" });
+
+    // 锁未泄漏，随后同 state、timeoutMs:0 的正常分配仍成功并发布合法 token。
+    const allocator = await acquireGenerationAllocator(state, {
+      lock: { timeoutMs: 0 },
+    });
+    const published = await allocator.allocate();
+    await allocator.close();
+    expect(v.safeParse(daemonGenerationSchema, published).success).toBe(true);
+  });
+
   test("a destructive state reset explicitly starts a new identity lineage", async () => {
     const state = await durableState();
     const home = directories[directories.length - 1]!;
