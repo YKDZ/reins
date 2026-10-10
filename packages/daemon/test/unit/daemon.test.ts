@@ -1770,7 +1770,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
   });
 
-  test("路由 driver 按 harness 懒实例化并复用", async () => {
+  test("路由 driver 按会话实例化所选 harness", async () => {
     const fakeA = createFakeHarness({
       harness: "a",
       capability: emptyCapability("a"),
@@ -1803,7 +1803,7 @@ describe("daemon 协议面（缝 C）", () => {
       harness: "b",
       message: "3",
     });
-    expect(fakeA.calls.factoryCalls).toBe(1);
+    expect(fakeA.calls.factoryCalls).toBe(2);
     expect(fakeA.calls.starts).toBe(2);
     expect(fakeB.calls.factoryCalls).toBe(1);
     expect(fakeB.calls.starts).toBe(1);

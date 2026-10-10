@@ -14,14 +14,14 @@ import {
 import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 
-// SessionMachine 只接受单一 driverFactory；路由 driver 按 harness 懒实例化
-// 各家 factory，并按 sessionId→harness 表路由（ADR-0009 adapter 表落地）。
+// SessionMachine 只接受单一 driverFactory；每个会话独立实例化所选
+// harness 的 driver，并按 sessionId 路由，避免单会话 adapter 状态串用。
 export function createRoutingDriverFactory(
   adapters: AdapterRegistry,
   diagnostics: Pick<DiagnosticsRuntime, "record" | "query">,
 ): WorkerDriverFactory {
   return (emit) => {
-    const drivers = new Map<string, WorkerDriver>();
+    const drivers = new Map<SessionId, WorkerDriver>();
     const sessionHarness = new Map<SessionId, string>();
     const sessionTurn = new Map<SessionId, TurnId>();
 
@@ -41,13 +41,9 @@ export function createRoutingDriverFactory(
     }
 
     function driverFor(sessionId: SessionId): WorkerDriver {
-      const harness = sessionHarness.get(sessionId);
-      if (harness === undefined) {
-        throw new Error(`No routing entry for session ${sessionId}`);
-      }
-      const driver = drivers.get(harness);
+      const driver = drivers.get(sessionId);
       if (driver === undefined) {
-        throw new Error(`No driver for harness ${harness}`);
+        throw new Error(`No routing entry for session ${sessionId}`);
       }
       return driver;
     }
@@ -99,19 +95,17 @@ export function createRoutingDriverFactory(
             availableHarnesses: [...adapters.keys()],
           } satisfies MachineError;
         }
-        let driver = drivers.get(spec.harness);
-        if (driver === undefined) {
-          driver = adapter.driverFactory({
-            emit,
-            diagnostics: (input) => recordAdapterFact(spec.harness, input),
-          });
-          drivers.set(spec.harness, driver);
-        }
+        const driver = adapter.driverFactory({
+          emit,
+          diagnostics: (input) => recordAdapterFact(spec.harness, input),
+        });
         try {
           driver.start(spec);
+          drivers.set(spec.sessionId, driver);
           sessionHarness.set(spec.sessionId, spec.harness);
           sessionTurn.set(spec.sessionId, spec.turnId);
         } catch (error) {
+          drivers.delete(spec.sessionId);
           sessionHarness.delete(spec.sessionId);
           sessionTurn.delete(spec.sessionId);
           throw error;
@@ -136,10 +130,7 @@ export function createRoutingDriverFactory(
         if (harness === undefined) {
           throw new Error(`No routing entry for session ${sessionId}`);
         }
-        const driver = drivers.get(harness);
-        if (driver === undefined) {
-          throw new Error(`No driver for harness ${harness}`);
-        }
+        const driver = driverFor(sessionId);
         try {
           await driver.terminate(sessionId);
         } catch (error) {
@@ -149,6 +140,7 @@ export function createRoutingDriverFactory(
         }
         sessionHarness.delete(sessionId);
         sessionTurn.delete(sessionId);
+        drivers.delete(sessionId);
       },
     };
     return routingDriver;
