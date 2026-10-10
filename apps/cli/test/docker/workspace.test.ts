@@ -64,7 +64,7 @@ test("prepares, observes and releases one owned native worktree through the real
     });
     for (const match of dependencies.matchAll(/(?:=>\s+|^\s*)(\/\S+)/gmu))
       libraries.add(match[1]!);
-    const wrapper = `#!/bin/sh\nlocation=$(dirname "$(readlink -f "$0")")\nexec "$location/lib/ld-linux-x86-64.so.2" --library-path "$location/lib" "$location/${name}-native" "$@"\n`;
+    const wrapper = `#!/bin/sh\nlocation=$(dirname "$(readlink -f "$0")")\nexec "$location/lib/ld-linux-x86-64.so.2" --argv0 ${name} --library-path "$location/lib" "$location/${name}-native" "$@"\n`;
     const entry = `tools/${name}`;
     await writeFile(join(input, entry), wrapper, { mode: 0o755 });
     fingerprints.push({

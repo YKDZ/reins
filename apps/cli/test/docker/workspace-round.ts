@@ -12,6 +12,7 @@ import {
   writeFile,
 } from "node:fs/promises";
 import { join, resolve } from "node:path";
+import { setTimeout as delay } from "node:timers/promises";
 const base = process.cwd();
 const output = join(base, "evidence");
 await mkdir(output, { recursive: true });
@@ -61,12 +62,14 @@ async function requireCommand(binary: string, args: string[], cwd = base) {
   return result.stdout;
 }
 const facts: unknown[] = [];
+let recording = Promise.resolve();
 const record = async (name: string, value: unknown) => {
   facts.push({ name, value });
-  await writeFile(
-    join(output, "workspace-facts.json"),
-    JSON.stringify(facts, null, 2),
+  const snapshot = JSON.stringify(facts, null, 2);
+  recording = recording.then(() =>
+    writeFile(join(output, "workspace-facts.json"), snapshot),
   );
+  await recording;
 };
 // 固定工具夹具仍执行真实 Git 与 Docker，省去每轮与业务无关的系统包安装。
 process.env.PATH = `${join(base, "tools")}:${process.env.PATH ?? ""}`;
@@ -88,7 +91,11 @@ await requireCommand(
 const installed = join(base, "consumer", "node_modules", "@ykdz", "reins");
 const context = join(base, "image-context");
 await mkdir(context);
-await cp(join(base, "tools"), join(context, "tools"), { recursive: true });
+await cp(join(base, "tools"), join(context, "tools"), {
+  recursive: true,
+  filter: (source) =>
+    !source.endsWith("/docker") && !source.endsWith("/docker-native"),
+});
 await cp(
   join(base, "consumer", "node_modules"),
   join(context, "node_modules"),
@@ -100,7 +107,7 @@ await copyFile(
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nconsole.log("codex-cli 0.149.0");\n',
+  '#!/usr/bin/env node\nconst fs=require("node:fs"),path=require("node:path");const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
   { mode: 0o755 },
 );
 await writeFile(
@@ -154,7 +161,15 @@ await writeFile(
   JSON.stringify(configuration),
 );
 const managerState = join(base, "manager-state");
+const callerHome = join(base, "caller-home");
+await mkdir(join(callerHome, ".codex"), { recursive: true });
+await writeFile(
+  join(callerHome, ".codex", "AGENTS.md"),
+  "unselected host instructions\n",
+);
 const env = {
+  HOME: callerHome,
+  CODEX_HOME: join(callerHome, ".codex"),
   REINS_CONSUMER_CONTEXT: "reins-wrr02-owner-a",
   REINS_WORKSPACE_MANAGER_SOCKET: join(base, "manager.sock"),
   REINS_WORKSPACE_MANAGER_STATE_DIR: managerState,
@@ -176,13 +191,32 @@ const cli = async (args: string[], overrides: NodeJS.ProcessEnv = {}) => {
 try {
   const catalog = await cli(["harnesses", "-C", join(worktree, "src")]);
   assert.equal(catalog.status, 0);
-  const attached = await cli([
+  const attachment = cli([
     "attach",
     "-C",
     join(worktree, "src"),
     "--binding",
     "code",
   ]);
+  let preparing;
+  for (let attempt = 0; attempt < 100; attempt += 1) {
+    const observed = await cli(["status", "-C", join(worktree, "src")]);
+    if (observed.status === 0) {
+      preparing = observed;
+      break;
+    }
+    assert.equal(observed.value.code, "attachment_not_found");
+    await delay(25);
+  }
+  assert.equal(
+    (preparing?.value.runtime as { status: string } | undefined)?.status,
+    "preparing",
+  );
+  await writeFile(
+    join(worktree, ".reins", "allow-version"),
+    "explicit fixture barrier release\n",
+  );
+  const attached = await attachment;
   assert.equal(attached.status, 0, JSON.stringify(attached));
   assert.equal((attached.value.runtime as { status: string }).status, "ready");
   assert.equal(attached.value.cwd, join(worktree, "src"));
@@ -206,6 +240,51 @@ try {
     .filter(Boolean);
   assert.equal(containers.length, 1);
   const container = containers[0]!;
+  const repeated = await cli([
+    "attach",
+    "-C",
+    join(worktree, "src"),
+    "--binding",
+    "code",
+  ]);
+  assert.equal(repeated.status, 0);
+  assert.equal((repeated.value.runtime as { status: string }).status, "ready");
+  assert.equal(
+    await requireCommand("docker", [
+      "ps",
+      "-q",
+      "--filter",
+      "label=reins.workspace.managed=true",
+    ]),
+    container,
+  );
+  const sessions = await requireCommand("docker", [
+    "exec",
+    "--env",
+    `REINS_CONSUMER_CONTEXT=${env.REINS_CONSUMER_CONTEXT}`,
+    container,
+    "node",
+    "/opt/reins/dist/reins.js",
+    "list",
+  ]);
+  await record("readySessions", JSON.parse(sessions));
+  assert.deepEqual(JSON.parse(sessions), []);
+  const privateHome = await requireCommand("docker", [
+    "exec",
+    container,
+    "node",
+    "-e",
+    "const fs=require('node:fs');console.log(JSON.stringify({home:process.env.HOME,codexHome:process.env.CODEX_HOME,unselectedInstructions:fs.existsSync(process.env.CODEX_HOME+'/AGENTS.md')}))",
+  ]);
+  const homeFacts = JSON.parse(privateHome) as {
+    home: string;
+    codexHome: string;
+    unselectedInstructions: boolean;
+  };
+  await record("privateHome", homeFacts);
+  assert.notEqual(homeFacts.home, callerHome);
+  assert.notEqual(homeFacts.codexHome, env.CODEX_HOME);
+  assert.equal(homeFacts.unselectedInstructions, false);
   await record(
     "container",
     JSON.parse(await requireCommand("docker", ["inspect", container])),
@@ -252,6 +331,21 @@ try {
   assert.match(runtimeProcesses, /reins-daemon/u);
   assert.doesNotMatch(runtimeProcesses, /codex app-server/u);
   await rename(worktree, `${worktree}-original`);
+  const movedForeign = await cli(
+    ["attach", "-C", `${worktree}-original`, "--binding", "code"],
+    { REINS_CONSUMER_CONTEXT: "reins-wrr02-owner-b" },
+  );
+  assert.equal(movedForeign.status, 1);
+  assert.equal(movedForeign.value.code, "attachment_owned");
+  const movedOwner = await cli([
+    "attach",
+    "-C",
+    `${worktree}-original`,
+    "--binding",
+    "code",
+  ]);
+  assert.equal(movedOwner.status, 1);
+  assert.equal(movedOwner.value.code, "native_view_mismatch");
   await mkdir(worktree);
   await requireCommand("git", ["init", "--quiet"], worktree);
   const replacement = await cli(["status", "-C", worktree]);
@@ -283,6 +377,44 @@ try {
   assert.equal(
     await readFile(join(worktree, "tracked.txt"), "utf8"),
     "native worktree\n",
+  );
+  configuration.runtimes[0]!.version = "9.9.9";
+  await writeFile(
+    join(worktree, ".reins", "workspace.json"),
+    JSON.stringify(configuration),
+  );
+  const mismatch = await cli([
+    "attach",
+    "-C",
+    join(worktree, "src"),
+    "--binding",
+    "code",
+  ]);
+  assert.equal(mismatch.status, 1);
+  assert.equal(mismatch.value.code, "runtime_entry_invalid");
+  const failed = await cli(["status", "-C", worktree]);
+  assert.equal(failed.status, 0);
+  assert.equal((failed.value.runtime as { status: string }).status, "failed");
+  const failedDetached = await cli([
+    "detach",
+    "-C",
+    worktree,
+    "--session-disposition",
+    "require_none",
+  ]);
+  assert.equal(failedDetached.status, 0);
+  assert.equal(
+    (failedDetached.value.runtime as { status: string }).status,
+    "released",
+  );
+  assert.equal(
+    await requireCommand("docker", [
+      "ps",
+      "-aq",
+      "--filter",
+      "label=reins.workspace.managed=true",
+    ]),
+    "",
   );
   await record("result", "passed");
 } finally {
