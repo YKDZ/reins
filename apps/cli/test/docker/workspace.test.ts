@@ -47,6 +47,8 @@ test("prepares, observes and releases one owned native worktree through the real
   const tools = join(input, "tools");
   await mkdir(join(tools, "lib"), { recursive: true });
   const libraries = new Set<string>();
+  // 当前 Docker CLI 的 Go 加密后端通过 dlopen 加载，ldd 不会列出它。
+  libraries.add("/lib/x86_64-linux-gnu/libcrypto.so.3");
   for (const name of ["git", "docker"]) {
     const executable = execFileSync("sh", ["-c", `command -v ${name}`], {
       encoding: "utf8",

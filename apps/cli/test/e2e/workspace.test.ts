@@ -4,6 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { createWorkspaceClient } from "@reins/client";
+import { consumerContextSchema } from "@reins/protocol";
+import { createUnixSocketClient } from "@reins/transport";
+import type { WorkspaceMessage } from "@reins/workspace-protocol";
+import * as v from "valibot";
 import { expect, test } from "vitest";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -90,6 +95,22 @@ test("discovers explicit bindings and pinned material before attaching a real wo
         },
       ],
     });
+    const client = createWorkspaceClient(
+      await createUnixSocketClient<WorkspaceMessage>(
+        join(directory, "manager.sock"),
+      ),
+      {
+        consumerContext: v.parse(consumerContextSchema, "reins-wrr02-catalog"),
+      },
+    );
+    try {
+      await client.initialize();
+      await expect(
+        client.request("workspace.attach", { cwd: directory, bindings: [] }),
+      ).rejects.toEqual({ code: "invalid_request" });
+    } finally {
+      client.close();
+    }
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

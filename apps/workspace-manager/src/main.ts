@@ -81,7 +81,19 @@ async function main() {
       }
       const parsed = v.safeParse(workspaceRequestSchema, event.message);
       if (!parsed.success) {
-        connection.close();
+        const message: unknown = event.message;
+        if (
+          typeof message === "object" &&
+          message !== null &&
+          "requestId" in message &&
+          typeof message.requestId === "string"
+        )
+          send({
+            kind: "response",
+            requestId: message.requestId,
+            error: workspaceFailure("invalid_request"),
+          });
+        else connection.close();
         return;
       }
       const request = parsed.output;
