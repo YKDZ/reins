@@ -172,9 +172,9 @@ async function runInterrupt(
 }
 
 async function runKill(ctx: CommandInvocationFor<"kill">): Promise<void> {
-  const [ids] = ctx.args;
+  const [sessionId] = ctx.args;
   await withClient(ctx.mode, async (client) => {
-    const response = await client.request("kill", { ids: [...ids] });
+    const response = await client.request("kill", { sessionId });
     printKillResult(requireResult(response), ctx.mode);
   });
 }

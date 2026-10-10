@@ -242,12 +242,11 @@ const commandSpecData = [
   }),
   defineCommand({
     name: "kill",
-    description: "Kill sessions permanently",
+    description: "Kill one session permanently",
     args: [
       {
-        name: "ids",
-        variadic: true,
-        description: "session ids",
+        name: "sessionId",
+        description: "session id",
         kind: { type: "sessionId", hint: "Expected a valid SessionId" },
       },
     ],

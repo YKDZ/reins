@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { readdirSync, readFileSync } from "node:fs";
 import { createInterface } from "node:readline";
 
 import {
@@ -124,6 +125,27 @@ function spawnRealChild(
       }
       try {
         process.kill(-processGroup, 0);
+        if (process.platform === "linux") {
+          // kill(0) 也会命中已停止、仅待父进程回收的成员；它们无法再持 FD 写入。
+          for (const entry of readdirSync("/proc")) {
+            if (!/^\d+$/.test(entry)) continue;
+            let stat: string;
+            try {
+              stat = readFileSync(`/proc/${entry}/stat`, "utf8");
+            } catch (error) {
+              if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+              throw error;
+            }
+            const fields = stat.slice(stat.lastIndexOf(")") + 2).split(" ");
+            if (
+              Number(fields[2]) === processGroup &&
+              fields[0] !== "Z" &&
+              fields[0] !== "X"
+            )
+              return true;
+          }
+          return false;
+        }
         return true;
       } catch (error) {
         if ((error as NodeJS.ErrnoException).code === "ESRCH") return false;

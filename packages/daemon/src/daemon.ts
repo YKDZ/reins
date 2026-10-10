@@ -133,7 +133,7 @@ export function createDaemonInternal(
         .map((session) => session.sessionId);
       const results = await Promise.allSettled(
         liveSessionIds.map(async (sessionId) => {
-          await machine.kill({ ids: [sessionId] });
+          await machine.kill({ sessionId: sessionId });
         }),
       );
       const failures = results
