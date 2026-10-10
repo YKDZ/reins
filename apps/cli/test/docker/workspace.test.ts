@@ -16,6 +16,14 @@ test("prepares, observes and releases one owned native worktree through the real
   );
   const input = join(directory, "input");
   await mkdir(input, { recursive: true });
+  const registryImage =
+    "node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e";
+  const nodeImage = process.env.REINS_WRR02_NODE_IMAGE ?? registryImage;
+  // 离线缓存只接受同一已验证 Node 材料的配置摘要，不引入替代镜像。
+  expect([
+    registryImage,
+    "sha256:59c575db86dccc264e6b71c316548f05a5c3c7a9aa1c112dc019807e651fd06b",
+  ]).toContain(nodeImage);
   const { version } = JSON.parse(
     await readFile(join(repository, "apps/cli/package.json"), "utf8"),
   ) as { version: string };
@@ -34,6 +42,12 @@ test("prepares, observes and releases one owned native worktree through the real
     ],
   ] as const;
   const fingerprints = [];
+  const base = JSON.stringify({ image: nodeImage });
+  await writeFile(join(input, "base-image.json"), base);
+  fingerprints.push({
+    name: "base-image.json",
+    sha256: createHash("sha256").update(base).digest("hex"),
+  });
   for (const [source, name] of sources) {
     await copyFile(source, join(input, name));
     fingerprints.push({
@@ -97,7 +111,12 @@ test("prepares, observes and releases one owned native worktree through the real
     "--evidence-dir",
     join(directory, "evidence"),
     "--image",
-    "node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e",
+    nodeImage,
+    "--timeout-ms",
+    "600000",
+    ...(process.env.REINS_WRR02_PLATFORM_DOCKER_BINARY === undefined
+      ? []
+      : ["--docker-binary", process.env.REINS_WRR02_PLATFORM_DOCKER_BINARY]),
     "--source",
     input,
     "--docker-access",

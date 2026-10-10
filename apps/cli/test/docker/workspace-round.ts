@@ -14,8 +14,9 @@ import { setTimeout as delay } from "node:timers/promises";
 const base = process.cwd();
 const output = join(base, "evidence");
 await mkdir(output, { recursive: true });
-const nodeImage =
-  "node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e";
+const { image: nodeImage } = JSON.parse(
+  await readFile(join(base, "base-image.json"), "utf8"),
+) as { image: string };
 async function command(
   binary: string,
   args: string[],
