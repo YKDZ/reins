@@ -77,7 +77,10 @@ async function bindConsumer(
   consumerContext = "test-consumer",
 ): Promise<void> {
   handshakeSeq += 1;
-  const requestId = v.parse(requestIdSchema, `handshake-${String(handshakeSeq)}`);
+  const requestId = v.parse(
+    requestIdSchema,
+    `handshake-${String(handshakeSeq)}`,
+  );
   const response = new Promise<ProtocolResponse>((resolve) => {
     const unsubscribe = client.onEvent((event) => {
       if (
@@ -111,7 +114,8 @@ afterEach(async () => {
       .splice(0)
       .map((directory) => rm(directory, { recursive: true, force: true })),
   );
-});describe("daemon diagnostic error dispatch", () => {
+});
+describe("daemon diagnostic error dispatch", () => {
   test("malformed NDJSON produces closed secret-safe diagnostics through the real transport and store", async () => {
     const root = await mkdtemp(join(tmpdir(), "reins-daemon-safe-transport-"));
     directories.push(root);
