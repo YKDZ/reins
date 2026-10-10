@@ -149,14 +149,27 @@ export async function openWorkspaceRuntime(options: {
     );
     return result;
   };
+  const locate = async (tree: Tree) => {
+    const currentRoot = await identity(tree.root);
+    return records.find(
+      (item) =>
+        item.info.runtime.status !== "released" &&
+        (item.tree.root === tree.root ||
+          item.identities.some(
+            (saved) =>
+              saved.path === item.tree.root &&
+              saved.dev === currentRoot.dev &&
+              saved.ino === currentRoot.ino,
+          )),
+    );
+  };
   const find = async (cwd: string, owner: ConsumerContext) => {
     const tree = await resolveWorktree(cwd);
-    const record = records.find(
-      (item) =>
-        item.tree.root === tree.root && item.info.runtime.status !== "released",
-    );
+    const record = await locate(tree);
     if (record === undefined) throw workspaceFailure("attachment_not_found");
     if (record.owner !== owner) throw workspaceFailure("attachment_owned");
+    if (record.tree.root !== tree.root)
+      throw workspaceFailure("native_view_mismatch");
     const current = await Promise.all(
       record.identities.map((item) => identity(item.path)),
     );
@@ -406,11 +419,7 @@ export async function openWorkspaceRuntime(options: {
         throw workspaceFailure("binding_conflict");
       const intent = bindingRefs.toSorted();
       const { record, created } = await exclusive(async () => {
-        const existing = records.find(
-          (item) =>
-            item.tree.root === tree.root &&
-            item.info.runtime.status !== "released",
-        );
+        const existing = await locate(tree);
         if (existing !== undefined) {
           await find(cwd, owner);
           if (JSON.stringify(existing.intent) !== JSON.stringify(intent))
