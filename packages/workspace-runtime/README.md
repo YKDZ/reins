@@ -6,8 +6,19 @@
 
 ```json
 {
-  "environments": [{ "provider": "docker", "image": "registry.example/project@sha256:<64 hex digits>" }],
-  "runtimes": [{ "harness": "codex", "version": "0.149.0", "image": "registry.example/codex-material@sha256:<64 hex digits>" }],
+  "environments": [
+    {
+      "provider": "docker",
+      "image": "registry.example/project@sha256:<64 hex digits>"
+    }
+  ],
+  "runtimes": [
+    {
+      "harness": "codex",
+      "version": "0.149.0",
+      "image": "registry.example/codex-material@sha256:<64 hex digits>"
+    }
+  ],
   "bindings": [{ "ref": "code", "harness": "codex" }]
 }
 ```
