@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { AlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
@@ -21,6 +23,8 @@ import type {
   WorkerSpec,
 } from "@reins/protocol";
 import {
+  isSideEffectMethod,
+  commandIdSchema,
   machineErrorSchema,
   makeDiagnosticId,
   REINS_PROTOCOL_MAJOR_VERSION,
@@ -166,7 +170,15 @@ function makeRequester(
             resolve(message);
           }
         });
-        client.send({ kind: "request", requestId, method, params });
+        client.send({
+          kind: "request",
+          requestId,
+          method,
+          params,
+          ...(isSideEffectMethod(method)
+            ? { commandId: v.parse(commandIdSchema, "test:" + randomUUID()) }
+            : {}),
+        });
       });
     if (method === "initialize") return send();
     // 领域动作前自动完成一次 initialize 握手（同连接幂等）。
@@ -2322,4 +2334,303 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     expect(resultOf(resolved)).toMatchObject({ sessionId, permissionId });
     expect(fake.calls.resolved).toEqual([{ outcome: "allow", scope: "once" }]);
   });
+});
+
+test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建一次", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: { harness: "fake", models: [] },
+  });
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const a = server.connect();
+  const b = server.connect();
+  await makeRequester(a)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "same-consumer",
+  });
+  await makeRequester(b)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "same-consumer",
+  });
+  const command = {
+    kind: "request",
+    method: "spawn",
+    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+    params: {
+      harness: "fake",
+      sessionName: "recoverable",
+      message: "caller original",
+    },
+  };
+  const first = await sendRaw(a, { ...command, requestId: "original" });
+  const replay = await sendRaw(b, { ...command, requestId: "recovered" });
+  expect(first).toMatchObject({
+    result: { sessionId: "recoverable@gdaemontest" },
+  });
+  expect(replay).toEqual({ ...first, requestId: "recovered" });
+  expect(fake.calls.starts).toBe(1);
+  a.close();
+  b.close();
+});
+
+test("命令结果恢复：其他消费者不能用原身份取结果或另起副作用", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: { harness: "fake", models: [] },
+  });
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const a = server.connect(),
+    b = server.connect();
+  await makeRequester(a, "alpha")("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "alpha",
+  });
+  await makeRequester(b, "beta")("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "beta",
+  });
+  const command = {
+    kind: "request",
+    method: "spawn",
+    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+    params: {
+      harness: "fake",
+      sessionName: "private-command",
+      message: "private",
+    },
+  };
+  expect(
+    await sendRaw(a, { ...command, requestId: "original" }),
+  ).toHaveProperty("result");
+  expect(await sendRaw(b, { ...command, requestId: "foreign" })).toMatchObject({
+    error: { code: "command_id_conflict" },
+  });
+  expect(fake.calls.starts).toBe(1);
+  a.close();
+  b.close();
+});
+
+test("命令结果恢复：成功、机器错误和冲突均不再次执行业务", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: { harness: "fake", models: [] },
+    autoPermission: { options: [{ outcome: "allow", scope: "once" }] },
+  });
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const a = server.connect(),
+    b = server.connect();
+  await makeRequester(a)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "test-consumer",
+  });
+  await makeRequester(b)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "test-consumer",
+  });
+  const command = async (
+    method: ProtocolMethod,
+    params: unknown,
+    id: string,
+  ) => {
+    const commandId = `test:${id.padStart(8, "0")}-0123-4123-8123-0123456789ab`;
+    const original = await sendRaw(a, {
+      kind: "request",
+      requestId: `a${id}`,
+      method,
+      params,
+      commandId,
+    });
+    const recovered = await sendRaw(b, {
+      kind: "request",
+      requestId: `b${id}`,
+      method,
+      params,
+      commandId,
+    });
+    expect(recovered).toEqual({ ...original, requestId: `b${id}` });
+    return original;
+  };
+  const sessionId = testIdentity.session("commands");
+  const missing = await command(
+    "send",
+    { sessionId, message: "before spawn" },
+    "1",
+  );
+  expect(missing).toMatchObject({ error: { code: "session_not_found" } });
+  await command(
+    "spawn",
+    {
+      harness: "fake",
+      sessionName: "commands",
+      message: "initial",
+      authorizationMode: "interactive",
+    },
+    "2",
+  );
+  // 状态已经变化；原来的机器错误仍是原请求的权威结果。
+  expect(
+    await sendRaw(b, {
+      kind: "request",
+      requestId: "old-error",
+      method: "send",
+      params: { message: "before spawn", sessionId },
+      commandId: "test:00000001-0123-4123-8123-0123456789ab",
+    }),
+  ).toMatchObject({ error: { code: "session_not_found" } });
+  expect(
+    await command(
+      "resolvePermission",
+      {
+        sessionId,
+        permissionId: "p1",
+        resolution: { outcome: "allow", scope: "once" },
+      },
+      "5",
+    ),
+  ).toHaveProperty("result");
+  fake.controls.completeTurn();
+  expect(
+    await command("send", { sessionId, message: "once" }, "3"),
+  ).toHaveProperty("result");
+  expect(await command("interrupt", { ids: [sessionId] }, "4")).toHaveProperty(
+    "result",
+  );
+  expect(
+    await sendRaw(b, {
+      kind: "request",
+      requestId: "changed",
+      method: "send",
+      params: { sessionId, message: "different" },
+      commandId: "test:00000003-0123-4123-8123-0123456789ab",
+    }),
+  ).toMatchObject({ error: { code: "command_id_conflict" } });
+  expect(
+    await sendRaw(b, {
+      kind: "request",
+      requestId: "changed-method",
+      method: "kill",
+      params: { ids: [sessionId] },
+      commandId: "test:00000003-0123-4123-8123-0123456789ab",
+    }),
+  ).toMatchObject({ error: { code: "command_id_conflict" } });
+  expect(await command("kill", { ids: [sessionId] }, "6")).toHaveProperty(
+    "result",
+  );
+  expect(fake.calls.starts).toBe(1);
+  expect(fake.calls.delivered).toHaveLength(1);
+  expect(fake.calls.interrupted).toHaveLength(1);
+  expect(fake.calls.resolved).toHaveLength(1);
+  expect(fake.calls.terminated).toHaveLength(1);
+  a.close();
+  b.close();
+});
+
+test("命令结果恢复：参数拒绝也是已知结果，不能用修改后的参数复用身份", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: { harness: "fake", models: [] },
+  });
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const connection = server.connect();
+  await makeRequester(connection)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "test-consumer",
+  });
+  const base = {
+    kind: "request",
+    method: "spawn",
+    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+  };
+  expect(
+    await sendRaw(connection, {
+      ...base,
+      requestId: "invalid",
+      params: { harness: "fake", sessionName: "params" },
+    }),
+  ).toMatchObject({ error: { code: "invalid_params" } });
+  expect(
+    await sendRaw(connection, {
+      ...base,
+      requestId: "changed",
+      params: { harness: "fake", sessionName: "params", message: "now valid" },
+    }),
+  ).toMatchObject({ error: { code: "command_id_conflict" } });
+  expect(fake.calls.starts).toBe(0);
+  connection.close();
+});
+
+test("命令结果恢复：接纳请求后立即断连不撤销原消费者下的执行", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: { harness: "fake", models: [] },
+  });
+  const server = createInMemoryTransportServer<ProtocolMessage>();
+  let disconnect = true;
+  const daemon = createDaemon({
+    transport: {
+      ...server,
+      onConnection(listener) {
+        return server.onConnection((connection) =>
+          listener({
+            ...connection,
+            onEvent(receive) {
+              return connection.onEvent((event) => {
+                receive(event);
+                if (
+                  disconnect &&
+                  event.kind === "message" &&
+                  event.message.kind === "request" &&
+                  event.message.method === "spawn"
+                ) {
+                  disconnect = false;
+                  // 接纳与 cleanup 同步完成；尚未运行账本中的业务微任务。
+                  receive({ kind: "closed" });
+                  connection.close();
+                }
+              });
+            },
+          }),
+        );
+      },
+    },
+    adapters: new Map([["fake", fake.adapter]]),
+    identity: testIdentity,
+    diagnostics: testDiagnostics,
+    idleTimeoutMs: 60_000,
+  });
+  daemons.push(daemon);
+  void daemon.start();
+  const client = server.connect();
+  await makeRequester(client)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "original-consumer",
+  });
+  const command = {
+    kind: "request",
+    method: "spawn",
+    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+    params: { harness: "fake", sessionName: "accepted", message: "original" },
+  };
+  client.send({
+    ...command,
+    requestId: "accepted-original",
+  } as ProtocolMessage);
+  await flush();
+  const recovery = server.connect();
+  try {
+    await makeRequester(recovery)("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext: "original-consumer",
+    });
+    expect(
+      await sendRaw(recovery, { ...command, requestId: "accepted-recovered" }),
+    ).toMatchObject({ result: { sessionId: "accepted@gdaemontest" } });
+    expect(fake.calls.starts).toBe(1);
+    expect(
+      await makeRequester(recovery, "original-consumer")("list", {}),
+    ).toMatchObject({ result: [{ sessionId: "accepted@gdaemontest" }] });
+  } finally {
+    client.close();
+    recovery.close();
+  }
 });

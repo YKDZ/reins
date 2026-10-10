@@ -1,5 +1,6 @@
 import {
   createReinsClient,
+  parseRetryToken,
   type ProtocolResponseFor,
   type ReinsClient,
 } from "@reins/client";
@@ -23,7 +24,7 @@ import type {
   CommandName,
 } from "./command-spec.ts";
 import { ensureDaemon } from "./daemon.ts";
-import { ExitError, EXIT_TIMEOUT, machineError } from "./errors.ts";
+import { ExitError, EXIT_TIMEOUT, machineError, usageError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 import {
   printCapabilitiesResult,
@@ -279,6 +280,49 @@ type HandlerMap = {
 };
 
 export const handlers = {
+  retry: async (ctx: CommandInvocationFor<"retry">) => {
+    const [token] = ctx.args;
+    let identity: ReturnType<typeof parseRetryToken>;
+    try {
+      identity = parseRetryToken(token);
+    } catch {
+      throw usageError({
+        issue: "invalid_value",
+        field: "token",
+        hint: "Use the RetryToken from command_outcome_unknown",
+      });
+    }
+    await withClient(ctx.mode, async (client) => {
+      const response = await client.retry(token, ctx.options.params);
+      const result = requireResult(response);
+      {
+        // 恢复保留原方法的输出；不显示内部命令身份。
+        switch (identity.method) {
+          case "spawn":
+            printSpawnResult(result as ProtocolResult<"spawn">, ctx.mode);
+            break;
+          case "send":
+            printSendAck(result as ProtocolResult<"send">, ctx.mode);
+            break;
+          case "interrupt":
+            printInterruptResult(
+              result as ProtocolResult<"interrupt">,
+              ctx.mode,
+            );
+            break;
+          case "kill":
+            printKillResult(result as ProtocolResult<"kill">, ctx.mode);
+            break;
+          case "resolvePermission":
+            printResolvePermissionAck(
+              result as ProtocolResult<"resolvePermission">,
+              ctx.mode,
+            );
+            break;
+        }
+      }
+    });
+  },
   spawn: runSpawn,
   send: runSend,
   wait: runWait,
@@ -296,6 +340,8 @@ export async function dispatchInvocation(
   invocation: CommandInvocation,
 ): Promise<void> {
   switch (invocation.command) {
+    case "retry":
+      return handlers.retry(invocation);
     case "spawn":
       return handlers.spawn(invocation);
     case "send":

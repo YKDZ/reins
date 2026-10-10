@@ -59,6 +59,13 @@ export function renderCliError(
   spec?: CommandSpec,
 ): RenderedError {
   if (error.code === "usage_error") return renderUsageError(error, spec);
+  if (error.code === "command_outcome_unknown")
+    return renderedError(
+      "Command outcome is unknown (" + error.cause + ")",
+      "Recover explicitly with reins retry " +
+        error.retryToken +
+        " --params <original-params-json>",
+    );
   if (error.code === "input_error") {
     return renderedError(
       error.reason === "permission_choice_eof"
@@ -325,6 +332,10 @@ function domainMessage(error: MachineError): string {
       return `Session name is already in use${"sessionName" in error ? `: ${error.sessionName}` : ""}`;
     case "unsupported_feature":
       return `Unsupported feature${"feature" in error ? `: ${error.feature}` : ""}`;
+    case "command_id_conflict":
+      return "Command identity was reused with different method or parameters";
+    case "stale_command_id":
+      return "Command belongs to a previous daemon generation";
     case "daemon_timeout":
       return "Daemon request timed out";
     case "invalid_daemon_response":
