@@ -301,7 +301,7 @@ describe("driver 抛错时动作整体回滚", () => {
       cwd: "/tmp/demo",
     });
 
-    await expect(machine.kill({ ids: [id] })).rejects.toEqual(
+    await expect(machine.kill({ sessionId: id })).rejects.toEqual(
       expect.objectContaining({
         code: "internal_error",
         cause: { kind: "exception", message: "终止失败" },
@@ -309,6 +309,7 @@ describe("driver 抛错时动作整体回滚", () => {
     );
 
     expect(events.some((event) => event.type === "session.killed")).toBe(false);
+    expect(events.some((event) => event.type === "turn.completed")).toBe(false);
     expect(machine.list()[0]).toEqual(
       expect.objectContaining({ sessionId: id, state: "busy" }),
     );
@@ -350,9 +351,9 @@ describe("driver 抛错时动作整体回滚", () => {
       cwd: "/tmp/demo",
     });
 
-    const first = machine.kill({ ids: [sessionId] });
+    const first = machine.kill({ sessionId: sessionId });
     await vi.waitFor(() => expect(terminateCalls).toBe(1));
-    const second = machine.kill({ ids: [sessionId] });
+    const second = machine.kill({ sessionId: sessionId });
     await expect(
       machine.send({ sessionId, message: "must not enter driver" }),
     ).rejects.toEqual({ code: "session_terminating", sessionId });
@@ -362,16 +363,32 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     expect(fake.controls.delivered).toEqual([]);
     expect(fake.controls.interrupted).toEqual([]);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "turn.completed" || event.type === "session.killed",
+      ),
+    ).toBe(false);
 
     releaseTermination();
     await expect(Promise.all([first, second])).resolves.toEqual([
-      [{ sessionId, status: "killed" }],
-      [{ sessionId, status: "killed" }],
+      { sessionId, status: "killed" },
+      { sessionId, status: "killed" },
     ]);
     expect(terminateCalls).toBe(1);
     expect(
       events.filter((event) => event.type === "session.killed"),
     ).toHaveLength(1);
+    await machine.kill({ sessionId });
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "turn.completed" || event.type === "session.killed",
+      ),
+    ).toMatchObject([
+      { type: "turn.completed", sessionId, stopReason: "killed" },
+      { type: "session.killed", sessionId },
+    ]);
   });
 
   test("routing 已验证的 diagnosticId 由 core 复用且不重复记录", async () => {
@@ -403,7 +420,7 @@ describe("driver 抛错时动作整体回滚", () => {
       cwd: "/tmp/demo",
     });
 
-    await expect(machine.kill({ ids: [sessionId] })).rejects.toMatchObject({
+    await expect(machine.kill({ sessionId: sessionId })).rejects.toMatchObject({
       code: "internal_error",
       diagnosticId,
     });
