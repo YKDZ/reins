@@ -23,7 +23,7 @@ const {
 } = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
   image: string;
   consumerSha256: string;
-  fault?: "move" | "replace" | "remove" | "split";
+  fault?: "move" | "replace" | "remove" | "split" | "provider";
 };
 async function command(
   binary: string,
@@ -343,6 +343,9 @@ try {
     heldFile: "held.txt",
     relativeFile: "relative.txt",
     intervalMs: 25,
+    ...(fault === "provider"
+      ? { permissionFile: "permission-effect.json" }
+      : {}),
   });
   const spawned = await control([
     "spawn",
@@ -397,6 +400,42 @@ try {
     ) as { state: string };
   const initialProcess = await processState();
   assert.ok(!["absent", "Z", "X"].includes(initialProcess.state));
+  let clientExecution:
+    | Promise<{ status: number; stdout: string; stderr: string }>
+    | undefined;
+  let clientReady:
+    | { permissionHandle: string; known: unknown; unknown: unknown }
+    | undefined;
+  if (fault === "provider") {
+    let clientExit: unknown;
+    clientExecution = command(process.execPath, [
+      join(base, "native-view-client.js"),
+      JSON.stringify({
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        cwd: join(worktree, "src"),
+        turnHandle: spawned.value.turnHandle,
+        spawnMessage: message,
+        evidence: output,
+      }),
+    ]).then((result) => {
+      clientExit = result;
+      return result;
+    });
+    for (;;) {
+      try {
+        clientReady = JSON.parse(
+          await readFile(join(output, "client-ready.json"), "utf8"),
+        );
+        break;
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        assert.equal(clientExit, undefined, JSON.stringify(clientExit));
+        await delay(25);
+      }
+    }
+    await record("shared-client-known-unknown-before-fault", clientReady);
+  }
   const held = await open(join(worktree, "src", "held.txt"), "r");
   const relative = await open(join(worktree, "src", "relative.txt"), "r");
   try {
@@ -465,6 +504,46 @@ try {
     const moved = join(base, "moved-worktree");
     let movedRoot: { dev: string; ino: string } | undefined;
     let passiveStopped: boolean | undefined;
+    if (fault === "provider") {
+      const beforeStop = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      await requireCommand("docker", [
+        "kill",
+        "--signal=STOP",
+        originalContainer,
+      ]);
+      const pausedDaemon = JSON.parse(
+        await requireCommand("docker", [
+          "exec",
+          "-w",
+          "/",
+          originalContainer,
+          "node",
+          "-e",
+          "const f=require('node:fs'),s=f.readFileSync('/proc/1/stat','utf8');console.log(JSON.stringify({state:s.slice(s.lastIndexOf(')')+2).split(' ')[0]}))",
+        ]),
+      ) as { state: string };
+      assert.equal(pausedDaemon.state, "T");
+      const originalWriter = await processState();
+      assert.ok(!["absent", "Z", "X"].includes(originalWriter.state));
+      await delay(150);
+      const afterStop = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      assert.ok(afterStop.held > beforeStop.held);
+      assert.ok(afterStop.relative > beforeStop.relative);
+      await record("provider-control-unavailable-original-writer", {
+        originalContainer,
+        pid: writer.pid,
+        daemon: pausedDaemon,
+        writer: originalWriter,
+        before: beforeStop,
+        after: afterStop,
+      });
+    }
     if (fault === "remove") {
       const originalGitDir = await requireCommand(
         "git",
@@ -617,133 +696,229 @@ try {
         originalHead,
       );
     }
-    const target = fault === "move" ? moved : worktree;
-    const expectedLoss =
-      fault === "replace"
-        ? { reason: "replaced" }
-        : fault === "remove"
-          ? { reason: "removed" }
-          : fault === "split"
-            ? { reason: "split" }
-            : { reason: "moved", currentRoot: moved };
-    const rejected = await control(
-      fault === "remove"
-        ? [
-            "-C",
-            join(target, "src"),
-            "send",
-            String(spawned.value.turnHandle),
-            message,
-            "--placement",
-            "active_turn",
-          ]
-        : [
-            "-C",
-            join(target, "src"),
-            "spawn",
-            "codex",
-            message,
-            "--name",
-            "must-reject",
-          ],
-      base,
-    );
-    assert.equal(rejected.status, 65, JSON.stringify(rejected));
-    const detected = {
-      held: (await held.stat()).size,
-      relative: (await relative.stat()).size,
-    };
-    const originalProcess = await processState(40);
-    const stopped = ["absent", "Z", "X"].includes(originalProcess.state);
-    const stoppedSizes = {
-      held: (await held.stat()).size,
-      relative: (await relative.stat()).size,
-    };
-    await delay(1000);
-    const stable =
-      stoppedSizes.held === (await held.stat()).size &&
-      stoppedSizes.relative === (await relative.stat()).size;
-    await record(`${fault}-original-writer`, {
-      originalRoot,
-      movedRoot,
-      replacementRoot,
-      originalHead,
-      writer,
-      originalContainer,
-      initialProcess,
-      originalProcess,
-      stopped,
-      spawn: spawned.value,
-      rejection: rejected.value,
-      before: detected,
-      after: {
+    if (fault === "provider") {
+      await writeFile(
+        join(output, "fault-applied.json"),
+        JSON.stringify({ fault, moved }),
+      );
+      const client = await clientExecution!;
+      await record("shared-client-after-fault", client);
+      assert.equal(client.status, 0, JSON.stringify(client));
+      const providerState = async () =>
+        JSON.parse(
+          await requireCommand("docker", [
+            "inspect",
+            "--format",
+            "{{json .}}",
+            originalContainer,
+          ]),
+        ) as { Id: string; State: { Running: boolean } };
+      let provider = await providerState();
+      for (let attempt = 0; attempt < 60 && provider.State.Running; attempt++) {
+        await delay(1000);
+        provider = await providerState();
+      }
+      const stoppedSizes = {
         held: (await held.stat()).size,
         relative: (await relative.stat()).size,
-      },
-      stable,
-    });
-    if (fault === "remove")
+      };
+      await delay(1000);
+      const stable =
+        stoppedSizes.held === (await held.stat()).size &&
+        stoppedSizes.relative === (await relative.stat()).size;
+      await record("provider-original-runtime-stop", {
+        originalContainer,
+        pid: writer.pid,
+        provider,
+        before: stoppedSizes,
+        after: {
+          held: (await held.stat()).size,
+          relative: (await relative.stat()).size,
+        },
+        stable,
+      });
+      assert.equal(provider.Id, originalContainer);
       assert.equal(
-        passiveStopped,
+        provider.State.Running,
+        false,
+        "Original provider isolation must stop when harness termination cannot be confirmed",
+      );
+      assert.equal(stable, true);
+      const lost = await cli(["status", "-C", join(moved, "src")]);
+      assert.equal(lost.status, 0, JSON.stringify(lost));
+      const source = lost.value.source as {
+        status: string;
+        termination: { status: string; via: string; error?: { code: string } };
+      };
+      assert.equal(source.status, "failed");
+      assert.equal(source.termination.status, "stopped");
+      assert.equal(source.termination.via, "provider");
+      assert.equal(source.termination.error?.code, "daemon_timeout");
+      const permission = await control(
+        [
+          "-C",
+          join(moved, "src"),
+          "resolve-permission",
+          clientReady!.permissionHandle,
+          "--outcome",
+          "allow",
+          "--scope",
+          "once",
+        ],
+        base,
+      );
+      assert.equal(permission.status, 65, JSON.stringify(permission));
+      assert.equal(permission.value.code, "native_view_lost");
+      await assert.rejects(
+        readFile(join(moved, "src", "permission-effect.json")),
+        { code: "ENOENT" },
+      );
+      assert.equal(
+        await readFile(join(moved, "src", "known-effect.txt"), "utf8"),
+        "caller known effect\n",
+      );
+      assert.equal(
+        await readFile(join(moved, "src", "unknown-effect.txt"), "utf8"),
+        "caller effect without native acceptance\n",
+      );
+      await record("provider-stop-facts", {
+        source,
+        client: JSON.parse(
+          await readFile(join(output, "client-result.json"), "utf8"),
+        ),
+        permission: permission.value,
+      });
+    } else {
+      const target = fault === "move" ? moved : worktree;
+      const expectedLoss =
+        fault === "replace"
+          ? { reason: "replaced" }
+          : fault === "remove"
+            ? { reason: "removed" }
+            : fault === "split"
+              ? { reason: "split" }
+              : { reason: "moved", currentRoot: moved };
+      const rejected = await control(
+        fault === "remove"
+          ? [
+              "-C",
+              join(target, "src"),
+              "send",
+              String(spawned.value.turnHandle),
+              message,
+              "--placement",
+              "active_turn",
+            ]
+          : [
+              "-C",
+              join(target, "src"),
+              "spawn",
+              "codex",
+              message,
+              "--name",
+              "must-reject",
+            ],
+        base,
+      );
+      assert.equal(rejected.status, 65, JSON.stringify(rejected));
+      const detected = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      const originalProcess = await processState(40);
+      const stopped = ["absent", "Z", "X"].includes(originalProcess.state);
+      const stoppedSizes = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      await delay(1000);
+      const stable =
+        stoppedSizes.held === (await held.stat()).size &&
+        stoppedSizes.relative === (await relative.stat()).size;
+      await record(`${fault}-original-writer`, {
+        originalRoot,
+        movedRoot,
+        replacementRoot,
+        originalHead,
+        writer,
+        originalContainer,
+        initialProcess,
+        originalProcess,
+        stopped,
+        spawn: spawned.value,
+        rejection: rejected.value,
+        before: detected,
+        after: {
+          held: (await held.stat()).size,
+          relative: (await relative.stat()).size,
+        },
+        stable,
+      });
+      if (fault === "remove")
+        assert.equal(
+          passiveStopped,
+          true,
+          "Original writer must stop after actual removal without a new caller action",
+        );
+      assert.equal(
+        stopped,
         true,
-        "Original writer must stop after actual removal without a new caller action",
+        "Original writer process must stop after native view loss is detected",
       );
-    assert.equal(
-      stopped,
-      true,
-      "Original writer process must stop after native view loss is detected",
-    );
-    assert.equal(
-      stable,
-      true,
-      "Original held-FD and cwd-relative writer must stop after native view loss is detected",
-    );
-    assert.equal(rejected.value.code, "native_view_lost");
-    assert.deepEqual(rejected.value.nativeView, expectedLoss);
-    const lost = await cli(["status", "-C", join(target, "src")]);
-    assert.equal(lost.status, 0);
-    const source = lost.value.source as {
-      status: string;
-      error: { code: string; nativeView: unknown };
-      termination: { status: string; via: string; sessions: unknown[] };
-    };
-    assert.equal(source.status, "failed");
-    assert.equal(source.error.code, "native_view_lost");
-    assert.deepEqual(source.error.nativeView, expectedLoss);
-    assert.deepEqual(source.termination, {
-      status: "stopped",
-      via: "harness",
-      sessions: [{ sessionId: spawned.value.sessionId, outcome: "confirmed" }],
-    });
-    const terminal = await control(
-      [
-        "-C",
-        join(target, "src"),
-        "wait",
-        String(spawned.value.turnHandle),
-        "--completion",
-        "all",
-        "--timeout",
-        "0",
-      ],
-      base,
-    );
-    assert.equal(terminal.status, 3, JSON.stringify(terminal));
-    assert.equal(
-      (terminal.value.completed as { stopReason: string }[])[0]!.stopReason,
-      "killed",
-    );
-    if (fault === "replace") {
-      for (const name of ["held.txt", "relative.txt", "writer.json"])
-        await assert.rejects(readFile(join(worktree, "src", name)), {
-          code: "ENOENT",
-        });
       assert.equal(
-        await readFile(join(worktree, "tracked.txt"), "utf8"),
-        "native worktree\n",
+        stable,
+        true,
+        "Original held-FD and cwd-relative writer must stop after native view loss is detected",
       );
+      assert.equal(rejected.value.code, "native_view_lost");
+      assert.deepEqual(rejected.value.nativeView, expectedLoss);
+      const lost = await cli(["status", "-C", join(target, "src")]);
+      assert.equal(lost.status, 0);
+      const source = lost.value.source as {
+        status: string;
+        error: { code: string; nativeView: unknown };
+        termination: { status: string; via: string; sessions: unknown[] };
+      };
+      assert.equal(source.status, "failed");
+      assert.equal(source.error.code, "native_view_lost");
+      assert.deepEqual(source.error.nativeView, expectedLoss);
+      assert.deepEqual(source.termination, {
+        status: "stopped",
+        via: "harness",
+        sessions: [
+          { sessionId: spawned.value.sessionId, outcome: "confirmed" },
+        ],
+      });
+      const terminal = await control(
+        [
+          "-C",
+          join(target, "src"),
+          "wait",
+          String(spawned.value.turnHandle),
+          "--completion",
+          "all",
+          "--timeout",
+          "0",
+        ],
+        base,
+      );
+      assert.equal(terminal.status, 3, JSON.stringify(terminal));
+      assert.equal(
+        (terminal.value.completed as { stopReason: string }[])[0]!.stopReason,
+        "killed",
+      );
+      if (fault === "replace") {
+        for (const name of ["held.txt", "relative.txt", "writer.json"])
+          await assert.rejects(readFile(join(worktree, "src", name)), {
+            code: "ENOENT",
+          });
+        assert.equal(
+          await readFile(join(worktree, "tracked.txt"), "utf8"),
+          "native worktree\n",
+        );
+      }
+      await record("original-stop-facts", { source, terminal: terminal.value });
     }
-    await record("original-stop-facts", { source, terminal: terminal.value });
   } finally {
     await held.close();
     await relative.close();

@@ -43,6 +43,28 @@ test(`stops the original writer after native view loss: ${fault}`, async () => {
     ],
   ] as const;
   const fingerprints: { name: string; sha256: string }[] = [];
+  if (fault === "provider") {
+    const configuration = join(directory, "client-bundle.config.ts");
+    await writeFile(
+      configuration,
+      `export default ${JSON.stringify({
+        input: join(repository, "apps/cli/test/docker/native-view-client.ts"),
+        platform: "node",
+        resolve: { conditionNames: ["source", "import", "node", "default"] },
+        output: { file: join(input, "native-view-client.js"), format: "esm" },
+      })};\n`,
+    );
+    execFileSync("pnpm", ["exec", "rolldown", "--config", configuration], {
+      cwd: repository,
+      stdio: "pipe",
+    });
+    fingerprints.push({
+      name: "native-view-client.js",
+      sha256: createHash("sha256")
+        .update(await readFile(join(input, "native-view-client.js")))
+        .digest("hex"),
+    });
+  }
   await copyFile(
     join(repository, "apps/cli/test/docker/native-view-worker.ts"),
     join(input, "native-view-worker.ts"),
