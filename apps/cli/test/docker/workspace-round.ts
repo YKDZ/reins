@@ -124,6 +124,10 @@ await requireCommand("cp", [
   join(payload, "opt", "reins", "dist"),
 ]);
 await writeFile(
+  join(payload, "opt", "reins", "package.json"),
+  await readFile(join(installed, "package.json")),
+);
+await writeFile(
   join(payload, "opt", "reins", "codex-adapter.ts"),
   await readFile(join(base, "codex-adapter.ts")),
 );
@@ -132,6 +136,11 @@ await writeFile(
   await readFile(join(context, "codex")),
   { mode: 0o755 },
 );
+// 在昂贵镜像提交前实际执行发行 CLI，验证夹具闭包的本地入口。
+await requireCommand(process.execPath, [
+  join(payload, "opt", "reins", "dist", "reins.js"),
+  "--version",
+]);
 await writeFile(
   join(context, "Dockerfile"),
   `FROM ${nodeImage}\nCOPY image-context/payload /\nENV REINS_ADAPTERS_MODULE=/opt/reins/codex-adapter.ts\n`,
