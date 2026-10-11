@@ -56,6 +56,8 @@ reins -C /native/project/src spawn codex 'Read another.ts and explain its import
 
 `--cwd` 可以显式选择同一工作树中的其他执行目录；相对路径按 CLI 当前目录解析。`spawn` 返回精确目录、会话句柄和首回合句柄。保存返回的句柄，分别用于会话控制和精确等待。两个 `spawn` 创建独立会话，共用已附着环境和原生源码；结束一个会话不会删除环境。相同绑定再次 `attach` 复用成功资源。环境定义变化由 `workspace status` 报告，已有环境继续采用已附着定义；新定义只经显式脱离、重新附着应用。
 
+部署者重启 workspace-local daemon 或整个容器后，先通过 `reins workspace status -C /native/project/src` 重新查询原生工作树、目录、运行环境及绑定。若状态失败，修正实际条件，再显式重复原绑定的 `workspace attach`；这会重新验证已完成材料，不自动重装。重启前的会话和回合句柄失效，代码保留不表示模型对话保留，原活动回合的结果也可能未知。继续工作时显式给出新名称和完整新消息，例如 `reins -C /native/project/src spawn codex 'Read target.ts and explain its current exports' --name after-restart`，再等待它返回的新回合句柄。产品不会重放旧消息或将旧句柄改投新 worker。
+
 共享客户端在已初始化的 `createWorkspaceClient` 上调用 `control(cwd)`，获得普通 Reins 客户端；内部连接地址由 Manager 解析。每次任务请求重新经过 Manager 准入，无需再提供绑定引用：
 
 ```ts
