@@ -1,5 +1,6 @@
 #!/usr/bin/env node
-import { mkdir } from "node:fs/promises";
+import { lstat, mkdir, unlink } from "node:fs/promises";
+import { createConnection } from "node:net";
 import { dirname } from "node:path";
 
 import type { ConsumerContext } from "@reins/protocol";
@@ -31,6 +32,7 @@ async function main() {
   const release = await lockfile.lock(stateDirectory);
   let runtime: Awaited<ReturnType<typeof openWorkspaceRuntime>>;
   try {
+    await removeStaleSocket(socket);
     runtime = await openWorkspaceRuntime({
       stateDirectory,
       ...(process.env.REINS_WORKSPACE_RESOURCE_PREFIX === undefined
@@ -45,11 +47,13 @@ async function main() {
   let connections = 0;
   let idle: NodeJS.Timeout | undefined;
   let stopping: Promise<void> | undefined;
+  const requests = new Set<Promise<void>>();
   const stop = () => {
     stopping ??= (async () => {
       clearTimeout(idle);
-      runtime.close();
       await transport.close();
+      await Promise.all(requests);
+      await runtime.close();
       await release();
     })();
     return stopping;
@@ -61,6 +65,10 @@ async function main() {
     }, 1000);
   };
   transport.onConnection((connection) => {
+    if (stopping !== undefined) {
+      connection.close();
+      return;
+    }
     connections += 1;
     clearTimeout(idle);
     let consumer: ConsumerContext | undefined;
@@ -77,6 +85,10 @@ async function main() {
           connections -= 1;
           scheduleIdle();
         }
+        return;
+      }
+      if (stopping !== undefined) {
+        connection.close();
         return;
       }
       const parsed = v.safeParse(workspaceRequestSchema, event.message);
@@ -97,7 +109,7 @@ async function main() {
         return;
       }
       const request = parsed.output;
-      void (async () => {
+      const operation = (async () => {
         if (request.method === "initialize") {
           if (
             request.params.protocolMajorVersion !==
@@ -147,6 +159,8 @@ async function main() {
             error: normalizeError(error),
           }),
       );
+      requests.add(operation);
+      void operation.finally(() => requests.delete(operation));
     });
   });
   process.on("SIGTERM", () => {
@@ -162,6 +176,33 @@ async function main() {
     await stop();
     throw error;
   }
+}
+// 同 state 的独占 lease 已取得；只移除失主留下且无法连接的 Unix socket。
+async function removeStaleSocket(path: string): Promise<void> {
+  try {
+    if (!(await lstat(path)).isSocket())
+      throw new Error("Workspace Manager socket path is not a socket");
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  const stale = await new Promise<boolean>((resolve, reject) => {
+    const connection = createConnection(path);
+    connection.once("connect", () => {
+      connection.destroy();
+      resolve(false);
+    });
+    connection.once("error", (error: NodeJS.ErrnoException) => {
+      connection.destroy();
+      if (error.code === "ECONNREFUSED" || error.code === "ENOENT")
+        resolve(true);
+      else reject(error);
+    });
+  });
+  if (!stale) throw new Error("Workspace Manager socket is already in use");
+  await unlink(path).catch((error: NodeJS.ErrnoException) => {
+    if (error.code !== "ENOENT") throw error;
+  });
 }
 function normalizeError(error: unknown): WorkspaceError {
   const parsed = v.safeParse(workspaceErrorSchema, error);

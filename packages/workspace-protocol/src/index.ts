@@ -59,9 +59,13 @@ export const workspaceErrorSchema = v.strictObject({
     "attachment_not_found",
     "native_view_mismatch",
     "material_unavailable",
+    "material_digest_mismatch",
     "runtime_entry_invalid",
     "credential_binding_unavailable",
     "provider_failed",
+    "preparation_interrupted",
+    "preparation_outcome_unknown",
+    "runtime_resource_mismatch",
     "workspace_busy",
     "workspace_not_ready",
     "harness_not_prepared",
@@ -153,6 +157,14 @@ export const preparationSchema = v.strictObject({
     ]),
   ),
   history: v.strictObject({ status: v.literal("unavailable") }),
+  preparation: v.strictObject({
+    attempts: v.array(
+      v.strictObject({
+        status: v.picklist(["preparing", "ready", "failed"]),
+        error: v.optional(workspaceErrorSchema),
+      }),
+    ),
+  }),
 });
 export type ManagedWorkspaceInfo = v.InferOutput<typeof preparationSchema>;
 export const workspaceMethods = [
