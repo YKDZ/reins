@@ -1,6 +1,6 @@
 # 原生工作树准备
 
-`reins workspace harnesses|attach|status|detach` 以当前目录或 `-C` 选定已经存在的 Git worktree。调用方 launcher 继续显式提供 `REINS_CONSUMER_CONTEXT`；这不是 CLI 动作参数，也不会进入结果。附着不会创建 worker 或回合。
+`reins workspace harnesses|attach|status|history|detach` 以当前目录或 `-C` 选定已经存在的 Git worktree。调用方 launcher 继续显式提供 `REINS_CONSUMER_CONTEXT`；这不是 CLI 动作参数，也不会进入结果。附着不会创建 worker 或回合。
 
 项目在 worktree 根目录的 `.reins/workspace.json` 显式绑定部署材料：
 
@@ -34,7 +34,7 @@ reins workspace status -C /absolute/worktree/src
 reins workspace detach -C /absolute/worktree --session-disposition require_none
 ```
 
-Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略，不猜测凭据来源。Manager／shared client 的附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。CLI `attach` 等待同一次准备终态，失败时输出完整准备事实并非零退出；合法准备中不会成为失败，只读状态请求超时会重新查询。逐 harness 阶段、源码身份验证、runtime 状态和历史不可用事实分别投影；`preparation.attempts` 保留每次准备的状态及原错误；本地历史由后继票接入。
+Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略，不猜测凭据来源。Manager／shared client 的附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。CLI `attach` 等待同一次准备终态，失败时输出完整准备事实并非零退出；合法准备中不会成为失败，只读状态请求超时会重新查询。逐 harness 阶段、源码身份验证、runtime 状态和本地历史健康分别投影；`preparation.attempts` 保留每次准备的状态及原错误。
 
 Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署者在 Manager launcher 显式提供 `REINS_CODEX_AUTH_BINDINGS`，其值是凭据引用到绝对 `auth.json` 路径的 JSON 映射，例如 `{"selected-login":"/private/selected-auth.json"}`；项目绑定只写 `{"ref":"code","harness":"codex","credentialBindingRef":"selected-login"}`。路径和 secret 均不经过工作区动作协议；目录发现只返回非秘密引用及支持事实，不读取源文件或启动模型。
 
@@ -50,7 +50,7 @@ QoderCN Manager launcher 显式提供 `REINS_QODER_AUTH_BINDINGS`，例如 `{"se
 
 已接受的意图与每步释放事实持久化。中断或再次失败后，相同意图只续未完成步骤，不自动重建环境；调用方可显式将 `require_none` 升级为 `kill`，反向变更被拒绝。公开 `status` 继续返回原生源码身份、清理进度及已观察到的 session/turn 关联。`detachment.sessions[].outcome` 的 `confirmed` 表示原生终止已确认；`terminated_by_workspace_detach` 只在 provider 已证明环境消失时结算未确认 worker；证据不足保持 `unknown` 和失败进度。后者不会补造 harness 的 `turn.completed`，已有唯一回合终态保持原样。
 
-脱离保留原生工作树、已有本地事实与价值状态，释放私有凭据投影及运行资源；不承诺保留整个 harness 临时 home。工作区清理投影不代替后继票的权威历史，产品资源释放与测试平台回收分别记录。
+脱离保留原生工作树、已有本地事实与价值状态，释放私有凭据投影及运行资源；不承诺保留整个 harness 临时 home。工作区清理投影不代替实际收到的类型化事件日志，产品资源释放与测试平台回收分别记录。
 
 准备中重复相同绑定集合会观察当前尝试，不另起执行。失败后，调用方修正条件并显式重复相同请求才会受理新尝试；继续未完成的阶段，保留已完成的材料和私有 home。已接受的环境、运行材料及绑定快照不会因当前目录配置变化而被替换；不同显式绑定集合返回 `attachment_intent_conflict`。同引用换 harness、凭据引用、省略状态或 launcher 原生来源路径同样被拒绝；来源路径只以私有不可逆意图摘要持久化。允许同一路径的内容修正，相同非空、顺序无关的绑定组合只续行失败阶段；成功绑定不重新安装或复制凭据。材料缺失与实际摘要核验失败分别持久表达为 `material_unavailable`、`material_digest_mismatch`。
 
@@ -80,3 +80,16 @@ reins workspace receipts --directory /absolute/receipts
 ```
 
 共享客户端提供相同的 `publication.list` 查询、`receivePublication` 和 `receipts`。接收提交本地可用文件后才返回 `arrived`、来源、大小及实际 `localPath`；失败返回 `receipt_failed`，保留已成功发布的副本。发布和接收查询均限 launcher 绑定的消费者，跨消费者发布标识按不存在处理。本链可直接用于原生工作树附着，无需源码交接。回合完成、回复中的路径和发布成功都不会自动接收文件。
+`reins workspace history -C /absolute/worktree` 显式查询当前消费者在该真实工作树各次附着中实际收到的类型化历史；`--all-worktrees` 聚合当前消费者的工作树。它与当前代的会话列表、有界 `attach` 回放窗口分别存在。记录回显当时的环境与 harness 运行指纹，不暴露内部沿袭或附着代际标识。同一真实工作树脱离再附着可以查到前代；删除后在同一路径新建的工作树具有新的沿袭。
+
+历史日志在 Manager 状态目录中，位于可销毁环境之外，按收到的原始类型化事件追加并同步；同一 daemon 世代及会话内，重复订阅收到的同一事件只保存一次。查询的 `integrity: unknown` 明确表示这些记录不能证明尚未收到的事件或断连期间的事实齐全。历史健康单独投影写入、读取故障及未保存状态；故障不会改变已有回合终态，也不会为缺失记录编造事件。
+
+脱离始终保留历史。管理员需要删除历史时，先停止使用同一状态目录的 Manager，再通过发行的独立管理入口执行：
+
+```sh
+REINS_WORKSPACE_MANAGER_STATE_DIR=/absolute/manager-state \
+  reins-workspace-manager history-delete \
+  --consumer-context explicit-owner --cwd /absolute/worktree
+```
+
+管理命令使用同一状态目录的独占 lease，只删除明确消费者与真实工作树沿袭的历史，不删除源码、已发布副本或附着事实。它不进入普通消费者 CLI 候选。没有第二台真实管理器的复制协议、隐含保留期限或自动历史回收。

@@ -4,7 +4,11 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createWorkspaceClient, type ReinsClient } from "@reins/client";
+import {
+  createWorkspaceClient,
+  projectWorkspaceHistory,
+  type ReinsClient,
+} from "@reins/client";
 import { consumerContextSchema } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
 import {
@@ -94,7 +98,9 @@ export function registerWorkspaceCommands(program: Command): void {
               : preparation
           ) as typeof result;
         }
-        process.stdout.write(`${JSON.stringify(result)}\n`);
+        process.stdout.write(
+          `${JSON.stringify(method === "workspace.history" ? projectWorkspaceHistory(result as WorkspaceResults["workspace.history"]) : result)}\n`,
+        );
         if (preparation?.runtime.status === "failed")
           throw new ExitError(1, "workspace_failed");
       } finally {
@@ -228,6 +234,19 @@ export function registerWorkspaceCommands(program: Command): void {
       invoke("workspace.attach", {
         cwd: nativeCwd(options.C),
         bindings: options.binding,
+      }),
+    );
+  workspace
+    .command("history")
+    .description("Query durable consumed events across worktree attachments")
+    .option("-C <path>", "native directory context")
+    .option("--all-worktrees", "query this consumer's worktrees")
+    .action((options: { C?: string; allWorktrees?: boolean }) =>
+      invoke("workspace.history", {
+        cwd: nativeCwd(options.C),
+        ...(options.allWorktrees === undefined
+          ? {}
+          : { allWorktrees: options.allWorktrees }),
       }),
     );
   workspace
