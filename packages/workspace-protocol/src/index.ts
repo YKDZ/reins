@@ -62,6 +62,7 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
     "native_view_mismatch",
     "material_unavailable",
     "material_digest_mismatch",
+    "capacity_exhausted",
     "runtime_entry_invalid",
     "credential_binding_unavailable",
     "provider_failed",

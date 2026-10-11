@@ -701,11 +701,30 @@ export async function openWorkspaceRuntime(options: {
               `material-${binding.harness}`,
             );
             await mkdir(archive, { recursive: true, mode: 0o700 });
-            await docker([
-              "cp",
-              `${material}:/opt/reins/harnesses/${binding.harness}/.`,
-              archive,
-            ]);
+            try {
+              await execute(
+                "docker",
+                [
+                  "cp",
+                  `${material}:/opt/reins/harnesses/${binding.harness}/.`,
+                  archive,
+                ],
+                { maxBuffer: 8 * 1024 * 1024 },
+              );
+            } catch (error) {
+              const stderr = (error as { stderr?: unknown }).stderr;
+              // 仅本地接收目录的原生写入容量失败已知未触及运行容器，可显式重做接收。
+              if (
+                typeof stderr === "string" &&
+                stderr.trim().startsWith(`write ${archive}/`) &&
+                stderr.trim().endsWith(": no space left on device") &&
+                !stderr.trim().includes("\n")
+              ) {
+                record.bindingStages[binding.ref] = "pending";
+                throw workspaceFailure("capacity_exhausted");
+              }
+              throw workspaceFailure("provider_failed");
+            }
             await docker([
               "exec",
               record.container,
