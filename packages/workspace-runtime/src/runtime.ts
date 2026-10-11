@@ -245,6 +245,11 @@ export async function openWorkspaceRuntime(options: {
     } catch {
       return { reason: "unreachable" };
     }
+    if (
+      record.environmentStage === "started" &&
+      record.info.source.error?.code !== "native_view_lost"
+    )
+      return await runtimeLoss(record);
     return undefined;
   };
   const find = async (
@@ -438,6 +443,36 @@ export async function openWorkspaceRuntime(options: {
     )
       throw workspaceFailure("runtime_resource_mismatch");
     return actual;
+  };
+  const runtimeLoss = async (
+    record: RecordState,
+  ): Promise<NativeViewLoss | undefined> => {
+    const container = await inspectContainer(record);
+    if (!container.State.Running) return undefined;
+    // 在原容器自己的 namespace 检查同一组原生对象；provider 调用失败不冒充分裂。
+    const actual = JSON.parse(
+      await docker([
+        "exec",
+        "-w",
+        "/",
+        container.Id,
+        "node",
+        "-e",
+        "const fs=require('node:fs'),cp=require('node:child_process'),input=JSON.parse(process.argv[1]);try{const identities=input.identities.map(({path})=>{const s=fs.statSync(path,{bigint:true});return {path,dev:String(s.dev),ino:String(s.ino)}});const git=flag=>fs.realpathSync(cp.execFileSync('git',['-C',input.tree.cwd,'rev-parse','--path-format=absolute',flag],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim());const tree={cwd:fs.realpathSync(input.tree.cwd),root:git('--show-toplevel'),gitDir:git('--git-dir'),commonDir:git('--git-common-dir')};console.log(JSON.stringify({identities,tree}))}catch(error){console.log(JSON.stringify({error:error.code??'git_relationship_unavailable'}))}",
+        JSON.stringify({ identities: record.identities, tree: record.tree }),
+      ]),
+    ) as { identities: NativeIdentity[]; tree: Tree; error?: string };
+    if (actual.error !== undefined)
+      return { reason: actual.error === "ENOENT" ? "split" : "unreachable" };
+    if (
+      JSON.stringify(actual.identities) !== JSON.stringify(record.identities) ||
+      actual.tree.cwd !== record.tree.cwd ||
+      actual.tree.root !== record.tree.root ||
+      actual.tree.gitDir !== record.tree.gitDir ||
+      actual.tree.commonDir !== record.tree.commonDir
+    )
+      return { reason: "split" };
+    return undefined;
   };
   const validateBinding = async (
     record: RecordState,

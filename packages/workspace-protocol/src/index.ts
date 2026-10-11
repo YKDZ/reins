@@ -85,6 +85,7 @@ export const nativeViewLossSchema = v.variant("reason", [
   }),
   v.strictObject({ reason: v.literal("replaced") }),
   v.strictObject({ reason: v.literal("removed") }),
+  v.strictObject({ reason: v.literal("split") }),
   v.strictObject({ reason: v.literal("unreachable") }),
 ]);
 export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;

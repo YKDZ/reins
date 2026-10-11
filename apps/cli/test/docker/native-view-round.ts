@@ -820,7 +820,6 @@ try {
             ],
         base,
       );
-      assert.equal(rejected.status, 65, JSON.stringify(rejected));
       const detected = {
         held: (await held.stat()).size,
         relative: (await relative.stat()).size,
@@ -854,6 +853,7 @@ try {
         },
         stable,
       });
+      assert.equal(rejected.status, 65, JSON.stringify(rejected));
       if (fault === "remove")
         assert.equal(
           passiveStopped,
