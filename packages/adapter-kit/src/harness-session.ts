@@ -2,6 +2,7 @@ import type {
   AdapterDiagnosticFact,
   DiagnosticId,
   DomainEvent,
+  HarnessFailure,
   MessageId,
   PermissionId,
   PermissionOption,
@@ -11,9 +12,16 @@ import type {
   ToolCallId,
   TurnId,
 } from "@reins/protocol";
-import { isPermissionResolutionAllowed } from "@reins/protocol";
+import {
+  isPermissionResolutionAllowed,
+  UNKNOWN_HARNESS_FAILURE,
+} from "@reins/protocol";
 
-import { noopDiagnosticSink, type DiagnosticSink } from "./diagnostic.ts";
+import {
+  acceptDiagnostic,
+  noopDiagnosticSink,
+  type DiagnosticSink,
+} from "./diagnostic.ts";
 
 type SessionDiagnosticFact = AdapterDiagnosticFact extends infer TInput
   ? TInput extends { kind: string }
@@ -43,8 +51,15 @@ export type TurnJournal = {
   diagnostic(input: SessionDiagnosticFact): Promise<DiagnosticId | undefined>;
   messageId(nativeId: string): MessageId;
   toolCallId(nativeId: string): ToolCallId;
-  endTurn(stopReason: "end_turn" | "cancelled" | "failed"): DomainEvent;
-  failActiveTurn(): void;
+  endTurn(stopReason: "end_turn" | "cancelled"): DomainEvent;
+  failTurn(
+    failure: HarnessFailure,
+    evidence?: SessionDiagnosticFact,
+  ): Promise<DomainEvent>;
+  failActiveTurn(
+    failure?: HarnessFailure,
+    evidence?: SessionDiagnosticFact,
+  ): Promise<void>;
 };
 
 // adapter 共用的会话骨架：回合簿记、turn.completed 构造、pending 决议结算、
@@ -101,16 +116,13 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
   async diagnostic(
     input: SessionDiagnosticFact,
   ): Promise<DiagnosticId | undefined> {
-    try {
-      return await this.diagnosticSink({
+    return await acceptDiagnostic(() =>
+      this.diagnosticSink({
         ...input,
         sessionId: this.sessionId,
         ...(this.turnId === null ? {} : { turnId: this.turnId }),
-      });
-    } catch {
-      // 诊断存储故障不能改变 adapter 的控制流。
-      return undefined;
-    }
+      }),
+    );
   }
 
   requestPermission(
@@ -189,7 +201,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     return this.turnId;
   }
 
-  endTurn(stopReason: "end_turn" | "cancelled" | "failed"): DomainEvent {
+  endTurn(stopReason: "end_turn" | "cancelled"): DomainEvent {
     const turnId = this.requireTurnId();
     const event: DomainEvent = {
       type: "turn.completed",
@@ -201,24 +213,39 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
         ? { usage: this.lastUsage }
         : {}),
     };
-    this.turnId = null;
-    this.finalText = null;
-    this.lastUsage = null;
-    this.cancelling = false;
-    this.clearPending();
+    this.clearTurn();
     return event;
   }
 
-  failActiveTurn(): void {
-    if (this.turnId === null) return;
-    const turnId = this.turnId;
-    this.emit({
+  async failTurn(
+    failure: HarnessFailure,
+    evidence?: SessionDiagnosticFact,
+  ): Promise<DomainEvent> {
+    const turnId = this.requireTurnId();
+    const acceptance =
+      evidence === undefined ? undefined : this.diagnostic(evidence);
+    this.clearTurn();
+    const diagnosticId = await acceptance;
+    return {
       type: "turn.completed",
       sessionId: this.sessionId,
       turnId,
       stopReason: "failed",
+      failure,
       finalReply: null,
-    });
+      ...(diagnosticId === undefined ? {} : { diagnosticId }),
+    };
+  }
+
+  async failActiveTurn(
+    failure: HarnessFailure = UNKNOWN_HARNESS_FAILURE,
+    evidence?: SessionDiagnosticFact,
+  ): Promise<void> {
+    if (this.turnId === null) return;
+    this.emit(await this.failTurn(failure, evidence));
+  }
+
+  private clearTurn(): void {
     this.turnId = null;
     this.finalText = null;
     this.lastUsage = null;

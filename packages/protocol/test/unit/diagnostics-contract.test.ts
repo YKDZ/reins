@@ -1403,11 +1403,11 @@ describe("machine errors", () => {
     ];
   });
 
-  test("capability failures use the dedicated unexpected failure contract", () => {
+  test("capability failures carry typed harness failure and optional accepted evidence", () => {
     ok(capabilityFailureSchema, {
       harness: "codex",
       code: "capability_query_failed",
-      cause: { kind: "upstream", message: "failed" },
+      failure: { failureCategory: "unclassified", retryDisposition: "unknown" },
       diagnosticId,
     });
     bad(capabilityFailureSchema, {

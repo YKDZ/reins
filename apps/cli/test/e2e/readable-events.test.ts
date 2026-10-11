@@ -342,9 +342,48 @@ test.each(["failed", "cancelled"] as const)(
       ...target,
       replay: { mode: "none" },
     });
-    subscription.onEvent(() => {});
+    const events: { type: string; [key: string]: unknown }[] = [];
+    subscription.onEvent((event) => events.push(event));
     await writeFile(gate, "release");
     expect(await subscription.done).toMatchObject({ reason: stopReason });
+    if (stopReason === "failed") {
+      const terminal = events.find((event) => event.type === "turn.completed");
+      const failure = {
+        failureCategory: "unclassified",
+        retryDisposition: "unknown",
+      };
+      expect(terminal).toMatchObject({ failure });
+      expect(terminal).not.toHaveProperty("turnId");
+      const waited = await client.request("wait", {
+        targets: [target],
+        completion: "all",
+        timeoutMs: 0,
+      });
+      expect(waited).toMatchObject({ result: { completed: [{ failure }] } });
+      const args = [
+        "attach",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ];
+      const json = await f.cli(args);
+      expect(json.exitCode, json.stdout + json.stderr).toBe(0);
+      const projected = json.stdout
+        .trim()
+        .split("\n")
+        .map((line) => JSON.parse(line))
+        .find((event) => event.type === "turn.completed");
+      expect(projected).toMatchObject({
+        failure,
+        message: expect.stringContaining("unknown"),
+      });
+      expect(projected).not.toHaveProperty("subscriptionId");
+      const pretty = await f.cli([...args, "--pretty"]);
+      expect(pretty.exitCode, pretty.stdout + pretty.stderr).toBe(0);
+      expect(pretty.stdout).toContain(projected.message);
+    }
   },
 );
 

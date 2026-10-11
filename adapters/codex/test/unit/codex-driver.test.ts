@@ -29,6 +29,71 @@ const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;
 const sessionName = "reviewer" as SessionName;
 
+test("结构化额度失败不从正文猜测限流，停止等待在途失败提交", async () => {
+  const fake = createFakeTransport();
+  const events: DomainEvent[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  let accepted!: () => void;
+  const acceptance = new Promise<void>((resolve) => {
+    accepted = resolve;
+  });
+  const driver = createCodexDriver({ transportFactory: () => fake.transport })({
+    emit: (event) => events.push(event),
+    diagnostics: async (input) => {
+      if (input.kind === "turn_failure") {
+        accepted();
+        await gate;
+      }
+      return undefined;
+    },
+  });
+  driver.start({
+    sessionId,
+    turnId: firstTurnId,
+    sessionName,
+    harness: "codex",
+    cwd: "/tmp",
+    message: "caller task",
+  });
+  await flush();
+  fake.controls.pushInbound({
+    kind: "notification",
+    method: "turn/completed",
+    params: {
+      turn: {
+        id: "turn1",
+        status: "failed",
+        error: { message: "rate limit", codexErrorInfo: "usageLimitExceeded" },
+      },
+    },
+  });
+  await acceptance;
+  let stopped = false;
+  const stopping = driver.terminate(sessionId).then(() => {
+    stopped = true;
+  });
+  await flush();
+  expect(stopped).toBe(false);
+  release();
+  await stopping;
+  expect(events.filter((event) => event.type === "turn.completed")).toEqual([
+    {
+      type: "turn.completed",
+      sessionId,
+      turnId: firstTurnId,
+      stopReason: "failed",
+      finalReply: null,
+      failure: {
+        failureCategory: "quota_exhausted",
+        retryDisposition: "external_state_change",
+      },
+    },
+  ]);
+});
+
 function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
   terminateTimeoutMs?: number,

@@ -1,6 +1,8 @@
 import { access } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
+import { UNKNOWN_HARNESS_FAILURE } from "@reins/protocol";
+
 for await (const line of createInterface({ input: process.stdin })) {
   const { turnId, message } = JSON.parse(line) as {
     turnId: string;
@@ -28,6 +30,9 @@ for await (const line of createInterface({ input: process.stdin })) {
       kind: "completed",
       turnId,
       stopReason: task.stopReason ?? "end_turn",
+      ...(task.stopReason === "failed"
+        ? { failure: UNKNOWN_HARNESS_FAILURE }
+        : {}),
       finalReply: task.reply,
     }) + "\n",
   );

@@ -582,7 +582,7 @@ describe("codex transport", () => {
     await transport.close();
   });
 
-  test("turn/completed 保留 worker 提供的失败 message", async () => {
+  test("turn/completed 保留 worker 提供的结构化失败标签与 message", async () => {
     const fake = fakeChild();
     const transport = createCodexTransport({ spawnChild: () => fake.child });
     transport.start();
@@ -595,7 +595,10 @@ describe("codex transport", () => {
           turn: {
             id: "turn1",
             status: "failed",
-            error: { message: "Requested reasoning effort is unsupported" },
+            error: {
+              message: "Requested reasoning effort is unsupported",
+              codexErrorInfo: "usageLimitExceeded",
+            },
           },
         },
       })}\n`,
@@ -610,7 +613,10 @@ describe("codex transport", () => {
           turn: {
             id: "turn1",
             status: "failed",
-            error: { message: "Requested reasoning effort is unsupported" },
+            error: {
+              message: "Requested reasoning effort is unsupported",
+              codexErrorInfo: "usageLimitExceeded",
+            },
           },
         },
       },
