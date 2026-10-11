@@ -20,11 +20,13 @@ const {
   consumerSha256,
   environmentBase = nodeImage,
   skipAtomic = false,
+  focus = "all",
 } = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
   image: string;
   consumerSha256: string;
   environmentBase?: string;
   skipAtomic?: boolean;
+  focus?: "all" | "kill" | "continuation";
 };
 async function command(
   binary: string,
@@ -376,16 +378,25 @@ await requireCommand("mv", [
 await writeFile(
   join(base, "tools", "docker"),
   `#!/usr/bin/env node
-import { existsSync, writeFileSync } from 'node:fs';
+import { existsSync, writeFileSync, appendFileSync } from 'node:fs';
 import { spawnSync } from 'node:child_process';
 import { setTimeout as delay } from 'node:timers/promises';
 const base=${JSON.stringify(base)};
 const args=process.argv.slice(2);
-if(args[0]==='rm' && args[1]==='-f' && args[2]?.startsWith('reins-wrr20-runtime-') && !args[2].includes('-material-')) {
-  writeFileSync(base+'/rm-ready','ready');
+const owned=args[0]==='rm' && args[1]==='-f' && args[2]?.startsWith('reins-wrr20-runtime-') && !args[2].includes('-material-');
+const log=value=>appendFileSync(base+'/provider.ndjson',JSON.stringify({...value,args,at:new Date().toISOString()})+'\\n');
+if(['create','start'].includes(args[0]))log({event:'prepare'});
+const pause=async phase=>{
+  writeFileSync(base+'/rm-ready',JSON.stringify({phase,pid:process.pid,managerPid:process.ppid,args}));
   while(!existsSync(base+'/rm-release')) await delay(10);
+};
+if(args[0]==='container' && args[1]==='ls' && existsSync(base+'/proof-fail')) {
+  log({event:'proof-failed'});
+  process.exit(42);
 }
+if(owned){log({event:'remove-start'});if(!existsSync(base+'/rm-after'))await pause('before');}
 const r=spawnSync(base+'/tools/docker-real',args,{stdio:'inherit'});
+if(owned){log({event:'remove-end',status:r.status});if(r.status===0 && existsSync(base+'/rm-after'))await pause('after');}
 process.exitCode=r.status??1;
 `,
   { mode: 0o755 },
@@ -482,204 +493,392 @@ if (!skipAtomic) {
     "04bdd04 dbf2b57d-da8b-412d-b140-7f09ae015089; independently verified by root",
   );
 }
-let attachment:
-  | {
-      directory: string;
-      container: string;
-      info: { runtime: { status: string } };
-    }
-  | undefined;
-for (const entry of await readdir(managerState, { withFileTypes: true })) {
-  if (!entry.isDirectory() || entry.name.startsWith("c-")) continue;
-  const saved = JSON.parse(
-    await readFile(join(managerState, entry.name, "attachment.json"), "utf8"),
+if (focus !== "continuation") {
+  let attachment:
+    | {
+        directory: string;
+        container: string;
+        info: { runtime: { status: string } };
+      }
+    | undefined;
+  for (const entry of await readdir(managerState, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith("c-")) continue;
+    const saved = JSON.parse(
+      await readFile(join(managerState, entry.name, "attachment.json"), "utf8"),
+    );
+    if (saved.info.runtime.status !== "released") attachment = saved;
+  }
+  assert.ok(attachment);
+  const projectedAuth = join(
+    attachment.directory,
+    "home",
+    ".codex",
+    "auth.json",
   );
-  if (saved.info.runtime.status !== "released") attachment = saved;
-}
-assert.ok(attachment);
-const projectedAuth = join(attachment.directory, "home", ".codex", "auth.json");
-assert.equal((await stat(projectedAuth)).isFile(), true);
-await record("projectedCredentialPresent", true);
-const completedWorker = await control([
-  "spawn",
-  "codex",
-  JSON.stringify({ path: "../tracked.txt" }),
-  "--name",
-  "completed-worker",
-]);
-assert.equal(completedWorker.status, 0, JSON.stringify(completedWorker));
-const completed = await control([
-  "wait",
-  String(completedWorker.value.turnHandle),
-  "--completion",
-  "all",
-  "--timeout",
-  "5000",
-]);
-assert.equal(completed.status, 0, JSON.stringify(completed));
-const originalTerminal = (
-  completed.value.completed as { stopReason: string; finalReply: string }[]
-)[0]!;
-assert.equal(originalTerminal.stopReason, "end_turn");
-const worker = await control([
-  "spawn",
-  "codex",
-  JSON.stringify({
-    heldFile: "kill-held.txt",
-    relativeFile: "kill-relative.txt",
-    intervalMs: 25,
-  }),
-  "--name",
-  "kill-worker",
-]);
-assert.equal(worker.status, 0, JSON.stringify(worker));
-for (;;) {
-  try {
-    await readFile(join(worktree, "src", "writer.json"));
-    break;
-  } catch {
-    await delay(10);
-  }
-}
-await record(
-  "killWriter",
-  JSON.parse(await readFile(join(worktree, "src", "writer.json"), "utf8")),
-);
-const busy = await cli([
-  "detach",
-  "-C",
-  join(worktree, "src"),
-  "--session-disposition",
-  "require_none",
-]);
-assert.notEqual(busy.status, 0);
-assert.equal(busy.value.code, "workspace_busy");
-const afterBusy = await control([
-  "spawn",
-  "codex",
-  JSON.stringify({
-    heldFile: "second-held.txt",
-    relativeFile: "second-relative.txt",
-    intervalMs: 25,
-  }),
-  "--name",
-  "after-rejected-none",
-]);
-assert.equal(afterBusy.status, 0, JSON.stringify(afterBusy));
-await rm(join(base, "rm-ready"), { force: true });
-await rm(join(base, "rm-release"), { force: true });
-const killing = cli([
-  "detach",
-  "-C",
-  join(worktree, "src"),
-  "--session-disposition",
-  "kill",
-]);
-for (;;) {
-  try {
-    await readFile(join(base, "rm-ready"));
-    break;
-  } catch {
-    await delay(10);
-  }
-}
-let killed;
-try {
-  const denied = await control([
+  assert.equal((await stat(projectedAuth)).isFile(), true);
+  await record("projectedCredentialPresent", true);
+  const completedWorker = await control([
+    "spawn",
+    "codex",
+    JSON.stringify({ path: "../tracked.txt" }),
+    "--name",
+    "completed-worker",
+  ]);
+  assert.equal(completedWorker.status, 0, JSON.stringify(completedWorker));
+  const completed = await control([
+    "wait",
+    String(completedWorker.value.turnHandle),
+    "--completion",
+    "all",
+    "--timeout",
+    "5000",
+  ]);
+  assert.equal(completed.status, 0, JSON.stringify(completed));
+  const originalTerminal = (
+    completed.value.completed as { stopReason: string; finalReply: string }[]
+  )[0]!;
+  assert.equal(originalTerminal.stopReason, "end_turn");
+  const worker = await control([
     "spawn",
     "codex",
     JSON.stringify({
-      heldFile: "denied.txt",
-      relativeFile: "denied-relative.txt",
+      heldFile: "kill-held.txt",
+      relativeFile: "kill-relative.txt",
       intervalMs: 25,
     }),
     "--name",
-    "kill-must-reject",
+    "kill-worker",
   ]);
-  assert.equal(denied.status, 65, JSON.stringify(denied));
-  assert.equal(denied.value.code, "workspace_detaching");
-  const probes = await command(
-    process.execPath,
-    [
-      join(base, "durable-detach-client.js"),
-      JSON.stringify({
-        action: "probe",
-        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
-        cwd: join(worktree, "src"),
-        consumer: env.REINS_CONSUMER_CONTEXT,
-        directory: base,
-        turnHandle: worker.value.turnHandle,
-      }),
-    ],
-    base,
-    env,
+  assert.equal(worker.status, 0, JSON.stringify(worker));
+  for (;;) {
+    try {
+      await readFile(join(worktree, "src", "writer.json"));
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  await record(
+    "killWriter",
+    JSON.parse(await readFile(join(worktree, "src", "writer.json"), "utf8")),
   );
-  await record("kill-gate-probes", probes);
-  assert.equal(probes.status, 0, JSON.stringify(probes));
-} finally {
-  await writeFile(join(base, "rm-release"), "release");
-  killed = await killing;
-}
-assert.equal(killed.status, 0, JSON.stringify(killed));
-const queried = await cli(["status", "-C", join(worktree, "src")]);
-assert.equal(queried.status, 0, JSON.stringify(queried));
-assert.equal((queried.value.runtime as { status: string }).status, "released");
-assert.equal((queried.value.source as { status: string }).status, "verified");
-const retained = queried.value.detachment as {
-  sessions: {
-    sessionId: string;
-    outcome: string;
-    turns: {
-      turnId: string;
-      completed?: { stopReason: string; finalReply: string | null };
+  const busy = await cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "require_none",
+  ]);
+  assert.notEqual(busy.status, 0);
+  assert.equal(busy.value.code, "workspace_busy");
+  const afterBusy = await control([
+    "spawn",
+    "codex",
+    JSON.stringify({
+      heldFile: "second-held.txt",
+      relativeFile: "second-relative.txt",
+      intervalMs: 25,
+    }),
+    "--name",
+    "after-rejected-none",
+  ]);
+  assert.equal(afterBusy.status, 0, JSON.stringify(afterBusy));
+  await rm(join(base, "rm-ready"), { force: true });
+  await rm(join(base, "rm-release"), { force: true });
+  const killing = cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "kill",
+  ]);
+  for (;;) {
+    try {
+      await readFile(join(base, "rm-ready"));
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  let killed;
+  try {
+    const denied = await control([
+      "spawn",
+      "codex",
+      JSON.stringify({
+        heldFile: "denied.txt",
+        relativeFile: "denied-relative.txt",
+        intervalMs: 25,
+      }),
+      "--name",
+      "kill-must-reject",
+    ]);
+    assert.equal(denied.status, 65, JSON.stringify(denied));
+    assert.equal(denied.value.code, "workspace_detaching");
+    const probes = await command(
+      process.execPath,
+      [
+        join(base, "durable-detach-client.js"),
+        JSON.stringify({
+          action: "probe",
+          socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+          cwd: join(worktree, "src"),
+          consumer: env.REINS_CONSUMER_CONTEXT,
+          directory: base,
+          turnHandle: worker.value.turnHandle,
+        }),
+      ],
+      base,
+      env,
+    );
+    await record("kill-gate-probes", probes);
+    assert.equal(probes.status, 0, JSON.stringify(probes));
+  } finally {
+    await writeFile(join(base, "rm-release"), "release");
+    killed = await killing;
+  }
+  assert.equal(killed.status, 0, JSON.stringify(killed));
+  const queried = await cli(["status", "-C", join(worktree, "src")]);
+  assert.equal(queried.status, 0, JSON.stringify(queried));
+  assert.equal(
+    (queried.value.runtime as { status: string }).status,
+    "released",
+  );
+  assert.equal((queried.value.source as { status: string }).status, "verified");
+  const retained = queried.value.detachment as {
+    sessions: {
+      sessionId: string;
+      outcome: string;
+      turns: {
+        turnId: string;
+        completed?: { stopReason: string; finalReply: string | null };
+      }[];
     }[];
-  }[];
-};
-const original = retained.sessions.find(
-  (item) => item.sessionId === completedWorker.value.sessionId,
-);
-assert.ok(original);
-assert.equal(original.outcome, "confirmed");
-assert.ok(
-  original.turns.some(
-    (turn) =>
-      turn.completed?.stopReason === "end_turn" &&
-      turn.completed.finalReply === originalTerminal.finalReply,
-  ),
-);
-assert.ok(
-  retained.sessions.some(
-    (item) =>
-      item.sessionId === worker.value.sessionId && item.outcome === "confirmed",
-  ),
-);
-assert.equal(
-  await readFile(join(worktree, "tracked.txt"), "utf8"),
-  "native worktree\n",
-);
-const stopped = await readFile(join(worktree, "src", "kill-held.txt"), "utf8");
-await delay(100);
-assert.equal(
-  await readFile(join(worktree, "src", "kill-held.txt"), "utf8"),
-  stopped,
-);
-await assert.rejects(stat(projectedAuth), { code: "ENOENT" });
-assert.equal(
-  await requireCommand("docker", [
-    "container",
-    "ls",
-    "-a",
-    "--filter",
-    "name=" + attachment.container,
-    "--format",
-    "{{.ID}}",
-  ]),
-  "",
-);
-await record("killRelease", {
-  nativeValuePreserved: true,
-  writesStopped: true,
-  projectedCredentialReleased: true,
-  runtimeAbsent: true,
-});
+  };
+  const original = retained.sessions.find(
+    (item) => item.sessionId === completedWorker.value.sessionId,
+  );
+  assert.ok(original);
+  assert.equal(original.outcome, "confirmed");
+  assert.ok(
+    original.turns.some(
+      (turn) =>
+        turn.completed?.stopReason === "end_turn" &&
+        turn.completed.finalReply === originalTerminal.finalReply,
+    ),
+  );
+  assert.ok(
+    retained.sessions.some(
+      (item) =>
+        item.sessionId === worker.value.sessionId &&
+        item.outcome === "confirmed",
+    ),
+  );
+  assert.equal(
+    await readFile(join(worktree, "tracked.txt"), "utf8"),
+    "native worktree\n",
+  );
+  const stopped = await readFile(
+    join(worktree, "src", "kill-held.txt"),
+    "utf8",
+  );
+  await delay(100);
+  assert.equal(
+    await readFile(join(worktree, "src", "kill-held.txt"), "utf8"),
+    stopped,
+  );
+  await assert.rejects(stat(projectedAuth), { code: "ENOENT" });
+  assert.equal(
+    await requireCommand("docker", [
+      "container",
+      "ls",
+      "-a",
+      "--filter",
+      "name=" + attachment.container,
+      "--format",
+      "{{.ID}}",
+    ]),
+    "",
+  );
+  await record("killRelease", {
+    nativeValuePreserved: true,
+    writesStopped: true,
+    projectedCredentialReleased: true,
+    runtimeAbsent: true,
+  });
+}
+if (focus !== "kill") {
+  if (focus === "all") {
+    const attachedAgain = await cli([
+      "attach",
+      "-C",
+      join(worktree, "src"),
+      "--binding",
+      "code",
+    ]);
+    assert.equal(attachedAgain.status, 0, JSON.stringify(attachedAgain));
+    await waitForRuntime("ready");
+  }
+  const finite = await control([
+    "spawn",
+    "codex",
+    JSON.stringify({ path: "../tracked.txt" }),
+    "--name",
+    "continuation-worker",
+  ]);
+  assert.equal(finite.status, 0, JSON.stringify(finite));
+  const finished = await control([
+    "wait",
+    String(finite.value.turnHandle),
+    "--completion",
+    "all",
+    "--timeout",
+    "5000",
+  ]);
+  assert.equal(finished.status, 0, JSON.stringify(finished));
+  const terminated = await control(["kill", String(finite.value.sessionId)]);
+  assert.equal(terminated.status, 0, JSON.stringify(terminated));
+  const dead = await control(["list", "--state", "killed"]);
+  assert.equal(dead.status, 0, JSON.stringify(dead));
+  assert.ok(
+    (dead.value as unknown as { sessionId: string }[]).some(
+      (item) => item.sessionId === finite.value.sessionId,
+    ),
+  );
+  await record("continuation-dead-row", dead.value);
+  await rm(join(base, "rm-ready"), { force: true });
+  await rm(join(base, "rm-release"), { force: true });
+  await writeFile(join(base, "rm-after"), "pause after real provider removal");
+  const interrupted = cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "require_none",
+  ]);
+  let marker: {
+    phase: string;
+    pid: number;
+    managerPid: number;
+    args: string[];
+  };
+  for (;;) {
+    try {
+      marker = JSON.parse(await readFile(join(base, "rm-ready"), "utf8"));
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  assert.equal(marker.phase, "after");
+  await record("continuation-interruption", marker);
+  process.kill(marker.managerPid, "SIGKILL");
+  process.kill(marker.pid, "SIGKILL");
+  const disconnected = await interrupted;
+  assert.notEqual(disconnected.status, 0, JSON.stringify(disconnected));
+  await writeFile(join(base, "proof-fail"), "provider proof unavailable");
+  await writeFile(join(base, "rm-release"), "release any successor removal");
+  // 等待既有 Manager lease 原生过期，再由公开 CLI 重启同一 Manager。
+  await delay(11_000);
+  const resumed = await cli(["status", "-C", join(worktree, "src")]);
+  assert.equal(resumed.status, 0, JSON.stringify(resumed));
+  type Detachment = {
+    disposition: string;
+    status: string;
+    sessions: { sessionId: string; outcome: string }[];
+    resources: Record<string, { status: string }>;
+  };
+  const accepted = resumed.value.detachment as Detachment;
+  assert.equal(accepted.disposition, "require_none");
+  assert.notEqual(accepted.resources.ownership!.status, "released");
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const failed = await cli([
+      "detach",
+      "-C",
+      join(worktree, "src"),
+      "--session-disposition",
+      "require_none",
+    ]);
+    assert.notEqual(failed.status, 0, JSON.stringify(failed));
+    const observed = await cli(["status", "-C", join(worktree, "src")]);
+    assert.equal(observed.status, 0, JSON.stringify(observed));
+    const progress = observed.value.detachment as Detachment;
+    assert.equal(progress.disposition, "require_none");
+    assert.equal(progress.status, "failed");
+    assert.deepEqual(progress.sessions, accepted.sessions);
+    assert.notEqual(progress.resources.ownership!.status, "released");
+  }
+  await rm(join(base, "proof-fail"));
+  const upgraded = await cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "kill",
+  ]);
+  await record("continuation-upgrade", upgraded);
+  assert.equal(upgraded.status, 0, JSON.stringify(upgraded));
+  const released = upgraded.value.detachment as Detachment;
+  assert.equal(released.disposition, "kill");
+  assert.equal(released.status, "released");
+  assert.ok(
+    Object.values(released.resources).every(
+      (step) => step.status === "released",
+    ),
+  );
+  assert.deepEqual(released.sessions, accepted.sessions);
+  const reverse = await cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "require_none",
+  ]);
+  assert.notEqual(reverse.status, 0, JSON.stringify(reverse));
+  assert.equal(reverse.value.code, "invalid_request");
+  const repeated = await cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "kill",
+  ]);
+  assert.equal(repeated.status, 0, JSON.stringify(repeated));
+  const provider = (await readFile(join(base, "provider.ndjson"), "utf8"))
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          event: string;
+          args: string[];
+          status?: number;
+        },
+    );
+  await record("continuation-provider", provider);
+  assert.equal(
+    provider.filter(
+      (item) =>
+        item.event === "remove-start" && item.args[2] === marker.args[2],
+    ).length,
+    1,
+  );
+  assert.equal(
+    provider.filter(
+      (item) => item.event === "prepare" && item.args.includes(marker.args[2]!),
+    ).length,
+    2,
+  );
+  assert.equal(
+    await readFile(join(worktree, "tracked.txt"), "utf8"),
+    "native worktree\n",
+  );
+  await record("continuationRelease", {
+    interruptedAfterActualRemoval: true,
+    onlyRemainingSteps: true,
+    explicitUpgrade: true,
+    reverseRejected: true,
+    sameIntentIdempotent: true,
+  });
+}
 await record("result", "passed");

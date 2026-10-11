@@ -110,6 +110,7 @@ test("durably detaches the workspace", async () => {
       image: nodeImage,
       consumerSha256,
       skipAtomic: process.env.REINS_WRR20_SKIP_ATOMIC === "1",
+      focus: process.env.REINS_WRR20_FOCUS ?? "all",
       environmentBase:
         process.env.REINS_WRR20_ENVIRONMENT_BASE_IMAGE ?? nodeImage,
     }),
