@@ -106,6 +106,41 @@ try {
   const publication = JSON.parse(first.result.stdout);
   assert.equal(publication.state, "ready");
   assert.equal(publication.bytes, 18);
+  assert.deepEqual(publication.source, {
+    cwd: root,
+    path: join(root, "--result.txt"),
+  });
+  const runtimeContainers = JSON.parse(
+    execFileSync(
+      "docker",
+      [
+        "container",
+        "ls",
+        "--filter",
+        "label=reins.workspace.managed=true",
+        "--format",
+        "json",
+      ],
+      { encoding: "utf8" },
+    ).trim(),
+  );
+  const runtimeMounts = JSON.parse(
+    execFileSync(
+      "docker",
+      [
+        "container",
+        "inspect",
+        "--format",
+        "{{json .Mounts}}",
+        runtimeContainers.ID,
+      ],
+      { encoding: "utf8" },
+    ),
+  );
+  await record("fixed-storage-outside-runtime", {
+    publicationRoot: join(task.base, "manager-state/publications"),
+    runtimeMounts,
+  });
   const next = async (message: unknown) => {
     const sent = await control!.request("send", {
       sessionId: activeSession,
@@ -144,12 +179,20 @@ try {
   );
   await record("fixed-publications-and-failed-publish", { list, failed });
   assert.deepEqual(await manager.receipts(receipts), []);
+  for (const directory of [root, join(root, "..receipts")])
+    await assert.rejects(
+      manager.receivePublication(publication.publicationId, {
+        directory,
+        activeRoot: root,
+      }),
+      { code: "receipt_failed" },
+    );
   await assert.rejects(
-    manager.receivePublication(publication.publicationId, {
-      directory: root,
+    other.receivePublication(publication.publicationId, {
+      directory: receipts,
       activeRoot: root,
     }),
-    { code: "receipt_failed" },
+    { code: "publication_not_found" },
   );
   assert.equal(
     (await manager.request("publication.list", { cwd: root })).length,
@@ -206,10 +249,7 @@ try {
       assert.doesNotMatch(rejected.result.stdout, /workspace|spawn|attach/u);
     } else {
       assert.equal(rejected.result.status, 64);
-      assert.doesNotMatch(
-        rejected.result.stdout,
-        /Allowed:.*(?:workspace|spawn|attach)/u,
-      );
+      assert.deepEqual(JSON.parse(rejected.result.stdout).valid, ["publish"]);
     }
   }
   await assert.rejects(
