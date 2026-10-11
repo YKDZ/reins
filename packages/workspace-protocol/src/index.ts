@@ -59,6 +59,8 @@ export const workspaceErrorSchema = v.strictObject({
     "credential_binding_unavailable",
     "provider_failed",
     "preparation_interrupted",
+    "preparation_outcome_unknown",
+    "runtime_resource_mismatch",
     "workspace_busy",
     "manager_disconnected",
     "manager_timeout",
