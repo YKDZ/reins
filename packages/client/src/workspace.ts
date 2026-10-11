@@ -20,6 +20,7 @@ import {
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
+import { importGitPublication } from "./git-import.ts";
 import {
   createReinsClient,
   parseRetryToken,
@@ -127,6 +128,15 @@ export function createWorkspaceClient(
     },
     receipts: (directory: string) =>
       listReceipts(options.consumerContext, directory),
+    async importGitPublication(
+      publicationId: string,
+      destination: { repository: string; reference: string; commit: string },
+    ) {
+      return importGitPublication(
+        await request("publication.read", { publicationId }),
+        destination,
+      );
+    },
     async control(
       context: string | { workspaceHandle: WorkspaceHandle },
     ): Promise<ReinsClient> {
