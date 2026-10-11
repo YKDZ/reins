@@ -38,7 +38,9 @@ Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接�
 
 Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署者在 Manager launcher 显式提供 `REINS_CODEX_AUTH_BINDINGS`，其值是凭据引用到绝对 `auth.json` 路径的 JSON 映射，例如 `{"selected-login":"/private/selected-auth.json"}`；项目绑定只写 `{"ref":"code","harness":"codex","credentialBindingRef":"selected-login"}`。路径和 secret 均不经过工作区动作协议；目录发现只返回非秘密引用及支持事实，不读取源文件或启动模型。
 
-准备时扩展只读取选定文件，验证该版 ChatGPT 登录结构，将 `auth_mode`、`tokens` 与可选 `last_refresh` 写入私有 `$CODEX_HOME/auth.json`（目录 `0700`、文件 `0600`）。其余配置键、宿主配置、历史、skills 和指令不会被投影，源文件不会回写。没有该引用、文件不可读、登录结构无效或该固定组合不支持时返回 `credential_binding_unavailable`，不会换认证方式；材料版本不符则返回 `runtime_entry_invalid`。`ready` 证明材料和绑定已交付以及本地 daemon 可连，不证明 token 在远端仍有效。此扩展的首回合支持范围不包含共享刷新、凭据轮换、过期恢复或并发保证；这些必须另行实测。QoderCN 使用自己的原生登录文件。
+准备时扩展只读取选定文件，验证该版 ChatGPT 登录结构，将 `auth_mode`、`tokens` 与可选 `last_refresh` 写入私有 `$CODEX_HOME/auth.json`（目录 `0700`、文件 `0600`）。其余配置键、宿主配置、历史、skills 和指令不会被投影，源文件不会回写。没有该引用、文件不可读、登录结构无效或该固定组合不支持时返回 `credential_binding_unavailable`，不会换认证方式；材料版本不符则返回 `runtime_entry_invalid`。`ready` 证明材料和绑定已交付以及本地 daemon 可连，不证明 token 在远端仍有效。QoderCN 使用自己的原生登录文件。
+
+固定 Codex 0.162.0／ChatGPT 私有登录投影的原生控制实测覆盖精确活动回合接收、显式新回合、interrupt 和停止；ACK、原生接受及实际终态分别核对。Docker 实测覆盖同一私有绑定的两个原生回合实际重叠并各自正常结束、daemon 与容器重启后的显式新任务、旧身份拒绝及无自动重放、活动进程组实际停止和资源清理。该版首次本地状态初始化在同一部署内协调，任务执行保持并发。个人 token 到期与原生刷新、共享刷新及凭据轮换仍未验；当前固定组合成功不承诺未来 token 有效，也不扩大到其他凭据形态或版本。
 
 固定 QoderCN SDK 1.0.23／worker 1.1.23 的材料目录还须包含完整的 `worker/` 闭包（实际入口 `worker/qoder-worker-runtime.obf.mjs`）；`bin/qoderclicn` 可以直接调用同一 worker 的 CLI 模式。provider 分别执行 CLI 与 worker 的真实版本入口。Manager 将固定 worker 路径通过 SDK 的公开 `pathToQoderCLIExecutable` 选项交付，SDK 按入口选择 WorkerTransport，不回退宿主全局 CLI。
 
