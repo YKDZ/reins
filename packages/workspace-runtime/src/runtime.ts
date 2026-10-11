@@ -262,17 +262,47 @@ export async function openWorkspaceRuntime(options: {
       throw workspaceFailure("runtime_resource_mismatch");
     return actual;
   };
+  const validateBinding = async (
+    record: RecordState,
+    binding: ManagedWorkspaceInfo["harnesses"][number],
+  ) => {
+    const binary = binding.harness === "codex" ? "codex" : "qoderclicn";
+    let version: string;
+    try {
+      version = await docker([
+        "exec",
+        record.container,
+        `/opt/reins/harnesses/${binding.harness}/bin/${binary}`,
+        "--version",
+      ]);
+    } catch {
+      throw workspaceFailure("runtime_entry_invalid");
+    }
+    if (!version.split(/\s+/u).includes(binding.runtime.version))
+      throw workspaceFailure("runtime_entry_invalid");
+  };
   const status = async (cwd: string, owner: ConsumerContext) => {
     const { record, tree } = await find(cwd, owner);
     if (record.info.runtime.status === "ready") {
+      let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
       try {
         if (!(await inspectContainer(record)).State.Running)
           throw workspaceFailure("runtime_resource_mismatch");
+        for (const binding of record.info.harnesses) {
+          active = binding;
+          await validateBinding(record, binding);
+        }
+        active = undefined;
         const client = await connect(record);
         const list = await client.request("list", {});
         if ("error" in list) throw workspaceFailure("runtime_entry_invalid");
       } catch (error) {
-        record.info.runtime = { status: "failed", error: normalize(error) };
+        const failure = normalize(error);
+        record.info.runtime = { status: "failed", error: failure };
+        if (active !== undefined) {
+          active.stage = "failed";
+          active.error = failure;
+        }
         await persist(record);
       }
     }
@@ -281,6 +311,7 @@ export async function openWorkspaceRuntime(options: {
   const prepare = async (record: RecordState) => {
     const control = controlDirectory(record);
     const home = join(record.directory, "home");
+    let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
     try {
       await mkdir(control, { recursive: true, mode: 0o700 });
       await mkdir(home, { recursive: true, mode: 0o700 });
@@ -385,8 +416,15 @@ export async function openWorkspaceRuntime(options: {
       await persist(record);
       record.bindingStages ??= {};
       for (const binding of record.info.harnesses) {
+        active = binding;
         const checkpoint = record.bindingStages[binding.ref] ?? "pending";
-        if (checkpoint === "ready") continue;
+        if (checkpoint === "ready") {
+          await validateBinding(record, binding);
+          binding.stage = "ready";
+          delete binding.error;
+          await persist(record);
+          continue;
+        }
         if (checkpoint === "installing")
           throw workspaceFailure("preparation_outcome_unknown");
         delete binding.error;
@@ -441,15 +479,7 @@ export async function openWorkspaceRuntime(options: {
         }
         binding.stage = "runtime_validate";
         await persist(record);
-        const binary = binding.harness === "codex" ? "codex" : "qoderclicn";
-        const version = await docker([
-          "exec",
-          record.container,
-          `/opt/reins/harnesses/${binding.harness}/bin/${binary}`,
-          "--version",
-        ]);
-        if (!version.split(/\s+/u).includes(binding.runtime.version))
-          throw workspaceFailure("runtime_entry_invalid");
+        await validateBinding(record, binding);
         record.bindingStages[binding.ref] = "validated";
         binding.stage = "credential_binding";
         await persist(record);
@@ -459,6 +489,7 @@ export async function openWorkspaceRuntime(options: {
         binding.stage = "ready";
         await persist(record);
       }
+      active = undefined;
       const deadline = Date.now() + 5000;
       for (;;) {
         try {
@@ -481,12 +512,12 @@ export async function openWorkspaceRuntime(options: {
       });
       if (failure.code === "native_view_mismatch")
         record.info.source = { status: "failed", error: failure };
-      const active = record.info.harnesses.find(
-        (binding) => binding.stage !== "ready",
-      );
-      if (active !== undefined) {
-        active.stage = "failed";
-        active.error = failure;
+      const failedBinding =
+        active ??
+        record.info.harnesses.find((binding) => binding.stage !== "ready");
+      if (failedBinding !== undefined) {
+        failedBinding.stage = "failed";
+        failedBinding.error = failure;
       }
       throw failure;
     } finally {

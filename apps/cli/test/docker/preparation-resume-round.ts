@@ -341,6 +341,24 @@ try {
     "qoder",
   ]);
   assert.equal(first.status, 0);
+  const preparingReentry = await cli([
+    "attach",
+    "--binding",
+    "qoder",
+    "--binding",
+    "code",
+  ]);
+  assert.equal(preparingReentry.status, 0);
+  assert.equal(
+    (preparingReentry.value.runtime as { status: string }).status,
+    "preparing",
+  );
+  assert.equal(
+    (preparingReentry.value.preparation as { attempts: unknown[] }).attempts
+      .length,
+    1,
+  );
+  await record("preparingReentry", preparingReentry.value);
   const failed = await waitForRuntime("failed");
   assert.deepEqual(failed.runtime, {
     status: "failed",
@@ -377,6 +395,13 @@ try {
     join(worktree, ".reins", "qoder-valid"),
     "caller repaired runtime condition\n",
   );
+  await requireCommand("docker", [
+    "exec",
+    container,
+    "node",
+    "-e",
+    "require('node:fs').renameSync('/opt/reins/harnesses/codex/bin/codex','/opt/reins/harnesses/codex/bin/codex.saved')",
+  ]);
   const retry = await cli([
     "attach",
     "--binding",
@@ -386,6 +411,39 @@ try {
   ]);
   assert.equal(retry.status, 0, "Identical intent must resume failed stage");
   assert.equal((retry.value.runtime as { status: string }).status, "preparing");
+  const drifted = await waitForRuntime("failed");
+  assert.deepEqual(drifted.runtime, {
+    status: "failed",
+    error: { code: "runtime_entry_invalid" },
+  });
+  const brokenBinding = (
+    drifted.harnesses as {
+      ref: string;
+      stage: string;
+      error?: { code: string };
+    }[]
+  ).find((binding) => binding.ref === "code");
+  assert.equal(brokenBinding?.stage, "failed");
+  assert.equal(brokenBinding?.error?.code, "runtime_entry_invalid");
+  await record("readyBindingDriftDuringResume", drifted);
+  await requireCommand("docker", [
+    "exec",
+    container,
+    "node",
+    "-e",
+    "if(require('node:fs').existsSync('/opt/reins/harnesses/codex/bin/codex'))process.exit(1)",
+  ]);
+  await requireCommand("docker", [
+    "exec",
+    container,
+    "node",
+    "-e",
+    "require('node:fs').renameSync('/opt/reins/harnesses/codex/bin/codex.saved','/opt/reins/harnesses/codex/bin/codex')",
+  ]);
+  assert.equal(
+    (await cli(["attach", "--binding", "code", "--binding", "qoder"])).status,
+    0,
+  );
   const ready = await waitForRuntime("ready");
   assert.equal(
     await requireCommand("docker", [
@@ -411,6 +469,32 @@ try {
     "keep installed success|keep private state",
   );
   await record("readyAfterExplicitResume", ready);
+  await requireCommand("docker", [
+    "exec",
+    container,
+    "node",
+    "-e",
+    "require('node:fs').renameSync('/opt/reins/harnesses/codex/bin/codex','/opt/reins/harnesses/codex/bin/codex.saved')",
+  ]);
+  const readyReentry = await cli(["status"]);
+  assert.equal(readyReentry.status, 0);
+  assert.deepEqual(readyReentry.value.runtime, {
+    status: "failed",
+    error: { code: "runtime_entry_invalid" },
+  });
+  await record("readyReentryActualBindingDrift", readyReentry.value);
+  await requireCommand("docker", [
+    "exec",
+    container,
+    "node",
+    "-e",
+    "if(require('node:fs').existsSync('/opt/reins/harnesses/codex/bin/codex'))process.exit(1);require('node:fs').renameSync('/opt/reins/harnesses/codex/bin/codex.saved','/opt/reins/harnesses/codex/bin/codex')",
+  ]);
+  assert.equal(
+    (await cli(["attach", "--binding", "code", "--binding", "qoder"])).status,
+    0,
+  );
+  await waitForRuntime("ready");
   const detached = await cli([
     "detach",
     "--session-disposition",
