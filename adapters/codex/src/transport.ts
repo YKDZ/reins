@@ -252,7 +252,7 @@ export type InboundMessage =
         turn: {
           id: string;
           status: "completed" | "interrupted" | "failed" | "inProgress";
-          error: { message: string } | null;
+          error: { message: string; codexErrorInfo?: unknown } | null;
         };
       };
     }
@@ -899,10 +899,16 @@ export function createCodexTransport(options: {
         return null;
       const status = params.turn.status;
       const error = params.turn.error;
-      let parsedError: { message: string } | null = null;
+      let parsedError: { message: string; codexErrorInfo?: unknown } | null =
+        null;
       if (error !== null) {
         if (!isRecord(error) || typeof error.message !== "string") return null;
-        parsedError = { message: error.message };
+        parsedError = {
+          message: error.message,
+          ...(error.codexErrorInfo === undefined
+            ? {}
+            : { codexErrorInfo: error.codexErrorInfo }),
+        };
       }
       return status === "completed" ||
         status === "interrupted" ||

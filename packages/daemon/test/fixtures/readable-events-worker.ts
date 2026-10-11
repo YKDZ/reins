@@ -1,6 +1,8 @@
 import { access, writeFile } from "node:fs/promises";
 import { createInterface } from "node:readline";
 
+import { UNKNOWN_HARNESS_FAILURE } from "@reins/protocol";
+
 const decisions = new Map<string, (resolution: unknown) => void>();
 const output = (value: unknown): void => {
   process.stdout.write(JSON.stringify(value) + "\n");
@@ -76,6 +78,9 @@ async function run(input: {
   emit({
     type: "turn.completed",
     stopReason: task.stopReason ?? "end_turn",
+    ...(task.stopReason === "failed"
+      ? { failure: UNKNOWN_HARNESS_FAILURE }
+      : {}),
     finalReply: task.reply,
   });
 }

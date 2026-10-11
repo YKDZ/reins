@@ -94,9 +94,10 @@ export function createQoderDriver(deps: {
     async function run(): Promise<void> {
       if (query === null || stream === null || session === null) return;
       let readFailed = false;
+      let evidence: Parameters<HarnessSession["failActiveTurn"]>[1];
       try {
         for await (const message of query) {
-          const events = mapSdkMessage(session, mappingState, message);
+          const events = await mapSdkMessage(session, mappingState, message);
           for (const event of events) {
             emit(event);
           }
@@ -104,16 +105,16 @@ export function createQoderDriver(deps: {
       } catch (error) {
         if (!terminating) {
           readFailed = true;
-          void session.diagnostic({
+          evidence = {
             kind: "stream_failure",
             operation: "receive_worker_stream",
             reason: "read_error",
             message: makeTextEvidence(String(error)),
-          });
+          };
         }
       }
       if (!readFailed && !terminating) {
-        await session.diagnostic({
+        evidence = {
           kind: "lifecycle",
           operation: "worker",
           reason: "exited_unexpectedly",
@@ -122,9 +123,21 @@ export function createQoderDriver(deps: {
               ? "worker stream ended unexpectedly while idle"
               : "worker stream ended before turn completion",
           ),
-        });
+        };
       }
-      if (!terminating) session.failActiveTurn();
+      if (!terminating) {
+        if (session.turnId === null) {
+          if (evidence !== undefined) await session.diagnostic(evidence);
+        } else {
+          await session.failActiveTurn(
+            {
+              failureCategory: "runtime_unavailable",
+              retryDisposition: "external_state_change",
+            },
+            evidence,
+          );
+        }
+      }
     }
 
     const driver: WorkerDriver = {
@@ -176,14 +189,13 @@ export function createQoderDriver(deps: {
         try {
           query = deps.sdk.query({ prompt: stream, options });
         } catch (error) {
-          void session.diagnostic({
+          runPromise = session.failActiveTurn(undefined, {
             kind: "request_failure",
             operation: "spawn",
             stage: "start_session",
             reason: "upstream_error",
             message: makeTextEvidence(String(error)),
           });
-          session.failActiveTurn();
           return;
         }
         runPromise = (async () => {

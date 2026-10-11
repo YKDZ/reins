@@ -309,10 +309,11 @@ export function createProtocolServerInternal(
     if (options.diagnostics.health().status === "degraded") return undefined;
     const unsafe = input as unknown as Record<string, unknown>;
     if ("source" in unsafe) return undefined;
-    return await options.diagnostics.record({
-      ...input,
-      source: "daemon",
-    });
+    try {
+      return await options.diagnostics.record({ ...input, source: "daemon" });
+    } catch {
+      return undefined;
+    }
   }
 
   function sendSafe(
@@ -680,7 +681,6 @@ export function createProtocolServerInternal(
           continue;
         }
         const reason = new Error("Capability result did not match its harness");
-        const cause = makeErrorCause("exception", String(reason));
         const diagnosticId = await recordDiagnostic({
           harness,
           kind: "request_failure",
@@ -692,11 +692,13 @@ export function createProtocolServerInternal(
         failures.push({
           harness,
           code: "capability_query_failed",
-          cause,
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          },
           ...(diagnosticId === undefined ? {} : { diagnosticId }),
         });
       } else {
-        const cause = makeErrorCause("exception", String(result.reason));
         const suppliedDiagnosticId = await verifiedCapabilityDiagnostic(
           result.reason,
           harness,
@@ -714,7 +716,10 @@ export function createProtocolServerInternal(
         failures.push({
           harness,
           code: "capability_query_failed",
-          cause,
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          },
           ...(diagnosticId === undefined ? {} : { diagnosticId }),
         });
       }

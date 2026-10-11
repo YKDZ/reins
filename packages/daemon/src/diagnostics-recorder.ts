@@ -1,3 +1,4 @@
+import { withinDiagnosticBudget } from "@reins/adapter-kit";
 import {
   diagnosticInputSchema,
   diagnosticRecordSchema,
@@ -171,9 +172,12 @@ class RecorderRuntime implements DiagnosticsRuntime {
       return undefined;
     }
     try {
-      await this.#store.append(parsedRecord.output, consumer);
-      const result = await this.#store.query({
-        diagnosticId: parsedRecord.output.diagnosticId,
+      const result = await withinDiagnosticBudget(async () => {
+        await this.#store.append(parsedRecord.output, consumer);
+        return await this.#store.query(
+          { diagnosticId: parsedRecord.output.diagnosticId },
+          consumer,
+        );
       });
       if (
         "record" in result &&
@@ -213,7 +217,9 @@ class RecorderRuntime implements DiagnosticsRuntime {
       throw new Error("Diagnostics store is unavailable");
     }
     try {
-      return await this.#store.query(params, scope);
+      return await withinDiagnosticBudget(() =>
+        this.#store.query(params, scope),
+      );
     } catch (error) {
       if (
         error instanceof Error &&

@@ -18,6 +18,7 @@ import {
   jsonErrorMessage,
   renderCliError,
 } from "./grammar.ts";
+import { harnessFailureMessage } from "./harness-failure.ts";
 
 export type OutputMode = "json" | "pretty";
 
@@ -109,6 +110,9 @@ export function printWaitResult(result: WaitResult, mode: OutputMode): void {
   const completed = result.completed.map(({ sessionId, turnId, ...facts }) => ({
     turnHandle: encodeTurnHandle({ sessionId, turnId }),
     ...facts,
+    ...(facts.stopReason === "failed"
+      ? { message: harnessFailureMessage(facts.failure, facts.diagnosticId) }
+      : {}),
   }));
   const pending = result.pending.map((target) => ({
     turnHandle: encodeTurnHandle(target),
@@ -124,6 +128,10 @@ export function printWaitResult(result: WaitResult, mode: OutputMode): void {
     process.stdout.write(
       `Turn completed: ${turn.stopReason} (${turn.turnHandle})\n`,
     );
+    if (turn.stopReason === "failed")
+      process.stdout.write(
+        `${harnessFailureMessage(turn.failure, turn.diagnosticId)}\n`,
+      );
     if (turn.finalReply !== null && turn.finalReply !== undefined) {
       process.stdout.write(`${turn.finalReply}\n`);
     }
@@ -227,7 +235,13 @@ export function printCapabilitiesResult(
   mode: OutputMode,
 ): void {
   if (mode === "json") {
-    printJsonLine(result);
+    printJsonLine({
+      ...result,
+      failures: result.failures.map((failure) => ({
+        ...failure,
+        message: harnessFailureMessage(failure.failure, failure.diagnosticId),
+      })),
+    });
     return;
   }
   for (const capability of result.capabilities) {
@@ -243,13 +257,8 @@ export function printCapabilitiesResult(
     }
   }
   for (const failure of result.failures) {
-    const cause = failure.cause?.message ?? "no cause provided";
-    const diagnostic =
-      failure.diagnosticId === undefined
-        ? ""
-        : ` (diagnostic: ${failure.diagnosticId})`;
     process.stderr.write(
-      `warning: capability query failed for ${failure.harness}: ${cause}${diagnostic}\n`,
+      `warning: capability query failed for ${failure.harness}: ${harnessFailureMessage(failure.failure, failure.diagnosticId)}\n`,
     );
   }
 }
@@ -259,7 +268,14 @@ export function printAgentEvent(
   mode: OutputMode,
 ): void {
   if (mode === "json") {
-    printJsonLine(event);
+    printJsonLine(
+      event.type === "turn.completed" && event.stopReason === "failed"
+        ? {
+            ...event,
+            message: harnessFailureMessage(event.failure, event.diagnosticId),
+          }
+        : event,
+    );
     return;
   }
   if (event.type === "text") {
@@ -276,6 +292,13 @@ export function printAgentEvent(
     );
   } else if (event.type === "permission.resolved")
     process.stdout.write(`[permission] resolved ${event.permissionHandle}\n`);
-  else if (event.type === "turn.completed")
+  else if (event.type === "turn.completed") {
     process.stdout.write(`[turn completed] ${event.stopReason}\n`);
+    if (event.stopReason === "failed")
+      process.stdout.write(
+        `${harnessFailureMessage(event.failure, event.diagnosticId)}\n`,
+      );
+    if (event.usage !== undefined)
+      process.stdout.write(`usage: ${JSON.stringify(event.usage)}\n`);
+  }
 }

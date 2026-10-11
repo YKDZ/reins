@@ -1194,6 +1194,7 @@ describe("qoder driver 事件映射", () => {
       sessionId,
       turnId: firstTurnId,
       stopReason: "failed",
+      failure: { failureCategory: "unclassified", retryDisposition: "unknown" },
       finalReply: null,
     });
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([

@@ -380,13 +380,52 @@ export const waitParamsSchema = v.strictObject({
 });
 export type WaitParams = v.InferOutput<typeof waitParamsSchema>;
 
-export const turnCompletedSchema = v.strictObject({
+export const harnessFailureSchema = v.strictObject({
+  failureCategory: v.picklist([
+    "credential_rejected",
+    "quota_exhausted",
+    "balance_exhausted",
+    "account_unavailable",
+    "rate_limited",
+    "model_unavailable",
+    "request_rejected",
+    "provider_unavailable",
+    "runtime_unavailable",
+    "unclassified",
+  ]),
+  retryDisposition: v.picklist([
+    "wait",
+    "external_state_change",
+    "input_change",
+    "unknown",
+  ]),
+});
+export type HarnessFailure = v.InferOutput<typeof harnessFailureSchema>;
+export const UNKNOWN_HARNESS_FAILURE: HarnessFailure = {
+  failureCategory: "unclassified",
+  retryDisposition: "unknown",
+};
+
+const turnCompletedFields = {
   sessionId: sessionIdSchema,
   turnId: turnIdSchema,
-  stopReason: stopReasonSchema,
   finalReply: v.nullable(v.string()),
   usage: v.optional(v.record(v.string(), v.unknown())),
+  diagnosticId: v.optional(diagnosticIdSchema),
+};
+const failedTurnCompletedSchema = v.strictObject({
+  ...turnCompletedFields,
+  stopReason: v.literal("failed"),
+  failure: harnessFailureSchema,
 });
+const successfulTurnCompletedSchema = v.strictObject({
+  ...turnCompletedFields,
+  stopReason: v.picklist(["end_turn", "cancelled", "killed"]),
+});
+export const turnCompletedSchema = v.variant("stopReason", [
+  failedTurnCompletedSchema,
+  successfulTurnCompletedSchema,
+]);
 export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
 export const waitResultSchema = v.strictObject({
@@ -618,11 +657,11 @@ export const domainEventSchema = v.union([
   }),
   v.strictObject({
     type: v.literal("turn.completed"),
-    sessionId: sessionIdSchema,
-    turnId: turnIdSchema,
-    stopReason: stopReasonSchema,
-    finalReply: v.nullable(v.string()),
-    usage: v.optional(v.record(v.string(), v.unknown())),
+    ...failedTurnCompletedSchema.entries,
+  }),
+  v.strictObject({
+    type: v.literal("turn.completed"),
+    ...successfulTurnCompletedSchema.entries,
   }),
   v.strictObject({
     type: v.literal("session.killed"),
@@ -2320,7 +2359,7 @@ export type HarnessCapability = v.InferOutput<typeof harnessCapabilitySchema>;
 export const capabilityFailureSchema = v.strictObject({
   harness: v.pipe(v.string(), v.minLength(1)),
   code: v.literal("capability_query_failed"),
-  cause: v.optional(errorCauseSchema),
+  failure: harnessFailureSchema,
   diagnosticId: v.optional(diagnosticIdSchema),
 });
 export type CapabilityFailure = v.InferOutput<typeof capabilityFailureSchema>;

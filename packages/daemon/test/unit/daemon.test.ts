@@ -353,7 +353,15 @@ function createFakeHarness(options: {
           type: "turn.completed",
           sessionId: current.sessionId,
           turnId: current.turnId,
-          stopReason,
+          ...(stopReason === "failed"
+            ? {
+                stopReason,
+                failure: {
+                  failureCategory: "unclassified" as const,
+                  retryDisposition: "unknown" as const,
+                },
+              }
+            : { stopReason }),
           finalReply,
         });
       },
@@ -470,6 +478,61 @@ describe("daemon 公共接口", () => {
 });
 
 describe("daemon 协议面（缝 C）", () => {
+  test("capabilities 诊断接受挂起仍返回部分结果，后续有限查询不被堵住", async () => {
+    const fake = createFakeHarness({
+      harness: "fake",
+      capability: emptyCapability("fake"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([
+        ["fake", fake.adapter],
+        [
+          "bad",
+          {
+            ...fake.adapter,
+            async capabilities() {
+              throw new Error("private native quota text");
+            },
+          },
+        ],
+      ]),
+      identity: testIdentity,
+      diagnostics: {
+        ...testDiagnostics,
+        record(input) {
+          return input.kind === "request_failure" &&
+            input.operation === "capabilities"
+            ? new Promise(() => {})
+            : testDiagnostics.record(input);
+        },
+      },
+    });
+    daemons.push(daemon);
+    void daemon.start();
+    const client = server.connect();
+    const requester = makeRequester(client);
+    const response = await requester.request("capabilities", {});
+    expect(resultOf(response)).toMatchObject({
+      capabilities: [{ harness: "fake" }],
+      failures: [
+        {
+          harness: "bad",
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          },
+        },
+      ],
+    });
+    expect(
+      (resultOf(response) as CapabilitiesResult).failures[0],
+    ).not.toHaveProperty("diagnosticId");
+    expect(
+      resultOf(await requester.request("diagnostics", { limit: 1 })),
+    ).toEqual({ records: [], truncated: false });
+  });
   test("initialize 握手交换协议主版本与 daemon 世代并绑定消费者", async () => {
     const { server } = startDaemon(new Map());
     const client = server.connect();
@@ -1669,7 +1732,10 @@ describe("daemon 协议面（缝 C）", () => {
         {
           harness: "bad",
           code: "capability_query_failed",
-          cause: { kind: "exception", message: "Error: boom" },
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          },
         },
       ],
     });
@@ -1807,44 +1873,6 @@ describe("daemon 协议面（缝 C）", () => {
     expect(capabilityRecords).toHaveLength(1);
   });
 
-  test("capability failure causes are UTF-8 bounded", async () => {
-    const dummyDriver: WorkerDriver = {
-      start() {},
-      async deliver() {},
-      async interrupt() {},
-      resolvePermission() {},
-      async terminate() {},
-    };
-    const makeFailingAdapter = (message: string): HarnessAdapter => ({
-      driverFactory: () => dummyDriver,
-      async capabilities() {
-        throw new Error(message);
-      },
-    });
-    const { server } = startDaemon(
-      new Map([
-        ["ascii", makeFailingAdapter("a".repeat(5000))],
-        ["unicode", makeFailingAdapter("界".repeat(2000))],
-      ]),
-    );
-    const client = server.connect();
-    await flush();
-
-    const result = resultOf(
-      await makeRequester(client).request("capabilities", {}),
-    ) as CapabilitiesResult;
-    const causes = result.failures.map((failure) => failure.cause);
-    expect(causes).toHaveLength(2);
-    for (const cause of causes) {
-      expect(cause).toBeDefined();
-      expect(
-        new TextEncoder().encode(cause?.message).length,
-      ).toBeLessThanOrEqual(4 * 1024);
-    }
-    expect(causes[0]?.message).toHaveLength(4 * 1024);
-    expect(causes[1]?.message).toHaveLength("Error: ".length + 1363);
-  });
-
   test("unexpected dispatch errors are schema-valid UTF-8 bounded causes", async () => {
     const failingDriver: WorkerDriver = {
       start() {
@@ -1965,9 +1993,10 @@ describe("daemon 空闲退出", () => {
       idleTimeoutMs: 100,
     });
     const started = daemon.start();
-    await flush();
-    vi.advanceTimersByTime(100);
-    await flush();
+    const readiness = server.connect();
+    await makeRequester(readiness).request("list", {});
+    readiness.close();
+    await vi.advanceTimersByTimeAsync(100);
     await expect(started).resolves.toBeUndefined();
   });
 
