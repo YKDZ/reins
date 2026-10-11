@@ -30,6 +30,8 @@ import type {
 } from "@reins/protocol";
 import {
   commandIdSchema,
+  encodeResumeCursor,
+  decodeResumeCursor,
   daemonGenerationSchema,
   sideEffectMethodSchema,
   sessionIdSchema,
@@ -328,6 +330,7 @@ export function createReinsClient(
     const eventListeners = new Set<(event: AgentEvent) => void>();
     let establishment: ProtocolResult<"attach"> | undefined;
     let ended = false;
+    let lastPosition = 0;
     let resolveDone!: (end: AgentSubscriptionEnd) => void;
     let rejectDone!: (error: Error) => void;
     const done = new Promise<AgentSubscriptionEnd>((resolve, reject) => {
@@ -348,7 +351,22 @@ export function createReinsClient(
     const disconnect = (reason: MachineError) => {
       if (ended) return;
       ended = true;
-      const failure = new Error(JSON.stringify(reason));
+      const failure = new Error(
+        JSON.stringify({
+          ...reason,
+          ...(reason.code === "daemon_disconnected" &&
+          establishment !== undefined &&
+          generation !== undefined
+            ? {
+                resumeCursor: encodeResumeCursor({
+                  target: establishment.target,
+                  daemonGeneration: generation,
+                  eventId: lastPosition,
+                }),
+              }
+            : {}),
+        }),
+      );
       cleanup();
       rejectDone(failure);
       wake();
@@ -364,6 +382,7 @@ export function createReinsClient(
       )
         return;
       if (notification.method === "event") {
+        lastPosition = notification.params.eventId;
         for (const projected of project(notification.params.event)) {
           const event = { ...projected, eventId: notification.params.eventId };
           if (
@@ -400,6 +419,12 @@ export function createReinsClient(
       const response = await request("attach", params);
       if ("error" in response) throw new Error(JSON.stringify(response.error));
       establishment = response.result;
+      lastPosition =
+        params.replay.mode === "after"
+          ? decodeResumeCursor(params.replay.cursor).eventId
+          : params.replay.mode === "none"
+            ? (establishment.window.head ?? 0)
+            : (establishment.window.oldest ?? 1) - 1;
       for (const notification of initial.splice(0)) receive(notification);
     } catch (error) {
       cleanup();

@@ -243,6 +243,23 @@ async function runAttachCommand(
   ctx: CommandInvocationFor<"attach">,
 ): Promise<void> {
   const [target] = ctx.args;
+  if (ctx.options.replay === "after" && ctx.options.cursor === undefined)
+    throw usageError({
+      issue: "missing_argument",
+      target: "option",
+      field: "--cursor",
+      hint: "after requires a complete ResumeCursor from interrupted attach",
+    });
+  if (ctx.options.replay !== "after" && ctx.options.cursor !== undefined)
+    throw usageError({
+      issue: "invalid_combination",
+      field: "--cursor",
+      hint: "--cursor is only accepted with --replay after",
+    });
+  const replay: AttachParams["replay"] =
+    ctx.options.replay === "after"
+      ? { mode: "after", cursor: ctx.options.cursor! }
+      : { mode: ctx.options.replay };
   let params: AttachParams;
   try {
     params =
@@ -250,12 +267,12 @@ async function runAttachCommand(
         ? {
             scope: "turn",
             ...decodeTurnHandle(target),
-            replay: { mode: ctx.options.replay },
+            replay,
           }
         : {
             scope: "session",
             sessionId: v.parse(sessionIdSchema, target),
-            replay: { mode: ctx.options.replay },
+            replay,
           };
   } catch {
     throw usageError({

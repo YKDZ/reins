@@ -158,7 +158,7 @@ class ControlledClient implements ReinsClient {
         sessionId,
         subscriptionId: "subscription-unit",
         target: { scope: "session", sessionId },
-        window: { oldest: null, head: null },
+        window: { oldest: null, head: null, truncated: false },
         replayed: 0,
       },
     });
@@ -442,7 +442,9 @@ test("pretty replay waits for attach acceptance and flushes a complete body once
   expect(output.join("")).toBe("");
   client.acceptAttach();
   await tick();
-  expect(output.join("")).toBe("hello\n");
+  expect(output.join("")).toBe(
+    "Event window: empty through empty (complete)\nhello\n",
+  );
   client.end();
   await attached;
 });
@@ -474,7 +476,9 @@ test("a coherent replay body is rendered before its permission menu starts", asy
   client.emit(requested("p1"));
   client.acceptAttach();
   await tick();
-  expect(output.join("")).toMatch(/^helloPermission requested: tool:Bash/u);
+  expect(output.join("")).toMatch(
+    /^Event window: empty through empty \(complete\)\nhelloPermission requested: tool:Bash/u,
+  );
   input.end("1\n");
   await tick();
   await tick();
@@ -517,7 +521,7 @@ test("an end received before the attach ACK flushes its initial batch before res
   client.acceptAttach();
   await expect(attached).resolves.toMatchObject({ reason: "session_killed" });
   expect(output.join("")).toBe(
-    "worker: last replay\n[attach ended] session_killed\n",
+    "Event window: empty through empty (complete)\nworker: last replay\n[attach ended] session_killed\n",
   );
 });
 
