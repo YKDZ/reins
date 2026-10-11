@@ -521,3 +521,4 @@ export function createReinsClient(
 }
 
 export { createWorkspaceClient } from "./workspace.ts";
+export type { GitImportResult, GitImportChanges } from "./git-import.ts";
