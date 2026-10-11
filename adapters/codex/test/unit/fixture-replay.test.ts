@@ -59,7 +59,7 @@ describe("录制 fixture 回放", () => {
           request.method === "thread/start"
             ? { thread: { id: "thr1" } }
             : request.method === "turn/start"
-              ? { turn: { id: "turn1" } }
+              ? { turn: { id: "01a01956-cda5-75a1-9921-dd75d5fe6df3" } }
               : {};
         queueMicrotask(() => {
           stdout.write(`${JSON.stringify({ id: request.id, result })}\n`);

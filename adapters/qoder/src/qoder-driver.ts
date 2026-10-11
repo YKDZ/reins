@@ -196,7 +196,10 @@ export function createQoderDriver(deps: {
           await run();
         })();
       },
-      deliver(sessionId, turnId, message) {
+      async deliver(sessionId, turnId, message, placement) {
+        if (placement === "active_turn") {
+          throw { code: "unsupported_feature", feature: "active_turn" };
+        }
         if (session?.turnId !== turnId) {
           mappingState = createQoderMappingState();
         }

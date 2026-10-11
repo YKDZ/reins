@@ -46,7 +46,7 @@ export function createFakeTransport(): {
     initialize: {},
     "thread/start": { thread: { id: "thr1" } },
     "turn/start": { turn: { id: "turn0" } },
-    "turn/steer": {},
+    "turn/steer": { turnId: "turn1" },
     "turn/interrupt": {},
     "thread/delete": {},
     "model/list": { data: [] },
@@ -64,6 +64,7 @@ export function createFakeTransport(): {
       if (method === "turn/start") {
         turnSeq += 1;
         defaults["turn/start"] = { turn: { id: `turn${turnSeq}` } };
+        defaults["turn/steer"] = { turnId: `turn${turnSeq}` };
       }
       const response = overrides.has(method)
         ? overrides.get(method)

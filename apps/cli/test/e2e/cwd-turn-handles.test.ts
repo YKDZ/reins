@@ -28,9 +28,9 @@ afterEach(async () => {
   for (const release of cleanup.splice(0).reverse()) await release();
 });
 
-async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "reins-wrr03-cwd-"));
-  const runtime = await mkdtemp("/dev/shm/reins-wrr03-runtime-");
+async function fixture(prefix = "reins-wrr03") {
+  const root = await mkdtemp(join(tmpdir(), prefix + "-cwd-"));
+  const runtime = await mkdtemp("/dev/shm/" + prefix + "-runtime-");
   cleanup.push(async () => {
     await rm(root, { recursive: true, force: true });
     await rm(runtime, { recursive: true, force: true });
@@ -302,4 +302,71 @@ test("session snapshots keep the exact active or completed turn without stale ac
     },
   ]);
   expect(killed[0]).not.toHaveProperty("activeTurnHandle");
+});
+
+test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择", async () => {
+  const { cli, callerCwd } = await fixture("reins-wrr06-placement");
+  const created = await cli(["spawn", "codex", "hold", "--name", "placement"]);
+  expect(created.exitCode).toBe(0);
+  const initial = JSON.parse(created.stdout) as {
+    sessionId: string;
+    turnHandle: string;
+  };
+  const busy = await cli([
+    "send",
+    initial.sessionId,
+    "new task",
+    "--placement",
+    "new_turn",
+  ]);
+  expect(busy.exitCode).toBe(65);
+  expect(JSON.parse(busy.stdout)).toMatchObject({ code: "session_busy" });
+  const active = await cli([
+    "send",
+    initial.turnHandle,
+    "active task",
+    "--placement",
+    "active_turn",
+  ]);
+  expect(active.exitCode, active.stderr).toBe(0);
+  expect(JSON.parse(active.stdout)).toEqual({
+    sessionId: initial.sessionId,
+    turnHandle: initial.turnHandle,
+  });
+  await writeFile(join(callerCwd, "release"), "released");
+  expect(
+    (await cli(["wait", initial.sessionId, "--timeout", "5000"])).exitCode,
+  ).toBe(0);
+  const ended = await cli([
+    "send",
+    initial.turnHandle,
+    "late task",
+    "--placement",
+    "active_turn",
+  ]);
+  expect(ended.exitCode).toBe(65);
+  expect(JSON.parse(ended.stdout)).toMatchObject({ code: "turn_not_active" });
+  const next = await cli([
+    "send",
+    initial.sessionId,
+    "next task",
+    "--placement",
+    "new_turn",
+  ]);
+  expect(next.exitCode).toBe(0);
+  const nextAck = JSON.parse(next.stdout) as {
+    sessionId: string;
+    turnHandle: string;
+  };
+  expect(nextAck.sessionId).toBe(initial.sessionId);
+  expect(nextAck.turnHandle).not.toBe(initial.turnHandle);
+  expect(decodeTurnHandle(nextAck.turnHandle).sessionId).toBe(
+    initial.sessionId,
+  );
+  const unspecified = await cli([
+    "send",
+    initial.sessionId,
+    "missing placement",
+  ]);
+  expect(unspecified.exitCode).toBe(64);
 });

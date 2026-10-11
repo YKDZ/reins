@@ -184,6 +184,8 @@ export function exitCodeForError(error: CliError): number {
     case "output_error":
     case "input_error":
     case "session_not_found":
+    case "session_busy":
+    case "turn_not_active":
     case "session_killed":
     case "session_terminating":
     case "daemon_shutting_down":

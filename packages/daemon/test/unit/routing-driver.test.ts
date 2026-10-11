@@ -56,7 +56,9 @@ function createNativeWorker(threadId: string) {
           ? { thread: { id: threadId } }
           : message.method === "turn/start"
             ? { turn: { id: "turn1" } }
-            : {};
+            : message.method === "turn/steer"
+              ? { turnId: "turn1" }
+              : {};
       stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
     }
   });
@@ -154,7 +156,12 @@ describe("routing driver invariants", () => {
       }
       const initialA = workerA.controls.requests().length;
       const initialB = workerB.controls.requests().length;
-      driver.deliver(alpha.sessionId, alpha.turnId, "caller message for alpha");
+      await driver.deliver(
+        alpha.sessionId,
+        alpha.turnId,
+        "caller message for alpha",
+        "active_turn",
+      );
       driver.interrupt(alpha.sessionId);
       await driver.terminate(alpha.sessionId);
       expect(workerA.controls.requests().slice(initialA)).toEqual([
@@ -182,7 +189,12 @@ describe("routing driver invariants", () => {
       expect(workerB.controls.requests().slice(initialB)).toEqual([]);
       expect(workerB.controls.closed()).toBe(false);
 
-      driver.deliver(beta.sessionId, beta.turnId, "caller message for beta");
+      await driver.deliver(
+        beta.sessionId,
+        beta.turnId,
+        "caller message for beta",
+        "active_turn",
+      );
       driver.interrupt(beta.sessionId);
       await driver.terminate(beta.sessionId);
       expect(workerB.controls.requests().slice(initialB)).toMatchObject([
@@ -305,7 +317,7 @@ describe("routing driver invariants", () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {
@@ -406,7 +418,7 @@ describe("routing driver invariants", () => {
       const adapter: HarnessAdapter = {
         driverFactory: () => ({
           start() {},
-          deliver() {},
+          async deliver() {},
           interrupt() {},
           resolvePermission() {},
           async terminate() {
@@ -581,7 +593,7 @@ describe("routing driver invariants", () => {
         sink = diagnostics;
         return {
           start() {},
-          deliver() {},
+          async deliver() {},
           interrupt() {},
           resolvePermission() {},
           async terminate() {},
@@ -655,7 +667,7 @@ describe("routing driver invariants", () => {
             fields: ["reasoning"],
           });
         },
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -692,7 +704,7 @@ describe("routing driver invariants", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("does not silently drop delivery with no session routing entry", () => {
+  test("does not silently drop delivery with no session routing entry", async () => {
     const driver = createRoutingDriverFactory(new Map(), {
       record: async () => undefined,
       async query() {
@@ -700,13 +712,14 @@ describe("routing driver invariants", () => {
       },
     })(() => {});
 
-    expect(() =>
+    await expect(
       driver.deliver(
         v.parse(sessionIdSchema, "missing@groute"),
         v.parse(turnIdSchema, "turn-route"),
         "message",
+        "active_turn",
       ),
-    ).toThrow("No routing entry for session missing@groute");
+    ).rejects.toThrow("No routing entry for session missing@groute");
   });
 
   test("does not retain failed starts and retains failed termination for retry", async () => {
@@ -744,9 +757,9 @@ describe("routing driver invariants", () => {
     };
     try {
       expect(() => driver.start(spec)).toThrow("start failed");
-      expect(() => driver.deliver(sessionId, spec.turnId, "message")).toThrow(
-        "No routing entry",
-      );
+      await expect(
+        driver.deliver(sessionId, spec.turnId, "message", "active_turn"),
+      ).rejects.toThrow("No routing entry");
       driver.start(spec);
       await vi.waitFor(() => {
         expect(workers[1]?.controls.requests().at(-1)?.method).toBe(
@@ -755,7 +768,12 @@ describe("routing driver invariants", () => {
       });
       const retryWorker = workers[1];
       if (retryWorker === undefined) throw new Error("Expected retry worker");
-      driver.deliver(sessionId, spec.turnId, "retry message");
+      await driver.deliver(
+        sessionId,
+        spec.turnId,
+        "retry message",
+        "active_turn",
+      );
       expect(retryWorker.controls.requests().at(-1)).toMatchObject({
         method: "turn/steer",
         params: { input: [{ text: "retry message" }] },
@@ -768,9 +786,14 @@ describe("routing driver invariants", () => {
       retryWorker.controls.setCloseError(undefined);
       await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
       expect(retryWorker.controls.closed()).toBe(true);
-      expect(() =>
-        driver.deliver(sessionId, spec.turnId, "after termination"),
-      ).toThrow("No routing entry");
+      await expect(
+        driver.deliver(
+          sessionId,
+          spec.turnId,
+          "after termination",
+          "active_turn",
+        ),
+      ).rejects.toThrow("No routing entry");
     } finally {
       for (const worker of workers) worker.controls.end();
     }

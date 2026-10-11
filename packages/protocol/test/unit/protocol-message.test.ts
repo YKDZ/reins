@@ -160,6 +160,7 @@ describe("per-method 参数与结果 schema", () => {
     });
     bad(protocolParamsSchemaFor("spawn"), { harness: "qoder" });
     ok(protocolParamsSchemaFor("send"), {
+      placement: "new_turn",
       sessionId: "reviewer@g7",
       message: "x",
     });
