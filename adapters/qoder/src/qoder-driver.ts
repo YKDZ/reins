@@ -277,6 +277,8 @@ export function createQoderDriver(deps: {
       },
       async terminate(sessionId) {
         void sessionId;
+        // abort 会强制关闭 SDK 工作线程，先让原生会话取消仍在执行的工具。
+        await query?.interrupt();
         terminating = true;
         abortController?.abort();
         await runPromise;

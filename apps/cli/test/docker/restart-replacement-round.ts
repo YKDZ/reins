@@ -485,6 +485,8 @@ const admission = async (name: string) => {
 };
 try {
   assert.ok((await admission("before-restarts")).result);
+  const lostSessions: string[] = [];
+  const completedTurns: unknown[] = [];
   for (const kind of ["daemon", "container"] as const) {
     const preservedSource = await readFile(join(cwd, "target.txt"), "utf8");
     await rm(join(cwd, "active-writer.json"), { force: true });
@@ -610,6 +612,8 @@ try {
       "all",
     ]);
     assert.equal(completed.status, 0, JSON.stringify(completed));
+    lostSessions.push(String(original.value.sessionId));
+    completedTurns.push(...(completed.value.completed as unknown[]));
     const reply = JSON.parse(
       (completed.value.completed as { finalReply: string }[])[0]!.finalReply,
     ) as { cwd: string; message: string; content: string };
@@ -674,6 +678,62 @@ try {
   const sourceLoss = await admission("must-reject-invalid-view");
   await record("stale-native-view-admission", sourceLoss);
   assert.equal(sourceLoss.error?.code, "native_view_lost");
+  await rename(join(base, "moved-worktree"), worktree);
+  const detached = await cli([
+    "detach",
+    "-C",
+    cwd,
+    "--session-disposition",
+    "kill",
+  ]);
+  await record("detach-after-restarts", detached);
+  assert.equal(detached.status, 0, JSON.stringify(detached));
+  const detachment = detached.value.detachment as {
+    status: string;
+    resources: Record<string, { status: string }>;
+    sessions: {
+      sessionId: string;
+      outcome: string;
+      turns: { completed?: unknown }[];
+    }[];
+  };
+  assert.equal(detachment.status, "released");
+  assert.ok(
+    Object.values(detachment.resources).every(
+      (step) => step.status === "released",
+    ),
+  );
+  for (const sessionId of lostSessions) {
+    const session = detachment.sessions.find(
+      (item) => item.sessionId === sessionId,
+    );
+    assert.ok(session);
+    assert.equal(session.outcome, "terminated_by_workspace_detach");
+    assert.ok(session.turns.every((turn) => turn.completed === undefined));
+  }
+  const retained = detachment.sessions.flatMap((session) =>
+    session.turns.flatMap((turn) =>
+      turn.completed === undefined ? [] : [turn.completed],
+    ),
+  );
+  for (const completed of completedTurns)
+    assert.ok(
+      retained.some(
+        (turn) => JSON.stringify(turn) === JSON.stringify(completed),
+      ),
+    );
+  assert.equal(
+    await requireCommand("docker", [
+      "container",
+      "ls",
+      "-a",
+      "--filter",
+      "name=^/" + container + "$",
+      "--format",
+      "{{.ID}}",
+    ]),
+    "",
+  );
 } finally {
   held.stdin.end();
   await new Promise<void>((resolve) => held.once("close", () => resolve()));
