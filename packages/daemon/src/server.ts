@@ -883,7 +883,7 @@ export function createProtocolServerInternal(
       }
       case "interrupt": {
         const params = request.params as InterruptParams;
-        for (const sessionId of params.ids) assertSessionScope(sessionId);
+        assertSessionScope(params.sessionId);
         return await options.machine.interrupt(params);
       }
       case "kill": {

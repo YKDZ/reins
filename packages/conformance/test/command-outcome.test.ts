@@ -28,7 +28,7 @@ function createFakeHarness(options: {
         calls.starts += 1;
       },
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate(id) {
         calls.terminated.push(id);

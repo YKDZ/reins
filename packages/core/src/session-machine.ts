@@ -4,7 +4,6 @@ import {
   type DiagnosticId,
   type CoreDiagnosticFact,
   type InterruptAck,
-  type InterruptOutcome,
   type InterruptParams,
   type InvalidParamIssue,
   interruptParamsSchema,
@@ -1120,49 +1119,42 @@ export function createSessionMachine(options: {
     },
     async interrupt(params) {
       const parsed = v.safeParse(interruptParamsSchema, params);
-      if (!parsed.success) {
-        throw invalidParamsError(parsed.issues);
+      if (!parsed.success) throw invalidParamsError(parsed.issues);
+      const { sessionId, turnId } = parsed.output;
+      const session = sessions.get(sessionId);
+      if (session === undefined)
+        throw machineError({ code: "session_not_found", sessionId });
+      if (session.state === "killed")
+        throw machineError({ code: "session_killed", sessionId });
+      assertNotTerminating(sessionId);
+      if (pendingDeliveries.get(sessionId)?.creating)
+        throw machineError({ code: "turn_not_active", sessionId, turnId });
+      const current = activeProjection(sessionId) ?? session;
+      if (current.currentTurnId !== turnId) {
+        if (
+          session.turns.some((turn) => turn.turnId === turnId) ||
+          activeProjection(sessionId)?.completedTurnIds.has(turnId)
+        )
+          throw machineError({ code: "turn_not_active", sessionId, turnId });
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
       }
-      const outcomes: InterruptOutcome[] = [];
-      for (const id of parsed.output.ids) {
-        const session = sessions.get(id);
-        if (session === undefined) {
-          throw machineError({ code: "session_not_found", sessionId: id });
-        }
-        if (session.state === "killed") {
-          throw machineError({ code: "session_killed", sessionId: id });
-        }
-        assertNotTerminating(id);
-        if (session.state === "busy") {
-          try {
-            driverTransaction([], new Map([[id, projectSession(id)]]), () => {
-              driver.interrupt(id);
-            });
-          } catch (error) {
-            throw await unexpectedFailure(options.diagnostics, error, {
-              sessionId: id,
-              ...(session.currentTurnId === null
-                ? {}
-                : { turnId: session.currentTurnId }),
-              kind: "request_failure",
-              operation: "interrupt",
-              stage: "interrupt",
-              reason: "upstream_error",
-              message: evidence(error),
-            });
-          }
-          outcomes.push({
-            sessionId: id,
-            status: "requested",
-            ...(session.currentTurnId === null
-              ? {}
-              : { turnId: session.currentTurnId }),
-          });
-        } else {
-          outcomes.push({ sessionId: id, status: "idle" });
-        }
+      try {
+        await driver.interrupt(sessionId, turnId);
+      } catch (error) {
+        throw await unexpectedFailure(options.diagnostics, error, {
+          sessionId,
+          turnId,
+          kind: "request_failure",
+          operation: "interrupt",
+          stage: "interrupt",
+          reason: "upstream_error",
+          message: evidence(error),
+        });
       }
-      return outcomes;
+      return { sessionId, turnId };
     },
     async resolvePermission(params) {
       const parsed = v.safeParse(resolvePermissionParamsSchema, params);

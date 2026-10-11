@@ -405,3 +405,44 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
   ]);
   expect(unspecified.exitCode).toBe(64);
 });
+
+test("interrupt 单 TurnHandle 返回接受事实，ACK 不等于取消", async () => {
+  const { cli, callerCwd } = await fixture("reins-wrr16");
+  const created = await cli([
+    "spawn",
+    "codex",
+    "hold",
+    "--name",
+    "exact-interrupt",
+  ]);
+  expect(created.exitCode, created.stderr).toBe(0);
+  const original = JSON.parse(created.stdout) as {
+    sessionId: string;
+    turnHandle: string;
+  };
+  const accepted = await cli(["interrupt", original.turnHandle]);
+  expect(accepted.exitCode, accepted.stdout + accepted.stderr).toBe(0);
+  expect(JSON.parse(accepted.stdout)).toEqual({
+    sessionId: original.sessionId,
+    turnHandle: original.turnHandle,
+  });
+  expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
+    { sessionId: original.sessionId, state: "busy" },
+  ]);
+  const incomplete = await cli(["interrupt", original.sessionId]);
+  expect(incomplete.exitCode).toBe(64);
+  const multiple = await cli([
+    "interrupt",
+    original.turnHandle,
+    original.turnHandle,
+  ]);
+  expect(multiple.exitCode).toBe(64);
+  await writeFile(join(callerCwd, "release"), "released");
+  await vi.waitFor(async () =>
+    expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
+      { state: "idle" },
+    ]),
+  );
+  const stale = await cli(["interrupt", original.turnHandle]);
+  expect(stale.exitCode).toBe(65);
+});

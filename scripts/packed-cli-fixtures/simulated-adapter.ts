@@ -79,7 +79,7 @@ const simulatedDriverFactory: AdapterDriverFactory = ({ emit }) => {
       record({ operation: "deliver", sessionId, turnId, message });
       complete(sessionId, turnId);
     },
-    interrupt(sessionId) {
+    async interrupt(sessionId) {
       throw new Error(
         `interrupt is not part of the simulated round: ${sessionId}`,
       );

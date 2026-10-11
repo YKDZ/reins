@@ -49,7 +49,7 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
         child.stdin.write(JSON.stringify({ turnId, message }) + "\n");
       });
     },
-    interrupt() {},
+    async interrupt() {},
     resolvePermission() {},
     async terminate() {
       if (child.exitCode !== null || child.signalCode !== null) return;

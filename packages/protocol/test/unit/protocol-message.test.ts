@@ -16,6 +16,7 @@ import {
   protocolParamsSchemaFor,
   protocolResultSchemaFor,
   sessionIdSchema,
+  turnIdSchema,
 } from "../../src/index.ts";
 
 const ok = (schema: v.GenericSchema, input: unknown): void => {
@@ -170,9 +171,13 @@ describe("per-method 参数与结果 schema", () => {
       completion: "all",
       timeoutMs: 100,
     });
-    ok(protocolParamsSchemaFor("interrupt"), { ids: ["reviewer@g7"] });
+    ok(protocolParamsSchemaFor("interrupt"), {
+      sessionId: "reviewer@g7",
+      turnId: "t1",
+    });
     const legacyInterruptParams: ProtocolParams<"interrupt"> = {
-      ids: [v.parse(sessionIdSchema, "reviewer@g7")],
+      sessionId: v.parse(sessionIdSchema, "reviewer@g7"),
+      turnId: v.parse(turnIdSchema, "t1"),
       // @ts-expect-error interrupt 的硬迁移必须在编译期拒绝旧 message。
       message: "legacy explanation",
     };
@@ -214,9 +219,10 @@ describe("per-method 参数与结果 schema", () => {
       completed: [],
       pending: [{ sessionId: "reviewer@g7", turnId: "t1" }],
     });
-    ok(protocolResultSchemaFor("interrupt"), [
-      { sessionId: "reviewer@g7", status: "requested", turnId: "t1" },
-    ]);
+    ok(protocolResultSchemaFor("interrupt"), {
+      sessionId: "reviewer@g7",
+      turnId: "t1",
+    });
     ok(protocolResultSchemaFor("kill"), {
       sessionId: "reviewer@g7",
       status: "killed",

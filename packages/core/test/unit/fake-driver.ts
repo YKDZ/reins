@@ -33,7 +33,7 @@ export function createFakeDriver(options?: {
     turnId: TurnId,
     message: string,
   ) => Promise<void> | void;
-  interrupt?: (sessionId: SessionId) => void;
+  interrupt?: (sessionId: SessionId, turnId: TurnId) => void | Promise<void>;
   resolvePermission?: (
     sessionId: SessionId,
     permissionId: PermissionId,
@@ -79,11 +79,11 @@ export function createFakeDriver(options?: {
           await options.deliver(sessionId, turnId, message);
         }
       },
-      interrupt(sessionId) {
+      async interrupt(sessionId, turnId) {
         if (options?.interrupt === undefined) {
           interrupted.push({ sessionId });
         } else {
-          options.interrupt(sessionId);
+          await options.interrupt(sessionId, turnId);
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {

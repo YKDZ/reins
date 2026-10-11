@@ -199,9 +199,18 @@ async function runWait(ctx: CommandInvocationFor<"wait">): Promise<void> {
 async function runInterrupt(
   ctx: CommandInvocationFor<"interrupt">,
 ): Promise<void> {
-  const [ids] = ctx.args;
+  const [target] = ctx.args;
+  if (!v.safeParse(turnHandleSchema, target).success)
+    throw usageError({
+      issue: "invalid_value",
+      target: "argument",
+      field: "target",
+      value: target,
+      hint: "Expected a valid TurnHandle",
+    });
+  const address = decodeTurnHandle(target);
   await withClient(ctx.mode, async (client) => {
-    const response = await client.request("interrupt", { ids: [...ids] });
+    const response = await client.request("interrupt", address);
     printInterruptResult(requireResult(response), ctx.mode);
   });
 }
