@@ -47,11 +47,13 @@ async function main() {
   let connections = 0;
   let idle: NodeJS.Timeout | undefined;
   let stopping: Promise<void> | undefined;
+  const requests = new Set<Promise<void>>();
   const stop = () => {
     stopping ??= (async () => {
       clearTimeout(idle);
-      runtime.close();
       await transport.close();
+      await Promise.all(requests);
+      await runtime.close();
       await release();
     })();
     return stopping;
@@ -63,6 +65,10 @@ async function main() {
     }, 1000);
   };
   transport.onConnection((connection) => {
+    if (stopping !== undefined) {
+      connection.close();
+      return;
+    }
     connections += 1;
     clearTimeout(idle);
     let consumer: ConsumerContext | undefined;
@@ -79,6 +85,10 @@ async function main() {
           connections -= 1;
           scheduleIdle();
         }
+        return;
+      }
+      if (stopping !== undefined) {
+        connection.close();
         return;
       }
       const parsed = v.safeParse(workspaceRequestSchema, event.message);
@@ -99,7 +109,7 @@ async function main() {
         return;
       }
       const request = parsed.output;
-      void (async () => {
+      const operation = (async () => {
         if (request.method === "initialize") {
           if (
             request.params.protocolMajorVersion !==
@@ -149,6 +159,8 @@ async function main() {
             error: normalizeError(error),
           }),
       );
+      requests.add(operation);
+      void operation.finally(() => requests.delete(operation));
     });
   });
   process.on("SIGTERM", () => {

@@ -699,7 +699,8 @@ export async function openWorkspaceRuntime(options: {
       });
       return { ...record.info, cwd: tree.cwd };
     },
-    close() {
+    async close() {
+      await Promise.all(executions.values());
       for (const client of clients.values()) client.close();
       clients.clear();
     },
