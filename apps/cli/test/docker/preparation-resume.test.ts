@@ -57,6 +57,21 @@ test("resumes only failed preparation stages while preserving completed resource
         .digest("hex"),
     });
   }
+  const installation = process.env.REINS_WRR10_CONSUMER_ARCHIVE;
+  if (installation !== undefined) {
+    for (const [source, name] of [
+      [installation, "consumer-installation.tar"],
+      [installation + ".json", "consumer-installation.json"],
+    ]) {
+      await copyFile(source!, join(input, name!));
+      fingerprints.push({
+        name: name!,
+        sha256: createHash("sha256")
+          .update(await readFile(source!))
+          .digest("hex"),
+      });
+    }
+  }
   // 工具仅来自本机已安装的原生程序；不携带宿主配置、home 或 node_modules。
   const tools = join(input, "tools");
   await mkdir(join(tools, "lib"), { recursive: true });

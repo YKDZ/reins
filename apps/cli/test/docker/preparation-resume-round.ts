@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
+import { createHash } from "node:crypto";
 import {
   appendFile,
   mkdir,
@@ -81,18 +82,48 @@ await writeFile(
     dependencies: { "@ykdz/reins": "file:../candidate.tgz" },
   }),
 );
-await requireCommand(
-  "npm",
-  ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
-  join(base, "consumer"),
-);
+// 可显式运输独立 npm 消费者的生产安装材料；不是开发 node_modules 或宿主配置。
+let installation: Buffer | undefined;
+try {
+  installation = await readFile(join(base, "consumer-installation.tar"));
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+}
+if (installation !== undefined) {
+  const material = JSON.parse(
+    await readFile(join(base, "consumer-installation.json"), "utf8"),
+  ) as { packedSha256: string; archiveSha256: string };
+  assert.equal(
+    createHash("sha256").update(installation).digest("hex"),
+    material.archiveSha256,
+  );
+  assert.equal(
+    createHash("sha256")
+      .update(await readFile(join(base, "candidate.tgz")))
+      .digest("hex"),
+    material.packedSha256,
+  );
+  await requireCommand("tar", [
+    "-xf",
+    join(base, "consumer-installation.tar"),
+    "-C",
+    join(base, "consumer"),
+  ]);
+  await record("independentConsumerInstallation", material);
+} else {
+  await requireCommand(
+    "npm",
+    ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
+    join(base, "consumer"),
+  );
+}
 const installed = join(base, "consumer", "node_modules", "@ykdz", "reins");
 const context = join(base, "image-context");
 await mkdir(context);
 // 直接将独立消费者的安装树作为 build context，避免在慢文件系统逐文件再复制一遍。
 await writeFile(
   join(base, ".dockerignore"),
-  "tools/docker\ntools/docker-native\ncandidate.tgz\nevidence\n",
+  "tools/docker\ntools/docker-native\ncandidate.tgz\nconsumer-installation.tar\nconsumer-installation.json\nevidence\n",
 );
 await writeFile(
   join(context, "codex"),
