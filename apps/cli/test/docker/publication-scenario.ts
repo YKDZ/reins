@@ -9,18 +9,22 @@ import { expect } from "vitest";
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 export async function runPublicationScenario(
-  observation: boolean | "retention" = false,
+  observation = false,
+  variant?: { ticket: number; client: string; worker: string },
 ) {
+  const ticket = variant?.ticket ?? (observation ? 27 : 26);
+  const setting = (name: string) =>
+    process.env[`REINS_WRR${variant?.ticket ?? 26}_${name}`];
   const directory = join(
     repository,
     ".artifacts",
-    `reins-wrr${observation === "retention" ? 29 : observation ? 27 : 26}-${randomUUID()}`,
+    `reins-wrr${ticket}-${randomUUID()}`,
   );
   const input = join(directory, "input");
   await mkdir(input, { recursive: true });
   const registryImage =
     "node@sha256:ba849c60be29959425b8734d57b8b4b7d56f98edd9504c9af091d5281095a71e";
-  const nodeImage = process.env.REINS_WRR26_NODE_IMAGE ?? registryImage;
+  const nodeImage = setting("NODE_IMAGE") ?? registryImage;
   // 离线缓存只接受同一已验证 Node 材料的配置摘要，不引入替代镜像。
   expect([
     registryImage,
@@ -45,7 +49,11 @@ export async function runPublicationScenario(
   ] as const;
   const fingerprints: { name: string; sha256: string }[] = [];
   await copyFile(
-    join(repository, "apps/cli/test/docker/publishing-worker.ts"),
+    join(
+      repository,
+      "apps/cli/test/docker",
+      variant?.worker ?? "publishing-worker.ts",
+    ),
     join(input, "publishing-worker.ts"),
   );
   fingerprints.push({
@@ -58,7 +66,9 @@ export async function runPublicationScenario(
     join(repository, "scripts/bundle-workspace-client.ts"),
     join(
       repository,
-      `apps/cli/test/docker/${observation === "retention" ? "publication-retention-client" : observation ? "publication-observation-client" : "publication-client"}.ts`,
+      "apps/cli/test/docker",
+      variant?.client ??
+        `${observation ? "publication-observation-client" : "publication-client"}.ts`,
     ),
     join(input, "publication-client.js"),
   ]);
@@ -68,7 +78,7 @@ export async function runPublicationScenario(
       .update(await readFile(join(input, "publication-client.js")))
       .digest("hex"),
   });
-  const fixtureBaseImage = process.env.REINS_WRR26_FIXTURE_BASE_IMAGE;
+  const fixtureBaseImage = setting("FIXTURE_BASE_IMAGE");
   let consumerSha256: string | undefined;
   if (fixtureBaseImage === undefined) {
     const consumer = join(directory, "consumer");
@@ -121,10 +131,15 @@ export async function runPublicationScenario(
   });
   for (const [source, name] of sources) {
     await copyFile(source, join(input, name));
+    if (name === "publication-round.ts" && variant !== undefined)
+      await writeFile(
+        join(input, name),
+        (await readFile(source, "utf8")).replaceAll("wrr26", `wrr${ticket}`),
+      );
     fingerprints.push({
       name,
       sha256: createHash("sha256")
-        .update(await readFile(source))
+        .update(await readFile(join(input, name)))
         .digest("hex"),
     });
   }
@@ -178,17 +193,17 @@ export async function runPublicationScenario(
     join(repository, "scripts/run-workspace-test-platform.ts"),
     "run",
     "--state-dir",
-    process.env.REINS_WRR26_PLATFORM_STATE_DIR ?? join(directory, "state"),
-    ...(process.env.REINS_WRR26_PLATFORM_REUSE === "1" ? ["--reuse"] : []),
+    setting("PLATFORM_STATE_DIR") ?? join(directory, "state"),
+    ...(setting("PLATFORM_REUSE") === "1" ? ["--reuse"] : []),
     "--evidence-dir",
     join(directory, "evidence"),
     "--image",
     fixtureBaseImage ?? nodeImage,
     "--timeout-ms",
-    process.env.REINS_WRR26_SCENARIO_TIMEOUT_MS ?? "3600000",
-    ...(process.env.REINS_WRR26_PLATFORM_DOCKER_BINARY === undefined
+    setting("SCENARIO_TIMEOUT_MS") ?? "3600000",
+    ...(setting("PLATFORM_DOCKER_BINARY") === undefined
       ? []
-      : ["--docker-binary", process.env.REINS_WRR26_PLATFORM_DOCKER_BINARY]),
+      : ["--docker-binary", setting("PLATFORM_DOCKER_BINARY")!]),
     "--source",
     input,
     "--docker-access",
@@ -237,7 +252,6 @@ export async function runPublicationScenario(
     scenarioExecution: "passed",
     scenarioCleanup: "passed",
     evidenceExport: "passed",
-    platformReclaim:
-      process.env.REINS_WRR26_PLATFORM_REUSE === "1" ? "not_run" : "passed",
+    platformReclaim: setting("PLATFORM_REUSE") === "1" ? "not_run" : "passed",
   });
 }

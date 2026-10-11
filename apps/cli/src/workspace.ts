@@ -85,14 +85,13 @@ export function registerWorkspaceCommands(program: Command): void {
                 throw error;
             }
           }
-          result = (
+          result =
             method === "workspace.handoff"
               ? {
                   ...(result as WorkspaceResults["workspace.handoff"]),
                   workspace: preparation,
                 }
-              : preparation
-          ) as typeof result;
+              : preparation;
         }
         process.stdout.write(`${JSON.stringify(result)}\n`);
         if (preparation?.runtime.status === "failed")
@@ -116,6 +115,31 @@ export function registerWorkspaceCommands(program: Command): void {
       throw new ExitError(1, "workspace_failed");
     }
   };
+  workspace
+    .command("import-git")
+    .description(
+      "Import a published Git bundle into a new reference without checkout or merge",
+    )
+    .argument("<publication>")
+    .requiredOption("--repository <path>", "target Git repository")
+    .requiredOption("--ref <reference>", "new fully qualified Git reference")
+    .requiredOption(
+      "--commit <object>",
+      "full commit object name advertised by the bundle",
+    )
+    .action(
+      (
+        publicationId: string,
+        options: { repository: string; ref: string; commit: string },
+      ) =>
+        invoke("publication.read", { publicationId }, (client) =>
+          client.importGitPublication(publicationId, {
+            repository: resolve(options.repository),
+            reference: options.ref,
+            commit: options.commit,
+          }),
+        ),
+    );
   workspace
     .command("publications")
     .description("Query files explicitly published from this worktree")
