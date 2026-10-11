@@ -439,24 +439,9 @@ export async function openWorkspaceRuntime(options: {
     async attach(cwd: string, bindingRefs: string[], owner: ConsumerContext) {
       v.parse(consumerContextSchema, owner);
       const tree = await resolveWorktree(cwd);
-      const catalog = await workspaceHarnesses(cwd);
       if (
         bindingRefs.length === 0 ||
         new Set(bindingRefs).size !== bindingRefs.length
-      )
-        throw workspaceFailure("binding_conflict");
-      const selected = bindingRefs.map((ref) => {
-        const binding = catalog.bindings.find((item) => item.ref === ref);
-        if (binding === undefined)
-          throw {
-            code: "binding_unknown",
-            availableBindings: catalog.bindings.map((item) => item.ref),
-          } satisfies WorkspaceError;
-        return binding;
-      });
-      if (
-        new Set(selected.map((binding) => binding.harness)).size !==
-        selected.length
       )
         throw workspaceFailure("binding_conflict");
       const intent = bindingRefs.toSorted();
@@ -481,6 +466,21 @@ export async function openWorkspaceRuntime(options: {
           }
           return { record: existing, created: false };
         }
+        const catalog = await workspaceHarnesses(cwd);
+        const selected = bindingRefs.map((ref) => {
+          const binding = catalog.bindings.find((item) => item.ref === ref);
+          if (binding === undefined)
+            throw {
+              code: "binding_unknown",
+              availableBindings: catalog.bindings.map((item) => item.ref),
+            } satisfies WorkspaceError;
+          return binding;
+        });
+        if (
+          new Set(selected.map((binding) => binding.harness)).size !==
+          selected.length
+        )
+          throw workspaceFailure("binding_conflict");
         const identities = await Promise.all(
           [
             ...new Set([

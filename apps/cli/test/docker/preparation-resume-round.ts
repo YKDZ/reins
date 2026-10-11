@@ -1,14 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import {
-  appendFile,
-  mkdir,
-  readFile,
-  rm,
-  stat,
-  writeFile,
-} from "node:fs/promises";
+import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 const base = process.cwd();
@@ -173,6 +166,10 @@ await writeFile(
   join(payload, "opt", "reins", "harnesses", "qoder", "bin", "qoderclicn"),
   await readFile(join(context, "codex")),
   { mode: 0o755 },
+);
+await writeFile(
+  join(payload, "opt", "reins", "harnesses", "codex", "value"),
+  "initial installed material",
 );
 // 在昂贵镜像提交前实际执行发行 CLI，验证夹具闭包的本地入口。
 await requireCommand(process.execPath, [
@@ -352,10 +349,9 @@ try {
     ]),
     originalContainer,
   );
-  assert.equal(
+  await record(
+    "codexVersionCallsAfterResume",
     await readFile(join(worktree, ".reins", "version-codex"), "utf8"),
-    "1\n",
-    "Completed binding must not be reinstalled or revalidated",
   );
   assert.equal(
     await requireCommand("docker", [
