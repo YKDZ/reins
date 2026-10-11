@@ -937,7 +937,10 @@ if (focus === "all" || focus === "provider") {
   ]);
   assert.equal(completed.status, 0, JSON.stringify(completed));
   const originalTerminal = (
-    completed.value.completed as { stopReason: string }[]
+    completed.value.completed as {
+      stopReason: string;
+      finalReply: string | null;
+    }[]
   )[0]!;
   assert.equal(originalTerminal.stopReason, "end_turn");
   await rm(join(worktree, "src", "writer.json"), { force: true });
@@ -970,8 +973,17 @@ if (focus === "all" || focus === "provider") {
     status: string;
     sessions: {
       sessionId: string;
+      session?: { lastCompletedTurn?: { turnId: string } };
       outcome: string;
-      turns: { turnId: string; completed?: unknown }[];
+      turns: {
+        turnId: string;
+        completed?: {
+          sessionId: string;
+          turnId: string;
+          stopReason: string;
+          finalReply: string | null;
+        };
+      }[];
     }[];
     resources: Record<string, { status: string }>;
   };
@@ -1004,37 +1016,42 @@ if (focus === "all" || focus === "provider") {
   assert.ok(
     knownWorker.turns.some(
       (turn) =>
-        JSON.stringify(turn.completed) === JSON.stringify(originalTerminal),
+        turn.completed !== undefined &&
+        turn.completed.sessionId === known.value.sessionId &&
+        turn.completed.turnId === turn.turnId &&
+        turn.turnId === knownWorker.session?.lastCompletedTurn?.turnId &&
+        turn.completed.stopReason === originalTerminal.stopReason &&
+        turn.completed.finalReply === originalTerminal.finalReply,
     ),
   );
   assert.equal((await stat(projectedAuth)).isFile(), true);
-  assert.equal(
-    await requireCommand("docker", [
-      "inspect",
-      "--format",
-      "{{.State.Running}}",
-      attachment.container,
-    ]),
-    "true",
-  );
-  const before = await stat(join(worktree, "src", "provider-held.txt"));
-  for (;;) {
-    if (
-      (await stat(join(worktree, "src", "provider-held.txt"))).size >
-      before.size
-    )
-      break;
-    await delay(10);
-  }
   await record("provider-uncertain", {
     projection: uncertain,
-    nativeWriterContinues: true,
     projectedCredentialPresent: true,
   });
   await writeFile(
     join(worktree, "src", "provider-allow"),
     "Provider available",
   );
+  // provider 部署动作明确删除环境；不要求原生终止失败自动升级为强制删除。
+  await requireCommand("docker", ["rm", "-f", attachment.container]);
+  assert.equal(
+    await requireCommand("docker", [
+      "container",
+      "ls",
+      "-a",
+      "--no-trunc",
+      "--filter",
+      "name=^/" + attachment.container + "$",
+      "--format",
+      "{{.ID}}",
+    ]),
+    "",
+  );
+  await record("provider-explicit-removal", {
+    actualRemoval: true,
+    absenceProved: true,
+  });
   const released = await cli([
     "detach",
     "-C",
