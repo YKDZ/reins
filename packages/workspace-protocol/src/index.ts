@@ -226,9 +226,21 @@ export const workspaceHandleSchema = v.pipe(
   v.regex(/^workspace-[a-f0-9-]{36}$/u),
 );
 export type WorkspaceHandle = v.InferOutput<typeof workspaceHandleSchema>;
+export const selectedFileSchema = v.variant("mode", [
+  v.strictObject({ path: v.string(), mode: v.literal("delete") }),
+  v.strictObject({
+    path: v.string(),
+    mode: v.picklist(["100644", "100755", "120000"]),
+    contentBase64: v.pipe(v.string(), v.maxLength(44_739_244)),
+  }),
+]);
+export type SelectedFile = v.InferOutput<typeof selectedFileSchema>;
 export const fixedCommitMaterialSchema = v.strictObject({
   commit: v.pipe(v.string(), v.regex(/^[a-f0-9]{40}$/u)),
   packBase64: v.pipe(v.string(), v.maxLength(44_739_244)),
+  selectedFiles: v.optional(
+    v.pipe(v.array(selectedFileSchema), v.maxLength(1024)),
+  ),
   sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
 });
 export type FixedCommitMaterial = v.InferOutput<
