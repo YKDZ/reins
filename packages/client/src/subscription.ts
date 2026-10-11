@@ -14,6 +14,7 @@ import {
   encodeTurnHandle,
   permissionHandleSchema,
 } from "@reins/protocol";
+import type { Publication } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
 // 关联键仅用于 client 内部配对；消费者只收到完整领域句柄与可读内容。
@@ -40,7 +41,9 @@ type ProjectedEvent =
       complete: boolean;
       start: boolean;
     };
-export type AgentEvent = ProjectedEvent & { eventId: EventId };
+export type AgentEvent =
+  | (ProjectedEvent & { eventId: EventId })
+  | { type: "publication.ready"; publication: Publication };
 export type AgentTarget =
   | { scope: "session"; sessionHandle: SessionHandle }
   | { scope: "turn"; turnHandle: TurnHandle };

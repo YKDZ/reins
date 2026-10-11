@@ -80,3 +80,9 @@ reins workspace receipts --directory /absolute/receipts
 ```
 
 共享客户端提供相同的 `publication.list` 查询、`receivePublication` 和 `receipts`。接收提交本地可用文件后才返回 `arrived`、来源、大小及实际 `localPath`；失败返回 `receipt_failed`，保留已成功发布的副本。发布和接收查询均限 launcher 绑定的消费者，跨消费者发布标识按不存在处理。本链可直接用于原生工作树附着，无需源码交接。回合完成、回复中的路径和发布成功都不会自动接收文件。
+
+工作区控制的既有 `wait` 返回原有 `status`、`completed`、`pending`，并附当前消费者／工作区的 `publications` 查询快照。发布不会使仍活动的回合满足等待条件，也不会把文件放入接收区。
+
+既有 `attach`／共享 client 的 `subscribe` 在同一 Manager 连接上接收 `publication.ready`。成果事实只在固定副本提交后产生，包含完整发布记录；它属于工作区，既不声称属于某个回合，也不借用 daemon 的 Session EventId 或恢复游标。建立观察时提供当前可取回成果，之后只在该观察存续期间发送新增事实；daemon 的 `none`／`available`／`after` 仍只控制原生会话事件的有界回放。任务终态和文件到达继续分别报告。
+
+关闭、结束或断开观察会移除对应的成果观察；没有等待或订阅时不承诺后台唤起。断连及通知丢失后，`workspace publications` 仍可查询固定副本，显式 `workspace receive` 才产生本地 `arrived` 事实。任务失败不删除发布，成果通知不证明任务完成或成果齐全。

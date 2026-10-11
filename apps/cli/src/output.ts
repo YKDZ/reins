@@ -294,7 +294,12 @@ export function printAgentEvent(
     );
     return;
   }
-  if (event.type === "text") {
+  if (event.type === "publication.ready") {
+    const publication = event.publication;
+    process.stdout.write(
+      `[publication ready] ${publication.publicationId} ${publication.source.path} (${publication.bytes} bytes)\n`,
+    );
+  } else if (event.type === "text") {
     if (event.start && event.complete) process.stdout.write(event.role + ": ");
     process.stdout.write(event.content);
     if (event.complete && !event.content.endsWith("\n"))
