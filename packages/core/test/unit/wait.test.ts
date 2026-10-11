@@ -25,10 +25,10 @@ describe("wait", () => {
       cwd: "/tmp/demo",
     });
 
-    const waiting = machine.wait({ ids: [id], timeoutMs: 500 });
+    const waiting = machine.wait({ targets: [{sessionId: id, turnId: ids.turn("t1")}], completion: "any", timeoutMs: 500 });
     await vi.advanceTimersByTimeAsync(500);
 
-    await expect(waiting).resolves.toEqual({ status: "timeout", results: [] });
+    await expect(waiting).resolves.toEqual({ status: "timeout", completed: [], pending: [{sessionId: id, turnId: ids.turn("t1")}] });
     expect(machine.list()[0]).toEqual(
       expect.objectContaining({ sessionId: id, state: "busy" }),
     );
@@ -54,7 +54,7 @@ describe("wait", () => {
       cwd: "/tmp/demo",
     });
 
-    const waiting = machine.wait({ ids: [a, b] });
+    const waiting = machine.wait({ targets: [{sessionId: a, turnId: ids.turn("t1")},{sessionId: b, turnId: ids.turn("t2")}], completion: "any" });
     fake.controls.emit({
       type: "turn.completed",
       sessionId: b,
@@ -65,25 +65,22 @@ describe("wait", () => {
     });
 
     await expect(waiting).resolves.toEqual({
-      status: "completed",
-      results: [
-        {
-          sessionId: b,
-          status: "completed",
-          turn: {
+      status: "satisfied",
+      pending: [{sessionId: a, turnId: ids.turn("t1")}],
+      completed: [
+          {
             sessionId: b,
             turnId: ids.turn("t2"),
             stopReason: "end_turn",
             finalReply: "乙完成",
             usage: {},
           },
-        },
       ],
     });
     expect(machine.list().find((s) => s.sessionId === a)?.state).toBe("busy");
   });
 
-  test("对已 kill 的会话返回 per-id killed 状态而不是错误", async () => {
+  test("对已 kill 的精确回合返回真实 killed 终态而不是错误", async () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({
       driverFactory: fake.factory,
@@ -101,9 +98,8 @@ describe("wait", () => {
       sessionId: id,
       status: "killed",
     });
-    await expect(machine.wait({ ids: [id] })).resolves.toEqual({
-      status: "completed",
-      results: [{ sessionId: id, status: "killed" }],
+    await expect(machine.wait({ targets: [{sessionId: id, turnId: ids.turn("t1")}], completion: "all" })).resolves.toEqual({
+      status: "satisfied", completed: [{sessionId: id, turnId: ids.turn("t1"),stopReason: "killed",finalReply: null}], pending: [],
     });
   });
 
@@ -116,7 +112,7 @@ describe("wait", () => {
     });
 
     await expect(
-      machine.wait({ ids: [ids.session("missing@gtest")] }),
+      machine.wait({ targets: [{sessionId: ids.session("missing@gtest"),turnId: ids.turn("t1")}],completion: "any" }),
     ).rejects.toEqual({
       code: "session_not_found",
       sessionId: ids.session("missing@gtest"),

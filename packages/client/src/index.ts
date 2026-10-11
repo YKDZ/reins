@@ -248,11 +248,12 @@ export function createReinsClient(
       const settle = (action: () => void): void => {
         if (settled) return;
         settled = true;
-        clearTimeout(timer);
+        if (timer !== null) clearTimeout(timer);
         pending.delete(requestId);
         action();
       };
-      const timer = setTimeout(() => {
+      // wait 的观察预算由 daemon 的领域计时器拥有，传输断连仍独立报错。
+      const timer = method === "wait" ? null : setTimeout(() => {
         settle(() =>
           reject(
             commandId === undefined

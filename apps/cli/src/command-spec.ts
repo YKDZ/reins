@@ -8,12 +8,15 @@ import {
   sessionIdSchema,
   sessionNameSchema,
   turnIdSchema,
+  turnHandleSchema,
+  decodeTurnHandle,
   utcMillisecondTimestampSchema,
   type DiagnosticId,
   type PermissionId,
   type SessionId,
   type SessionName,
   type TurnId,
+  type TurnTarget,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -30,6 +33,7 @@ export type ValueKind =
   | { readonly type: "sessionName"; readonly hint: string }
   | { readonly type: "sessionId"; readonly hint: string }
   | { readonly type: "turnId"; readonly hint: string }
+  | { readonly type: "turnHandle"; readonly hint: string }
   | { readonly type: "permissionId"; readonly hint: string }
   | { readonly type: "diagnosticId"; readonly hint: string }
   | { readonly type: "time"; readonly hint: string }
@@ -207,18 +211,18 @@ const commandSpecData = [
     description: "Wait for turns to complete",
     args: [
       {
-        name: "ids",
+        name: "turns",
         variadic: true,
-        description: "session ids",
-        kind: { type: "sessionId", hint: "Expected a valid SessionId" },
+        description: "complete turn handles",
+        kind: { type: "turnHandle", hint: "Expected a complete TurnHandle" },
       },
     ],
     options: [
+      { name: "completion", flags: "--completion <mode>", required: true, description: "completion condition", kind: { type: "enum", values: ["any", "all"] } },
       {
         name: "timeout",
         flags: "--timeout <ms>",
-        defaultValue: "60000",
-        description: "timeout in milliseconds",
+        description: "observation timeout in milliseconds; 0 queries immediately, omitted waits indefinitely",
         kind: {
           type: "number",
           min: 0,
@@ -516,6 +520,8 @@ type ParsedValue<K extends ValueKind> = K extends { readonly type: "text" }
     ? SessionName
     : K extends { readonly type: "sessionId" }
       ? SessionId
+      : K extends { readonly type: "turnHandle" }
+        ? TurnTarget
       : K extends { readonly type: "turnId" }
         ? TurnId
         : K extends { readonly type: "permissionId" }
@@ -1028,6 +1034,10 @@ function validateValue(
           hint: kind.hint,
         });
       return;
+    case "turnHandle":
+      if (typeof value !== "string" || !v.safeParse(turnHandleSchema, value).success)
+        throw usageError({ issue: "invalid_value", field, value: String(value), hint: kind.hint });
+      return;
     case "turnId":
       if (
         typeof value !== "string" ||
@@ -1098,6 +1108,8 @@ function parseFieldValue(
       return v.parse(sessionNameSchema, value);
     case "sessionId":
       return v.parse(sessionIdSchema, value);
+    case "turnHandle":
+      return decodeTurnHandle(String(value));
     case "turnId":
       return v.parse(turnIdSchema, value);
     case "permissionId":
@@ -1119,6 +1131,7 @@ export function valueHint(kind: ValueKind): string | undefined {
     case "sessionName":
     case "sessionId":
     case "turnId":
+    case "turnHandle":
     case "permissionId":
     case "diagnosticId":
     case "time":

@@ -120,20 +120,16 @@ describe("权限与事件", () => {
         lastCompletedTurn: expect.objectContaining({ stopReason: "failed" }),
       }),
     );
-    await expect(machine.wait({ ids: [id] })).resolves.toEqual({
-      status: "completed",
-      results: [
-        {
-          sessionId: id,
-          status: "completed",
-          turn: {
+    await expect(machine.wait({ targets: [{sessionId: id,turnId: ids.turn("t1")}],completion: "all" })).resolves.toEqual({
+      status: "satisfied", pending: [],
+      completed: [
+          {
             sessionId: id,
             turnId: ids.turn("t1"),
             stopReason: "failed",
             finalReply: "构建失败",
             usage: {},
           },
-        },
       ],
     });
   });

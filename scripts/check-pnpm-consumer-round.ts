@@ -11,6 +11,7 @@
 //   evidence-dir：调用方明确提供的外部证据目录。临时安装、socket、state 与子进程
 //              全部由本入口拥有并在结束前回收；证据不随回收消失。
 import { createHash } from "node:crypto";
+import {encodeTurnHandle,decodeTurnHandle,type TurnTarget} from "@reins/protocol";
 import {
   copyFileSync,
   cpSync,
@@ -642,7 +643,8 @@ async function runWorkerRound(
 
   const waitFirstOutput = await runCli(context, "wait-first", [
     "wait",
-    providedSessionId,
+    requiredString(readJsonRecord("spawn output",spawnProvidedOutput),"turnHandle","spawn output"),
+    "--completion", "all",
     "--timeout",
     "10000",
   ]);
@@ -825,7 +827,8 @@ async function runWorkerRound(
   );
   const waitOmittedOutput = await runCli(context, "wait-omitted", [
     "wait",
-    omittedSessionId,
+    requiredString(readJsonRecord("spawn output",spawnOmittedOutput),"turnHandle","spawn output"),
+    "--completion", "all",
     "--timeout",
     "10000",
   ]);
@@ -952,23 +955,12 @@ function assertCompletedTurn(
   sessionId: string,
 ): { readonly turnId: string; readonly stopReason: string } {
   const result = readJsonRecord("wait result", output);
-  if (result.status !== "completed") {
-    throw new Error(`Wait did not complete: ${output}`);
-  }
-  if (!Array.isArray(result.results) || result.results.length !== 1) {
-    throw new Error(`Wait result is unexpected: ${output}`);
-  }
-  const entry = result.results[0];
-  if (!isRecord(entry) || entry.status !== "completed") {
-    throw new Error(`Wait entry is not completed: ${output}`);
-  }
-  if (entry.sessionId !== sessionId) {
-    throw new Error(`Wait entry belongs to another session: ${output}`);
-  }
-  if (!isRecord(entry.turn)) {
-    throw new Error(`Wait entry has no turn result: ${output}`);
-  }
-  const turn = entry.turn;
+  if (result.status !== "satisfied") throw new Error(`Wait did not complete: ${output}`);
+  if (!Array.isArray(result.completed) || result.completed.length !== 1) throw new Error(`Wait result is unexpected: ${output}`);
+  const turn = result.completed[0];
+  if (!isRecord(turn)) throw new Error(`Wait entry is not completed: ${output}`);
+  const target = decodeTurnHandle(requiredString(turn,"turnHandle","wait turn"));
+  if (target.sessionId !== sessionId) throw new Error(`Wait entry belongs to another session: ${output}`);
   if (
     turn.stopReason !== "end_turn" ||
     turn.finalReply !== scenario.finalReply
@@ -976,7 +968,7 @@ function assertCompletedTurn(
     throw new Error(`Turn did not finish as authored: ${JSON.stringify(turn)}`);
   }
   return {
-    turnId: requiredString(turn, "turnId", "wait turn"),
+    turnId: target.turnId,
     stopReason: requiredString(turn, "stopReason", "wait turn"),
   };
 }

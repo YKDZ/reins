@@ -323,8 +323,12 @@ export const sendAckSchema = v.strictObject({
 export type SendAck = v.InferOutput<typeof sendAckSchema>;
 
 export const waitParamsSchema = v.strictObject({
-  ids: v.array(sessionIdSchema),
-  timeoutMs: v.optional(v.number()),
+  targets: v.pipe(v.array(turnTargetSchema), v.minLength(1), v.check(
+    (targets) => new Set(targets.map((target) => JSON.stringify(target))).size === targets.length,
+    "Duplicate turn target",
+  )),
+  completion: v.picklist(["any", "all"]),
+  timeoutMs: v.optional(v.pipe(v.number(), v.finite(), v.minValue(0))),
 });
 export type WaitParams = v.InferOutput<typeof waitParamsSchema>;
 
@@ -338,14 +342,9 @@ export const turnCompletedSchema = v.strictObject({
 export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
 export const waitResultSchema = v.strictObject({
-  status: v.union([v.literal("completed"), v.literal("timeout")]),
-  results: v.array(
-    v.strictObject({
-      sessionId: sessionIdSchema,
-      status: v.union([v.literal("completed"), v.literal("killed")]),
-      turn: v.optional(turnCompletedSchema),
-    }),
-  ),
+  status: v.picklist(["satisfied", "timeout"]),
+  completed: v.array(turnCompletedSchema),
+  pending: v.array(turnTargetSchema),
 });
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 

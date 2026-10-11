@@ -149,7 +149,7 @@ async function runFixture(
     if ("error" in attached) throw new Error(JSON.stringify(attached.error));
     const ended = await endedPromise;
     const waited = await client.request("wait", {
-      ids: [spawned.result.sessionId],
+      targets: [{sessionId: spawned.result.sessionId,turnId: spawned.result.turnId}],completion: "all",
     });
     if ("error" in waited) throw new Error(JSON.stringify(waited.error));
     const diagnostics = await client.request("diagnostics", {
@@ -304,26 +304,11 @@ describe("Qoder ingress conformance", () => {
       sessionId: terminal.sessionId,
       reason: "end_turn",
     });
-    expect({
-      status: result.waited.status,
-      results: result.waited.results.map(({ sessionId, status, turn }) => ({
-        sessionId,
-        status,
-        turnId: turn?.turnId,
-        stopReason: turn?.stopReason,
-      })),
-    }).toEqual({
-      status: "completed",
-      results: [
-        {
-          sessionId: terminal.sessionId,
-          status: "completed",
-          turnId: terminal.turnId,
-          stopReason: terminal.stopReason,
-        },
-      ],
+    expect(result.waited).toMatchObject({
+      status: "satisfied", pending: [],
+      completed: [{sessionId: terminal.sessionId,turnId: terminal.turnId,stopReason: terminal.stopReason}],
     });
-    const waitedTurn = result.waited.results[0]?.turn;
+    const waitedTurn = result.waited.completed[0];
     expect(waitedTurn?.finalReply === terminal.finalReply).toBe(true);
     expect(waitedTurn?.usage).toEqual(terminal.usage);
     expect(result.diagnostics).toEqual({ records: [], truncated: false });
