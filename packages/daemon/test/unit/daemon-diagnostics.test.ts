@@ -399,7 +399,7 @@ describe("daemon diagnostic error dispatch", () => {
         return {
           start() {},
           async deliver() {},
-          interrupt() {},
+          async interrupt() {},
           resolvePermission() {},
           async terminate() {},
         };
@@ -461,7 +461,7 @@ describe("daemon diagnostic error dispatch", () => {
       return {
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       };
@@ -531,7 +531,7 @@ describe("daemon diagnostic error dispatch", () => {
       return {
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       };
@@ -974,7 +974,7 @@ describe("daemon diagnostic error dispatch", () => {
         throw new Error("worker start failed");
       },
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate() {},
     });
@@ -1072,7 +1072,7 @@ describe("daemon diagnostic error dispatch", () => {
           throw new Error("worker start failed");
         },
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       }),
@@ -1205,7 +1205,7 @@ describe("daemon diagnostic error dispatch", () => {
     const driverFactory: AdapterDriverFactory = () => ({
       start() {},
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate() {},
     });
@@ -1354,7 +1354,7 @@ describe("daemon diagnostic error dispatch", () => {
     const driverFactory: AdapterDriverFactory = () => ({
       start() {},
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate() {},
     });
@@ -2196,7 +2196,7 @@ describe("daemon diagnostic error dispatch", () => {
       driverFactory: () => ({
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       }),
@@ -2647,7 +2647,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       return {
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       };
@@ -2733,7 +2733,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
         throw new Error("start failed");
       },
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate() {},
     });

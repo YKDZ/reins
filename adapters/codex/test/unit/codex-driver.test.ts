@@ -515,11 +515,58 @@ describe("codex driver", () => {
     ]);
   });
 
+  test("精确 interrupt 等待原生接受，结束竞争不换用新 native TurnId", async () => {
+    const { events, fake, driver } = setup();
+    await flush();
+    let accept!: (value: Record<string, never>) => void;
+    fake.controls.setResponse(
+      "turn/interrupt",
+      new Promise((resolve) => {
+        accept = resolve;
+      }),
+    );
+    let settled = false;
+    const pending = driver.interrupt(sessionId, firstTurnId).then(() => {
+      settled = true;
+    });
+    await flush();
+    expect(fake.controls.requests().at(-1)).toEqual({
+      method: "turn/interrupt",
+      params: { threadId: "thr1", turnId: "turn1" },
+    });
+    expect(settled).toBe(false);
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { id: "turn1", status: "interrupted", error: null } },
+    });
+    await flush();
+    await driver.deliver(
+      sessionId,
+      secondTurnId,
+      "explicit next task",
+      "new_turn",
+    );
+    accept({});
+    await pending;
+    const count = fake.controls.requests().length;
+    await expect(
+      driver.interrupt(sessionId, firstTurnId),
+    ).rejects.toMatchObject({ code: "turn_not_active", turnId: firstTurnId });
+    expect(fake.controls.requests()).toHaveLength(count);
+    expect(
+      events.filter((event) => event.type === "turn.completed"),
+    ).toMatchObject([{ turnId: firstTurnId, stopReason: "cancelled" }]);
+  });
+
   test("interrupt 走 turn/interrupt，interrupted 合成 cancelled", async () => {
     const { events, fake, driver } = setup();
     await flush();
 
-    driver.interrupt(sessionId);
+    await driver.interrupt(sessionId, firstTurnId);
     await flush();
     expect(fake.controls.requests().at(-1)?.method).toBe("turn/interrupt");
 
@@ -881,10 +928,7 @@ test("原生拒绝的精确分类依据已观察终态，不依据自由文本",
   const noActiveText = new CodexRequestError(
     '{"code":-32600,"message":"no active turn to steer"}',
   );
-  fake.controls.setResponse(
-    "turn/steer",
-    Promise.reject(noActiveText) as never,
-  );
+  fake.controls.setResponse("turn/steer", Promise.reject(noActiveText));
   await expect(
     driver.deliver(
       sessionId,
@@ -898,7 +942,7 @@ test("原生拒绝的精确分类依据已观察终态，不依据自由文本",
     "turn/steer",
     new Promise<never>((_, fail) => {
       reject = fail;
-    }) as never,
+    }),
   );
   const delivering = driver.deliver(
     sessionId,

@@ -73,7 +73,7 @@ describe("权限与事件", () => {
       options: [{ outcome: "allow", scope: "once" }],
     });
 
-    await machine.interrupt({ ids: [id] });
+    await machine.interrupt({ sessionId: id, turnId: ids.turn("t1") });
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,

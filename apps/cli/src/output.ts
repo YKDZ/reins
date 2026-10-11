@@ -127,22 +127,15 @@ export function printWaitResult(result: WaitResult, mode: OutputMode): void {
 }
 
 export function printInterruptResult(
-  outcomes: ProtocolResult<"interrupt">,
+  result: ProtocolResult<"interrupt">,
   mode: OutputMode,
 ): void {
+  const turnHandle = encodeTurnHandle(result);
   if (mode === "json") {
-    printJsonLine(outcomes);
+    printJsonLine({ sessionId: result.sessionId, turnHandle });
     return;
   }
-  for (const outcome of outcomes) {
-    if (outcome.status === "idle") {
-      process.stdout.write(`Session ${outcome.sessionId} is idle\n`);
-    } else {
-      process.stdout.write(
-        `Interrupted ${outcome.sessionId}${outcome.turnId === undefined ? "" : ` (turn ${outcome.turnId})`}\n`,
-      );
-    }
-  }
+  process.stdout.write(`Stop request accepted: ${turnHandle}\n`);
 }
 
 export function printKillResult(result: KillResult, mode: OutputMode): void {

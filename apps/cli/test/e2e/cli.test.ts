@@ -360,7 +360,7 @@ describe("A 类：帮助（stdout + 退出 0）", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout).toContain(
-      "Usage: reins interrupt <ids...> [options]",
+      "Usage: reins interrupt <target> [options]",
     );
     expect(result.stdout).not.toContain("--message");
   });

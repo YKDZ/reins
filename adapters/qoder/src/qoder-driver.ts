@@ -207,19 +207,8 @@ export function createQoderDriver(deps: {
         session?.setTurnId(turnId);
         stream?.push(userMessage(message, "next", true));
       },
-      interrupt(sessionId) {
-        void sessionId;
-        if (session !== null) session.cancelling = true;
-        query?.interrupt().catch((error: unknown) => {
-          if (session === null) return;
-          void session.diagnostic({
-            kind: "request_failure",
-            operation: "interrupt",
-            stage: "interrupt",
-            reason: "upstream_error",
-            message: makeTextEvidence(String(error)),
-          });
-        });
+      async interrupt() {
+        throw { code: "unsupported_feature", feature: "interrupt" };
       },
       resolvePermission(sessionId, permissionId, resolution) {
         const entry = session?.takePending(permissionId, resolution);

@@ -262,7 +262,7 @@ test.each([
       message: "private-message",
     },
   ],
-  ["interrupt", { ids: ["worker@gab12cd"] }],
+  ["interrupt", { sessionId: "worker@gab12cd", turnId: "t1" }],
   ["kill", { sessionId: "worker@gab12cd" }],
   [
     "resolvePermission",

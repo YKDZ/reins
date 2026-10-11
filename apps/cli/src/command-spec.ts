@@ -237,13 +237,12 @@ const commandSpecData = [
   }),
   defineCommand({
     name: "interrupt",
-    description: "Interrupt running turns",
+    description: "Request stopping one exact active turn",
     args: [
       {
-        name: "ids",
-        variadic: true,
-        description: "session ids",
-        kind: { type: "sessionId", hint: "Expected a valid SessionId" },
+        name: "target",
+        description: "exact TurnHandle",
+        kind: { type: "text" },
       },
     ],
     options: [],

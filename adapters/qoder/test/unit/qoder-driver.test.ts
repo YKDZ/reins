@@ -1344,28 +1344,17 @@ describe("permission 桥", () => {
 });
 
 describe("interrupt 与 kill", () => {
-  test("interrupt 后 aborted 合成 cancelled", async () => {
+  test("精确 interrupt 不受公开原生入口支持，拒绝前不调用会话 interrupt", async () => {
     const { events, fake, driver } = setup();
-    driver.interrupt(sessionId);
-    expect(fake.controls.interruptCount()).toBe(1);
-
-    fake.controls.push({
-      type: "assistant",
-      message: { role: "assistant", content: [] },
-      parent_tool_use_id: null,
-      uuid: "a5",
-      session_id: "qs",
-      aborted: true,
+    await expect(driver.interrupt(sessionId, firstTurnId)).rejects.toEqual({
+      code: "unsupported_feature",
+      feature: "interrupt",
     });
-    await flush();
+    expect(fake.controls.interruptCount()).toBe(0);
 
-    expect(events.find((event) => event.type === "turn.completed")).toEqual({
-      type: "turn.completed",
-      sessionId,
-      turnId: firstTurnId,
-      stopReason: "cancelled",
-      finalReply: null,
-    });
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
   });
 
   test("terminate 等到底层流关闭且不伪造 turn failure", async () => {
