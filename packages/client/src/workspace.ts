@@ -31,7 +31,7 @@ import {
   type ReinsClient,
   type AgentEvent,
 } from "./index.ts";
-import { receivePublication, listReceipts } from "./receipts.ts";
+import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
 
 export function createWorkspaceClient(
   connection: TransportConnection<WorkspaceMessage>,
@@ -167,6 +167,8 @@ export function createWorkspaceClient(
     },
     receipts: (directory: string) =>
       listReceipts(options.consumerContext, directory),
+    removeReceipt: (directory: string, receiptId: string) =>
+      removeReceipt(options.consumerContext, directory, receiptId),
     async control(
       context: string | { workspaceHandle: WorkspaceHandle },
     ): Promise<ReinsClient> {

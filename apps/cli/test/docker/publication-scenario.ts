@@ -8,11 +8,13 @@ import { expect } from "vitest";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
-export async function runPublicationScenario(observation = false) {
+export async function runPublicationScenario(
+  observation: boolean | "retention" = false,
+) {
   const directory = join(
     repository,
     ".artifacts",
-    `reins-wrr${observation ? 27 : 26}-${randomUUID()}`,
+    `reins-wrr${observation === "retention" ? 29 : observation ? 27 : 26}-${randomUUID()}`,
   );
   const input = join(directory, "input");
   await mkdir(input, { recursive: true });
@@ -56,7 +58,7 @@ export async function runPublicationScenario(observation = false) {
     join(repository, "scripts/bundle-workspace-client.ts"),
     join(
       repository,
-      `apps/cli/test/docker/${observation ? "publication-observation-client" : "publication-client"}.ts`,
+      `apps/cli/test/docker/${observation === "retention" ? "publication-retention-client" : observation ? "publication-observation-client" : "publication-client"}.ts`,
     ),
     join(input, "publication-client.js"),
   ]);

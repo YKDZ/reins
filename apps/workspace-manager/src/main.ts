@@ -167,6 +167,11 @@ async function main() {
               consumer,
               request.params.publicationId,
             );
+          case "publication.remove":
+            return runtime.publications.remove(
+              consumer,
+              request.params.publicationId,
+            );
           case "workspace.handoff": {
             const incoming = await sourceBridge.receive(
               request.params.material,
