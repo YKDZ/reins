@@ -30,7 +30,7 @@
       },
       "client": {
         "dependencies": {
-          "allow": ["protocol", "transport", "library"]
+          "allow": ["protocol", "workspace-protocol", "transport", "library"]
         }
       },
       "conformance": {
@@ -43,6 +43,7 @@
             "daemon",
             "event-journal",
             "protocol",
+            "workspace-protocol",
             "transport",
             "library"
           ]

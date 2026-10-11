@@ -13,6 +13,7 @@ const turboBuildArguments = [
   "build",
   "--filter=@ykdz/reins",
   "--filter=@reins/daemon",
+  "--filter=@reins/workspace-manager",
   "--output-logs=errors-only",
   "--log-order=grouped",
   "--log-prefix=task",
@@ -237,6 +238,18 @@ async function runCli(args: readonly string[]): Promise<number> {
           REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
           REINS_SOCKET: join(runtimeDirectory, "reins.sock"),
           REINS_STATE_DIR: join(runtimeDirectory, "state"),
+          REINS_WORKSPACE_MANAGER_BIN: join(
+            repository,
+            "apps/workspace-manager/dist/main.js",
+          ),
+          REINS_WORKSPACE_MANAGER_SOCKET: join(
+            runtimeDirectory,
+            "workspace-manager.sock",
+          ),
+          REINS_WORKSPACE_MANAGER_STATE_DIR: join(
+            runtimeDirectory,
+            "workspace-manager-state",
+          ),
         },
         stdio: "inherit",
       },

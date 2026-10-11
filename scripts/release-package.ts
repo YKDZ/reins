@@ -7,6 +7,7 @@ const releaseAuthorityDirectory = "apps/cli";
 const distributionEntryDirectories = [
   releaseAuthorityDirectory,
   "packages/daemon",
+  "apps/workspace-manager",
 ] as const;
 const workspacePackageDirectories = [
   releaseAuthorityDirectory,

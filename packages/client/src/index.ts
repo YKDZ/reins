@@ -513,3 +513,5 @@ export function createReinsClient(
     },
   };
 }
+
+export { createWorkspaceClient } from "./workspace.ts";
