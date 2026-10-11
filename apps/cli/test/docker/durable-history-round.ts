@@ -10,10 +10,12 @@ const {
   image: nodeImage,
   consumerSha256,
   environmentBase = nodeImage,
+  resourcePrefix = "reins-wrr22",
 } = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
   image: string;
   consumerSha256: string;
   environmentBase?: string;
+  resourcePrefix?: string;
 };
 async function command(
   binary: string,
@@ -177,7 +179,7 @@ await writeFile(
   join(context, "Dockerfile"),
   `FROM ${environmentBase}\nCOPY image-context/payload /\nENV REINS_ADAPTERS_MODULE=/opt/reins/native-view-adapter.ts\n`,
 );
-const imageTag = `reins-wrr22-material-${process.pid}:candidate`;
+const imageTag = `${resourcePrefix}-material-${process.pid}:candidate`;
 await requireCommand("docker", [
   "build",
   "--quiet",
@@ -207,7 +209,7 @@ await writeFile(
   join(materialContext, "Dockerfile"),
   "FROM scratch\nCOPY harnesses /opt/reins/harnesses\n",
 );
-const materialTag = `reins-wrr22-runtime-${process.pid}:candidate`;
+const materialTag = `${resourcePrefix}-runtime-${process.pid}:candidate`;
 await requireCommand("docker", [
   "build",
   "--quiet",
@@ -299,10 +301,10 @@ const env = {
   REINS_CODEX_AUTH_BINDINGS: JSON.stringify({ "fixture-auth": authFile }),
   HOME: callerHome,
   CODEX_HOME: join(callerHome, ".codex"),
-  REINS_CONSUMER_CONTEXT: "reins-wrr22-owner-a",
+  REINS_CONSUMER_CONTEXT: `${resourcePrefix}-owner-a`,
   REINS_WORKSPACE_MANAGER_SOCKET: join(base, "manager.sock"),
   REINS_WORKSPACE_MANAGER_STATE_DIR: managerState,
-  REINS_WORKSPACE_RESOURCE_PREFIX: "reins-wrr22-runtime",
+  REINS_WORKSPACE_RESOURCE_PREFIX: `${resourcePrefix}-runtime`,
 };
 const cli = async (args: string[], overrides: NodeJS.ProcessEnv = {}) => {
   const result = await command(
