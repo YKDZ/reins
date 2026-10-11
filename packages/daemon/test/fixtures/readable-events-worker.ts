@@ -17,6 +17,8 @@ async function run(input: {
     gate: string;
     reply: string;
     permission?: boolean;
+    messages?: number;
+    deltas?: number;
     resolutionFile?: string;
     stopReason?: string;
   };
@@ -30,6 +32,15 @@ async function run(input: {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   const emit = (event: object): void =>
     output({ kind: "event", event: { sessionId, turnId, ...event } });
+  for (let index = 0; index < (task.deltas ?? 0); index += 1)
+    emit({ type: "text.delta", messageId: "unclosed", delta: "x" });
+  for (let index = 0; index < (task.messages ?? 0); index += 1)
+    emit({
+      type: "message",
+      messageId: "history-" + index,
+      role: "worker",
+      content: "message " + index,
+    });
   emit({ type: "text.delta", messageId: "reply", delta: "hello " });
   emit({ type: "text.delta", messageId: "reply", delta: "world" });
   emit({

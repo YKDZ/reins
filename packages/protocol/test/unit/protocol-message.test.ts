@@ -330,14 +330,14 @@ describe("per-method 参数与结果 schema", () => {
       sessionId: "reviewer@g7",
       subscriptionId: "subscription-1",
       target: { scope: "session", sessionId: "reviewer@g7" },
-      window: { oldest: null, head: null },
+      window: { oldest: null, head: null, truncated: false },
       replayed: 0,
     });
     bad(protocolResultSchemaFor("attach"), {
       sessionId: "reviewer@g7",
       subscriptionId: "subscription-1",
       target: { scope: "session", sessionId: "reviewer@g7" },
-      window: { oldest: null, head: null },
+      window: { oldest: null, head: null, truncated: false },
       replayed: 0,
       replayPrefixes: [
         {

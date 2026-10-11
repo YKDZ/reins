@@ -155,7 +155,7 @@ test("a malformed notification after a valid response preserves invalid_daemon_r
       sessionId: "prompt@g1",
       subscriptionId: "subscription-1",
       target: { scope: "session", sessionId: "prompt@g1" },
-      window: { oldest: null, head: null },
+      window: { oldest: null, head: null, truncated: false },
       replayed: 0,
     },
   });
