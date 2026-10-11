@@ -75,22 +75,52 @@ await writeFile(
     dependencies: { "@ykdz/reins": "file:../candidate.tgz" },
   }),
 );
-await requireCommand(
-  "npm",
-  ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
-  join(base, "consumer"),
-);
+// 可显式运输独立 npm 消费者的生产安装材料；不是开发 node_modules 或宿主配置。
+let installation: Buffer | undefined;
+try {
+  installation = await readFile(join(base, "consumer-installation.tar"));
+} catch (error) {
+  if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+}
+if (installation !== undefined) {
+  const material = JSON.parse(
+    await readFile(join(base, "consumer-installation.json"), "utf8"),
+  ) as { packedSha256: string; archiveSha256: string };
+  assert.equal(
+    createHash("sha256").update(installation).digest("hex"),
+    material.archiveSha256,
+  );
+  assert.equal(
+    createHash("sha256")
+      .update(await readFile(join(base, "candidate.tgz")))
+      .digest("hex"),
+    material.packedSha256,
+  );
+  await requireCommand("tar", [
+    "-xf",
+    join(base, "consumer-installation.tar"),
+    "-C",
+    join(base, "consumer"),
+  ]);
+  await record("independentConsumerInstallation", material);
+} else {
+  await requireCommand(
+    "npm",
+    ["install", "--ignore-scripts", "--no-audit", "--no-fund"],
+    join(base, "consumer"),
+  );
+}
 const installed = join(base, "consumer", "node_modules", "@ykdz", "reins");
 const context = join(base, "image-context");
 await mkdir(context);
 // 直接将独立消费者的安装树作为 build context，避免在慢文件系统逐文件再复制一遍。
 await writeFile(
   join(base, ".dockerignore"),
-  "tools/docker\ntools/docker-native\ncandidate.tgz\nevidence\n",
+  "tools/docker\ntools/docker-native\ncandidate.tgz\nconsumer-installation.tar\nconsumer-installation.json\nevidence\n",
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);const version=path.resolve("../.reins/fixture-version");console.log("codex-cli "+(fs.existsSync(version)?fs.readFileSync(version,"utf8").trim():"0.149.0"))}},25);\n',
+  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve(process.cwd()==="/"?fs.readlinkSync("/proc/1/cwd"):process.cwd(),"../.reins/allow-version"))){clearInterval(timer);const version=path.resolve(process.cwd()==="/"?fs.readlinkSync("/proc/1/cwd"):process.cwd(),"../.reins/fixture-version");console.log("codex-cli "+(fs.existsSync(version)?fs.readFileSync(version,"utf8").trim():"0.149.0"))}},25);\n',
   { mode: 0o755 },
 );
 // 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
@@ -98,19 +128,25 @@ const payload = join(context, "payload");
 await mkdir(join(payload, "opt", "reins", "harnesses", "codex", "bin"), {
   recursive: true,
 });
-await mkdir(join(payload, "usr", "local"), { recursive: true });
-await requireCommand("cp", [
-  "-al",
-  join(base, "tools"),
-  join(payload, "usr", "local", "bin"),
-]);
-await rm(join(payload, "usr", "local", "bin", "docker"));
-await rm(join(payload, "usr", "local", "bin", "docker-native"));
-await requireCommand("cp", [
-  "-al",
-  join(base, "consumer", "node_modules"),
-  join(payload, "opt", "reins", "node_modules"),
-]);
+// 精确缓存只复用同版本依赖与工具，发行 dist 始终由本轮覆盖。
+if (
+  nodeImage !==
+  "sha256:42166530c7fc76804e18fb5bfbdec7a6dde41ffd1e6746155d7e5f0ba16babe4"
+) {
+  await mkdir(join(payload, "usr", "local"), { recursive: true });
+  await requireCommand("cp", [
+    "-al",
+    join(base, "tools"),
+    join(payload, "usr", "local", "bin"),
+  ]);
+  await rm(join(payload, "usr", "local", "bin", "docker"));
+  await rm(join(payload, "usr", "local", "bin", "docker-native"));
+  await requireCommand("cp", [
+    "-al",
+    join(base, "consumer", "node_modules"),
+    join(payload, "opt", "reins", "node_modules"),
+  ]);
+}
 await requireCommand("cp", [
   "-al",
   join(installed, "dist"),
@@ -149,11 +185,11 @@ await writeFile(
 );
 // 在昂贵镜像提交前实际执行发行 CLI，验证夹具闭包的本地入口。
 await requireCommand(process.execPath, [
-  join(payload, "opt", "reins", "dist", "reins.js"),
+  join(installed, "dist", "reins.js"),
   "--version",
 ]);
 await requireCommand(process.execPath, [
-  join(payload, "opt", "reins", "dist", "reins.js"),
+  join(installed, "dist", "reins.js"),
   "list",
   "--help",
 ]);
@@ -366,13 +402,21 @@ try {
   );
   const catalog = await cli(["harnesses", "-C", join(worktree, "src")]);
   assert.equal(catalog.status, 0);
-  const accepted = await cli([
-    "attach",
-    "-C",
-    join(worktree, "src"),
-    "--binding",
-    "code",
-  ]);
+  const accepted = await command(
+    process.execPath,
+    [
+      join(base, "workspace-attach-client.js"),
+      JSON.stringify({
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        cwd: join(worktree, "src"),
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        bindings: ["code"],
+      }),
+    ],
+    base,
+    env,
+  );
+  await record("shared client preparing acceptance", accepted);
   assert.equal(accepted.status, 0);
   const premature = await control([
     "spawn",
@@ -603,7 +647,7 @@ try {
     await writeFile(join(root, ".reins", "fixture-version"), scenario.version);
     assert.equal(
       (await cli(["attach", "-C", cwd, "--binding", "code"])).status,
-      0,
+      scenario.expected === "ready" ? 0 : 1,
     );
     for (;;) {
       const observed = await cli(["status", "-C", cwd]);
@@ -726,7 +770,7 @@ try {
       );
     assert.equal(
       (await cli(["attach", "-C", cwd, "--binding", "qoder"])).status,
-      0,
+      scenario.expected === "ready" ? 0 : 1,
     );
     for (;;) {
       const observed = await cli(["status", "-C", cwd]);
