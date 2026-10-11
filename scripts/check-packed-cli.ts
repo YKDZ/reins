@@ -323,13 +323,22 @@ async function smokePackedCli(
     usageLog,
   );
   const usageError: unknown = JSON.parse(usage.stdout);
+  const usageIssues =
+    isRecord(usageError) && Array.isArray(usageError.issues)
+      ? usageError.issues
+      : [];
+  const usageIssue = usageIssues[0];
   if (
     !isRecord(usageError) ||
     usageError.code !== "usage_error" ||
-    !Array.isArray(usageError.issues) ||
-    usageError.issues.length !== 2 ||
+    usageIssues.length !== 1 ||
+    !isRecord(usageIssue) ||
+    usageIssue.issue !== "missing_argument" ||
+    usageIssue.target !== "option" ||
+    usageIssue.field !== "--outcome <allow|deny>" ||
+    JSON.stringify(usageIssue.valid) !== JSON.stringify(["allow", "deny"]) ||
     usageError.usage !==
-      "reins resolve-permission <sessionId> <permissionId> --outcome <allow|deny> [options]"
+      "reins resolve-permission <permissionHandle> --outcome <allow|deny> [options]"
   )
     throw new Error(`Packed usage error was incomplete: ${usage.stdout}`);
 
