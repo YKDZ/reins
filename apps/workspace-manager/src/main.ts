@@ -179,11 +179,16 @@ async function main() {
               consumer,
               request.params.action,
               request.params.params,
+              request.params.commandId,
             );
           case "workspace.status":
             return runtime.status(request.params.cwd, consumer);
           case "workspace.detach":
-            return runtime.detach(request.params.cwd, consumer);
+            return runtime.detach(
+              request.params.cwd,
+              consumer,
+              request.params.sessionDisposition,
+            );
         }
       })().then(
         (result) =>

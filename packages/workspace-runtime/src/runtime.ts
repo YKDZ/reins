@@ -21,14 +21,30 @@ import {
   type ProtocolMethod,
   type ConsumerContext,
   type ProtocolMessage,
+  protocolRequestSchema,
+  protocolResponseSchema,
+  type CommandId,
+  type TurnTarget,
+  type TurnCompleted,
+  type SessionInfo,
+  sessionIdSchema,
+  turnIdSchema,
+  turnCompletedSchema,
+  waitResultSchema,
 } from "@reins/protocol";
-import { createUnixSocketClient } from "@reins/transport";
+import {
+  createUnixSocketClient,
+  createUnixSocketServer,
+  type TransportServer,
+  type TransportConnection,
+} from "@reins/transport";
 import {
   workspaceErrorSchema,
   type ManagedWorkspaceInfo,
   type WorkspaceError,
   type NativeViewLoss,
   type NativeViewTermination,
+  type WorkspaceDetachment,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
@@ -63,6 +79,15 @@ type RecordState = {
   container: string;
   environmentStage?: "pending" | "creating" | "created" | "started";
   containerId?: string;
+  detach?: {
+    disposition: "require_none" | "kill";
+    sessionsObserved?: boolean;
+  };
+  completed?: TurnCompleted[];
+  commands?: Record<
+    string,
+    { fingerprint: string; pending: boolean; target?: TurnTarget }
+  >;
   bindingStages?: Record<
     string,
     "pending" | "installing" | "installed" | "validated" | "ready"
@@ -73,14 +98,24 @@ async function identity(path: string): Promise<NativeIdentity> {
   const value = await stat(path, { bigint: true });
   return { path, dev: String(value.dev), ino: String(value.ino) };
 }
-async function persist(record: RecordState) {
+const writes = new WeakMap<RecordState, Promise<void>>();
+function persist(record: RecordState): Promise<void> {
+  // 调用顺序就是事实提交顺序，慢文件系统不能让旧快照覆盖已接受的清理意图。
+  const snapshot = JSON.stringify(record);
+  const next = (writes.get(record) ?? Promise.resolve())
+    .catch(() => {})
+    .then(() => writeRecord(record, snapshot));
+  writes.set(record, next);
+  return next;
+}
+async function writeRecord(record: RecordState, snapshot: string) {
   await mkdir(record.directory, { recursive: true, mode: 0o700 });
   const target = join(record.directory, "attachment.json");
   const temp = `${target}.${randomUUID()}.tmp`;
   try {
     const file = await open(temp, "wx", 0o600);
     try {
-      await file.writeFile(JSON.stringify(record));
+      await file.writeFile(snapshot);
       await file.sync();
     } finally {
       await file.close();
@@ -225,6 +260,7 @@ export async function openWorkspaceRuntime(options: {
     }
   }
   const clients = new Map<string, ReinsClient>();
+  const routes = new Map<string, Promise<TransportServer<ProtocolMessage>>>();
   // 保留完整 UUID 身份，用紧凑目录避开 Unix socket 的路径长度上限。
   const controlDirectory = (record: RecordState) =>
     join(
@@ -233,6 +269,7 @@ export async function openWorkspaceRuntime(options: {
     );
   const preparing = new Set<string>();
   const executions = new Map<string, Promise<void>>();
+  const detachments = new Map<string, Promise<void>>();
   // 单个 Manager 对受理与发布串行化，Docker 准备在锁外进行，status 始终可观察。
   let serial = Promise.resolve();
   const exclusive = <T>(action: () => Promise<T>): Promise<T> => {
@@ -243,18 +280,24 @@ export async function openWorkspaceRuntime(options: {
     );
     return result;
   };
-  const locate = async (tree: Tree) => {
+  const active = (record: RecordState) =>
+    record.info.detachment === undefined
+      ? record.info.runtime.status !== "released"
+      : record.info.detachment.resources.ownership.status !== "released";
+  const locate = async (tree: Tree, includeReleased = false) => {
     const currentRoot = await identity(tree.root);
-    return records.find(
+    const matching = records.filter(
       (item) =>
-        item.info.runtime.status !== "released" &&
-        (item.tree.root === tree.root ||
-          item.identities.some(
-            (saved) =>
-              saved.path === item.tree.root &&
-              saved.dev === currentRoot.dev &&
-              saved.ino === currentRoot.ino,
-          )),
+        item.tree.root === tree.root ||
+        item.identities.some(
+          (saved) =>
+            saved.path === item.tree.root &&
+            saved.dev === currentRoot.dev &&
+            saved.ino === currentRoot.ino,
+        ),
+    );
+    return (
+      matching.find(active) ?? (includeReleased ? matching.at(-1) : undefined)
     );
   };
   const nativeLoss = async (
@@ -304,12 +347,13 @@ export async function openWorkspaceRuntime(options: {
     cwd: string,
     owner: ConsumerContext,
     allowInvalid = false,
+    observe = true,
   ) => {
     let tree: Tree;
     let record: RecordState | undefined;
     try {
       tree = await resolveWorktree(cwd);
-      record = await locate(tree);
+      record = await locate(tree, true);
     } catch (error) {
       // 只有已附着原对象确实失效时，旧目录才可用于读取其事实或拒绝修改。
       record = records.find((item) => {
@@ -350,8 +394,10 @@ export async function openWorkspaceRuntime(options: {
       if (!allowInvalid) throw failure;
       return { record, tree };
     }
+    if (record.detach !== undefined || !observe) return { record, tree };
     const loss = await nativeLoss(record);
-    if (loss !== undefined) await invalidate(record, loss);
+    if (loss !== undefined && record.detach === undefined)
+      await invalidate(record, loss);
     if (!allowInvalid && record.info.source.error?.code === "native_view_lost")
       throw record.info.source.error;
     return { record, tree };
@@ -370,9 +416,253 @@ export async function openWorkspaceRuntime(options: {
       client.close();
       throw workspaceFailure("runtime_entry_invalid");
     }
+    if (record.info.runtime.status === "released") {
+      client.close();
+      throw workspaceFailure("workspace_detaching");
+    }
     clients.set(record.directory, client);
     client.onClosed(() => clients.delete(record.directory));
     return client;
+  };
+  const retainedTargets = (record: RecordState): TurnTarget[] => {
+    const targets = [
+      ...Object.values(record.commands ?? {}).flatMap((command) =>
+        command.target === undefined ? [] : [command.target],
+      ),
+      ...(record.completed ?? []).map(({ sessionId, turnId }) => ({
+        sessionId,
+        turnId,
+      })),
+    ];
+    return [
+      ...new Map(
+        targets.map((target) => [
+          target.sessionId + "/" + target.turnId,
+          target,
+        ]),
+      ).values(),
+    ];
+  };
+  const retain = (record: RecordState, completed: TurnCompleted[] = []) => {
+    record.completed ??= [];
+    for (const turn of completed)
+      if (
+        !record.completed.some(
+          (known) =>
+            known.sessionId === turn.sessionId && known.turnId === turn.turnId,
+        )
+      )
+        record.completed.push(turn);
+    const detachment = record.info.detachment;
+    if (detachment === undefined) return;
+    for (const target of retainedTargets(record)) {
+      let session = detachment.sessions.find(
+        (item) => item.sessionId === target.sessionId,
+      );
+      if (session === undefined) {
+        session = {
+          sessionId: target.sessionId,
+          outcome: "unknown",
+          turns: [],
+        };
+        detachment.sessions.push(session);
+      }
+      let turn = session.turns.find((item) => item.turnId === target.turnId);
+      if (turn === undefined) {
+        turn = { turnId: target.turnId };
+        session.turns.push(turn);
+      }
+      turn.completed ??= record.completed.find(
+        (item) =>
+          item.sessionId === target.sessionId && item.turnId === target.turnId,
+      );
+    }
+    // runtime released 只在 provider 已证明环境消失后发布；不补造 harness 回合终态。
+    if (detachment.resources.runtime.status === "released")
+      for (const session of detachment.sessions)
+        if (session.outcome === "unknown")
+          session.outcome = "terminated_by_workspace_detach";
+  };
+  const mutable = (method: ProtocolMethod) =>
+    ["spawn", "send", "resolvePermission"].includes(method);
+  const routedSocket = async (record: RecordState) => {
+    let route = routes.get(record.directory);
+    const path = join(controlDirectory(record), "p.sock");
+    if (route === undefined) {
+      route = (async () => {
+        await rm(path, { force: true });
+        const server = createUnixSocketServer<ProtocolMessage>({ path });
+        const nativeConnections = new Set<
+          TransportConnection<ProtocolMessage>
+        >();
+        const connecting = new Set<
+          Promise<TransportConnection<ProtocolMessage>>
+        >();
+        let closing = false;
+        server.onConnection((peer) => {
+          const requests = new Map<string, string>();
+          const native = createUnixSocketClient<ProtocolMessage>(
+            join(controlDirectory(record), "r.sock"),
+          );
+          connecting.add(native);
+          void native
+            .then((connection) => {
+              connecting.delete(native);
+              if (closing) {
+                connection.close();
+                peer.close();
+                return;
+              }
+              nativeConnections.add(connection);
+              let outgoing = Promise.resolve();
+              connection.onEvent((event) => {
+                // 保存 ACK 的异步 I/O 不得改变同一原生连接的帧顺序。
+                outgoing = outgoing
+                  .then(async () => {
+                    if (event.kind !== "message") {
+                      nativeConnections.delete(connection);
+                      peer.close();
+                      return;
+                    }
+                    const response = v.safeParse(
+                      protocolResponseSchema,
+                      event.message,
+                    );
+                    const key = response.success
+                      ? requests.get(response.output.requestId)
+                      : undefined;
+                    if (key !== undefined) {
+                      // ACK 只由原 daemon 产生；先保存其已知结果，再原样交付。
+                      await exclusive(async () => {
+                        const command = record.commands?.[key];
+                        if (command !== undefined) {
+                          command.pending = false;
+                          if (response.success && "result" in response.output) {
+                            const target = v.safeParse(
+                              v.object({
+                                sessionId: sessionIdSchema,
+                                turnId: turnIdSchema,
+                              }),
+                              response.output.result,
+                            );
+                            if (target.success)
+                              command.target ??= target.output;
+                          }
+                        }
+                        retain(record);
+                        await persist(record);
+                      });
+                      if (response.success)
+                        requests.delete(response.output.requestId);
+                    }
+                    let completed: TurnCompleted[] = [];
+                    if (response.success && "result" in response.output) {
+                      const waited = v.safeParse(
+                        waitResultSchema,
+                        response.output.result,
+                      );
+                      if (waited.success) completed = waited.output.completed;
+                    } else if (
+                      event.message.kind === "notification" &&
+                      event.message.method === "event" &&
+                      event.message.params.event.type === "turn.completed"
+                    ) {
+                      const { type: _, ...turn } = event.message.params.event;
+                      const parsed = v.safeParse(turnCompletedSchema, turn);
+                      if (parsed.success) completed = [parsed.output];
+                    }
+                    if (completed.length !== 0)
+                      await exclusive(async () => {
+                        retain(record, completed);
+                        await persist(record);
+                      });
+                    peer.send(event.message);
+                  })
+                  .catch(() => peer.close());
+              });
+            })
+            .catch(() => {
+              connecting.delete(native);
+              peer.close();
+            });
+          peer.onEvent((event) => {
+            if (event.kind !== "message") {
+              void native
+                .then((connection) => connection.close())
+                .catch(() => {});
+              return;
+            }
+            const parsed = v.safeParse(protocolRequestSchema, event.message);
+            const request = parsed.success ? parsed.output : undefined;
+            const forward = async () => {
+              const connection = await native;
+              if (request !== undefined && mutable(request.method)) {
+                const known =
+                  request.commandId === undefined
+                    ? undefined
+                    : record.commands?.[request.commandId];
+                if (
+                  known === undefined &&
+                  record.info.source.error?.code === "native_view_lost"
+                ) {
+                  peer.send({
+                    kind: "response",
+                    requestId: request.requestId,
+                    error: record.info.source.error,
+                  });
+                  return;
+                }
+                if (record.detach !== undefined && known === undefined) {
+                  peer.send({
+                    kind: "response",
+                    requestId: request.requestId,
+                    error: { code: "workspace_detaching" },
+                  });
+                  return;
+                }
+                if (request.commandId !== undefined) {
+                  record.commands ??= {};
+                  // 原 CommandId 的冲突检查与去重仍由 daemon 负责，不替换或重试请求。
+                  record.commands[request.commandId] ??= {
+                    fingerprint: fingerprint({
+                      method: request.method,
+                      params: request.params,
+                    }),
+                    pending: true,
+                  };
+                  requests.set(request.requestId, request.commandId);
+                  await persist(record);
+                }
+              }
+              connection.send(event.message);
+            };
+            // 只串行化准入、落盘和写帧；原生回合、只读请求、kill 与订阅控制不占锁。
+            void (
+              request !== undefined && mutable(request.method)
+                ? exclusive(forward)
+                : forward()
+            ).catch(() => peer.close());
+          });
+        });
+        await server.listen();
+        return {
+          ...server,
+          async close() {
+            closing = true;
+            for (const connection of nativeConnections) connection.close();
+            nativeConnections.clear();
+            await Promise.allSettled(
+              [...connecting].map(async (pending) => (await pending).close()),
+            );
+            await server.close();
+          },
+        };
+      })();
+      routes.set(record.directory, route);
+      void route.catch(() => routes.delete(record.directory));
+    }
+    await route;
+    return path;
   };
   const stopTasks = new Map<string, Promise<void>>();
   const machineFailure = (error: unknown): MachineError | undefined => {
@@ -571,8 +861,9 @@ export async function openWorkspaceRuntime(options: {
   const status = async (cwd: string, owner: ConsumerContext) => {
     const { record, tree } = await find(cwd, owner, true);
     if (
-      record.info.runtime.status === "ready" ||
-      (record.info.runtime.status === "failed" && hasReadyBinding(record))
+      record.detach === undefined &&
+      (record.info.runtime.status === "ready" ||
+        (record.info.runtime.status === "failed" && hasReadyBinding(record)))
     ) {
       let failure: WorkspaceError | undefined;
       try {
@@ -583,6 +874,7 @@ export async function openWorkspaceRuntime(options: {
           try {
             await validateBinding(record, binding);
           } catch (error) {
+            if (record.detach !== undefined) break;
             const bindingFailure = normalize(error);
             binding.stage = "failed";
             binding.error = bindingFailure;
@@ -593,15 +885,17 @@ export async function openWorkspaceRuntime(options: {
         const list = await client.request("list", {});
         if ("error" in list) throw workspaceFailure("runtime_entry_invalid");
       } catch (error) {
-        failure = normalize(error);
-        // 共享容器或 daemon 失效时，所有绑定都无法继续提供执行者。
-        for (const binding of record.info.harnesses) {
-          if (binding.stage !== "ready") continue;
-          binding.stage = "failed";
-          binding.error = failure;
+        if (record.detach === undefined) {
+          failure = normalize(error);
+          // 共享容器或 daemon 失效时，所有绑定都无法继续提供执行者。
+          for (const binding of record.info.harnesses) {
+            if (binding.stage !== "ready") continue;
+            binding.stage = "failed";
+            binding.error = failure;
+          }
         }
       }
-      if (failure !== undefined) {
+      if (failure !== undefined && record.detach === undefined) {
         record.info.runtime = { status: "failed", error: failure };
         await persist(record);
       }
@@ -903,6 +1197,7 @@ export async function openWorkspaceRuntime(options: {
     for (const record of records) {
       if (
         record.environmentStage !== "started" ||
+        record.detach !== undefined ||
         observations.has(record.directory) ||
         record.info.runtime.status === "released"
       )
@@ -914,6 +1209,7 @@ export async function openWorkspaceRuntime(options: {
         continue;
       const observation = (async () => {
         const loss = await nativeLoss(record);
+        if (record.detach !== undefined) return;
         if (loss !== undefined) await invalidate(record, loss);
         else if (record.info.source.error?.code === "native_view_lost")
           await invalidate(record, record.info.source.error.nativeView);
@@ -926,8 +1222,7 @@ export async function openWorkspaceRuntime(options: {
   }, 1000);
   monitor.unref();
   return {
-    hasAttachments: () =>
-      records.some((record) => record.info.runtime.status !== "released"),
+    hasAttachments: () => records.some(active),
     async attach(cwd: string, bindingRefs: string[], owner: ConsumerContext) {
       v.parse(consumerContextSchema, owner);
       const tree = await resolveWorktree(cwd);
@@ -940,6 +1235,8 @@ export async function openWorkspaceRuntime(options: {
       const { record, created } = await exclusive(async () => {
         const existing = await locate(tree);
         if (existing !== undefined) {
+          if (existing.detach !== undefined)
+            throw workspaceFailure("workspace_detaching");
           await find(cwd, owner);
           if (JSON.stringify(existing.intent) !== JSON.stringify(intent))
             throw workspaceFailure("attachment_intent_conflict");
@@ -1054,7 +1351,7 @@ export async function openWorkspaceRuntime(options: {
         throw workspaceFailure("workspace_not_ready");
       return {
         cwd: tree.cwd,
-        socket: join(controlDirectory(record), "r.sock"),
+        socket: await routedSocket(record),
       };
     },
     async admit(
@@ -1062,8 +1359,18 @@ export async function openWorkspaceRuntime(options: {
       owner: ConsumerContext,
       action: ProtocolMethod,
       params: unknown,
+      commandId?: CommandId,
     ) {
       const { record, tree } = await find(cwd, owner, true);
+      // 已转发命令的显式恢复仍交原 daemon 裁决去重、冲突与运行代际。
+      if (
+        mutable(action) &&
+        commandId !== undefined &&
+        record.commands?.[commandId] !== undefined
+      )
+        return { cwd: tree.cwd };
+      if (mutable(action) && record.detach !== undefined)
+        throw workspaceFailure("workspace_detaching");
       if (
         ["spawn", "send", "resolvePermission"].includes(action) &&
         record.info.source.error !== undefined
@@ -1093,31 +1400,251 @@ export async function openWorkspaceRuntime(options: {
       }
       return { cwd: tree.cwd };
     },
-    async detach(cwd: string, owner: ConsumerContext) {
-      const { record, tree } = await find(cwd, owner);
-      if (preparing.has(record.directory))
-        throw workspaceFailure("workspace_busy");
-      if (
-        Object.values(record.bindingStages ?? {}).some(
-          (stage) => stage === "ready",
-        )
-      ) {
-        const response = await (await connect(record)).request("list", {});
-        if (
-          "error" in response ||
-          response.result.some((session) => session.state !== "killed")
-        )
+    async detach(
+      cwd: string,
+      owner: ConsumerContext,
+      disposition: "require_none" | "kill",
+    ) {
+      const { record, tree } = await find(cwd, owner, true, false);
+      let listed: SessionInfo[] = [];
+      await exclusive(async () => {
+        if (record.detach !== undefined) {
+          if (record.detach.disposition === disposition) return;
+          if (disposition !== "kill") throw workspaceFailure("invalid_request");
+          record.detach.disposition = "kill";
+          record.info.detachment!.disposition = "kill";
+          await persist(record);
+          return;
+        }
+        if (preparing.has(record.directory))
           throw workspaceFailure("workspace_busy");
-      }
-      clients.get(record.directory)?.close();
-      clients.delete(record.directory);
-      await docker(["rm", "-f", record.container]);
-      record.info.runtime = { status: "released" };
-      await persist(record);
-      await rm(join(record.directory, "home"), {
-        recursive: true,
-        force: true,
+        if (disposition === "require_none") {
+          if (
+            Object.values(record.commands ?? {}).some(
+              (command) => command.pending,
+            )
+          )
+            throw workspaceFailure("workspace_busy");
+          if (record.environmentStage === "started") {
+            const response = await (await connect(record)).request("list", {});
+            if (
+              "error" in response ||
+              response.result.some((session) => session.state !== "killed")
+            )
+              throw workspaceFailure("workspace_busy");
+            listed = response.result;
+          }
+        }
+        record.detach = {
+          disposition,
+          ...(disposition === "require_none" ? { sessionsObserved: true } : {}),
+        };
+        record.info.detachment = {
+          disposition,
+          status: "detaching",
+          sessions: [],
+          resources: {
+            runtime: { status: "pending" },
+            credentials: { status: "pending" },
+            bindings: { status: "pending" },
+            routing: { status: "pending" },
+            ownership: { status: "pending" },
+          },
+        };
+        retain(record);
+        for (const session of listed) {
+          const saved = record.info.detachment.sessions.find(
+            (item) => item.sessionId === session.sessionId,
+          );
+          if (saved === undefined)
+            record.info.detachment.sessions.push({
+              sessionId: session.sessionId,
+              session,
+              outcome: "confirmed",
+              turns: [],
+            });
+          else {
+            saved.session = session;
+            saved.outcome = "confirmed";
+          }
+        }
+        await persist(record);
       });
+      const detachment = record.info.detachment!;
+      let cleanup = detachments.get(record.directory);
+      if (cleanup === undefined && detachment.status !== "released") {
+        cleanup = (async () => {
+          let step: keyof WorkspaceDetachment["resources"] | undefined;
+          try {
+            detachment.status = "detaching";
+            delete detachment.error;
+            await persist(record);
+            const runtimeAbsent = async () =>
+              (await docker([
+                "container",
+                "ls",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                record.containerId === undefined
+                  ? "name=^/" + record.container + "$"
+                  : "id=" + record.containerId,
+                "--format",
+                "{{.ID}}",
+              ])) === "";
+            if (detachment.resources.runtime.status !== "released") {
+              step = "runtime";
+              const absent = await runtimeAbsent();
+              if (!absent) {
+                const client =
+                  record.environmentStage === "started" &&
+                  (!record.detach!.sessionsObserved ||
+                    detachment.sessions.some(
+                      (session) => session.outcome !== "confirmed",
+                    ))
+                    ? await connect(record)
+                    : undefined;
+                if (client !== undefined) {
+                  if (detachment.disposition === "kill") {
+                    const response = await client.request("list", {});
+                    if ("error" in response) throw response.error;
+                    listed = response.result;
+                    record.detach!.sessionsObserved = true;
+                  }
+                  for (const session of listed) {
+                    let saved = detachment.sessions.find(
+                      (item) => item.sessionId === session.sessionId,
+                    );
+                    if (saved === undefined) {
+                      saved = {
+                        sessionId: session.sessionId,
+                        outcome: "unknown",
+                        turns: [],
+                      };
+                      detachment.sessions.push(saved);
+                    }
+                    saved.session = session;
+                    if (session.state === "killed") saved.outcome = "confirmed";
+                    for (const turnId of [
+                      ...(session.state === "busy"
+                        ? [session.activeTurnId]
+                        : []),
+                      ...(session.lastCompletedTurn === undefined
+                        ? []
+                        : [session.lastCompletedTurn.turnId]),
+                    ])
+                      if (!saved.turns.some((turn) => turn.turnId === turnId))
+                        saved.turns.push({ turnId });
+                  }
+                  const saveTurns = async () => {
+                    const targets = detachment.sessions.flatMap((session) =>
+                      session.turns.map((turn) => ({
+                        sessionId: session.sessionId,
+                        turnId: turn.turnId,
+                      })),
+                    );
+                    if (targets.length !== 0) {
+                      const waited = await client.request("wait", {
+                        targets,
+                        completion: "all",
+                        timeoutMs: 0,
+                      });
+                      if ("result" in waited)
+                        retain(record, waited.result.completed);
+                    }
+                    await persist(record);
+                  };
+                  await saveTurns();
+                  if (detachment.disposition === "kill")
+                    for (const session of detachment.sessions) {
+                      if (session.outcome === "confirmed") continue;
+                      try {
+                        const killed = await client.request("kill", {
+                          sessionId: session.sessionId,
+                        });
+                        if ("error" in killed) {
+                          session.error = killed.error;
+                          throw killed.error;
+                        }
+                        if (killed.result.status !== "killed")
+                          throw workspaceFailure("provider_failed");
+                        session.outcome = "confirmed";
+                        delete session.error;
+                        await saveTurns();
+                      } catch (error) {
+                        const failure = machineFailure(error);
+                        if (failure !== undefined) session.error = failure;
+                        await persist(record);
+                        throw error;
+                      }
+                    }
+                }
+                await docker(["rm", "-f", record.container]);
+                if (!(await runtimeAbsent()))
+                  throw workspaceFailure("provider_failed");
+              }
+              clients.get(record.directory)?.close();
+              clients.delete(record.directory);
+              record.info.runtime = { status: "released" };
+              detachment.resources.runtime = { status: "released" };
+              retain(record);
+              await persist(record);
+            }
+            if (detachment.resources.credentials.status !== "released") {
+              step = "credentials";
+              await rm(join(record.directory, "home"), {
+                recursive: true,
+                force: true,
+              });
+              detachment.resources.credentials = { status: "released" };
+              await persist(record);
+            }
+            if (detachment.resources.bindings.status !== "released") {
+              step = "bindings";
+              for (const binding of record.info.harnesses)
+                binding.stage = "released";
+              detachment.resources.bindings = { status: "released" };
+              await persist(record);
+            }
+            if (detachment.resources.routing.status !== "released") {
+              step = "routing";
+              await (await routes.get(record.directory))?.close();
+              routes.delete(record.directory);
+              await rm(join(controlDirectory(record), "p.sock"), {
+                force: true,
+              });
+              await rm(join(controlDirectory(record), "r.sock"), {
+                force: true,
+              });
+              detachment.resources.routing = { status: "released" };
+              await persist(record);
+            }
+            step = "ownership";
+            detachment.resources.ownership = { status: "released" };
+            detachment.status = "released";
+            delete detachment.error;
+            await persist(record);
+          } catch (error) {
+            const failure = normalize(error);
+            detachment.status = "failed";
+            detachment.error = failure;
+            if (
+              step !== undefined &&
+              detachment.resources[step].status !== "released"
+            )
+              detachment.resources[step] = { status: "failed", error: failure };
+            await persist(record);
+            throw failure;
+          }
+        })();
+        detachments.set(record.directory, cleanup);
+        const finished = () => {
+          if (detachments.get(record.directory) === cleanup)
+            detachments.delete(record.directory);
+        };
+        void cleanup.then(finished, finished);
+      }
+      await cleanup;
       return { ...record.info, cwd: tree.cwd };
     },
     async close() {
@@ -1127,6 +1654,10 @@ export async function openWorkspaceRuntime(options: {
       await Promise.allSettled(stopTasks.values());
       for (const client of clients.values()) client.close();
       clients.clear();
+      await Promise.allSettled(
+        [...routes.values()].map(async (route) => (await route).close()),
+      );
+      routes.clear();
     },
   };
 }

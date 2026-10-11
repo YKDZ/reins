@@ -195,15 +195,18 @@ export function registerWorkspaceCommands(program: Command): void {
     );
   workspace
     .command("detach")
-    .description("Release an environment that has no sessions")
+    .description("Release an environment with an explicit session disposition")
     .option("-C <path>", "native directory context")
-    .requiredOption("--session-disposition <value>", "require_none")
+    .requiredOption("--session-disposition <value>", "require_none or kill")
     .action((options: { C?: string; sessionDisposition: string }) => {
-      if (options.sessionDisposition !== "require_none")
+      if (
+        options.sessionDisposition !== "require_none" &&
+        options.sessionDisposition !== "kill"
+      )
         throw new ExitError(64, "Invalid session disposition");
       return invoke("workspace.detach", {
         cwd: nativeCwd(options.C),
-        sessionDisposition: "require_none",
+        sessionDisposition: options.sessionDisposition,
       });
     });
 }

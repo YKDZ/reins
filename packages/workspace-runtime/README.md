@@ -44,7 +44,13 @@ Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署�
 
 QoderCN Manager launcher 显式提供 `REINS_QODER_AUTH_BINDINGS`，例如 `{"selected-login":{"userFile":"/private/selected-user","machineIdFile":"/private/selected-machine-id"}}`。固定支持包只读取选定的两个非空原生文件，将原始字节写入私有 `HOME/.qoder-cn/.auth/user` 与 `machine_id`（0600），不解密或重造厂商格式，不复制 settings、cache、历史、锁文件或完整 home。`qodercliAuth()` 由原生 SDK 只读消费，源文件不回写；省略绑定不搜索宿主。缺失来源或空文件是 `credential_binding_unavailable`，材料版本或 worker 入口错误是 `runtime_entry_invalid`；非空但无效的原生登录由真实 worker 判定，不把 ready 当作远端认证成功。不承诺凭据刷新、并发轮换或重启恢复。
 
-附着受理与所有者写入 Manager 的持久状态，关闭 CLI 连接不会释放它。相同所有者及绑定集合复用已经准备的附着；不同所有者或不同意图被拒绝。每个 harness 最多选定一个绑定。逐绑定独立准备，一项失败仍继续其他项；全局 runtime 保留失败事实，ready 绑定仍可创建独立会话并发运行。`detach require_none` 只释放没有会话的环境，保留源码与准备事实。
+附着受理与所有者写入 Manager 的持久状态，关闭 CLI 连接不会释放它。相同所有者及绑定集合复用已经准备的附着；不同所有者或不同意图被拒绝。每个 harness 最多选定一个绑定。逐绑定独立准备，一项失败仍继续其他项；全局 runtime 保留失败事实，ready 绑定仍可创建独立会话并发运行。
+
+脱离必须显式选择 `--session-disposition require_none` 或 `kill`。`require_none` 原子检查真实存活会话并关闭新的修改准入，已终止但仍可列出的会话不阻止脱离；前置检查失败不会接受意图。`kill` 接受后同样拒绝新的 spawn、send 和授权修改，再实际终止 worker、销毁环境并逐步释放凭据、绑定、路由与归属。正式工作区路由保留原 CommandId、ACK、未知结果及订阅语义；部署内的原生 socket 与显式 `REINS_SOCKET` 入口继续按原生传输工作。
+
+已接受的意图与每步释放事实持久化。中断或再次失败后，相同意图只续未完成步骤，不自动重建环境；调用方可显式将 `require_none` 升级为 `kill`，反向变更被拒绝。公开 `status` 继续返回原生源码身份、清理进度及已观察到的 session/turn 关联。`detachment.sessions[].outcome` 的 `confirmed` 表示原生终止已确认；`terminated_by_workspace_detach` 只在 provider 已证明环境消失时结算未确认 worker；证据不足保持 `unknown` 和失败进度。后者不会补造 harness 的 `turn.completed`，已有唯一回合终态保持原样。
+
+脱离保留原生工作树、已有本地事实与价值状态，释放私有凭据投影及运行资源；不承诺保留整个 harness 临时 home。工作区清理投影不代替后继票的权威历史，产品资源释放与测试平台回收分别记录。
 
 准备中重复相同绑定集合会观察当前尝试，不另起执行。失败后，调用方修正条件并显式重复相同请求才会受理新尝试；继续未完成的阶段，保留已完成的材料和私有 home。已接受的环境、运行材料及绑定快照不会因当前目录配置变化而被替换；不同显式绑定集合返回 `attachment_intent_conflict`。同引用换 harness、凭据引用、省略状态或 launcher 原生来源路径同样被拒绝；来源路径只以私有不可逆意图摘要持久化。允许同一路径的内容修正，相同非空、顺序无关的绑定组合只续行失败阶段；成功绑定不重新安装或复制凭据。材料缺失与实际摘要核验失败分别持久表达为 `material_unavailable`、`material_digest_mismatch`。
 
