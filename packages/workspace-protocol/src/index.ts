@@ -1,5 +1,6 @@
 import {
   consumerContextSchema,
+  nativeViewLossSchema,
   sessionIdSchema,
   machineErrorSchema,
   protocolMethodSchema,
@@ -82,17 +83,7 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
   detail: v.optional(v.string()),
   availableBindings: v.optional(v.array(v.string())),
 });
-export const nativeViewLossSchema = v.variant("reason", [
-  v.strictObject({
-    reason: v.literal("moved"),
-    currentRoot: v.string(),
-  }),
-  v.strictObject({ reason: v.literal("replaced") }),
-  v.strictObject({ reason: v.literal("removed") }),
-  v.strictObject({ reason: v.literal("split") }),
-  v.strictObject({ reason: v.literal("unreachable") }),
-]);
-export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;
+export { nativeViewLossSchema, type NativeViewLoss } from "@reins/protocol";
 export const workspaceErrorSchema = v.union([
   ordinaryWorkspaceErrorSchema,
   v.strictObject({

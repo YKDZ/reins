@@ -29,6 +29,7 @@ import {
   createUnixSocketClient,
   createUnixSocketServer,
   type TransportServer,
+  type TransportConnection,
 } from "@reins/transport";
 import {
   workspaceErrorSchema,
@@ -368,39 +369,64 @@ export async function openWorkspaceRuntime(options: {
       route = (async () => {
         await rm(path, { force: true });
         const server = createUnixSocketServer<ProtocolMessage>({ path });
+        const nativeConnections = new Set<
+          TransportConnection<ProtocolMessage>
+        >();
+        const connecting = new Set<
+          Promise<TransportConnection<ProtocolMessage>>
+        >();
+        let closing = false;
         server.onConnection((peer) => {
           const requests = new Map<string, string>();
           const native = createUnixSocketClient<ProtocolMessage>(
             join(controlDirectory(record), "r.sock"),
           );
+          connecting.add(native);
           void native
             .then((connection) => {
+              connecting.delete(native);
+              if (closing) {
+                connection.close();
+                peer.close();
+                return;
+              }
+              nativeConnections.add(connection);
+              let outgoing = Promise.resolve();
               connection.onEvent((event) => {
-                if (event.kind !== "message") {
-                  peer.close();
-                  return;
-                }
-                const response = v.safeParse(
-                  protocolResponseSchema,
-                  event.message,
-                );
-                const key = response.success
-                  ? requests.get(response.output.requestId)
-                  : undefined;
-                if (key === undefined) {
-                  peer.send(event.message);
-                  return;
-                }
-                // ACK 只由原 daemon 产生；先保存其已知结果，再原样交付。
-                void exclusive(async () => {
-                  if (record.commands?.[key] !== undefined)
-                    record.commands[key].pending = false;
-                  await persist(record);
-                  peer.send(event.message);
-                }).catch(() => peer.close());
+                // 保存 ACK 的异步 I/O 不得改变同一原生连接的帧顺序。
+                outgoing = outgoing
+                  .then(async () => {
+                    if (event.kind !== "message") {
+                      nativeConnections.delete(connection);
+                      peer.close();
+                      return;
+                    }
+                    const response = v.safeParse(
+                      protocolResponseSchema,
+                      event.message,
+                    );
+                    const key = response.success
+                      ? requests.get(response.output.requestId)
+                      : undefined;
+                    if (key !== undefined) {
+                      // ACK 只由原 daemon 产生；先保存其已知结果，再原样交付。
+                      await exclusive(async () => {
+                        if (record.commands?.[key] !== undefined)
+                          record.commands[key].pending = false;
+                        await persist(record);
+                      });
+                      if (response.success)
+                        requests.delete(response.output.requestId);
+                    }
+                    peer.send(event.message);
+                  })
+                  .catch(() => peer.close());
               });
             })
-            .catch(() => peer.close());
+            .catch(() => {
+              connecting.delete(native);
+              peer.close();
+            });
           peer.onEvent((event) => {
             if (event.kind !== "message") {
               void native
@@ -417,6 +443,17 @@ export async function openWorkspaceRuntime(options: {
                   request.commandId === undefined
                     ? undefined
                     : record.commands?.[request.commandId];
+                if (
+                  known === undefined &&
+                  record.info.source.error?.code === "native_view_lost"
+                ) {
+                  peer.send({
+                    kind: "response",
+                    requestId: request.requestId,
+                    error: record.info.source.error,
+                  });
+                  return;
+                }
                 if (record.detach !== undefined && known === undefined) {
                   peer.send({
                     kind: "response",
@@ -450,7 +487,18 @@ export async function openWorkspaceRuntime(options: {
           });
         });
         await server.listen();
-        return server;
+        return {
+          ...server,
+          async close() {
+            closing = true;
+            for (const connection of nativeConnections) connection.close();
+            nativeConnections.clear();
+            await Promise.allSettled(
+              [...connecting].map(async (pending) => (await pending).close()),
+            );
+            await server.close();
+          },
+        };
       })();
       routes.set(record.directory, route);
       void route.catch(() => routes.delete(record.directory));
@@ -1115,7 +1163,8 @@ export async function openWorkspaceRuntime(options: {
         throw workspaceFailure("workspace_detaching");
       if (
         ["spawn", "send", "resolvePermission"].includes(action) &&
-        record.info.source.error?.code === "native_view_lost"
+        record.info.source.error?.code === "native_view_lost" &&
+        (commandId === undefined || record.commands?.[commandId] === undefined)
       )
         throw record.info.source.error;
       if (record.info.runtime.status !== "ready")
