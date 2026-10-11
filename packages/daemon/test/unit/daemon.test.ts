@@ -24,6 +24,7 @@ import type {
 } from "@reins/protocol";
 import {
   isSideEffectMethod,
+  encodeResumeCursor,
   commandIdSchema,
   machineErrorSchema,
   makeDiagnosticId,
@@ -1260,7 +1261,7 @@ describe("daemon 协议面（缝 C）", () => {
     expect(idleCollector.events).toEqual([]);
   });
 
-  test("an active span may exceed the soft log limit and is discarded after closing", async () => {
+  test("available reports strict truncation during an unfinished stream and retains the bounded tail", async () => {
     const fake = createFakeHarness({
       harness: "fake",
       capability: emptyCapability("fake"),
@@ -1287,8 +1288,10 @@ describe("daemon 协议面（缝 C）", () => {
       sessionId,
       replay: { mode: "available" },
     });
-    expect(active).toMatchObject({ result: { replayed: 4 } });
-    expect(activeCollector.events).toHaveLength(4);
+    expect(active).toMatchObject({
+      result: { replayed: 2, window: { truncated: true } },
+    });
+    expect(activeCollector.events).toHaveLength(2);
 
     fake.controls.completeTurn("end_turn", "abcd");
     const idleClient = server.connect();
@@ -1299,8 +1302,13 @@ describe("daemon 协议面（缝 C）", () => {
       sessionId,
       replay: { mode: "available" },
     });
-    expect(completed).toMatchObject({ result: { replayed: 0 } });
-    expect(idleCollector.events).toEqual([]);
+    expect(completed).toMatchObject({
+      result: { replayed: 2, window: { truncated: true } },
+    });
+    expect(idleCollector.events.at(-1)).toMatchObject({
+      type: "turn.completed",
+      stopReason: "end_turn",
+    });
   });
 
   test("attach freezes its coherent replay selection before pending live injection", async () => {
@@ -2836,4 +2844,68 @@ test("none turn scope ends from authoritative terminal history after event reten
   expect(collector.ended).toEqual([
     { sessionId: target.sessionId, reason: "end_turn" },
   ]);
+});
+
+test("after freezes its replay prefix and buffers live events before the establishment ACK", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: emptyCapability("fake"),
+  });
+  let inject: (() => void) | undefined;
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    beforeAttachReplay: () => inject?.(),
+  });
+  const client = server.connect();
+  await flush();
+  const requester = makeRequester(client);
+  const spawned = await requester("spawn", {
+    sessionName: "after-boundary",
+    harness: "fake",
+    message: "first",
+  });
+  const { sessionId } = resultOf(spawned) as { sessionId: SessionId };
+  const messageId = "boundary" as MessageId;
+  fake.controls.emitText(messageId, "he");
+  inject = () => {
+    fake.controls.emitText(messageId, "llo");
+    fake.controls.emitSnapshot(messageId, "hello");
+    fake.controls.completeTurn("end_turn", "hello");
+  };
+  const wire: ProtocolMessage[] = [];
+  client.onEvent((event) => {
+    if (event.kind === "message") wire.push(event.message);
+  });
+  const ack = await requester("attach", {
+    scope: "turn",
+    sessionId,
+    turnId: "t1",
+    replay: {
+      mode: "after",
+      cursor: encodeResumeCursor({
+        target: { scope: "turn", sessionId, turnId: "t1" as TurnId },
+        daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+        eventId: 1,
+      }),
+    },
+  });
+  await flush();
+  expect(ack).toMatchObject({
+    result: { replayed: 2, window: { oldest: 1, head: 3, truncated: false } },
+  });
+  expect(wire[0]).toMatchObject({
+    kind: "response",
+    result: expect.anything(),
+  });
+  const notifications = wire.filter(
+    (message) => message.kind === "notification",
+  );
+  expect(
+    notifications
+      .filter((message) => message.method === "event")
+      .map((message) => message.params.eventId),
+  ).toEqual([2, 3, 4, 5, 6]);
+  expect(notifications.at(-1)).toMatchObject({
+    method: "attach.ended",
+    params: { reason: "end_turn", lastEventId: 6 },
+  });
 });

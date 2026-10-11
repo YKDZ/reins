@@ -5,6 +5,8 @@ import {
   diagnosticIdSchema,
   permissionIdSchema,
   permissionHandleSchema,
+  resumeCursorSchema,
+  type ResumeCursor,
   decodePermissionHandle,
   type PermissionTarget,
   sessionIdSchema,
@@ -38,6 +40,7 @@ export type ValueKind =
   | { readonly type: "turnHandle"; readonly hint: string }
   | { readonly type: "permissionId"; readonly hint: string }
   | { readonly type: "permissionHandle"; readonly hint: string }
+  | { readonly type: "resumeCursor"; readonly hint: string }
   | { readonly type: "diagnosticId"; readonly hint: string }
   | { readonly type: "time"; readonly hint: string }
   | { readonly type: "boolean" }
@@ -330,10 +333,19 @@ const commandSpecData = [
       },
       {
         name: "replay",
-        flags: "--replay <none|available>",
+        flags: "--replay <none|available|after>",
         required: true,
-        description: "explicit history policy",
-        kind: { type: "enum", values: ["none", "available"] },
+        description: "bounded event history policy; after requires --cursor",
+        kind: { type: "enum", values: ["none", "available", "after"] },
+      },
+      {
+        name: "cursor",
+        flags: "--cursor <ResumeCursor>",
+        description: "resume an interrupted attach; only with --replay after",
+        kind: {
+          type: "resumeCursor",
+          hint: "Use the complete ResumeCursor from a disconnected attach",
+        },
       },
     ],
   }),
@@ -522,38 +534,43 @@ export const commandSpecs: readonly (CommandSpec & {
 
 type CommandSpecData = (typeof commandSpecData)[number];
 
-type ParsedValue<K extends ValueKind> = K extends { readonly type: "text" }
-  ? string
-  : K extends { readonly type: "sessionName" }
-    ? SessionName
-    : K extends { readonly type: "sessionId" }
-      ? SessionId
-      : K extends { readonly type: "turnHandle" }
-        ? TurnTarget
-        : K extends { readonly type: "turnId" }
-          ? TurnId
-          : K extends { readonly type: "permissionHandle" }
-            ? PermissionTarget
-            : K extends { readonly type: "permissionId" }
-              ? PermissionId
-              : K extends { readonly type: "diagnosticId" }
-                ? DiagnosticId
-                : K extends { readonly type: "time" }
-                  ? string
-                  : K extends { readonly type: "boolean" }
-                    ? boolean
-                    : K extends {
-                          readonly type: "enum";
-                          readonly values: readonly (infer E extends string)[];
-                        }
-                      ? E
-                      : K extends { readonly type: "number" }
-                        ? number
-                        : K extends { readonly type: "jsonObject" }
-                          ? Record<string, unknown>
-                          : K extends { readonly type: "dynamic" }
-                            ? string
-                            : never;
+type ParsedValue<K extends ValueKind> = K extends {
+  readonly type: "resumeCursor";
+}
+  ? ResumeCursor
+  : K extends { readonly type: "text" }
+    ? string
+    : K extends { readonly type: "sessionName" }
+      ? SessionName
+      : K extends { readonly type: "sessionId" }
+        ? SessionId
+        : K extends { readonly type: "turnHandle" }
+          ? TurnTarget
+          : K extends { readonly type: "turnId" }
+            ? TurnId
+            : K extends { readonly type: "permissionHandle" }
+              ? PermissionTarget
+              : K extends { readonly type: "permissionId" }
+                ? PermissionId
+                : K extends { readonly type: "diagnosticId" }
+                  ? DiagnosticId
+                  : K extends { readonly type: "time" }
+                    ? string
+                    : K extends { readonly type: "boolean" }
+                      ? boolean
+                      : K extends {
+                            readonly type: "enum";
+                            readonly values: readonly (infer E extends
+                              string)[];
+                          }
+                        ? E
+                        : K extends { readonly type: "number" }
+                          ? number
+                          : K extends { readonly type: "jsonObject" }
+                            ? Record<string, unknown>
+                            : K extends { readonly type: "dynamic" }
+                              ? string
+                              : never;
 
 type FieldValue<F extends CommandArg | CommandOption> = F extends {
   readonly variadic: true;
@@ -1032,6 +1049,18 @@ function validateValue(
           hint: kind.hint,
         });
       return;
+    case "resumeCursor":
+      if (
+        typeof value !== "string" ||
+        !v.safeParse(resumeCursorSchema, value).success
+      )
+        throw usageError({
+          issue: "invalid_value",
+          field,
+          value: String(value),
+          hint: kind.hint,
+        });
+      return;
     case "permissionHandle":
       if (
         typeof value !== "string" ||
@@ -1142,6 +1171,8 @@ function parseFieldValue(
       return decodeTurnHandle(String(value));
     case "turnId":
       return v.parse(turnIdSchema, value);
+    case "resumeCursor":
+      return v.parse(resumeCursorSchema, value);
     case "permissionHandle":
       return decodePermissionHandle(String(value));
     case "permissionId":
@@ -1166,6 +1197,7 @@ export function valueHint(kind: ValueKind): string | undefined {
     case "turnHandle":
     case "permissionId":
     case "permissionHandle":
+    case "resumeCursor":
     case "diagnosticId":
     case "time":
     case "number":

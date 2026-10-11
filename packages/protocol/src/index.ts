@@ -440,16 +440,60 @@ export const subscriptionTargetSchema = v.variant("scope", [
   v.strictObject({ scope: v.literal("turn"), ...turnTargetSchema.entries }),
 ]);
 export type SubscriptionTarget = v.InferOutput<typeof subscriptionTargetSchema>;
+
+export const resumePositionSchema = v.strictObject({
+  target: subscriptionTargetSchema,
+  daemonGeneration: daemonGenerationSchema,
+  eventId: v.pipe(v.number(), v.integer(), v.minValue(0)),
+});
+export type ResumePosition = v.InferOutput<typeof resumePositionSchema>;
+export function encodeResumeCursor(position: ResumePosition): ResumeCursor {
+  const body = Buffer.from(
+    JSON.stringify(v.parse(resumePositionSchema, position)),
+  ).toString("base64url");
+  return v.parse(
+    resumeCursorSchema,
+    "resume1_" + body + "." + turnHandleChecksum(body),
+  );
+}
+export function decodeResumeCursor(cursor: string): ResumePosition {
+  const match = /^resume1_([A-Za-z0-9_-]+)\.([a-f0-9]{8})$/u.exec(cursor);
+  if (match === null || turnHandleChecksum(match[1]!) !== match[2])
+    throw new Error("Invalid ResumeCursor");
+  return v.parse(
+    resumePositionSchema,
+    JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")),
+  );
+}
+export const resumeCursorSchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    try {
+      decodeResumeCursor(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
+  v.brand("ResumeCursor"),
+);
+export type ResumeCursor = v.InferOutput<typeof resumeCursorSchema>;
+export const replayPolicySchema = v.variant("mode", [
+  v.strictObject({ mode: v.literal("none") }),
+  v.strictObject({ mode: v.literal("available") }),
+  v.strictObject({ mode: v.literal("after"), cursor: resumeCursorSchema }),
+]);
+
 export const attachParamsSchema = v.variant("scope", [
   v.strictObject({
     scope: v.literal("session"),
     sessionId: sessionIdSchema,
-    replay: v.strictObject({ mode: v.picklist(["none", "available"]) }),
+    replay: replayPolicySchema,
   }),
   v.strictObject({
     scope: v.literal("turn"),
     ...turnTargetSchema.entries,
-    replay: v.strictObject({ mode: v.picklist(["none", "available"]) }),
+    replay: replayPolicySchema,
   }),
 ]);
 export type AttachParams = v.InferOutput<typeof attachParamsSchema>;
@@ -466,6 +510,7 @@ export const eventIdSchema = v.pipe(
 );
 export type EventId = v.InferOutput<typeof eventIdSchema>;
 export const eventWindowSchema = v.strictObject({
+  truncated: v.boolean(),
   oldest: v.nullable(eventIdSchema),
   head: v.nullable(eventIdSchema),
 });
@@ -2025,6 +2070,7 @@ export const errorCodeSchema = v.union([
   v.literal("invalid_daemon_response"),
   v.literal("daemon_start_failed"),
   v.literal("daemon_disconnected"),
+  v.literal("event_cursor_expired"),
 ]);
 export type ErrorCode = v.InferOutput<typeof errorCodeSchema>;
 
@@ -2171,7 +2217,15 @@ export const machineErrorSchema = v.union([
     code: v.literal("daemon_start_failed"),
     cause: errorCauseSchema,
   }),
-  v.strictObject({ code: v.literal("daemon_disconnected") }),
+  v.strictObject({
+    code: v.literal("daemon_disconnected"),
+    resumeCursor: v.optional(resumeCursorSchema),
+  }),
+  v.strictObject({
+    code: v.literal("event_cursor_expired"),
+    oldest: v.nullable(eventIdSchema),
+    head: v.nullable(eventIdSchema),
+  }),
   v.strictObject({ code: v.literal("diagnostics_unavailable") }),
   unexpectedError("capability_query_failed"),
   unexpectedError("internal_error"),

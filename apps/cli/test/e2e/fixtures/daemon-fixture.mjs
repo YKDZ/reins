@@ -29,7 +29,7 @@ function encodeMessage(value) {
         ...value.result,
         subscriptionId: "subscription-fixture",
         target: { scope: "turn", sessionId: "prompt@g1", turnId: "t1" },
-        window: { oldest: null, head: null },
+        window: { oldest: null, head: null, truncated: false },
       },
     };
   return JSON.stringify(value);

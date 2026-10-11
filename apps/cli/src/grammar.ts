@@ -1,4 +1,5 @@
 import type { InvalidParamIssue, MachineError } from "@reins/protocol";
+import { decodeResumeCursor, encodeTurnHandle } from "@reins/protocol";
 import type { TransportErrorCode } from "@reins/transport";
 import type { CommanderError } from "commander";
 
@@ -66,6 +67,26 @@ export function renderCliError(
         error.retryToken +
         " --params <original-params-json>",
     );
+  if (
+    error.code === "daemon_disconnected" &&
+    error.resumeCursor !== undefined
+  ) {
+    const { target } = decodeResumeCursor(error.resumeCursor);
+    return renderedError(
+      "Daemon disconnected",
+      "Resume event observation with reins attach " +
+        (target.scope === "session"
+          ? target.sessionId
+          : encodeTurnHandle({
+              sessionId: target.sessionId,
+              turnId: target.turnId,
+            })) +
+        " --scope " +
+        target.scope +
+        " --replay after --cursor " +
+        error.resumeCursor,
+    );
+  }
   if (error.code === "input_error") {
     return renderedError(
       error.reason === "permission_choice_eof"
@@ -348,6 +369,13 @@ function domainMessage(error: MachineError): string {
       return "cause" in error && error.cause !== undefined
         ? error.cause.message
         : "Daemon failed to start";
+    case "event_cursor_expired":
+      return (
+        "Event cursor has expired; available window: " +
+        error.oldest +
+        " through " +
+        error.head
+      );
     case "daemon_disconnected":
       return "Daemon disconnected";
     case "diagnostics_unavailable":

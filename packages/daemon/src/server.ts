@@ -35,6 +35,7 @@ import type {
 } from "@reins/protocol";
 import {
   isSideEffectMethod,
+  decodeResumeCursor,
   eventIdSchema,
   subscriptionIdSchema,
   subscriptionCloseSchema,
@@ -106,8 +107,6 @@ type Observation = {
 
 type EventHistory = {
   readonly events: DomainEvent[];
-  readonly openMessages: Set<string>;
-  safeBoundaries: number[];
 };
 
 function unsupportedProtocolMethod(value: ProtocolRequest["method"]): never {
@@ -473,57 +472,13 @@ export function createProtocolServerInternal(
     return attempt;
   }
 
-  function messageKey(event: { turnId: TurnId; messageId: string }): string {
-    return `${event.turnId}\0${event.messageId}`;
-  }
-
-  function observeHistoryBoundary(
-    history: EventHistory,
-    event: DomainEvent,
-  ): void {
-    if (event.type === "text.delta") {
-      history.openMessages.add(messageKey(event));
-    } else if (event.type === "message") {
-      history.openMessages.delete(messageKey(event));
-    } else if (event.type === "turn.completed") {
-      const prefix = `${event.turnId}\0`;
-      for (const key of history.openMessages) {
-        if (key.startsWith(prefix)) history.openMessages.delete(key);
-      }
-    } else if (event.type === "session.killed") {
-      history.openMessages.clear();
-    }
-    if (history.openMessages.size === 0) {
-      history.safeBoundaries.push(history.events.length);
-    }
-  }
-
-  function trimHistory(history: EventHistory): void {
-    if (history.events.length <= eventLogLimit) return;
-    const target = history.events.length - eventLogLimit;
-    const atOrAfter = history.safeBoundaries.find(
-      (boundary) => boundary >= target,
-    );
-    const cut =
-      atOrAfter ??
-      history.safeBoundaries.findLast((boundary) => boundary <= target) ??
-      0;
-    if (cut === 0) return;
-    history.events.splice(0, cut);
-    history.safeBoundaries = history.safeBoundaries
-      .filter((boundary) => boundary >= cut)
-      .map((boundary) => boundary - cut);
-  }
-
   function appendLog(event: DomainEvent): void {
     const history = eventLog.get(event.sessionId) ?? {
       events: [],
-      openMessages: new Set<string>(),
-      safeBoundaries: [0],
     };
     history.events.push(event);
-    observeHistoryBoundary(history, event);
-    trimHistory(history);
+    if (history.events.length > eventLogLimit)
+      history.events.splice(0, history.events.length - eventLogLimit);
     eventLog.set(event.sessionId, history);
   }
 
@@ -788,16 +743,47 @@ export function createProtocolServerInternal(
         ? { scope: "turn", sessionId: params.sessionId, turnId: params.turnId }
         : { scope: "session", sessionId: params.sessionId };
     const history = eventLog.get(params.sessionId);
+    const head = eventHeads.get(params.sessionId) ?? null;
+    const first = history?.events[0];
+    const oldest = first === undefined ? null : eventPositions.get(first)!;
+    let after: number | undefined;
+    if (params.replay.mode === "after") {
+      const cursor = decodeResumeCursor(params.replay.cursor);
+      if (
+        cursor.daemonGeneration !== options.diagnostics.generation ||
+        cursor.target.scope !== target.scope ||
+        cursor.target.sessionId !== target.sessionId ||
+        (target.scope === "turn" &&
+          (cursor.target.scope !== "turn" ||
+            cursor.target.turnId !== target.turnId)) ||
+        cursor.eventId > (head ?? 0)
+      ) {
+        throw {
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "replay.cursor" }],
+        } satisfies MachineError;
+      }
+      if (
+        head !== null &&
+        (oldest === null || oldest > 1) &&
+        cursor.eventId < (oldest ?? head + 1)
+      )
+        throw {
+          code: "event_cursor_expired",
+          oldest,
+          head,
+        } satisfies MachineError;
+      after = cursor.eventId;
+    }
     const replayEvents =
       params.replay.mode === "none"
         ? []
         : (history?.events ?? []).filter(
             (event) =>
-              target.scope === "session" ||
-              ("turnId" in event && event.turnId === target.turnId),
+              (after === undefined || eventPositions.get(event)! > after) &&
+              (target.scope === "session" ||
+                ("turnId" in event && event.turnId === target.turnId)),
           );
-    const head = eventHeads.get(params.sessionId) ?? null;
-    const first = history?.events[0];
     const subscription: AttachSubscription = {
       sessionId: params.sessionId,
       target,
@@ -805,7 +791,12 @@ export function createProtocolServerInternal(
         subscriptionIdSchema,
         "subscription-" + ++subscriptionSequence,
       ),
-      lastEventId: head,
+      lastEventId:
+        after === undefined
+          ? head
+          : after === 0
+            ? null
+            : v.parse(eventIdSchema, after),
       connection,
       replaying: true,
       pendingEvents: [],
@@ -846,6 +837,9 @@ export function createProtocolServerInternal(
       subscriptionId: subscription.subscriptionId,
       target,
       window: {
+        truncated:
+          head !== null &&
+          (first === undefined || eventPositions.get(first)! > 1),
         oldest: first === undefined ? null : eventPositions.get(first)!,
         head,
       },

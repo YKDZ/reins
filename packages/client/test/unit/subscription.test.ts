@@ -31,7 +31,7 @@ async function fixture(autoAck = true) {
         sessionId: "readable@g1",
         subscriptionId: "subscription-1",
         target: { scope: "session", sessionId: "readable@g1" },
-        window: { oldest: null, head: null },
+        window: { oldest: null, head: null, truncated: false },
         replayed: 0,
       },
     });

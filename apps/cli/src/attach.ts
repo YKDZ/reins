@@ -176,6 +176,12 @@ export async function runAttach(
         ...subscription.establishment,
       }) + "\n",
     );
+  if (options.mode === "pretty") {
+    const window = subscription.establishment.window;
+    process.stdout.write(
+      `Event window: ${window.oldest ?? "empty"} through ${window.head ?? "empty"} (${window.truncated ? "truncated" : "complete"})\n`,
+    );
+  }
   const prompt =
     options.mode === "pretty"
       ? createPromptInput(options.input ?? process.stdin)

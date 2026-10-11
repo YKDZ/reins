@@ -20,6 +20,8 @@ import {
   turnIdSchema,
   encodeTurnHandle,
   encodePermissionHandle,
+  encodeResumeCursor,
+  daemonGenerationSchema,
   permissionIdSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -1393,6 +1395,15 @@ function sampleForKind(kind: ValueKind): string {
       return fixtureTurnHandle;
     case "turnId":
       return "t1";
+    case "resumeCursor":
+      return encodeResumeCursor({
+        target: {
+          scope: "session",
+          sessionId: v.parse(sessionIdSchema, fixtureSessionId),
+        },
+        daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+        eventId: 1,
+      });
     case "permissionHandle":
       return encodePermissionHandle({
         sessionId: v.parse(sessionIdSchema, fixtureSessionId),
@@ -1525,6 +1536,7 @@ type InvalidKindCategory =
   | "multiEnum"
   | "jsonObject"
   | "dynamicHarness"
+  | "resumeCursor"
   | "permissionHandle"
   | "dynamicModel"
   | "dynamicReasoning";
@@ -1546,6 +1558,7 @@ function invalidCategory(
     case "turnId":
     case "turnHandle":
     case "permissionHandle":
+    case "resumeCursor":
     case "permissionId":
     case "diagnosticId":
     case "time":
@@ -1582,6 +1595,8 @@ function invalidValueFor(kind: ValueKind): string {
       return "bad-handle";
     case "turnId":
       return "T1";
+    case "resumeCursor":
+      return "resume1_invalid";
     case "permissionHandle":
       return "permission1_invalid";
     case "permissionId":
@@ -1709,6 +1724,7 @@ function invalidCaseFor(
 }
 
 const fixtureValueKinds = {
+  resumeCursor: { type: "resumeCursor", hint: "Expected fixture ResumeCursor" },
   permissionHandle: {
     type: "permissionHandle",
     hint: "Expected fixture PermissionHandle",

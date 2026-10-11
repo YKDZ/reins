@@ -198,6 +198,7 @@ export function exitCodeForError(error: CliError): number {
     case "invalid_daemon_response":
     case "daemon_start_failed":
     case "daemon_disconnected":
+    case "event_cursor_expired":
     case "diagnostics_unavailable":
     case "capability_query_failed":
     case "internal_error":
