@@ -15,7 +15,10 @@ import {
   type WorkspaceResults,
   type ManagedWorkspaceInfo,
 } from "@reins/workspace-protocol";
-import { captureFixedCommit } from "@reins/workspace-source";
+import {
+  captureFixedCommit,
+  captureSelectedWorkingFiles,
+} from "@reins/workspace-source";
 import { Command } from "commander";
 import * as v from "valibot";
 
@@ -31,9 +34,10 @@ export function registerWorkspaceCommands(program: Command): void {
     resolve(path ?? (program.opts().C as string | undefined) ?? process.cwd());
   const invoke = async <M extends WorkspaceMethod>(
     method: M,
-    params: WorkspaceParams[M],
+    input: WorkspaceParams[M] | (() => Promise<WorkspaceParams[M]>),
   ) => {
     try {
+      const params = typeof input === "function" ? await input() : input;
       const context = v.safeParse(
         consumerContextSchema,
         process.env.REINS_CONSUMER_CONTEXT ?? "",
@@ -101,7 +105,9 @@ export function registerWorkspaceCommands(program: Command): void {
   };
   workspace
     .command("handoff")
-    .description("Transfer one fixed commit to a new incoming Git worktree")
+    .description(
+      "Transfer a fixed commit and explicitly selected files to a new Git worktree",
+    )
     .requiredOption("--repository <path>", "one caller-native Git root")
     .requiredOption("--commit <sha>", "full fixed commit object name")
     .requiredOption(
@@ -112,21 +118,48 @@ export function registerWorkspaceCommands(program: Command): void {
       "--binding <refs...>",
       "explicit harness binding references",
     )
+    .option(
+      "--index-file <paths...>",
+      "explicit repository-relative staged file versions",
+    )
+    .option(
+      "--worktree-file <paths...>",
+      "explicit repository-relative working file versions",
+    )
     .action(
       async (options: {
+        indexFile?: string[];
+        worktreeFile?: string[];
         repository: string;
         commit: string;
         subdirectory: string;
         binding: string[];
       }) =>
-        invoke("workspace.handoff", {
-          material: await captureFixedCommit(
-            resolve(options.repository),
-            options.commit,
-          ),
+        invoke("workspace.handoff", async () => ({
+          material:
+            options.indexFile === undefined &&
+            options.worktreeFile === undefined
+              ? await captureFixedCommit(
+                  resolve(options.repository),
+                  options.commit,
+                )
+              : await captureSelectedWorkingFiles(
+                  resolve(options.repository),
+                  options.commit,
+                  [
+                    ...(options.indexFile ?? []).map((path) => ({
+                      path,
+                      source: "index" as const,
+                    })),
+                    ...(options.worktreeFile ?? []).map((path) => ({
+                      path,
+                      source: "worktree" as const,
+                    })),
+                  ],
+                ),
           subdirectory: options.subdirectory,
           bindings: options.binding,
-        }),
+        })),
     );
   workspace
     .command("harnesses")
