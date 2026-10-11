@@ -11,6 +11,9 @@ import {
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
+import { hasCodexAuthBinding, type CodexAuthBindings } from "./codex-auth.ts";
+import { hasQoderAuthBinding, type QoderAuthBindings } from "./qoder-auth.ts";
+
 const execute = promisify(execFile);
 export function workspaceFailure(
   code: Exclude<WorkspaceError["code"], "native_view_lost">,
@@ -79,6 +82,8 @@ export async function workspaceEnvironment(cwd: string) {
 }
 export async function workspaceHarnesses(
   cwd: string,
+  codexAuthBindings: CodexAuthBindings = {},
+  qoderAuthBindings: QoderAuthBindings = {},
 ): Promise<WorkspaceHarnessCatalog> {
   const configuration = await readConfiguration(cwd);
   const environment = selectEnvironment(configuration);
@@ -111,10 +116,23 @@ export async function workspaceHarnesses(
         harness: binding.harness,
         runtime,
         provider: environment.provider,
-        extensionVersion: 1,
+        extensionVersion:
+          binding.harness === "codex" && runtime.version === "0.162.0" ? 2 : 1,
       }),
       compatibility:
-        binding.credentialBindingRef === undefined
+        binding.credentialBindingRef === undefined ||
+        hasCodexAuthBinding(
+          codexAuthBindings,
+          binding.harness,
+          runtime.version,
+          binding.credentialBindingRef,
+        ) ||
+        hasQoderAuthBinding(
+          qoderAuthBindings,
+          binding.harness,
+          runtime.version,
+          binding.credentialBindingRef,
+        )
           ? ("supported" as const)
           : ("credential_binding_unavailable" as const),
     };
@@ -126,3 +144,5 @@ export async function workspaceHarnesses(
   };
 }
 export { openWorkspaceRuntime } from "./runtime.ts";
+export { parseQoderAuthBindings } from "./qoder-auth.ts";
+export { parseCodexAuthBindings } from "./codex-auth.ts";

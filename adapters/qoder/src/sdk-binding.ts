@@ -7,14 +7,21 @@ async function* noPrompt(): AsyncGenerator<SDKUserMessage> {}
 
 // 真实绑定：进程内 SDK + 复用本机 qodercli 登录态（ADR-0011）。
 export function createRealQoderSdk(): QoderSdk {
+  const runtime =
+    process.env.QODERCLI_PATH === undefined
+      ? {}
+      : { pathToQoderCLIExecutable: process.env.QODERCLI_PATH };
   return {
     query({ prompt, options }) {
-      return query({ prompt, options: { ...options, auth: qodercliAuth() } });
+      return query({
+        prompt,
+        options: { ...runtime, ...options, auth: qodercliAuth() },
+      });
     },
     async getAvailableModels(modelOptions) {
       const session = query({
         prompt: noPrompt(),
-        options: { auth: qodercliAuth(), persistSession: false },
+        options: { ...runtime, auth: qodercliAuth(), persistSession: false },
       });
       try {
         return await session.getAvailableModels({

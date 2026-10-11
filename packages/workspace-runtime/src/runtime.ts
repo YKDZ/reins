@@ -33,12 +33,22 @@ import {
 import * as v from "valibot";
 
 import {
+  hasCodexAuthBinding,
+  projectCodexAuth,
+  type CodexAuthBindings,
+} from "./codex-auth.ts";
+import {
   fingerprint,
   resolveWorktree,
   workspaceFailure,
   workspaceEnvironment,
   workspaceHarnesses,
 } from "./index.ts";
+import {
+  hasQoderAuthBinding,
+  projectQoderAuth,
+  type QoderAuthBindings,
+} from "./qoder-auth.ts";
 
 const execute = promisify(execFile);
 type Tree = Awaited<ReturnType<typeof resolveWorktree>>;
@@ -129,6 +139,8 @@ function mount(path: string) {
 export async function openWorkspaceRuntime(options: {
   stateDirectory: string;
   resourcePrefix?: string;
+  codexAuthBindings?: CodexAuthBindings;
+  qoderAuthBindings?: QoderAuthBindings;
 }) {
   const root = options.stateDirectory;
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -496,6 +508,22 @@ export async function openWorkspaceRuntime(options: {
     } catch {
       throw workspaceFailure("runtime_entry_invalid");
     }
+    if (binding.harness === "qoder") {
+      let workerVersion: string;
+      try {
+        workerVersion = await docker([
+          "exec",
+          record.container,
+          "node",
+          "/opt/reins/harnesses/qoder/worker/qoder-worker-runtime.obf.mjs",
+          "--version",
+        ]);
+      } catch {
+        throw workspaceFailure("runtime_entry_invalid");
+      }
+      if (workerVersion !== binding.runtime.version)
+        throw workspaceFailure("runtime_entry_invalid");
+    }
     if (!version.split(/\s+/u).includes(binding.runtime.version))
       throw workspaceFailure("runtime_entry_invalid");
   };
@@ -586,7 +614,7 @@ export async function openWorkspaceRuntime(options: {
           )
             ? [
                 "--env",
-                "QODERCLI_PATH=/opt/reins/harnesses/qoder/bin/qoderclicn",
+                "QODERCLI_PATH=/opt/reins/harnesses/qoder/worker/qoder-worker-runtime.obf.mjs",
                 "--env",
                 `QODERCN_CONFIG_DIR=${join(home, ".qoder-cn")}`,
               ]
@@ -749,8 +777,34 @@ export async function openWorkspaceRuntime(options: {
         record.bindingStages[binding.ref] = "validated";
         binding.stage = "credential_binding";
         await persist(record);
-        if (binding.credential.kind !== "omitted")
-          throw workspaceFailure("credential_binding_unavailable");
+        if (binding.credential.kind === "bound") {
+          const bindings = options.codexAuthBindings ?? {};
+          if (
+            hasQoderAuthBinding(
+              options.qoderAuthBindings ?? {},
+              binding.harness,
+              binding.runtime.version,
+              binding.credential.ref,
+            )
+          ) {
+            await projectQoderAuth(
+              options.qoderAuthBindings ?? {},
+              binding.credential.ref,
+              home,
+            );
+          } else {
+            if (
+              !hasCodexAuthBinding(
+                bindings,
+                binding.harness,
+                binding.runtime.version,
+                binding.credential.ref,
+              )
+            )
+              throw workspaceFailure("credential_binding_unavailable");
+            await projectCodexAuth(bindings, binding.credential.ref, home);
+          }
+        }
         record.bindingStages[binding.ref] = "ready";
         binding.stage = "ready";
         await persist(record);
@@ -839,7 +893,11 @@ export async function openWorkspaceRuntime(options: {
           }
           return { record: existing, created: false };
         }
-        const catalog = await workspaceHarnesses(cwd);
+        const catalog = await workspaceHarnesses(
+          cwd,
+          options.codexAuthBindings,
+          options.qoderAuthBindings,
+        );
         const selected = bindingRefs.map((ref) => {
           const binding = catalog.bindings.find((item) => item.ref === ref);
           if (binding === undefined)
