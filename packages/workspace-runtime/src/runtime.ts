@@ -333,6 +333,18 @@ export async function openWorkspaceRuntime(options: {
       ]);
       record.info.source = { status: "verified" };
       await persist(record);
+      // 提前保持真实控制连接；大材料安装时 daemon 不因空闲退出。
+      const deadline = Date.now() + 5000;
+      for (;;) {
+        try {
+          await connect(record);
+          break;
+        } catch {
+          if (Date.now() >= deadline)
+            throw workspaceFailure("runtime_entry_invalid");
+          await new Promise((resolve) => setTimeout(resolve, 25));
+        }
+      }
       for (const binding of record.info.harnesses) {
         binding.stage = "runtime_install";
         await persist(record);
@@ -402,17 +414,6 @@ export async function openWorkspaceRuntime(options: {
         }
         binding.stage = "ready";
         await persist(record);
-      }
-      const deadline = Date.now() + 5000;
-      for (;;) {
-        try {
-          await connect(record);
-          break;
-        } catch {
-          if (Date.now() >= deadline)
-            throw workspaceFailure("runtime_entry_invalid");
-          await new Promise((resolve) => setTimeout(resolve, 25));
-        }
       }
       record.info.runtime = { status: "ready" };
     } catch (error) {
