@@ -43,14 +43,18 @@ import {
   requestIdSchema,
 } from "@reins/protocol";
 import type { TransportConnection } from "@reins/transport";
+import type { Publication } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
 export type NotificationListener = (notification: ProtocolNotification) => void;
 
+export type ClientResult<M extends ProtocolMethod> = ProtocolResult<M> &
+  (M extends "wait" ? { publications?: Publication[] } : unknown);
+
 export type ProtocolResponseFor<M extends ProtocolMethod> =
   | Extract<ProtocolResponse, { readonly error: unknown }>
   | (Omit<Extract<ProtocolResponse, { readonly result: unknown }>, "result"> & {
-      readonly result: ProtocolResult<M>;
+      readonly result: ClientResult<M>;
     });
 
 export type ReinsClientOptions = {

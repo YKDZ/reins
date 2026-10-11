@@ -106,7 +106,12 @@ export function printSendAck(ack: SendAck, mode: OutputMode): void {
   else process.stdout.write(`Sent message to ${turnHandle}\n`);
 }
 
-export function printWaitResult(result: WaitResult, mode: OutputMode): void {
+export function printWaitResult(
+  result: WaitResult & {
+    publications?: import("@reins/workspace-protocol").Publication[];
+  },
+  mode: OutputMode,
+): void {
   const completed = result.completed.map(({ sessionId, turnId, ...facts }) => ({
     turnHandle: encodeTurnHandle({ sessionId, turnId }),
     ...facts,
@@ -118,7 +123,14 @@ export function printWaitResult(result: WaitResult, mode: OutputMode): void {
     turnHandle: encodeTurnHandle(target),
   }));
   if (mode === "json") {
-    printJsonLine({ status: result.status, completed, pending });
+    printJsonLine({
+      status: result.status,
+      completed,
+      pending,
+      ...(result.publications === undefined
+        ? {}
+        : { publications: result.publications }),
+    });
     return;
   }
   if (result.status === "timeout") {
@@ -136,6 +148,10 @@ export function printWaitResult(result: WaitResult, mode: OutputMode): void {
       process.stdout.write(`${turn.finalReply}\n`);
     }
   }
+  for (const publication of result.publications ?? [])
+    process.stdout.write(
+      `[publication ready] ${publication.publicationId} ${publication.source.path} (${publication.bytes} bytes)\n`,
+    );
   for (const target of pending) {
     process.stdout.write(`Pending: ${target.turnHandle}\n`);
   }

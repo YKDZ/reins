@@ -149,7 +149,18 @@ export function createWorkspaceClient(
         ...client,
         async request(method, params, timeoutMs) {
           await admit(method, params);
-          return await client.request(method, params, timeoutMs);
+          const response = await client.request(method, params, timeoutMs);
+          if (method === "wait" && "result" in response)
+            return {
+              ...response,
+              result: {
+                ...response.result,
+                publications: await request("publication.list", {
+                  cwd: route.cwd,
+                }),
+              },
+            };
+          return response;
         },
         async retry(token, params, timeoutMs) {
           const parsed = parseRetryToken(token);
