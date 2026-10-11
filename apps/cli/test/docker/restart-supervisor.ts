@@ -3,22 +3,19 @@ import { unlinkSync, writeFileSync } from "node:fs";
 
 // 仅测试部署的 PID 1；真实 daemon 保持发行字节，允许单独重启其进程。
 let stopping = false;
-function isMissingFile(error: unknown) {
-  return (
-    typeof error === "object" &&
-    error !== null &&
-    "code" in error &&
-    error.code === "ENOENT"
-  );
-}
-
 function start() {
   const socket = process.env.REINS_SOCKET;
   if (socket !== undefined) {
     try {
       unlinkSync(socket);
     } catch (error) {
-      if (!isMissingFile(error)) throw error;
+      if (
+        typeof error !== "object" ||
+        error === null ||
+        !("code" in error) ||
+        error.code !== "ENOENT"
+      )
+        throw error;
     }
   }
   const child = spawn(
