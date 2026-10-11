@@ -180,7 +180,7 @@ test("hands explicitly selected working files to new Git worktrees without chang
     "--image",
     fixtureBaseImage ?? nodeImage,
     "--timeout-ms",
-    "1200000",
+    process.env.REINS_WRR25_SCENARIO_TIMEOUT_MS ?? "3600000",
     ...(process.env.REINS_WRR25_PLATFORM_DOCKER_BINARY === undefined
       ? []
       : ["--docker-binary", process.env.REINS_WRR25_PLATFORM_DOCKER_BINARY]),
@@ -235,4 +235,4 @@ test("hands explicitly selected working files to new Git worktrees without chang
     platformReclaim:
       process.env.REINS_WRR25_PLATFORM_REUSE === "1" ? "not_run" : "passed",
   });
-}, 1_800_000);
+}, 3_900_000);

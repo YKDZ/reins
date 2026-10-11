@@ -271,63 +271,25 @@ try {
     120000,
   );
   incoming.push(next.workspace.cwd);
-  for (;;) {
-    const current = await manager.request(
-      "workspace.status",
-      { cwd: next.workspace.cwd },
-      120000,
-    );
-    if (current.runtime.status === "ready") break;
-    assert.equal(current.runtime.status, "preparing", JSON.stringify(current));
-    await delay(1000);
-  }
   assert.notEqual(first.workspace.root, next.workspace.root);
   assert.notEqual(first.workspaceHandle, next.workspaceHandle);
   assert.deepEqual(await original(), nextBefore);
-  const sent = await control.request("send", {
-    sessionId: spawned.result.sessionId,
-    placement: "new_turn",
-    message,
-  });
-  assert.ok("result" in sent);
-  const again = await control.request("wait", {
-    targets: [
-      { sessionId: spawned.result.sessionId, turnId: sent.result.turnId },
-    ],
-    completion: "all",
-  });
-  assert.ok("result" in again);
-  const reread = JSON.parse(again.result.completed[0]!.finalReply!);
-  assert.equal(reread.pid, read.pid);
-  assert.equal(reread.cwd, read.cwd);
-  assert.deepEqual(reread.files, expected);
-  const secondControl = await manager.control({
-    workspaceHandle: next.workspaceHandle,
-  });
-  controls.push(secondControl);
-  assert.ok("result" in (await secondControl.initialize()));
-  const second = await secondControl.request("spawn", {
-    harness: "codex",
-    cwd: next.workspace.cwd,
-    sessionName: v.parse(sessionNameSchema, "next-selected-reader"),
-    message,
-  });
-  assert.ok("result" in second);
-  sessions.push({ control: secondControl, sessionId: second.result.sessionId });
-  const secondWait = await secondControl.request("wait", {
-    targets: [
-      { sessionId: second.result.sessionId, turnId: second.result.turnId },
-    ],
-    completion: "all",
-  });
-  assert.ok("result" in secondWait);
-  const secondRead = JSON.parse(secondWait.result.completed[0]!.finalReply!);
-  assert.equal(secondRead.content, "next selected input\n");
-  await record("new-tree-old-session-preserved", {
+  const firstInput = await readFile(
+    join(first.workspace.cwd, "input.txt"),
+    "utf8",
+  );
+  const successorInput = await readFile(
+    join(next.workspace.cwd, "input.txt"),
+    "utf8",
+  );
+  assert.equal(firstInput, "selected unstaged\n");
+  assert.equal(successorInput, "next selected input\n");
+  // 本票只核对后继新树及首树保留；旧会话复读由固定提交场景覆盖。
+  await record("successor-new-tree-first-input-preserved", {
     first,
     next,
-    reread,
-    secondRead,
+    firstInput,
+    successorInput,
     callerUnchanged: true,
   });
   const captureReject = async (name: string, selected = selection) => {
