@@ -33,6 +33,52 @@
 
 保持核心动作简单是兼容各家 Harness 的前提，因为它们在设计细节上区别繁多，对外暴露的可编程能力更是参差不齐。
 
+## 在已附着工作树中委派
+
+启动器负责提供消费者上下文和 Manager 的部署配置。项目的 `.reins/workspace.json` 显式声明固定摘要的 Docker 环境、harness runtime 和绑定；Reins 不替调用方选择模型、推理强度或任务文本。
+
+先发现绑定并准备工作树，观察 `runtime.status` 到达 `ready`：
+
+```sh
+reins workspace harnesses -C /native/project/src
+reins workspace attach -C /native/project/src --binding code
+reins workspace status -C /native/project/src
+```
+
+正常任务直接使用原生目录上下文。也可以进入该目录再运行，省略 `-C`：
+
+```sh
+reins -C /native/project/src spawn codex 'Read target.ts and explain its exports' --name source-reader
+reins -C /native/project/src wait '<returned TurnHandle>' --completion all
+reins -C /native/project/src kill '<returned SessionHandle>'
+reins -C /native/project/src spawn codex 'Read another.ts and explain its imports' --name next-reader
+```
+
+`--cwd` 可以显式选择同一工作树中的其他执行目录；相对路径按 CLI 当前目录解析。`spawn` 返回精确目录、会话句柄和首回合句柄。保存返回的句柄，分别用于会话控制和精确等待。两个 `spawn` 创建独立会话，共用已附着环境和原生源码；结束一个会话不会删除环境。相同绑定再次 `attach` 复用成功资源。环境定义变化由 `workspace status` 报告，已有环境继续采用已附着定义；新定义只经显式脱离、重新附着应用。
+
+共享客户端在已初始化的 `createWorkspaceClient` 上调用 `control(cwd)`，获得普通 Reins 客户端；内部连接地址由 Manager 解析。每次任务请求重新经过 Manager 准入，无需再提供绑定引用：
+
+```ts
+import { sessionNameSchema } from "@reins/protocol";
+import * as v from "valibot";
+
+const client = await manager.control("/native/project/src");
+try {
+  await client.initialize();
+  const response = await client.request("spawn", {
+    harness: "codex",
+    cwd: "/native/project/src",
+    sessionName: v.parse(sessionNameSchema, "source-reader"),
+    message: "Read target.ts and explain its exports",
+  });
+  // 使用成功响应中的 sessionId 和 turnId 组成精确 wait 目标。
+} finally {
+  client.close();
+}
+```
+
+未附着、未就绪、未选择该 harness 或目录失效时，任务在启动 worker 前被类型化拒绝；不会退回宿主执行。能力目录查询不启动模型任务。只有显式传入的消息和可选参数进入 worker。
+
 ## 发行与验收
 
 - `pnpm deployment`：构建发行所需包，生成并校验正式发行产物（`.artifacts/release`，恰好一个 tarball 与 `SHA256SUMS`），随后对发行包执行 npm 干净安装 smoke。

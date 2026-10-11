@@ -1,5 +1,13 @@
-import type { ConsumerContext } from "@reins/protocol";
-import type { TransportConnection } from "@reins/transport";
+import type {
+  ConsumerContext,
+  ProtocolMessage,
+  ProtocolMethod,
+  ProtocolParams,
+} from "@reins/protocol";
+import {
+  createUnixSocketClient,
+  type TransportConnection,
+} from "@reins/transport";
 import {
   WORKSPACE_PROTOCOL_MAJOR_VERSION,
   workspaceResponseSchema,
@@ -10,6 +18,12 @@ import {
   type WorkspaceResults,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
+
+import {
+  createReinsClient,
+  parseRetryToken,
+  type ReinsClient,
+} from "./index.ts";
 
 export function createWorkspaceClient(
   connection: TransportConnection<WorkspaceMessage>,
@@ -99,6 +113,43 @@ export function createWorkspaceClient(
         consumerContext: options.consumerContext,
       }),
     request,
+    async control(cwd: string): Promise<ReinsClient> {
+      const route = await request("workspace.route", { cwd });
+      const client = createReinsClient(
+        await createUnixSocketClient<ProtocolMessage>(route.socket),
+        options,
+      );
+      const admit = async <M extends ProtocolMethod>(
+        action: M,
+        params: ProtocolParams<M>,
+      ) => {
+        await request("workspace.admit", { cwd: route.cwd, action, params });
+      };
+      return {
+        ...client,
+        async request(method, params, timeoutMs) {
+          await admit(method, params);
+          return await client.request(method, params, timeoutMs);
+        },
+        async retry(token, params, timeoutMs) {
+          const parsed = parseRetryToken(token);
+          // 与原 retry 同样恢复内部目录投影，再做 Manager 准入；敏感 caller 输入仍由调用方重带。
+          const restored =
+            parsed.spawnContext !== undefined &&
+            params !== null &&
+            typeof params === "object" &&
+            !Array.isArray(params)
+              ? { ...parsed.spawnContext, ...params }
+              : params;
+          await request("workspace.admit", {
+            cwd: route.cwd,
+            action: parsed.method,
+            params: restored,
+          });
+          return await client.retry(token, params, timeoutMs);
+        },
+      };
+    },
     close() {
       unsubscribe();
       fail("manager_disconnected");

@@ -4,7 +4,14 @@ import {
 } from "@reins/client";
 import type { MachineError } from "@reins/protocol";
 import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
+import {
+  workspaceErrorSchema,
+  type WorkspaceError,
+} from "@reins/workspace-protocol";
 import * as v from "valibot";
+export function isWorkspaceError(value: unknown): value is WorkspaceError {
+  return v.safeParse(workspaceErrorSchema, value).success;
+}
 
 export const EXIT_OK = 0;
 export const EXIT_TIMEOUT = 4;
@@ -78,6 +85,7 @@ export type OutputError = {
 
 export type CliError =
   | MachineError
+  | WorkspaceError
   | Omit<CommandOutcomeUnknown, "commandId" | "daemonGeneration">
   | UsageError
   | InputError
@@ -146,6 +154,7 @@ export function toCliError(error: unknown): CliError {
       ...(error.targets === undefined ? {} : { targets: error.targets }),
     };
   if (isUsageError(error)) return error;
+  if (isWorkspaceError(error)) return error;
   if (isMachineError(error)) return error;
   if (isInputError(error)) return error;
   if (isOutputError(error)) return error;
@@ -169,6 +178,11 @@ export function toCliError(error: unknown): CliError {
 }
 
 export function exitCodeForError(error: CliError): number {
+  if (isWorkspaceError(error))
+    return error.code === "consumer_context_required" ||
+      error.code === "protocol_version_mismatch"
+      ? EXIT_USAGE
+      : EXIT_RESOURCE;
   switch (error.code) {
     case "usage_error":
     case "invalid_params":

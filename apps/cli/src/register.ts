@@ -55,6 +55,7 @@ export function registerCommands(program: Command): void {
     .description("Control plane for agent harnesses")
     .version(readReleaseVersion())
     .usage(ROOT_USAGE)
+    .option("-C <path>", "native worktree directory context")
     .option("--pretty", "human-readable output (default: NDJSON)")
     .exitOverride()
     .configureOutput({ writeErr: () => {} })
@@ -105,9 +106,12 @@ export function registerCommands(program: Command): void {
       const { args, options } = unsafeCommanderCallbackInput(values);
       const mode = prettyOf(options, program);
       try {
-        await dispatchInvocation(
-          parseCommandInvocation(spec.name, args, options, mode),
-        );
+        await dispatchInvocation({
+          ...parseCommandInvocation(spec.name, args, options, mode),
+          ...(program.opts().C === undefined
+            ? {}
+            : { contextCwd: String(program.opts().C) }),
+        });
       } catch (error) {
         if (error instanceof ExitError) throw error;
         const cliError = toCliError(error);
