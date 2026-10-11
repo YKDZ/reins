@@ -100,9 +100,41 @@ await writeFile(
   '#!/usr/bin/env node\nconst fs=require("node:fs"),path=require("node:path");const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
   { mode: 0o755 },
 );
+// 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
+const payload = join(context, "payload");
+await mkdir(join(payload, "opt", "reins", "harnesses", "codex", "bin"), {
+  recursive: true,
+});
+await mkdir(join(payload, "usr", "local"), { recursive: true });
+await requireCommand("cp", [
+  "-al",
+  join(base, "tools"),
+  join(payload, "usr", "local", "bin"),
+]);
+await rm(join(payload, "usr", "local", "bin", "docker"));
+await rm(join(payload, "usr", "local", "bin", "docker-native"));
+await requireCommand("cp", [
+  "-al",
+  join(base, "consumer", "node_modules"),
+  join(payload, "opt", "reins", "node_modules"),
+]);
+await requireCommand("cp", [
+  "-al",
+  join(installed, "dist"),
+  join(payload, "opt", "reins", "dist"),
+]);
+await writeFile(
+  join(payload, "opt", "reins", "codex-adapter.ts"),
+  await readFile(join(base, "codex-adapter.ts")),
+);
+await writeFile(
+  join(payload, "opt", "reins", "harnesses", "codex", "bin", "codex"),
+  await readFile(join(context, "codex")),
+  { mode: 0o755 },
+);
 await writeFile(
   join(context, "Dockerfile"),
-  `FROM ${nodeImage}\nCOPY tools /usr/local/bin\nCOPY consumer/node_modules /opt/reins/node_modules\nCOPY consumer/node_modules/@ykdz/reins/dist /opt/reins/dist\nCOPY codex-adapter.ts /opt/reins/codex-adapter.ts\nCOPY image-context/codex /opt/reins/harnesses/codex/bin/codex\nENV REINS_ADAPTERS_MODULE=/opt/reins/codex-adapter.ts\n`,
+  `FROM ${nodeImage}\nCOPY image-context/payload /\nENV REINS_ADAPTERS_MODULE=/opt/reins/codex-adapter.ts\n`,
 );
 const imageTag = `reins-wrr02-material-${process.pid}:candidate`;
 await requireCommand("docker", [
@@ -186,6 +218,24 @@ const cli = async (args: string[], overrides: NodeJS.ProcessEnv = {}) => {
     value: JSON.parse(result.stdout) as Record<string, unknown>,
   };
 };
+async function waitForRuntime(expected: "ready" | "failed") {
+  const deadline = Date.now() + 300_000;
+  for (;;) {
+    const observed = await cli(["status", "-C", join(worktree, "src")]);
+    assert.equal(observed.status, 0);
+    const runtime = observed.value.runtime as {
+      status: string;
+      error?: { code: string };
+    };
+    if (runtime.status === expected) return runtime;
+    assert.equal(runtime.status, "preparing", JSON.stringify(observed));
+    assert.ok(
+      Date.now() < deadline,
+      "Preparation did not reach the expected terminal state",
+    );
+    await delay(500);
+  }
+}
 try {
   const catalog = await cli(["harnesses", "-C", join(worktree, "src")]);
   assert.equal(catalog.status, 0);
@@ -216,7 +266,11 @@ try {
   );
   const attached = await attachment;
   assert.equal(attached.status, 0, JSON.stringify(attached));
-  assert.equal((attached.value.runtime as { status: string }).status, "ready");
+  assert.equal(
+    (attached.value.runtime as { status: string }).status,
+    "preparing",
+  );
+  await waitForRuntime("ready");
   assert.equal(attached.value.cwd, join(worktree, "src"));
   const forbidden = await cli(["status", "-C", worktree], {
     REINS_CONSUMER_CONTEXT: "reins-wrr02-owner-b",
@@ -388,8 +442,13 @@ try {
     "--binding",
     "code",
   ]);
-  assert.equal(mismatch.status, 1);
-  assert.equal(mismatch.value.code, "runtime_entry_invalid");
+  assert.equal(mismatch.status, 0);
+  assert.equal(
+    (mismatch.value.runtime as { status: string }).status,
+    "preparing",
+  );
+  const preparationFailure = await waitForRuntime("failed");
+  assert.equal(preparationFailure.error?.code, "runtime_entry_invalid");
   const failed = await cli(["status", "-C", worktree]);
   assert.equal(failed.status, 0);
   assert.equal((failed.value.runtime as { status: string }).status, "failed");

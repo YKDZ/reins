@@ -113,7 +113,7 @@ test("prepares, observes and releases one owned native worktree through the real
     "--image",
     nodeImage,
     "--timeout-ms",
-    "600000",
+    "900000",
     ...(process.env.REINS_WRR02_PLATFORM_DOCKER_BINARY === undefined
       ? []
       : ["--docker-binary", process.env.REINS_WRR02_PLATFORM_DOCKER_BINARY]),
@@ -167,4 +167,4 @@ test("prepares, observes and releases one owned native worktree through the real
     evidenceExport: "passed",
     platformReclaim: "passed",
   });
-}, 1_200_000);
+}, 1_800_000);

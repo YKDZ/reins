@@ -34,7 +34,7 @@ reins workspace status -C /absolute/worktree/src
 reins workspace detach -C /absolute/worktree --session-disposition require_none
 ```
 
-Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略；02 尚未提供的显式凭据扩展返回 `credential_binding_unavailable`，不猜测凭据来源。逐 harness 阶段、源码身份验证、runtime 状态和历史不可用事实分别投影；本地历史及失败后续行由后继票接入。
+Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略；02 尚未提供的显式凭据扩展返回 `credential_binding_unavailable`，不猜测凭据来源。附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。逐 harness 阶段、源码身份验证、runtime 状态和历史不可用事实分别投影；本地历史及失败后续行由后继票接入。
 
 附着受理与所有者写入 Manager 的持久状态，关闭 CLI 连接不会释放它。相同所有者及绑定集合复用已经准备的附着；不同所有者或不同意图被拒绝。`detach require_none` 只释放没有会话的环境，保留源码与准备事实。
 

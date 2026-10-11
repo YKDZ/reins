@@ -221,9 +221,9 @@ export async function openWorkspaceRuntime(options: {
   const prepare = async (record: RecordState) => {
     const control = controlDirectory(record);
     const home = join(record.directory, "home");
-    await mkdir(control, { recursive: true, mode: 0o700 });
-    await mkdir(home, { recursive: true, mode: 0o700 });
     try {
+      await mkdir(control, { recursive: true, mode: 0o700 });
+      await mkdir(home, { recursive: true, mode: 0o700 });
       await ensureImage(record.info.environment.image);
       const paths = [
         ...new Set([
@@ -464,8 +464,10 @@ export async function openWorkspaceRuntime(options: {
         preparing.add(directory);
         return { record, created: true };
       });
-      if (created) await prepare(record);
-      else if (record.info.runtime.status !== "preparing") {
+      if (created) {
+        // 受理只等待事实持久化；长时间 Docker 准备通过 status 观察，不占用短连接。
+        void prepare(record).catch(() => {});
+      } else if (record.info.runtime.status !== "preparing") {
         const current = await status(cwd, owner);
         if (current.runtime.status === "failed")
           throw current.runtime.error ?? workspaceFailure("provider_failed");
