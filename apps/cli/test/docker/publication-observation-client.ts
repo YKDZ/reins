@@ -57,6 +57,8 @@ const record = async (name: string, value: unknown) => {
 let control: Awaited<ReturnType<typeof manager.control>> | undefined;
 let sessionId: SessionId | undefined;
 let cli: ReturnType<typeof spawn> | undefined;
+const cliEvents: Array<Record<string, unknown>> = [];
+let cliStderr = "";
 const until = async <T>(
   read: () => Promise<T | undefined> | T | undefined,
 ): Promise<T> => {
@@ -154,15 +156,12 @@ try {
   });
   assert.ok("result" in sent);
   const target = { sessionId: activeSession, turnId: sent.result.turnId };
-  const cliEvents: Array<Record<string, unknown>> = [];
-  let cliStderr = "";
   cli = spawn(
     process.execPath,
     [
       task.cliPath,
       "-C",
       root,
-      "--json",
       "attach",
       encodeTurnHandle(target),
       "--scope",
@@ -182,9 +181,15 @@ try {
     cli!.once("error", reject);
     cli!.once("close", (status) => resolve(status ?? 1));
   });
-  await until(() =>
-    cliEvents.find((event) => event.type === "subscription.established"),
-  );
+  await until(() => {
+    assert.equal(cli!.exitCode, null, JSON.stringify({ cliEvents, cliStderr }));
+    assert.equal(
+      cli!.signalCode,
+      null,
+      JSON.stringify({ cliEvents, cliStderr }),
+    );
+    return cliEvents.find((event) => event.type === "subscription.established");
+  });
   await writeFile(publishGate, "publish now");
   const notification = await until(() =>
     observed.find(
@@ -246,7 +251,6 @@ try {
           task.cliPath,
           "-C",
           root,
-          "--json",
           "wait",
           encodeTurnHandle(target),
           "--completion",
@@ -377,7 +381,15 @@ try {
   await record("explicit-arrival-after-failed-task", { arrived, lastWait });
   await record("result", "passed");
 } catch (error) {
-  await record("failure", error);
+  await record("failure", {
+    error,
+    cli: {
+      exitCode: cli?.exitCode,
+      signalCode: cli?.signalCode,
+      events: cliEvents,
+      stderr: cliStderr,
+    },
+  });
   throw error;
 } finally {
   if (cli && cli.exitCode === null && cli.signalCode === null)
