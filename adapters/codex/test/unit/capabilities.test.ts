@@ -1,10 +1,18 @@
+import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-import type { DiagnosticId, DriverDiagnosticFact } from "@reins/protocol";
+import type {
+  DiagnosticId,
+  DriverDiagnosticFact,
+  SessionId,
+  SessionName,
+  TurnId,
+} from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createCodexCapabilities } from "#/capabilities";
+import { createCodexDriver } from "#/codex-driver";
 import {
   createCodexTransport,
   ProtocolBoundaryError,
@@ -13,7 +21,81 @@ import {
 
 import { createFakeTransport } from "../helpers/fake-transport.ts";
 
+const flush = async (): Promise<void> => {
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  await new Promise((resolve) => setTimeout(resolve, 0));
+};
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((done) => {
+    resolve = done;
+  });
+  return { promise, resolve };
+}
+
 describe("codex capabilities", () => {
+  test("能力查询与 worker 共用冷 HOME 首次 initialize 协调", async () => {
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = `/tmp/reins-codex-capabilities-${randomUUID()}`;
+    const workerFake = createFakeTransport();
+    const capabilitiesFake = createFakeTransport();
+    const workerInitialize = deferred<Record<string, never>>();
+    workerFake.controls.setResponse("initialize", workerInitialize.promise);
+    let workerStarts = 0;
+    let capabilitiesStarts = 0;
+    workerFake.transport.start = () => {
+      workerStarts += 1;
+    };
+    capabilitiesFake.transport.start = () => {
+      capabilitiesStarts += 1;
+    };
+    const sessionId = "capabilities-worker@g1" as SessionId;
+    const worker = createCodexDriver({
+      transportFactory: () => workerFake.transport,
+    })({
+      emit: () => undefined,
+      diagnostics: async () => undefined,
+    });
+    let capabilityPromise: Promise<unknown> | undefined;
+
+    try {
+      worker.start({
+        sessionId,
+        turnId: "t1" as TurnId,
+        sessionName: "capabilities-worker" as SessionName,
+        harness: "codex",
+        message: "caller task",
+        cwd: "/tmp/demo",
+      });
+      await flush();
+      expect(workerStarts).toBe(1);
+
+      capabilityPromise = createCodexCapabilities({
+        transportFactory: () => capabilitiesFake.transport,
+      })();
+      await flush();
+      expect(capabilitiesStarts).toBe(0);
+      expect(capabilitiesFake.controls.requests()).toEqual([]);
+
+      workerInitialize.resolve({});
+      await flush();
+      expect(capabilitiesStarts).toBe(1);
+      await expect(capabilityPromise).resolves.toEqual({
+        harness: "codex",
+        models: [],
+      });
+    } finally {
+      workerInitialize.resolve({});
+      if (capabilityPromise !== undefined)
+        await capabilityPromise.catch(() => {});
+      await worker.terminate(sessionId);
+      if (previousHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
   test("model/list 实时查询并映射为能力矩阵", async () => {
     const { transport, controls } = createFakeTransport();
     controls.setResponse("model/list", {

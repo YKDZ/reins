@@ -16,6 +16,7 @@ import {
 
 import type { UserInput } from "#/generated/v2/UserInput";
 
+import { initializeCodexTransport } from "./initialization.ts";
 import {
   derivePermissionOptions,
   mapNotification,
@@ -249,7 +250,6 @@ export function createCodexDriver(deps: {
             ? { captureHarnessStderr: true }
             : {}),
         });
-        transport.start();
         turnOverrides = {
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.reasoning === undefined ? {} : { effort: spec.reasoning }),
@@ -265,12 +265,11 @@ export function createCodexDriver(deps: {
         void (async () => {
           let startingTurn = false;
           try {
-            await transport?.request("initialize", {
-              clientInfo: { name: "reins", title: null, version: "0.0.0" },
-              capabilities: null,
-            });
-            transport?.notify("initialized", {});
-            const thread = await transport?.request("thread/start", {
+            const startingTransport = transport;
+            if (startingTransport === null)
+              throw new Error("Codex transport is unavailable");
+            await initializeCodexTransport(startingTransport);
+            const thread = await startingTransport.request("thread/start", {
               ephemeral: true,
               cwd: spec.cwd,
               ...(spec.authorizationMode === "allowAll"
