@@ -296,7 +296,7 @@ const env = {
   REINS_WORKSPACE_MANAGER_STATE_DIR: join(base, "manager-state"),
   REINS_WORKSPACE_RESOURCE_PREFIX: "reins-wrr24-runtime",
 };
-// 首个只读请求启动正式 Manager；固定提交由共享客户端经公开交接动作投递。
+// 首个只读请求启动正式 Manager；CLI 和共享客户端连续投递两次固定提交。
 const probe = join(base, "probe");
 await mkdir(join(probe, ".reins"), { recursive: true });
 await requireCommand("git", ["init", "--quiet"], probe);
@@ -325,6 +325,7 @@ try {
         socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
         image,
         runtimeImage,
+        cliPath: join(installed, "dist/reins.js"),
       }),
     ],
     base,

@@ -6,6 +6,7 @@ import {
   mkdir,
   readFile,
   readlink,
+  readdir,
   rm,
   stat,
   symlink,
@@ -30,6 +31,7 @@ const task = JSON.parse(process.argv[2]!) as {
   socket: string;
   image: string;
   runtimeImage: string;
+  cliPath: string;
 };
 const source = join(task.base, "caller-source");
 await mkdir(join(source, "src"), { recursive: true });
@@ -85,10 +87,6 @@ git(
   "second",
 );
 const nextMaterial = await captureFixedCommit(source, git("rev-parse", "HEAD"));
-await rm(source, { recursive: true });
-// 调用侧相同路径留下假内容，目标 worker 必须读取新物化目录。
-await mkdir(join(source, "src"), { recursive: true });
-await writeFile(join(source, "src/input.txt"), "caller path decoy\n");
 const connect = async (consumer: string) => {
   const manager = createWorkspaceClient(
     await createUnixSocketClient<WorkspaceMessage>(task.socket),
@@ -114,12 +112,32 @@ const record = async (name: string, value: unknown) => {
   );
 };
 try {
-  const receive = async (selected = material) => {
-    const handoff = await manager.request(
-      "workspace.handoff",
-      { material: selected, subdirectory: "src", bindings: ["code"] },
-      120_000,
-    );
+  const receive = async (selected = material, viaCli = false) => {
+    const handoff = viaCli
+      ? (JSON.parse(
+          execFileSync(
+            process.execPath,
+            [
+              task.cliPath,
+              "workspace",
+              "handoff",
+              "--repository",
+              source,
+              "--commit",
+              selected.commit,
+              "--subdirectory",
+              "src",
+              "--binding",
+              "code",
+            ],
+            { encoding: "utf8" },
+          ),
+        ) as Awaited<ReturnType<typeof manager.request<"workspace.handoff">>>)
+      : await manager.request(
+          "workspace.handoff",
+          { material: selected, subdirectory: "src", bindings: ["code"] },
+          120_000,
+        );
     incoming.push(handoff.workspace.cwd);
     await record("handoff", handoff);
     for (;;) {
@@ -138,7 +156,12 @@ try {
     }
     return handoff;
   };
-  const first = await receive();
+  const first = await receive(material, true);
+  await rm(source, { recursive: true });
+  // 调用侧相同路径留下假内容，目标 worker 必须读取新物化目录。
+  await mkdir(join(source, "src"), { recursive: true });
+  await writeFile(join(source, "src/input.txt"), "caller path decoy\n");
+
   assert.notEqual(first.workspace.cwd, join(source, "src"));
   assert.equal(
     execFileSync("git", ["-C", first.workspace.cwd, "rev-parse", "HEAD"], {
@@ -280,6 +303,9 @@ try {
     indexBefore,
     head: firstCommit,
   });
+  const beforeRejected = await readdir(
+    join(task.base, "manager-state/incoming"),
+  );
   for (const invalid of [
     { ...material, packBase64: "" },
     { ...material, packBase64: Buffer.from("damaged pack").toString("base64") },
@@ -319,6 +345,10 @@ try {
       120_000,
     ),
     { code: "source_invalid" },
+  );
+  assert.deepEqual(
+    await readdir(join(task.base, "manager-state/incoming")),
+    beforeRejected,
   );
   await record("rejected-material", {
     empty: true,
