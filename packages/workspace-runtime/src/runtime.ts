@@ -32,6 +32,7 @@ import {
   type TurnTarget,
   type TurnCompleted,
   type SessionInfo,
+  killResultSchema,
   sessionIdSchema,
   turnIdSchema,
   turnCompletedSchema,
@@ -90,6 +91,7 @@ type PendingSpawn = {
   sessionName: string;
   cwd: string;
   identity: NativeIdentity;
+  daemonGeneration?: DaemonGeneration;
 };
 type RecordState = {
   owner: ConsumerContext;
@@ -108,7 +110,7 @@ type RecordState = {
   completed?: TurnCompleted[];
   sessionCwds?: SessionCwd[];
   pendingSpawns?: Record<string, PendingSpawn>;
-  sessionCwdConflict?: boolean;
+  sessionCwdConflicts?: string[];
   commands?: Record<
     string,
     { fingerprint: string; pending: boolean; target?: TurnTarget }
@@ -383,6 +385,7 @@ export async function openWorkspaceRuntime(options: {
   ): Promise<WorkspaceHistoryHealth> =>
     (await readWorkspaceHistory(record.directory, record.info.history)).health;
   const clients = new Map<string, ReinsClient>();
+  const clientGenerations = new WeakMap<ReinsClient, DaemonGeneration>();
   const routes = new Map<string, Promise<TransportServer<ProtocolMessage>>>();
   // 保留完整 UUID 身份，用紧凑目录避开 Unix socket 的路径长度上限。
   const controlDirectory = (record: RecordState) =>
@@ -443,7 +446,26 @@ export async function openWorkspaceRuntime(options: {
       matching.find(active) ?? (includeReleased ? matching.at(-1) : undefined)
     );
   };
-  const reconciledSessions = new Set<string>();
+  const markSessionCwdConflict = (record: RecordState, sessionId: string) => {
+    record.sessionCwdConflicts ??= [];
+    if (record.sessionCwdConflicts.includes(sessionId)) return false;
+    record.sessionCwdConflicts.push(sessionId);
+    return true;
+  };
+  const clearSessionCwd = (record: RecordState, sessionId: string) => {
+    const beforeCwds = record.sessionCwds?.length ?? 0;
+    const beforeConflicts = record.sessionCwdConflicts?.length ?? 0;
+    record.sessionCwds = (record.sessionCwds ?? []).filter(
+      (item) => item.sessionId !== sessionId,
+    );
+    record.sessionCwdConflicts = (record.sessionCwdConflicts ?? []).filter(
+      (item) => item !== sessionId,
+    );
+    return (
+      beforeCwds !== record.sessionCwds.length ||
+      beforeConflicts !== record.sessionCwdConflicts.length
+    );
+  };
   const saveSessionCwd = (
     record: RecordState,
     sessionId: string,
@@ -459,8 +481,7 @@ export async function openWorkspaceRuntime(options: {
         existing.dev !== saved.dev ||
         existing.ino !== saved.ino
       ) {
-        record.sessionCwdConflict = true;
-        return true;
+        return markSessionCwdConflict(record, sessionId);
       }
       return false;
     }
@@ -468,59 +489,78 @@ export async function openWorkspaceRuntime(options: {
     return true;
   };
   const reconcileSessionCwds = async (record: RecordState) => {
-    if (reconciledSessions.has(record.directory)) return;
     if (
       (record.sessionCwds?.length ?? 0) === 0 &&
       Object.keys(record.pendingSpawns ?? {}).length === 0
-    ) {
-      reconciledSessions.add(record.directory);
+    )
       return;
-    }
     const client = await connect(record);
     const listed = await client.request("list", {});
     if ("error" in listed) throw listed.error;
-    const live = listed.result.filter((session) => session.state !== "killed");
+    const sessions = listed.result;
+    const daemonGeneration = clientGenerations.get(client);
     let changed = false;
     record.sessionCwds = (record.sessionCwds ?? []).filter((saved) => {
-      const current = live.find(
+      const current = sessions.find(
         (session) => session.sessionId === saved.sessionId,
       );
       if (current === undefined) {
-        changed = true;
+        return true;
+      }
+      if (current.state === "killed") {
+        changed = clearSessionCwd(record, saved.sessionId) || changed;
         return false;
       }
       if (current.cwd !== saved.path) {
-        if (record.sessionCwdConflict !== true) changed = true;
-        record.sessionCwdConflict = true;
+        changed = markSessionCwdConflict(record, saved.sessionId) || changed;
       }
       return true;
     });
+    for (const sessionId of Array.from(record.sessionCwdConflicts ?? [])) {
+      const current = sessions.find(
+        (session) => session.sessionId === sessionId,
+      );
+      if (current?.state === "killed")
+        changed = clearSessionCwd(record, sessionId) || changed;
+    }
     for (const [requestId, pending] of Object.entries(
       record.pendingSpawns ?? {},
     )) {
-      const current = live.find(
+      if (
+        pending.daemonGeneration === undefined ||
+        pending.daemonGeneration !== daemonGeneration
+      )
+        continue;
+      const current = sessions.find(
         (session) =>
           session.sessionName === pending.sessionName &&
           session.cwd === pending.cwd,
       );
       if (current === undefined) continue;
-      changed =
-        saveSessionCwd(record, current.sessionId, pending.identity) || changed;
-      delete record.pendingSpawns![requestId];
-      changed = true;
+      if (current.state === "killed") {
+        delete record.pendingSpawns![requestId];
+        changed = true;
+      } else {
+        changed =
+          saveSessionCwd(record, current.sessionId, pending.identity) ||
+          changed;
+        delete record.pendingSpawns![requestId];
+        changed = true;
+      }
     }
     if (changed) await persist(record);
-    if (Object.keys(record.pendingSpawns ?? {}).length === 0)
-      reconciledSessions.add(record.directory);
   };
   const trackSessionEvent = async (
     record: RecordState,
     event: import("@reins/protocol").DomainEvent,
+    daemonGeneration: DaemonGeneration | undefined,
   ) => {
     let changed = false;
-    if (event.type === "session.created") {
+    if (event.type === "session.created" && daemonGeneration !== undefined) {
       const candidates = Object.entries(record.pendingSpawns ?? {}).filter(
-        ([, pending]) => pending.sessionName === event.sessionName,
+        ([, pending]) =>
+          pending.daemonGeneration === daemonGeneration &&
+          pending.sessionName === event.sessionName,
       );
       const match =
         candidates.find(([, pending]) => pending.cwd === event.cwd) ??
@@ -529,19 +569,17 @@ export async function openWorkspaceRuntime(options: {
         const [requestId, pending] = match;
         if (pending.cwd === event.cwd) {
           changed = saveSessionCwd(record, event.sessionId, pending.identity);
-        } else if (record.sessionCwdConflict !== true) {
-          record.sessionCwdConflict = true;
-          changed = true;
+        } else {
+          changed =
+            saveSessionCwd(record, event.sessionId, pending.identity) ||
+            changed;
+          changed = markSessionCwdConflict(record, event.sessionId) || changed;
         }
         delete record.pendingSpawns![requestId];
         changed = true;
       }
     } else if (event.type === "session.killed") {
-      const sessionCwds = record.sessionCwds ?? [];
-      record.sessionCwds = sessionCwds.filter(
-        (item) => item.sessionId !== event.sessionId,
-      );
-      changed = sessionCwds.length !== record.sessionCwds.length;
+      changed = clearSessionCwd(record, event.sessionId);
     }
     if (changed) await persist(record);
   };
@@ -567,8 +605,16 @@ export async function openWorkspaceRuntime(options: {
     record: RecordState,
   ): Promise<NativeViewLoss | undefined> => {
     await reconcileSessionCwds(record);
-    if (record.sessionCwdConflict === true) return { reason: "unreachable" };
-    for (const saved of [...record.identities, ...(record.sessionCwds ?? [])]) {
+    if ((record.sessionCwdConflicts?.length ?? 0) !== 0)
+      return { reason: "unreachable" };
+    const pendingIdentities = Object.values(record.pendingSpawns ?? {}).map(
+      (pending) => pending.identity,
+    );
+    for (const saved of [
+      ...record.identities,
+      ...(record.sessionCwds ?? []),
+      ...pendingIdentities,
+    ]) {
       let current: NativeIdentity;
       try {
         current = await identity(saved.path);
@@ -686,6 +732,7 @@ export async function openWorkspaceRuntime(options: {
       client.close();
       throw workspaceFailure("workspace_detaching");
     }
+    clientGenerations.set(client, response.result.daemonGeneration);
     clients.set(record.directory, client);
     client.onClosed(() => clients.delete(record.directory));
     return client;
@@ -768,6 +815,9 @@ export async function openWorkspaceRuntime(options: {
         const deliveries = new Set<Promise<void>>();
         server.onConnection((peer) => {
           const requests = new Map<string, string>();
+          const methods = new Map<string, ProtocolMethod>();
+          const routeConnectionId = randomUUID();
+          let generation: DaemonGeneration | undefined;
           const native = createUnixSocketClient<ProtocolMessage>(
             join(controlDirectory(record), "r.sock"),
           );
@@ -782,7 +832,6 @@ export async function openWorkspaceRuntime(options: {
               }
               nativeConnections.add(connection);
               let outgoing = Promise.resolve();
-              let generation: DaemonGeneration | undefined;
               connection.onEvent((event) => {
                 // 保存 ACK 的异步 I/O 不得改变同一原生连接的帧顺序。
                 outgoing = outgoing
@@ -818,7 +867,7 @@ export async function openWorkspaceRuntime(options: {
                           eventId,
                           event: fact,
                         });
-                        await trackSessionEvent(record, fact);
+                        await trackSessionEvent(record, fact, daemonGeneration);
                       });
                     }
                     const key = response.success
@@ -827,9 +876,35 @@ export async function openWorkspaceRuntime(options: {
                     const responseId = response.success
                       ? response.output.requestId
                       : undefined;
-                    const pendingSpawn = response.success
-                      ? record.pendingSpawns?.[responseId!]
-                      : undefined;
+                    const responseSpawnKey =
+                      responseId === undefined
+                        ? undefined
+                        : `${routeConnectionId}:${responseId}`;
+                    const responseMethod =
+                      responseId === undefined
+                        ? undefined
+                        : methods.get(responseId);
+                    if (responseId !== undefined) methods.delete(responseId);
+                    if (
+                      responseMethod === "kill" &&
+                      response.success &&
+                      "result" in response.output
+                    ) {
+                      const killed = v.safeParse(
+                        killResultSchema,
+                        response.output.result,
+                      );
+                      if (killed.success && killed.output.status === "killed") {
+                        await exclusive(async () => {
+                          if (clearSessionCwd(record, killed.output.sessionId))
+                            await persist(record);
+                        });
+                      }
+                    }
+                    const pendingSpawn =
+                      response.success && responseSpawnKey !== undefined
+                        ? record.pendingSpawns?.[responseSpawnKey]
+                        : undefined;
                     if (key !== undefined || pendingSpawn !== undefined) {
                       // ACK 只由原 daemon 产生；先保存其已知结果，再原样交付。
                       await exclusive(async () => {
@@ -852,9 +927,9 @@ export async function openWorkspaceRuntime(options: {
                           }
                         }
                         const spawn =
-                          responseId === undefined
+                          responseSpawnKey === undefined
                             ? undefined
-                            : record.pendingSpawns?.[responseId];
+                            : record.pendingSpawns?.[responseSpawnKey];
                         if (spawn !== undefined) {
                           if (response.success && "result" in response.output) {
                             const ack = v.safeParse(
@@ -869,15 +944,23 @@ export async function openWorkspaceRuntime(options: {
                                   spawn.identity,
                                 );
                               } else {
-                                record.sessionCwdConflict = true;
+                                saveSessionCwd(
+                                  record,
+                                  ack.output.sessionId,
+                                  spawn.identity,
+                                );
+                                markSessionCwdConflict(
+                                  record,
+                                  ack.output.sessionId,
+                                );
                               }
-                              delete record.pendingSpawns![responseId!];
+                              delete record.pendingSpawns![responseSpawnKey!];
                             }
                           } else if (
                             response.success &&
                             "error" in response.output
                           ) {
-                            delete record.pendingSpawns![responseId!];
+                            delete record.pendingSpawns![responseSpawnKey!];
                           }
                         }
                         retain(record);
@@ -961,9 +1044,12 @@ export async function openWorkspaceRuntime(options: {
                     request.params,
                   );
                   if (candidate !== undefined) {
+                    if (generation !== undefined)
+                      candidate.daemonGeneration = generation;
                     record.pendingSpawns ??= {};
-                    record.pendingSpawns[request.requestId] = candidate;
-                    reconciledSessions.delete(record.directory);
+                    record.pendingSpawns[
+                      `${routeConnectionId}:${request.requestId}`
+                    ] = candidate;
                     changed = true;
                   }
                 }
@@ -982,6 +1068,8 @@ export async function openWorkspaceRuntime(options: {
                 }
                 if (changed) await persist(record);
               }
+              if (request !== undefined)
+                methods.set(request.requestId, request.method);
               connection.send(event.message);
             };
             // 只串行化准入、落盘和写帧；原生回合、只读请求、kill 与订阅控制不占锁。
@@ -1138,7 +1226,14 @@ export async function openWorkspaceRuntime(options: {
     if (!container.State.Running) return undefined;
     const watchedIdentities = [
       ...record.identities,
-      ...(record.sessionCwds ?? []),
+      ...(record.sessionCwds ?? []).map(({ path, dev, ino }) => ({
+        path,
+        dev,
+        ino,
+      })),
+      ...Object.values(record.pendingSpawns ?? {}).map(
+        (pending) => pending.identity,
+      ),
     ];
     // 在原容器自己的 namespace 检查附着目录与活跃会话 cwd；provider 调用失败不冒充分裂。
     const actual = JSON.parse(

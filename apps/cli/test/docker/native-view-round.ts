@@ -255,6 +255,7 @@ await requireCommand(
 );
 await mkdir(join(worktree, ".reins"));
 await mkdir(join(worktree, "src"));
+if (fault === "session-cwd-replace") await mkdir(join(worktree, "other"));
 const configuration = {
   environments: [{ provider: "docker", image }],
   runtimes: [{ harness: "codex", version: "0.149.0", image: runtimeImage }],
@@ -346,14 +347,29 @@ try {
     relativeFile: "relative.txt",
     intervalMs: 25,
   });
-  const spawned = await control([
+  const originalSpawnArgs = [
     "spawn",
     "codex",
     message,
     "--name",
     "original-writer",
-  ]);
-  assert.equal(spawned.status, 0, JSON.stringify(spawned));
+  ];
+  let secondarySpawned: Awaited<ReturnType<typeof control>> | undefined;
+  let spawned: Awaited<ReturnType<typeof control>>;
+  if (fault === "session-cwd-replace") {
+    [spawned, secondarySpawned] = await Promise.all([
+      control(originalSpawnArgs),
+      control(
+        ["spawn", "codex", message, "--name", "secondary-writer"],
+        join(worktree, "other"),
+      ),
+    ]);
+    assert.equal(spawned.status, 0, JSON.stringify(spawned));
+    assert.equal(secondarySpawned.status, 0, JSON.stringify(secondarySpawned));
+  } else {
+    spawned = await control(originalSpawnArgs);
+    assert.equal(spawned.status, 0, JSON.stringify(spawned));
+  }
   let writer: Record<string, unknown>;
   for (;;) {
     try {
@@ -363,6 +379,19 @@ try {
       break;
     } catch {
       await delay(25);
+    }
+  }
+  let secondaryWriter: Record<string, unknown> | undefined;
+  if (secondarySpawned !== undefined) {
+    for (;;) {
+      try {
+        secondaryWriter = JSON.parse(
+          await readFile(join(worktree, "other", "writer.json"), "utf8"),
+        );
+        break;
+      } catch {
+        await delay(25);
+      }
     }
   }
   const containers = (
@@ -383,7 +412,7 @@ try {
     "{{.Id}}",
     containers[0]!,
   ]);
-  const processState = async (attempts = 0) =>
+  const processState = async (attempts = 0, pid = writer.pid) =>
     JSON.parse(
       await requireCommand("docker", [
         "exec",
@@ -393,7 +422,7 @@ try {
         "node",
         "-e",
         "const fs=require('node:fs');const read=()=>{try{const s=fs.readFileSync('/proc/'+process.argv[1]+'/stat','utf8');return s.slice(s.lastIndexOf(')')+2).split(' ')[0]}catch(e){if(e.code!=='ENOENT')throw e;return 'absent'}};(async()=>{let state=read();for(let i=0;i<Number(process.argv[2])&&!['absent','Z','X'].includes(state);i++){await new Promise(r=>setTimeout(r,250));state=read()}console.log(JSON.stringify({state}))})().catch(e=>{console.error(e);process.exitCode=1})",
-        String(writer.pid),
+        String(pid),
         String(attempts),
       ]),
     ) as { state: string };
@@ -414,6 +443,45 @@ try {
     await delay(150);
     assert.ok((await held.stat()).size > before.held.size);
     assert.ok((await relative.stat()).size > before.relative.size);
+    if (secondarySpawned !== undefined) {
+      const secondaryProcess = await processState(0, secondaryWriter!.pid);
+      assert.ok(!["absent", "Z", "X"].includes(secondaryProcess.state));
+      const killed = await control([
+        "kill",
+        String(secondarySpawned.value.sessionId),
+      ]);
+      assert.equal(killed.status, 0, JSON.stringify(killed));
+      const stoppedSecondary = await processState(40, secondaryWriter!.pid);
+      assert.ok(["absent", "Z", "X"].includes(stoppedSecondary.state));
+      await rm(join(worktree, "other"), { recursive: true });
+      const afterKill = await cli(["status", "-C", join(worktree, "src")]);
+      assert.equal(afterKill.status, 0, JSON.stringify(afterKill));
+      assert.equal(
+        (afterKill.value.runtime as { status: string }).status,
+        "ready",
+      );
+      const afterKillGrowth = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      await delay(150);
+      assert.ok((await held.stat()).size > afterKillGrowth.held);
+      assert.ok((await relative.stat()).size > afterKillGrowth.relative);
+      await record("secondary-session-kill-and-cwd-removal", {
+        sessionId: secondarySpawned.value.sessionId,
+        writer: secondaryWriter,
+        processBeforeKill: secondaryProcess,
+        kill: killed.value,
+        processAfterKill: stoppedSecondary,
+        survivingWriter: {
+          pid: writer.pid,
+          cwd: writer.cwd,
+          heldGrowth: (await held.stat()).size - afterKillGrowth.held,
+          relativeGrowth:
+            (await relative.stat()).size - afterKillGrowth.relative,
+        },
+      });
+    }
     if (fault === "remove") {
       const beforeDrift = {
         held: (await held.stat()).size,
