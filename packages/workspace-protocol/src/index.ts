@@ -78,10 +78,13 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
   detail: v.optional(v.string()),
   availableBindings: v.optional(v.array(v.string())),
 });
-export const nativeViewLossSchema = v.strictObject({
-  reason: v.literal("moved"),
-  currentRoot: v.string(),
-});
+export const nativeViewLossSchema = v.variant("reason", [
+  v.strictObject({
+    reason: v.literal("moved"),
+    currentRoot: v.string(),
+  }),
+  v.strictObject({ reason: v.literal("replaced") }),
+]);
 export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;
 export const workspaceErrorSchema = v.union([
   ordinaryWorkspaceErrorSchema,

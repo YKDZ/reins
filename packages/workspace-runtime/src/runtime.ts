@@ -218,16 +218,16 @@ export async function openWorkspaceRuntime(options: {
     const record = await locate(tree);
     if (record === undefined) throw workspaceFailure("attachment_not_found");
     if (record.owner !== owner) throw workspaceFailure("attachment_owned");
+    if (record.info.source.error?.code === "native_view_lost") {
+      if (!allowInvalid) throw record.info.source.error;
+      return { record, tree };
+    }
     if (record.tree.root !== tree.root) {
       const failure = await invalidate(record, {
         reason: "moved",
         currentRoot: tree.root,
       });
       if (!allowInvalid) throw failure;
-      return { record, tree };
-    }
-    if (record.info.source.error?.code === "native_view_lost") {
-      if (!allowInvalid) throw record.info.source.error;
       return { record, tree };
     }
     for (const saved of record.identities) {
@@ -239,8 +239,14 @@ export async function openWorkspaceRuntime(options: {
           throw workspaceFailure("native_view_mismatch");
         throw error;
       }
-      if (current.dev !== saved.dev || current.ino !== saved.ino)
+      if (current.dev !== saved.dev || current.ino !== saved.ino) {
+        if (saved.path === record.tree.root) {
+          const failure = await invalidate(record, { reason: "replaced" });
+          if (!allowInvalid) throw failure;
+          return { record, tree };
+        }
         throw workspaceFailure("native_view_mismatch");
+      }
     }
     return { record, tree };
   };

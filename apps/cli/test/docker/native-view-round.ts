@@ -8,6 +8,7 @@ import {
   readFile,
   rename,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { join } from "node:path";
@@ -15,9 +16,15 @@ import { setTimeout as delay } from "node:timers/promises";
 const base = process.cwd();
 const output = join(base, "evidence");
 await mkdir(output, { recursive: true });
-const { image: nodeImage, consumerSha256 } = JSON.parse(
-  await readFile(join(base, "base-image.json"), "utf8"),
-) as { image: string; consumerSha256: string };
+const {
+  image: nodeImage,
+  consumerSha256,
+  fault = "move",
+} = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
+  image: string;
+  consumerSha256: string;
+  fault?: "move" | "replace";
+};
 async function command(
   binary: string,
   args: string[],
@@ -98,7 +105,7 @@ await writeFile(
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
+  '#!/usr/bin/env node\nconsole.log("codex-cli 0.149.0");\n',
   { mode: 0o755 },
 );
 // 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
@@ -151,15 +158,11 @@ await requireCommand(process.execPath, [
   "list",
   "--help",
 ]);
-const preflight = join(base, "fixture-preflight");
-await mkdir(join(preflight, "src"), { recursive: true });
-await mkdir(join(preflight, ".reins"));
-await writeFile(join(preflight, ".reins", "allow-version"), "fixture check\n");
 assert.equal(
   await requireCommand(
     join(payload, "opt", "reins", "harnesses", "codex", "bin", "codex"),
     ["--version"],
-    join(preflight, "src"),
+    base,
   ),
   "codex-cli 0.149.0",
 );
@@ -317,10 +320,6 @@ const control = async (args: string[], cwd = join(worktree, "src")) => {
   };
 };
 try {
-  await writeFile(
-    join(worktree, ".reins", "allow-version"),
-    "caller permits local version check\n",
-  );
   const attached = await cli([
     "attach",
     "-C",
@@ -402,12 +401,50 @@ try {
     await delay(150);
     assert.ok((await held.stat()).size > before.held.size);
     assert.ok((await relative.stat()).size > before.relative.size);
+    const nativeIdentity = async (path: string) => {
+      const value = await stat(path, { bigint: true });
+      return { dev: String(value.dev), ino: String(value.ino) };
+    };
+    const originalRoot = await nativeIdentity(worktree);
+    const originalHead = await requireCommand(
+      "git",
+      ["rev-parse", "HEAD"],
+      worktree,
+    );
     const moved = join(base, "moved-worktree");
     await rename(worktree, moved);
+    const movedRoot = await nativeIdentity(moved);
+    assert.deepEqual(movedRoot, originalRoot);
+    let replacementRoot: { dev: string; ino: string } | undefined;
+    if (fault === "replace") {
+      await requireCommand("git", ["worktree", "repair", moved], git);
+      await requireCommand(
+        "git",
+        ["worktree", "add", "--quiet", "--detach", worktree, "HEAD"],
+        git,
+      );
+      await mkdir(join(worktree, "src"));
+      await mkdir(join(worktree, ".reins"));
+      await writeFile(
+        join(worktree, ".reins", "workspace.json"),
+        JSON.stringify(configuration),
+      );
+      replacementRoot = await nativeIdentity(worktree);
+      assert.notDeepEqual(replacementRoot, originalRoot);
+      assert.equal(
+        await requireCommand("git", ["rev-parse", "HEAD"], worktree),
+        originalHead,
+      );
+    }
+    const target = fault === "replace" ? worktree : moved;
+    const expectedLoss =
+      fault === "replace"
+        ? { reason: "replaced" }
+        : { reason: "moved", currentRoot: moved };
     const rejected = await control(
       [
         "-C",
-        join(moved, "src"),
+        join(target, "src"),
         "spawn",
         "codex",
         message,
@@ -439,7 +476,11 @@ try {
     const stable =
       stoppedSizes.held === (await held.stat()).size &&
       stoppedSizes.relative === (await relative.stat()).size;
-    await record("moved-original-writer", {
+    await record(`${fault}-original-writer`, {
+      originalRoot,
+      movedRoot,
+      replacementRoot,
+      originalHead,
       writer,
       originalContainer,
       initialProcess,
@@ -465,11 +506,8 @@ try {
       "Original held-FD and cwd-relative writer must stop after native view loss is detected",
     );
     assert.equal(rejected.value.code, "native_view_lost");
-    assert.deepEqual(rejected.value.nativeView, {
-      reason: "moved",
-      currentRoot: moved,
-    });
-    const lost = await cli(["status", "-C", join(moved, "src")]);
+    assert.deepEqual(rejected.value.nativeView, expectedLoss);
+    const lost = await cli(["status", "-C", join(target, "src")]);
     assert.equal(lost.status, 0);
     const source = lost.value.source as {
       status: string;
@@ -478,10 +516,7 @@ try {
     };
     assert.equal(source.status, "failed");
     assert.equal(source.error.code, "native_view_lost");
-    assert.deepEqual(source.error.nativeView, {
-      reason: "moved",
-      currentRoot: moved,
-    });
+    assert.deepEqual(source.error.nativeView, expectedLoss);
     assert.deepEqual(source.termination, {
       status: "stopped",
       via: "harness",
@@ -490,7 +525,7 @@ try {
     const terminal = await control(
       [
         "-C",
-        join(moved, "src"),
+        join(target, "src"),
         "wait",
         String(spawned.value.turnHandle),
         "--completion",
@@ -505,6 +540,16 @@ try {
       (terminal.value.completed as { stopReason: string }[])[0]!.stopReason,
       "killed",
     );
+    if (fault === "replace") {
+      for (const name of ["held.txt", "relative.txt", "writer.json"])
+        await assert.rejects(readFile(join(worktree, "src", name)), {
+          code: "ENOENT",
+        });
+      assert.equal(
+        await readFile(join(worktree, "tracked.txt"), "utf8"),
+        "native worktree\n",
+      );
+    }
     await record("original-stop-facts", { source, terminal: terminal.value });
   } finally {
     await held.close();
@@ -512,8 +557,9 @@ try {
   }
   await record("result", "passed");
 } finally {
-  await record(
-    "fixtureImageRemoval",
-    await command("docker", ["image", "rm", imageTag, materialTag]),
-  );
+  // 保留本票同一 Engine 的 build cache；最终由公开 platform destroy 回收。
+  await record("fixtureImageCleanupOwner", {
+    owner: "test-platform",
+    images: [image, runtimeImage],
+  });
 }

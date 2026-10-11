@@ -8,7 +8,8 @@ import { expect, test } from "vitest";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
-test("stops the original writer after its native worktree moves", async () => {
+const fault = process.env.REINS_WRR09_FAULT ?? "move";
+test(`stops the original writer after native view loss: ${fault}`, async () => {
   const directory = join(
     repository,
     ".artifacts",
@@ -87,7 +88,7 @@ test("stops the original writer after its native worktree moves", async () => {
   fingerprints.push({ name: "consumer.tar", sha256: consumerSha256 });
   await writeFile(
     join(input, "base-image.json"),
-    JSON.stringify({ image: nodeImage, consumerSha256 }),
+    JSON.stringify({ image: nodeImage, consumerSha256, fault }),
   );
   fingerprints.push({
     name: "base-image.json",
