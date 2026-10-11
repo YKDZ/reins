@@ -90,7 +90,7 @@ await writeFile(
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
+  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);const version=path.resolve("../.reins/fixture-version");console.log("codex-cli "+(fs.existsSync(version)?fs.readFileSync(version,"utf8").trim():"0.149.0"))}},25);\n',
   { mode: 0o755 },
 );
 // 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
@@ -268,7 +268,25 @@ const env = {
   REINS_WORKSPACE_MANAGER_SOCKET: join(base, "manager.sock"),
   REINS_WORKSPACE_MANAGER_STATE_DIR: managerState,
   REINS_WORKSPACE_RESOURCE_PREFIX: "reins-wrr08-runtime",
+  REINS_CODEX_AUTH_BINDINGS: JSON.stringify({
+    login: join(base, "selected-auth.json"),
+    broken: join(base, "broken-auth.json"),
+  }),
 };
+await writeFile(
+  join(base, "selected-auth.json"),
+  JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      id_token: "fixture-id",
+      access_token: "fixture-selected-access",
+      refresh_token: "fixture-refresh",
+      account_id: "fixture-account",
+    },
+    unselected: "must not be projected",
+  }),
+);
+await writeFile(join(base, "broken-auth.json"), "not a login document");
 const cli = async (args: string[], overrides: NodeJS.ProcessEnv = {}) => {
   const result = await command(
     process.execPath,
@@ -344,6 +362,16 @@ try {
     "label=reins.workspace.managed=true",
   ]);
   assert.match(container, /^[a-f0-9]{12}$/u);
+  assert.equal(
+    await requireCommand("docker", [
+      "exec",
+      container,
+      "node",
+      "-e",
+      "const fs=require('node:fs');if(fs.existsSync(process.env.CODEX_HOME+'/auth.json')||fs.existsSync(process.env.CODEX_HOME+'/AGENTS.md'))process.exit(1);console.log('omitted credential stayed absent')",
+    ]),
+    "omitted credential stayed absent",
+  );
   const message = JSON.stringify({ path: "target.txt" });
   const capabilities = await control(["capabilities"]);
   assert.equal(capabilities.status, 0, JSON.stringify(capabilities));
@@ -490,6 +518,123 @@ try {
   );
   await record("shared-client", sdk);
   assert.equal(sdk.status, 0, JSON.stringify(sdk));
+  // 同一真实 provider 接缝覆盖支持包的最小投影与反例，厂商在线调用另行实测。
+  for (const scenario of [
+    {
+      name: "selected",
+      credential: "login",
+      version: "0.162.0",
+      expected: "ready",
+    },
+    {
+      name: "unknown",
+      credential: "not-configured",
+      version: "0.162.0",
+      expected: "credential_binding_unavailable",
+    },
+    {
+      name: "malformed",
+      credential: "broken",
+      version: "0.162.0",
+      expected: "credential_binding_unavailable",
+    },
+    {
+      name: "wrong-material",
+      credential: "login",
+      version: "0.161.0",
+      expected: "runtime_entry_invalid",
+    },
+  ]) {
+    const root = join(base, `auth-${scenario.name}`),
+      cwd = join(root, "src");
+    await mkdir(cwd, { recursive: true });
+    await requireCommand("git", ["init", "--quiet"], root);
+    await mkdir(join(root, ".reins"));
+    await writeFile(
+      join(root, ".reins", "workspace.json"),
+      JSON.stringify({
+        environments: configuration.environments,
+        runtimes: [
+          { harness: "codex", version: "0.162.0", image: runtimeImage },
+        ],
+        bindings: [
+          {
+            ref: "code",
+            harness: "codex",
+            credentialBindingRef: scenario.credential,
+          },
+        ],
+      }),
+    );
+    await writeFile(join(root, ".reins", "allow-version"), "ready");
+    await writeFile(join(root, ".reins", "fixture-version"), scenario.version);
+    assert.equal(
+      (await cli(["attach", "-C", cwd, "--binding", "code"])).status,
+      0,
+    );
+    for (;;) {
+      const observed = await cli(["status", "-C", cwd]);
+      const runtime = observed.value.runtime as {
+        status: string;
+        error?: { code: string };
+      };
+      if (runtime.status === "preparing") {
+        await delay(100);
+        continue;
+      }
+      if (scenario.expected === "ready") {
+        assert.equal(runtime.status, "ready", JSON.stringify(observed));
+        const selectedContainer = await requireCommand("docker", [
+          "ps",
+          "-q",
+          "--filter",
+          `label=reins.workspace.managed=true`,
+        ]);
+        const candidates = selectedContainer
+          .split("\n")
+          .filter((id) => id !== container);
+        assert.equal(candidates.length, 1);
+        assert.equal(
+          await requireCommand("docker", [
+            "exec",
+            candidates[0]!,
+            "node",
+            "-e",
+            "const fs=require('node:fs'),path=process.env.CODEX_HOME,login=JSON.parse(fs.readFileSync(path+'/auth.json','utf8'));if(login.tokens.access_token!=='fixture-selected-access'||'unselected' in login||JSON.stringify(fs.readdirSync(path))!=='[\"auth.json\"]'||(fs.statSync(path+'/auth.json').mode&511)!==384)process.exit(1);const probe=process.env.HOME+'/write-probe';fs.writeFileSync(probe,'ok');fs.unlinkSync(probe);console.log('selected login only; private home writable')",
+          ]),
+          "selected login only; private home writable",
+        );
+      } else {
+        assert.equal(runtime.status, "failed");
+        assert.equal(
+          runtime.error?.code,
+          scenario.expected,
+          JSON.stringify(observed),
+        );
+        const rejected = await control(
+          [
+            "spawn",
+            "codex",
+            "caller task",
+            "--name",
+            `rejected-${scenario.name}`,
+          ],
+          cwd,
+        );
+        assert.equal(rejected.status, 65);
+        assert.equal(rejected.value.code, "workspace_not_ready");
+      }
+      break;
+    }
+    const detached = await cli([
+      "detach",
+      "-C",
+      cwd,
+      "--session-disposition",
+      "require_none",
+    ]);
+    assert.equal(detached.status, 0, JSON.stringify(detached));
+  }
   if (independentUse) {
     const deployment = {
       cli: join(installed, "dist", "reins.js"),

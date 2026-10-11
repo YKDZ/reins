@@ -34,7 +34,11 @@ reins workspace status -C /absolute/worktree/src
 reins workspace detach -C /absolute/worktree --session-disposition require_none
 ```
 
-Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略；02 尚未提供的显式凭据扩展返回 `credential_binding_unavailable`，不猜测凭据来源。附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。逐 harness 阶段、源码身份验证、runtime 状态和历史不可用事实分别投影；本地历史及失败后续行由后继票接入。
+Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略，不猜测凭据来源。附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。逐 harness 阶段、源码身份验证、runtime 状态和历史不可用事实分别投影；本地历史及失败后续行由后继票接入。
+
+Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署者在 Manager launcher 显式提供 `REINS_CODEX_AUTH_BINDINGS`，其值是凭据引用到绝对 `auth.json` 路径的 JSON 映射，例如 `{"selected-login":"/private/selected-auth.json"}`；项目绑定只写 `{"ref":"code","harness":"codex","credentialBindingRef":"selected-login"}`。路径和 secret 均不经过工作区动作协议；目录发现只返回非秘密引用及支持事实，不读取源文件或启动模型。
+
+准备时扩展只读取选定文件，验证该版 ChatGPT 登录结构，将 `auth_mode`、`tokens` 与可选 `last_refresh` 写入私有 `$CODEX_HOME/auth.json`（目录 `0700`、文件 `0600`）。其余配置键、宿主配置、历史、skills 和指令不会被投影，源文件不会回写。没有该引用、文件不可读、登录结构无效或该固定组合不支持时返回 `credential_binding_unavailable`，不会换认证方式；材料版本不符则返回 `runtime_entry_invalid`。`ready` 证明材料和绑定已交付以及本地 daemon 可连，不证明 token 在远端仍有效。此扩展的首回合支持范围不包含共享刷新、凭据轮换、过期恢复或并发保证；这些必须另行实测。QoderCN 的绑定扩展仍由对应支持包交付，不能复用 Codex 登录文件。
 
 附着受理与所有者写入 Manager 的持久状态，关闭 CLI 连接不会释放它。相同所有者及绑定集合复用已经准备的附着；不同所有者或不同意图被拒绝。`detach require_none` 只释放没有会话的环境，保留源码与准备事实。
 

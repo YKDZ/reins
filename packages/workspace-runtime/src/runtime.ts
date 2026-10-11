@@ -29,6 +29,11 @@ import {
 import * as v from "valibot";
 
 import {
+  hasCodexAuthBinding,
+  projectCodexAuth,
+  type CodexAuthBindings,
+} from "./codex-auth.ts";
+import {
   fingerprint,
   resolveWorktree,
   workspaceFailure,
@@ -111,6 +116,7 @@ function mount(path: string) {
 export async function openWorkspaceRuntime(options: {
   stateDirectory: string;
   resourcePrefix?: string;
+  codexAuthBindings?: CodexAuthBindings;
 }) {
   const root = options.stateDirectory;
   await mkdir(root, { recursive: true, mode: 0o700 });
@@ -381,8 +387,19 @@ export async function openWorkspaceRuntime(options: {
           throw workspaceFailure("runtime_entry_invalid");
         binding.stage = "credential_binding";
         await persist(record);
-        if (binding.credential.kind !== "omitted")
-          throw workspaceFailure("credential_binding_unavailable");
+        if (binding.credential.kind === "bound") {
+          const bindings = options.codexAuthBindings ?? {};
+          if (
+            !hasCodexAuthBinding(
+              bindings,
+              binding.harness,
+              binding.runtime.version,
+              binding.credential.ref,
+            )
+          )
+            throw workspaceFailure("credential_binding_unavailable");
+          await projectCodexAuth(bindings, binding.credential.ref, home);
+        }
         binding.stage = "ready";
         await persist(record);
       }
@@ -422,7 +439,7 @@ export async function openWorkspaceRuntime(options: {
     async attach(cwd: string, bindingRefs: string[], owner: ConsumerContext) {
       v.parse(consumerContextSchema, owner);
       const tree = await resolveWorktree(cwd);
-      const catalog = await workspaceHarnesses(cwd);
+      const catalog = await workspaceHarnesses(cwd, options.codexAuthBindings);
       if (
         bindingRefs.length === 0 ||
         new Set(bindingRefs).size !== bindingRefs.length
