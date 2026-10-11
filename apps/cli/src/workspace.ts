@@ -12,6 +12,7 @@ import {
   type WorkspaceMessage,
   type WorkspaceMethod,
   type WorkspaceParams,
+  type ManagedWorkspaceInfo,
 } from "@reins/workspace-protocol";
 import { Command } from "commander";
 import * as v from "valibot";
@@ -50,12 +51,35 @@ export function registerWorkspaceCommands(program: Command): void {
       );
       try {
         await client.initialize();
-        const result = await client.request(method, params);
+        let result = await client.request(method, params);
+        // Manager 先持久受理；CLI 等待该次准备事实，不为合法 pending 创造失败或期限。
+        if (method === "workspace.attach") {
+          let info = result as ManagedWorkspaceInfo;
+          while (info.runtime.status === "preparing") {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            try {
+              info = await client.request("workspace.status", {
+                cwd: (params as WorkspaceParams["workspace.attach"]).cwd,
+              });
+            } catch (error) {
+              const parsed = v.safeParse(workspaceErrorSchema, error);
+              if (!parsed.success || parsed.output.code !== "manager_timeout")
+                throw error;
+            }
+          }
+          result = info as typeof result;
+        }
         process.stdout.write(`${JSON.stringify(result)}\n`);
+        if (
+          method === "workspace.attach" &&
+          (result as ManagedWorkspaceInfo).runtime.status === "failed"
+        )
+          throw new ExitError(1, "workspace_failed");
       } finally {
         client.close();
       }
     } catch (error) {
+      if (error instanceof ExitError) throw error;
       const parsed = v.safeParse(workspaceErrorSchema, error);
       process.stdout.write(
         `${JSON.stringify(parsed.success ? parsed.output : { code: "manager_disconnected" })}\n`,

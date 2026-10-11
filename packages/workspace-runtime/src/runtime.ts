@@ -527,14 +527,23 @@ export async function openWorkspaceRuntime(options: {
     if (!version.split(/\s+/u).includes(binding.runtime.version))
       throw workspaceFailure("runtime_entry_invalid");
   };
+  const hasReadyBinding = (record: RecordState) =>
+    record.environmentStage === "started" &&
+    (record.info.runtime.status === "ready" ||
+      record.info.runtime.status === "failed") &&
+    record.info.harnesses.some((binding) => binding.stage === "ready");
   const status = async (cwd: string, owner: ConsumerContext) => {
     const { record, tree } = await find(cwd, owner, true);
-    if (record.info.runtime.status === "ready") {
+    if (
+      record.info.runtime.status === "ready" ||
+      (record.info.runtime.status === "failed" && hasReadyBinding(record))
+    ) {
       let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
       try {
         if (!(await inspectContainer(record)).State.Running)
           throw workspaceFailure("runtime_resource_mismatch");
         for (const binding of record.info.harnesses) {
+          if (binding.stage !== "ready") continue;
           active = binding;
           await validateBinding(record, binding);
         }
@@ -690,126 +699,136 @@ export async function openWorkspaceRuntime(options: {
         }
       }
       record.bindingStages ??= {};
+      let bindingFailure: WorkspaceError | undefined;
       for (const binding of record.info.harnesses) {
         active = binding;
-        const checkpoint = record.bindingStages[binding.ref] ?? "pending";
-        if (checkpoint === "ready") {
-          await validateBinding(record, binding);
-          binding.stage = "ready";
-          delete binding.error;
-          await persist(record);
-          continue;
-        }
-        if (checkpoint === "installing")
-          throw workspaceFailure("preparation_outcome_unknown");
-        delete binding.error;
-        if (checkpoint === "pending") {
-          binding.stage = "runtime_install";
-          await persist(record);
-          await ensureImage(binding.runtime.image);
-          record.bindingStages[binding.ref] = "installing";
-          await persist(record);
-          const material = `${record.container}-material-${binding.harness}`;
-          let materialCreated = false;
-          try {
-            await docker([
-              "create",
-              "--name",
-              material,
-              "--label",
-              `reins.workspace.owner=${fingerprint(root)}`,
-              "--entrypoint",
-              "node",
-              binding.runtime.image,
-              "--version",
-            ]);
-            materialCreated = true;
-            const archive = join(
-              record.directory,
-              `material-${binding.harness}`,
-            );
-            await mkdir(archive, { recursive: true, mode: 0o700 });
-            try {
-              await execute(
-                "docker",
-                [
-                  "cp",
-                  `${material}:/opt/reins/harnesses/${binding.harness}/.`,
-                  archive,
-                ],
-                { maxBuffer: 8 * 1024 * 1024 },
-              );
-            } catch (error) {
-              const stderr = (error as { stderr?: unknown }).stderr;
-              // 仅本地接收目录的原生写入容量失败已知未触及运行容器，可显式重做接收。
-              if (
-                typeof stderr === "string" &&
-                stderr.trim().startsWith(`write ${archive}/`) &&
-                stderr.trim().endsWith(": no space left on device") &&
-                !stderr.trim().includes("\n")
-              ) {
-                record.bindingStages[binding.ref] = "pending";
-                throw workspaceFailure("capacity_exhausted");
-              }
-              throw workspaceFailure("provider_failed");
-            }
-            await docker([
-              "exec",
-              record.container,
-              "mkdir",
-              "-p",
-              `/opt/reins/harnesses/${binding.harness}`,
-            ]);
-            await docker([
-              "cp",
-              `${archive}/.`,
-              `${record.container}:/opt/reins/harnesses/${binding.harness}`,
-            ]);
-          } finally {
-            if (materialCreated) await docker(["rm", "-f", material]);
+        try {
+          const checkpoint = record.bindingStages[binding.ref] ?? "pending";
+          if (checkpoint === "ready") {
+            await validateBinding(record, binding);
+            binding.stage = "ready";
+            delete binding.error;
+            await persist(record);
+            continue;
           }
-          record.bindingStages[binding.ref] = "installed";
+          if (checkpoint === "installing")
+            throw workspaceFailure("preparation_outcome_unknown");
+          delete binding.error;
+          if (checkpoint === "pending") {
+            binding.stage = "runtime_install";
+            await persist(record);
+            await ensureImage(binding.runtime.image);
+            record.bindingStages[binding.ref] = "installing";
+            await persist(record);
+            const material = `${record.container}-material-${binding.harness}`;
+            let materialCreated = false;
+            try {
+              await docker([
+                "create",
+                "--name",
+                material,
+                "--label",
+                `reins.workspace.owner=${fingerprint(root)}`,
+                "--entrypoint",
+                "node",
+                binding.runtime.image,
+                "--version",
+              ]);
+              materialCreated = true;
+              const archive = join(
+                record.directory,
+                `material-${binding.harness}`,
+              );
+              await mkdir(archive, { recursive: true, mode: 0o700 });
+              try {
+                await execute(
+                  "docker",
+                  [
+                    "cp",
+                    `${material}:/opt/reins/harnesses/${binding.harness}/.`,
+                    archive,
+                  ],
+                  { maxBuffer: 8 * 1024 * 1024 },
+                );
+              } catch (error) {
+                const stderr = (error as { stderr?: unknown }).stderr;
+                // 仅本地接收目录的原生写入容量失败已知未触及运行容器，可显式重做接收。
+                if (
+                  typeof stderr === "string" &&
+                  stderr.trim().startsWith(`write ${archive}/`) &&
+                  stderr.trim().endsWith(": no space left on device") &&
+                  !stderr.trim().includes("\n")
+                ) {
+                  record.bindingStages[binding.ref] = "pending";
+                  throw workspaceFailure("capacity_exhausted");
+                }
+                throw workspaceFailure("provider_failed");
+              }
+              await docker([
+                "exec",
+                record.container,
+                "mkdir",
+                "-p",
+                `/opt/reins/harnesses/${binding.harness}`,
+              ]);
+              await docker([
+                "cp",
+                `${archive}/.`,
+                `${record.container}:/opt/reins/harnesses/${binding.harness}`,
+              ]);
+            } finally {
+              if (materialCreated) await docker(["rm", "-f", material]);
+            }
+            record.bindingStages[binding.ref] = "installed";
+            await persist(record);
+          }
+          binding.stage = "runtime_validate";
           await persist(record);
-        }
-        binding.stage = "runtime_validate";
-        await persist(record);
-        await validateBinding(record, binding);
-        record.bindingStages[binding.ref] = "validated";
-        binding.stage = "credential_binding";
-        await persist(record);
-        if (binding.credential.kind === "bound") {
-          const bindings = options.codexAuthBindings ?? {};
-          if (
-            hasQoderAuthBinding(
-              options.qoderAuthBindings ?? {},
-              binding.harness,
-              binding.runtime.version,
-              binding.credential.ref,
-            )
-          ) {
-            await projectQoderAuth(
-              options.qoderAuthBindings ?? {},
-              binding.credential.ref,
-              home,
-            );
-          } else {
+          await validateBinding(record, binding);
+          record.bindingStages[binding.ref] = "validated";
+          binding.stage = "credential_binding";
+          await persist(record);
+          if (binding.credential.kind === "bound") {
+            const bindings = options.codexAuthBindings ?? {};
             if (
-              !hasCodexAuthBinding(
-                bindings,
+              hasQoderAuthBinding(
+                options.qoderAuthBindings ?? {},
                 binding.harness,
                 binding.runtime.version,
                 binding.credential.ref,
               )
-            )
-              throw workspaceFailure("credential_binding_unavailable");
-            await projectCodexAuth(bindings, binding.credential.ref, home);
+            ) {
+              await projectQoderAuth(
+                options.qoderAuthBindings ?? {},
+                binding.credential.ref,
+                home,
+              );
+            } else {
+              if (
+                !hasCodexAuthBinding(
+                  bindings,
+                  binding.harness,
+                  binding.runtime.version,
+                  binding.credential.ref,
+                )
+              )
+                throw workspaceFailure("credential_binding_unavailable");
+              await projectCodexAuth(bindings, binding.credential.ref, home);
+            }
           }
+          record.bindingStages[binding.ref] = "ready";
+          binding.stage = "ready";
+          await persist(record);
+        } catch (error) {
+          const failure = normalize(error);
+          bindingFailure ??= failure;
+          binding.stage = "failed";
+          binding.error = failure;
+          await persist(record);
         }
-        record.bindingStages[binding.ref] = "ready";
-        binding.stage = "ready";
-        await persist(record);
       }
       active = undefined;
+      if (bindingFailure !== undefined) throw bindingFailure;
       record.info.runtime = { status: "ready" };
       record.info.preparation.attempts.at(-1)!.status = "ready";
     } catch (error) {
@@ -967,10 +986,10 @@ export async function openWorkspaceRuntime(options: {
     },
     status,
     async route(cwd: string, owner: ConsumerContext) {
-      const current = await status(cwd, owner);
-      if (current.runtime.status !== "ready")
-        throw workspaceFailure("workspace_not_ready");
+      await status(cwd, owner);
       const { record, tree } = await find(cwd, owner, true);
+      if (!hasReadyBinding(record))
+        throw workspaceFailure("workspace_not_ready");
       return {
         cwd: tree.cwd,
         socket: join(controlDirectory(record), "r.sock"),
@@ -985,10 +1004,10 @@ export async function openWorkspaceRuntime(options: {
       const { record, tree } = await find(cwd, owner, true);
       if (
         ["spawn", "send", "resolvePermission"].includes(action) &&
-        record.info.source.error?.code === "native_view_lost"
+        record.info.source.error !== undefined
       )
         throw record.info.source.error;
-      if (record.info.runtime.status !== "ready")
+      if (!hasReadyBinding(record))
         throw workspaceFailure("workspace_not_ready");
       if (action === "spawn") {
         const supplied = v.safeParse(spawnParamsSchema, params);
@@ -1009,7 +1028,11 @@ export async function openWorkspaceRuntime(options: {
       const { record, tree } = await find(cwd, owner);
       if (preparing.has(record.directory))
         throw workspaceFailure("workspace_busy");
-      if (record.info.runtime.status === "ready") {
+      if (
+        Object.values(record.bindingStages ?? {}).some(
+          (stage) => stage === "ready",
+        )
+      ) {
         const response = await (await connect(record)).request("list", {});
         if ("error" in response || response.result.length !== 0)
           throw workspaceFailure("workspace_busy");
