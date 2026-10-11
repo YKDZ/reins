@@ -574,33 +574,35 @@ export async function openWorkspaceRuntime(options: {
       record.info.runtime.status === "ready" ||
       (record.info.runtime.status === "failed" && hasReadyBinding(record))
     ) {
-      let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
+      let failure: WorkspaceError | undefined;
       try {
         if (!(await inspectContainer(record)).State.Running)
           throw workspaceFailure("runtime_resource_mismatch");
         for (const binding of record.info.harnesses) {
           if (binding.stage !== "ready") continue;
-          active = binding;
-          await validateBinding(record, binding);
+          try {
+            await validateBinding(record, binding);
+          } catch (error) {
+            const bindingFailure = normalize(error);
+            binding.stage = "failed";
+            binding.error = bindingFailure;
+            failure ??= bindingFailure;
+          }
         }
-        active = undefined;
         const client = await connect(record);
         const list = await client.request("list", {});
         if ("error" in list) throw workspaceFailure("runtime_entry_invalid");
       } catch (error) {
-        const failure = normalize(error);
-        record.info.runtime = { status: "failed", error: failure };
-        // 绑定校验失败只撤销该绑定；共享容器或 daemon 失效则没有仍就绪的绑定。
-        const unavailable =
-          active === undefined
-            ? record.info.harnesses.filter(
-                (binding) => binding.stage === "ready",
-              )
-            : [active];
-        for (const binding of unavailable) {
+        failure = normalize(error);
+        // 共享容器或 daemon 失效时，所有绑定都无法继续提供执行者。
+        for (const binding of record.info.harnesses) {
+          if (binding.stage !== "ready") continue;
           binding.stage = "failed";
           binding.error = failure;
         }
+      }
+      if (failure !== undefined) {
+        record.info.runtime = { status: "failed", error: failure };
         await persist(record);
       }
     }

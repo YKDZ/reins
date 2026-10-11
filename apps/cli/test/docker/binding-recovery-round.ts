@@ -12,6 +12,10 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+
+import type { spawnParamsSchema } from "@reins/protocol";
+import type { InferInput } from "valibot";
+
 const base = process.cwd();
 const output = join(base, "evidence");
 await mkdir(output, { recursive: true });
@@ -353,6 +357,7 @@ const env = {
     "qoder-login": { userFile: qoderSource, machineIdFile: machineSource },
   }),
 };
+const controllers: ReturnType<typeof spawn>[] = [];
 let manager: ReturnType<typeof spawn> | undefined;
 let keeper: ReturnType<typeof spawn> | undefined;
 const cwd = join(worktree, "src");
@@ -403,7 +408,7 @@ async function startManager() {
   assert.deepEqual(JSON.parse(connected), { connected: true });
 }
 async function stopManager() {
-  for (const child of [keeper, manager]) {
+  for (const child of [...controllers, keeper, manager]) {
     if (
       child === undefined ||
       child.exitCode !== null ||
@@ -443,6 +448,27 @@ const control = async (args: string[]) => {
 };
 const attach = (refs = ["qoder", "code"]) =>
   cli(["attach", ...refs.flatMap((ref) => ["--binding", ref])]);
+// 已就绪 reattach 会同步核验真实入口；调用方显式提供与连续生命周期一致的预算。
+const reattachReady = async () => {
+  const result = await command(
+    process.execPath,
+    [
+      join(base, "workspace-attach-client.js"),
+      JSON.stringify({
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        cwd,
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        bindings: ["qoder", "code"],
+        timeoutMs: 1_200_000,
+      }),
+    ],
+    base,
+    env,
+  );
+  await record("shared client ready reattach", result);
+  assert.equal(result.status, 0, JSON.stringify(result));
+  assert.equal(JSON.parse(result.stdout).runtime.status, "ready");
+};
 let sequence = 0;
 async function round(harness: string, expected: string, gate?: string) {
   const supplied = JSON.stringify({
@@ -668,7 +694,7 @@ try {
     "codex-login": codexSource,
   });
   await startManager();
-  assert.equal((await attach()).status, 0);
+  await reattachReady();
   // Qoder 的两个显式原生来源各自固定，不允许借同引用换其中任一文件。
   for (const [key, content] of [
     ["userFile", "fixture-qoder-valid"],
@@ -692,7 +718,7 @@ try {
       "qoder-login": { userFile: qoderSource, machineIdFile: machineSource },
     });
     await startManager();
-    assert.equal((await attach()).status, 0);
+    await reattachReady();
   }
   // 同ref不得在重入时改变harness或凭据省略状态。
   const original = structuredClone(configuration.bindings);
@@ -733,6 +759,103 @@ try {
   await writeFile(codexSource, validCodex);
   assert.equal((await attach()).status, 0);
   await (await round("codex", "correct")).finish();
+  // 两个入口同时失效时，新 spawn 必须在同次准入中撤销两者，不能短路保留第二个 ready。
+  const validationContainer = await requireCommand("docker", [
+    "ps",
+    "-q",
+    "--filter",
+    "label=" + ownerLabel,
+  ]);
+  const entryPaths = [
+    "/opt/reins/harnesses/qoder/bin/qoderclicn",
+    "/opt/reins/harnesses/codex/bin/codex",
+  ];
+  const originalEntries = await Promise.all(
+    entryPaths.map((path) =>
+      requireCommand("docker", ["exec", validationContainer, "cat", path]),
+    ),
+  );
+  const controller = spawn(
+    process.execPath,
+    [
+      join(base, "workspace-attach-client.js"),
+      JSON.stringify({
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        cwd,
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        control: true,
+      }),
+    ],
+    { env: { ...process.env, ...env }, stdio: ["pipe", "pipe", "pipe"] },
+  );
+  controllers.push(controller);
+  let controllerOut = "",
+    controllerError = "";
+  const connected = new Promise<void>((resolve, reject) => {
+    controller.stdout.on("data", (chunk: Buffer) => {
+      controllerOut += chunk.toString();
+      if (controllerOut.includes("\n")) resolve();
+    });
+    controller.stderr.on("data", (chunk: Buffer) => {
+      controllerError += chunk.toString();
+    });
+    controller.once("error", reject);
+    controller.once("close", (status) =>
+      reject(
+        new Error(
+          "Control exited before connection " + status + ": " + controllerError,
+        ),
+      ),
+    );
+  });
+  const controllerClosed = new Promise<number>((resolve) =>
+    controller.once("close", (status) => resolve(status ?? 1)),
+  );
+  await connected;
+  assert.deepEqual(JSON.parse(controllerOut.trim()), { connected: true });
+  await requireCommand("docker", [
+    "exec",
+    validationContainer,
+    "node",
+    "-e",
+    "const fs=require('node:fs');for(const p of JSON.parse(process.argv[1]))fs.writeFileSync(p,'#!/bin/sh\\necho invalid-version\\n')",
+    JSON.stringify(entryPaths),
+  ]);
+  const invalidSpawn: InferInput<typeof spawnParamsSchema> = {
+    cwd,
+    harness: "codex",
+    message: JSON.stringify({ path: "target.txt" }),
+    sessionName: "invalid-second",
+  };
+  controller.stdin.end(JSON.stringify(invalidSpawn) + "\n");
+  const denied = {
+    status: await controllerClosed,
+    stdout: controllerOut,
+    stderr: controllerError,
+    value: JSON.parse(controllerOut.trim().split("\n").at(-1)!),
+  };
+  await record("two invalid entries spawn admission", denied);
+  assert.equal(denied.status, 1);
+  assert.equal(denied.value.code, "runtime_entry_invalid");
+  const invalid = await cli(["status"]);
+  assert.ok(
+    invalid.value.harnesses.every(
+      (binding: { stage: string }) => binding.stage === "failed",
+    ),
+  );
+  await requireCommand("docker", [
+    "exec",
+    validationContainer,
+    "node",
+    "-e",
+    "const fs=require('node:fs');JSON.parse(process.argv[1]).forEach(([path,text])=>fs.writeFileSync(path,text))",
+    JSON.stringify(
+      entryPaths.map((path, index) => [path, originalEntries[index]]),
+    ),
+  ]);
+  assert.equal((await attach()).status, 0);
+  await (await round("codex", "correct")).finish();
+  await (await round("qoder", "correct")).finish();
   await cli(["detach", "--session-disposition", "require_none"]);
   async function publicFiles(directory: string): Promise<string[]> {
     const files: string[] = [];
@@ -744,25 +867,23 @@ try {
     }
     return files;
   }
-  for (const path of await publicFiles(env.REINS_WORKSPACE_MANAGER_STATE_DIR)) {
-    const text = await readFile(path, "utf8");
-    for (const secret of [
-      "fixture-codex-valid",
-      "fixture-codex-expired",
-      "fixture-qoder-valid",
-      "fixture-qoder-expired",
-      "fixture-refresh",
-      ...nativeSources,
-    ])
-      assert.equal(text.includes(secret), false, path);
-  }
-  for (const secret of [
+  const secrets = [
     "fixture-codex-valid",
     "fixture-codex-expired",
     "fixture-qoder-valid",
+    "fixture-qoder-expired",
     "fixture-refresh",
+    "fixture-id",
+    "fixture-account",
+    "fixture-machine",
     ...nativeSources,
-  ])
+  ];
+  for (const path of await publicFiles(env.REINS_WORKSPACE_MANAGER_STATE_DIR)) {
+    const text = await readFile(path, "utf8");
+    for (const secret of secrets)
+      assert.equal(text.includes(secret), false, path);
+  }
+  for (const secret of secrets)
     assert.equal(JSON.stringify(facts).includes(secret), false);
   await record("nativeSecretProjection", {
     publicStateAndFactsContainSecrets: false,

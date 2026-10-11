@@ -36,7 +36,8 @@ test("keeps ready bindings usable and resumes only failed native credential proj
       "candidate.tgz",
     ],
     [
-      join(repository, "apps/cli/test/docker/binding-recovery-round.ts"),
+      process.env.REINS_WRR12_ROUND_SOURCE ??
+        join(repository, "apps/cli/test/docker/binding-recovery-round.ts"),
       "binding-recovery-round.ts",
     ],
     [
