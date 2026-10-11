@@ -12,6 +12,8 @@ import {
 import {
   WORKSPACE_PROTOCOL_MAJOR_VERSION,
   workspaceResponseSchema,
+  workspaceErrorSchema,
+  type WorkspaceError,
   workspaceNotificationSchema,
   type Publication,
   workspaceResultSchemaFor,
@@ -130,6 +132,22 @@ export function createWorkspaceClient(
       }
     });
   };
+  const discover = async (
+    cwd: string,
+  ): Promise<
+    { publications: Publication[] } | { publicationError: WorkspaceError }
+  > => {
+    try {
+      return { publications: await request("publication.list", { cwd }) };
+    } catch (error) {
+      const failure = v.safeParse(workspaceErrorSchema, error);
+      return {
+        publicationError: failure.success
+          ? failure.output
+          : { code: "invalid_manager_response" },
+      };
+    }
+  };
   return {
     initialize: () =>
       request("initialize", {
@@ -179,9 +197,7 @@ export function createWorkspaceClient(
               ...response,
               result: {
                 ...(response.result as WaitResult),
-                publications: await request("publication.list", {
-                  cwd: route.cwd,
-                }),
+                ...(await discover(route.cwd)),
               },
             };
           return response;
@@ -224,9 +240,13 @@ export function createWorkspaceClient(
             const done = subscription.done
               .then(async (end) => {
                 // 两条既有连接的到达顺序独立，结束前查询补齐已保存成果。
-                for (const publication of await request("publication.list", {
-                  cwd: route.cwd,
-                }))
+                const discovered = await discover(route.cwd);
+                if ("publicationError" in discovered)
+                  return {
+                    ...end,
+                    publicationError: discovered.publicationError,
+                  };
+                for (const publication of discovered.publications)
                   receive(publication);
                 return end;
               })

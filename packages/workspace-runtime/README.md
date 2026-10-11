@@ -86,3 +86,5 @@ reins workspace receipts --directory /absolute/receipts
 既有 `attach`／共享 client 的 `subscribe` 在同一 Manager 连接上接收 `publication.ready`。成果事实只在固定副本提交后产生，包含完整发布记录；它属于工作区，既不声称属于某个回合，也不借用 daemon 的 Session EventId 或恢复游标。建立观察时提供当前可取回成果，之后只在该观察存续期间发送新增事实；daemon 的 `none`／`available`／`after` 仍只控制原生会话事件的有界回放。任务终态和文件到达继续分别报告。
 
 关闭、结束或断开观察会移除对应的成果观察；没有等待或订阅时不承诺后台唤起。断连及通知丢失后，`workspace publications` 仍可查询固定副本，显式 `workspace receive` 才产生本地 `arrived` 事实。任务失败不删除发布，成果通知不证明任务完成或成果齐全。
+
+成果查询失败时，已确定的 `wait` 结果与订阅结束事实仍返回，并以独立的 `publicationError` 报告发现失败；不把失败投影为空成果，也不改写任务终态。

@@ -14,7 +14,7 @@ import {
   encodeTurnHandle,
   permissionHandleSchema,
 } from "@reins/protocol";
-import type { Publication } from "@reins/workspace-protocol";
+import type { Publication, WorkspaceError } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
 // 关联键仅用于 client 内部配对；消费者只收到完整领域句柄与可读内容。
@@ -56,6 +56,7 @@ export type AgentSubscriptionEnd = {
   target: AgentTarget;
   reason: AttachEnded["reason"];
   lastEventId: EventId | null;
+  publicationError?: WorkspaceError;
 };
 export function projectSubscriptionTarget(
   target: SubscriptionTarget,

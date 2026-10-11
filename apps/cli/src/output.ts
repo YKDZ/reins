@@ -109,6 +109,7 @@ export function printSendAck(ack: SendAck, mode: OutputMode): void {
 export function printWaitResult(
   result: WaitResult & {
     publications?: import("@reins/workspace-protocol").Publication[];
+    publicationError?: import("@reins/workspace-protocol").WorkspaceError;
   },
   mode: OutputMode,
 ): void {
@@ -130,6 +131,9 @@ export function printWaitResult(
       ...(result.publications === undefined
         ? {}
         : { publications: result.publications }),
+      ...(result.publicationError === undefined
+        ? {}
+        : { publicationError: result.publicationError }),
     });
     return;
   }
@@ -151,6 +155,10 @@ export function printWaitResult(
   for (const publication of result.publications ?? [])
     process.stdout.write(
       `[publication ready] ${publication.publicationId} ${publication.source.path} (${publication.bytes} bytes)\n`,
+    );
+  if (result.publicationError)
+    process.stdout.write(
+      `[publication discovery failed] ${result.publicationError.code}\n`,
     );
   for (const target of pending) {
     process.stdout.write(`Pending: ${target.turnHandle}\n`);

@@ -256,7 +256,13 @@ export async function runAttach(
     const publicEnd = { type: "subscription.ended", ...ended };
     if (options.mode === "json")
       process.stdout.write(JSON.stringify(publicEnd) + "\n");
-    else process.stdout.write("[attach ended] " + ended.reason + "\n");
+    else {
+      if (ended.publicationError)
+        process.stdout.write(
+          `[publication discovery failed] ${ended.publicationError.code}\n`,
+        );
+      process.stdout.write("[attach ended] " + ended.reason + "\n");
+    }
     return ended;
   } finally {
     abort();
