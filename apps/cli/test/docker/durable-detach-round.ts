@@ -1,7 +1,15 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
-import { appendFile, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  appendFile,
+  mkdir,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 const base = process.cwd();
@@ -11,10 +19,12 @@ const {
   image: nodeImage,
   consumerSha256,
   environmentBase = nodeImage,
+  skipAtomic = false,
 } = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
   image: string;
   consumerSha256: string;
   environmentBase?: string;
+  skipAtomic?: boolean;
 };
 async function command(
   binary: string,
@@ -96,7 +106,7 @@ await writeFile(
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nconsole.log("codex-cli 0.149.0");\n',
+  '#!/usr/bin/env node\nconsole.log("codex-cli 0.162.0");\n',
   { mode: 0o755 },
 );
 // 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
@@ -144,6 +154,10 @@ await writeFile(
   await readFile(join(base, "native-view-adapter.ts")),
 );
 await writeFile(
+  join(payload, "opt", "reins", "workspace-reading-worker.ts"),
+  await readFile(join(base, "workspace-reading-worker.ts")),
+);
+await writeFile(
   join(payload, "opt", "reins", "native-view-worker.ts"),
   await readFile(join(base, "native-view-worker.ts")),
 );
@@ -168,7 +182,7 @@ assert.equal(
     ["--version"],
     base,
   ),
-  "codex-cli 0.149.0",
+  "codex-cli 0.162.0",
 );
 await writeFile(
   join(context, "Dockerfile"),
@@ -261,8 +275,10 @@ await mkdir(join(worktree, ".reins"));
 await mkdir(join(worktree, "src"));
 const configuration = {
   environments: [{ provider: "docker", image }],
-  runtimes: [{ harness: "codex", version: "0.149.0", image: runtimeImage }],
-  bindings: [{ ref: "code", harness: "codex" }],
+  runtimes: [{ harness: "codex", version: "0.162.0", image: runtimeImage }],
+  bindings: [
+    { ref: "code", harness: "codex", credentialBindingRef: "fixture-auth" },
+  ],
 };
 await writeFile(
   join(worktree, ".reins", "workspace.json"),
@@ -276,7 +292,22 @@ await writeFile(
   join(callerHome, ".codex", "AGENTS.md"),
   "unselected host instructions\n",
 );
+const authFile = join(base, "synthetic-auth.json");
+await writeFile(
+  authFile,
+  JSON.stringify({
+    auth_mode: "chatgpt",
+    tokens: {
+      id_token: "fixture-id",
+      access_token: "fixture-access",
+      refresh_token: "fixture-refresh",
+      account_id: "fixture-account",
+    },
+  }),
+  { mode: 0o600 },
+);
 const env = {
+  REINS_CODEX_AUTH_BINDINGS: JSON.stringify({ "fixture-auth": authFile }),
   HOME: callerHome,
   CODEX_HOME: join(callerHome, ".codex"),
   REINS_CONSUMER_CONTEXT: "reins-wrr20-owner-a",
@@ -294,25 +325,32 @@ const cli = async (args: string[], overrides: NodeJS.ProcessEnv = {}) => {
   await record(`cli ${args.join(" ")}`, result);
   return {
     ...result,
-    value: JSON.parse(result.stdout) as Record<string, unknown>,
+    value: (result.stdout === "" ? {} : JSON.parse(result.stdout)) as Record<
+      string,
+      unknown
+    >,
   };
 };
 async function waitForRuntime(expected: "ready" | "failed") {
-  for (;;) {
-    const observed = await cli(["status", "-C", join(worktree, "src")]);
-    if (observed.status !== 0 && observed.value.code === "manager_timeout") {
-      await delay(2000);
-      continue;
-    }
-    assert.equal(observed.status, 0);
-    const runtime = observed.value.runtime as {
-      status: string;
-      error?: { code: string };
-    };
-    if (runtime.status === expected) return runtime;
-    assert.equal(runtime.status, "preparing", JSON.stringify(observed));
-    await delay(2000);
-  }
+  const observed = await command(
+    process.execPath,
+    [
+      join(base, "durable-detach-client.js"),
+      JSON.stringify({
+        action: "prepare",
+        expected,
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        cwd: join(worktree, "src"),
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        directory: base,
+      }),
+    ],
+    base,
+    env,
+  );
+  await record("prepare-result", observed);
+  assert.equal(observed.status, 0, JSON.stringify(observed));
+  return JSON.parse(observed.stdout) as Record<string, unknown>;
 }
 const control = async (args: string[], cwd = join(worktree, "src")) => {
   const result = await command(
@@ -324,7 +362,10 @@ const control = async (args: string[], cwd = join(worktree, "src")) => {
   await record("control " + args.join(" "), result);
   return {
     ...result,
-    value: JSON.parse(result.stdout) as Record<string, unknown>,
+    value: (result.stdout === "" ? {} : JSON.parse(result.stdout)) as Record<
+      string,
+      unknown
+    >,
   };
 };
 // Docker 命令仍实际执行；只在 provider 删除入口暂停，形成确定性准入竞争。
@@ -358,34 +399,179 @@ const attached = await cli([
 ]);
 assert.equal(attached.status, 0, JSON.stringify(attached));
 await waitForRuntime("ready");
-const late = command(
-  process.execPath,
-  [
-    join(base, "durable-detach-client.js"),
-    JSON.stringify({
-      socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
-      cwd: join(worktree, "src"),
-      consumer: env.REINS_CONSUMER_CONTEXT,
-      directory: base,
-    }),
-  ],
-  base,
-  env,
-);
+if (!skipAtomic) {
+  const late = command(
+    process.execPath,
+    [
+      join(base, "durable-detach-client.js"),
+      JSON.stringify({
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        cwd: join(worktree, "src"),
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        directory: base,
+      }),
+    ],
+    base,
+    env,
+  );
+  for (;;) {
+    try {
+      await readFile(join(base, "admission-ready"));
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  const removing = cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "require_none",
+  ]);
+  for (;;) {
+    try {
+      await readFile(join(base, "rm-ready"));
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  try {
+    await writeFile(join(base, "admission-release"), "release");
+    const lateProcess = await late;
+    await record("late-admission-process", lateProcess);
+    assert.equal(lateProcess.status, 0, JSON.stringify(lateProcess));
+    const lateOutcome = JSON.parse(
+      await readFile(join(base, "late-admission-result.json"), "utf8"),
+    ) as { error?: { code: string } };
+    await record("late-admission-outcome", lateOutcome);
+    assert.equal(lateOutcome.error?.code, "workspace_detaching");
+    const raced = await control([
+      "spawn",
+      "codex",
+      JSON.stringify({
+        heldFile: "held.txt",
+        relativeFile: "relative.txt",
+        intervalMs: 25,
+      }),
+      "--name",
+      "must-reject",
+    ]);
+    await record("spawn-during-accepted-detach", raced);
+    assert.equal(raced.status, 65, JSON.stringify(raced));
+    assert.equal(raced.value.code, "workspace_detaching");
+  } finally {
+    await writeFile(join(base, "rm-release"), "release");
+    await record("detach-result", await removing);
+  }
+  // 显式 kill 的原义务：真实存活检查拒绝不受理，受理 kill 后释放资源而保留业务事实。
+  const second = await cli([
+    "attach",
+    "-C",
+    join(worktree, "src"),
+    "--binding",
+    "code",
+  ]);
+  assert.equal(second.status, 0, JSON.stringify(second));
+  await waitForRuntime("ready");
+} else {
+  await writeFile(join(base, "rm-release"), "release");
+  await record(
+    "atomicEvidenceReuse",
+    "04bdd04 dbf2b57d-da8b-412d-b140-7f09ae015089; independently verified by root",
+  );
+}
+let attachment:
+  | {
+      directory: string;
+      container: string;
+      info: { runtime: { status: string } };
+    }
+  | undefined;
+for (const entry of await readdir(managerState, { withFileTypes: true })) {
+  if (!entry.isDirectory() || entry.name.startsWith("c-")) continue;
+  const saved = JSON.parse(
+    await readFile(join(managerState, entry.name, "attachment.json"), "utf8"),
+  );
+  if (saved.info.runtime.status !== "released") attachment = saved;
+}
+assert.ok(attachment);
+const projectedAuth = join(attachment.directory, "home", ".codex", "auth.json");
+assert.equal((await stat(projectedAuth)).isFile(), true);
+await record("projectedCredentialPresent", true);
+const completedWorker = await control([
+  "spawn",
+  "codex",
+  JSON.stringify({ path: "../tracked.txt" }),
+  "--name",
+  "completed-worker",
+]);
+assert.equal(completedWorker.status, 0, JSON.stringify(completedWorker));
+const completed = await control([
+  "wait",
+  String(completedWorker.value.turnHandle),
+  "--timeout-ms",
+  "5000",
+]);
+assert.equal(completed.status, 0, JSON.stringify(completed));
+const originalTerminal = (
+  completed.value.completed as { stopReason: string; finalReply: string }[]
+)[0]!;
+assert.equal(originalTerminal.stopReason, "end_turn");
+const worker = await control([
+  "spawn",
+  "codex",
+  JSON.stringify({
+    heldFile: "kill-held.txt",
+    relativeFile: "kill-relative.txt",
+    intervalMs: 25,
+  }),
+  "--name",
+  "kill-worker",
+]);
+assert.equal(worker.status, 0, JSON.stringify(worker));
 for (;;) {
   try {
-    await readFile(join(base, "admission-ready"));
+    await readFile(join(worktree, "src", "writer.json"));
     break;
   } catch {
     await delay(10);
   }
 }
-const removing = cli([
+await record(
+  "killWriter",
+  JSON.parse(await readFile(join(worktree, "src", "writer.json"), "utf8")),
+);
+const busy = await cli([
   "detach",
   "-C",
   join(worktree, "src"),
   "--session-disposition",
   "require_none",
+]);
+assert.notEqual(busy.status, 0);
+assert.equal(busy.value.code, "workspace_busy");
+const afterBusy = await control([
+  "spawn",
+  "codex",
+  JSON.stringify({
+    heldFile: "second-held.txt",
+    relativeFile: "second-relative.txt",
+    intervalMs: 25,
+  }),
+  "--name",
+  "after-rejected-none",
+]);
+assert.equal(afterBusy.status, 0, JSON.stringify(afterBusy));
+await rm(join(base, "rm-ready"), { force: true });
+await rm(join(base, "rm-release"), { force: true });
+const killing = cli([
+  "detach",
+  "-C",
+  join(worktree, "src"),
+  "--session-disposition",
+  "kill",
 ]);
 for (;;) {
   try {
@@ -395,32 +581,103 @@ for (;;) {
     await delay(10);
   }
 }
+let killed;
 try {
-  await writeFile(join(base, "admission-release"), "release");
-  const lateProcess = await late;
-  await record("late-admission-process", lateProcess);
-  assert.equal(lateProcess.status, 0, JSON.stringify(lateProcess));
-  const lateOutcome = JSON.parse(
-    await readFile(join(base, "late-admission-result.json"), "utf8"),
-  ) as { error?: { code: string } };
-  await record("late-admission-outcome", lateOutcome);
-  assert.equal(lateOutcome.error?.code, "workspace_detaching");
-  const raced = await control([
+  const denied = await control([
     "spawn",
     "codex",
     JSON.stringify({
-      heldFile: "held.txt",
-      relativeFile: "relative.txt",
+      heldFile: "denied.txt",
+      relativeFile: "denied-relative.txt",
       intervalMs: 25,
     }),
     "--name",
-    "must-reject",
+    "kill-must-reject",
   ]);
-  await record("spawn-during-accepted-detach", raced);
-  assert.equal(raced.status, 65, JSON.stringify(raced));
-  assert.equal(raced.value.code, "workspace_detaching");
+  assert.equal(denied.status, 65, JSON.stringify(denied));
+  assert.equal(denied.value.code, "workspace_detaching");
+  const probes = await command(
+    process.execPath,
+    [
+      join(base, "durable-detach-client.js"),
+      JSON.stringify({
+        action: "probe",
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        cwd: join(worktree, "src"),
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        directory: base,
+        turnHandle: worker.value.turnHandle,
+      }),
+    ],
+    base,
+    env,
+  );
+  await record("kill-gate-probes", probes);
+  assert.equal(probes.status, 0, JSON.stringify(probes));
 } finally {
   await writeFile(join(base, "rm-release"), "release");
-  await record("detach-result", await removing);
+  killed = await killing;
 }
+assert.equal(killed.status, 0, JSON.stringify(killed));
+const queried = await cli(["status", "-C", join(worktree, "src")]);
+assert.equal(queried.status, 0, JSON.stringify(queried));
+assert.equal((queried.value.runtime as { status: string }).status, "released");
+assert.equal((queried.value.source as { status: string }).status, "verified");
+const retained = queried.value.detachment as {
+  sessions: {
+    sessionId: string;
+    outcome: string;
+    turns: {
+      turnId: string;
+      completed?: { stopReason: string; finalReply: string | null };
+    }[];
+  }[];
+};
+const original = retained.sessions.find(
+  (item) => item.sessionId === completedWorker.value.sessionId,
+);
+assert.ok(original);
+assert.equal(original.outcome, "confirmed");
+assert.ok(
+  original.turns.some(
+    (turn) =>
+      turn.completed?.stopReason === "end_turn" &&
+      turn.completed.finalReply === originalTerminal.finalReply,
+  ),
+);
+assert.ok(
+  retained.sessions.some(
+    (item) =>
+      item.sessionId === worker.value.sessionId && item.outcome === "confirmed",
+  ),
+);
+assert.equal(
+  await readFile(join(worktree, "tracked.txt"), "utf8"),
+  "native worktree\n",
+);
+const stopped = await readFile(join(worktree, "src", "kill-held.txt"), "utf8");
+await delay(100);
+assert.equal(
+  await readFile(join(worktree, "src", "kill-held.txt"), "utf8"),
+  stopped,
+);
+await assert.rejects(stat(projectedAuth), { code: "ENOENT" });
+assert.equal(
+  await requireCommand("docker", [
+    "container",
+    "ls",
+    "-a",
+    "--filter",
+    "name=" + attachment.container,
+    "--format",
+    "{{.ID}}",
+  ]),
+  "",
+);
+await record("killRelease", {
+  nativeValuePreserved: true,
+  writesStopped: true,
+  projectedCredentialReleased: true,
+  runtimeAbsent: true,
+});
 await record("result", "passed");

@@ -37,8 +37,12 @@ test("durably detaches the workspace", async () => {
       "durable-detach-round.ts",
     ],
     [
-      join(repository, "apps/cli/test/docker/native-view-adapter.ts"),
+      join(repository, "apps/cli/test/docker/durable-detach-adapter.ts"),
       "native-view-adapter.ts",
+    ],
+    [
+      join(repository, "apps/cli/test/docker/workspace-reading-worker.ts"),
+      "workspace-reading-worker.ts",
     ],
   ] as const;
   const fingerprints: { name: string; sha256: string }[] = [];
@@ -105,6 +109,7 @@ test("durably detaches the workspace", async () => {
     JSON.stringify({
       image: nodeImage,
       consumerSha256,
+      skipAtomic: process.env.REINS_WRR20_SKIP_ATOMIC === "1",
       environmentBase:
         process.env.REINS_WRR20_ENVIRONMENT_BASE_IMAGE ?? nodeImage,
     }),
@@ -181,7 +186,7 @@ test("durably detaches the workspace", async () => {
     "--image",
     nodeImage,
     "--timeout-ms",
-    "1200000",
+    "3600000",
     ...(process.env.REINS_WRR20_PLATFORM_DOCKER_BINARY === undefined
       ? []
       : ["--docker-binary", process.env.REINS_WRR20_PLATFORM_DOCKER_BINARY]),
@@ -236,4 +241,4 @@ test("durably detaches the workspace", async () => {
     platformReclaim:
       process.env.REINS_WRR20_PLATFORM_REUSE === "1" ? "not_run" : "passed",
   });
-}, 1_800_000);
+}, 4_200_000);

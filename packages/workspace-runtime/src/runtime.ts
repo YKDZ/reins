@@ -24,6 +24,13 @@ import {
   protocolRequestSchema,
   protocolResponseSchema,
   type CommandId,
+  type TurnTarget,
+  type TurnCompleted,
+  type SessionInfo,
+  sessionIdSchema,
+  turnIdSchema,
+  turnCompletedSchema,
+  waitResultSchema,
 } from "@reins/protocol";
 import {
   createUnixSocketClient,
@@ -37,6 +44,7 @@ import {
   type WorkspaceError,
   type NativeViewLoss,
   type NativeViewTermination,
+  type WorkspaceDetachment,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
@@ -70,8 +78,12 @@ type RecordState = {
   container: string;
   environmentStage?: "pending" | "creating" | "created" | "started";
   containerId?: string;
-  detach?: { disposition: "require_none" };
-  commands?: Record<string, { fingerprint: string; pending: boolean }>;
+  detach?: { disposition: "require_none" | "kill" };
+  completed?: TurnCompleted[];
+  commands?: Record<
+    string,
+    { fingerprint: string; pending: boolean; target?: TurnTarget }
+  >;
   bindingStages?: Record<
     string,
     "pending" | "installing" | "installed" | "validated" | "ready"
@@ -228,18 +240,24 @@ export async function openWorkspaceRuntime(options: {
     );
     return result;
   };
-  const locate = async (tree: Tree) => {
+  const active = (record: RecordState) =>
+    record.info.detachment === undefined
+      ? record.info.runtime.status !== "released"
+      : record.info.detachment.resources.ownership.status !== "released";
+  const locate = async (tree: Tree, includeReleased = false) => {
     const currentRoot = await identity(tree.root);
-    return records.find(
+    const matching = records.filter(
       (item) =>
-        item.info.runtime.status !== "released" &&
-        (item.tree.root === tree.root ||
-          item.identities.some(
-            (saved) =>
-              saved.path === item.tree.root &&
-              saved.dev === currentRoot.dev &&
-              saved.ino === currentRoot.ino,
-          )),
+        item.tree.root === tree.root ||
+        item.identities.some(
+          (saved) =>
+            saved.path === item.tree.root &&
+            saved.dev === currentRoot.dev &&
+            saved.ino === currentRoot.ino,
+        ),
+    );
+    return (
+      matching.find(active) ?? (includeReleased ? matching.at(-1) : undefined)
     );
   };
   const nativeLoss = async (
@@ -289,12 +307,13 @@ export async function openWorkspaceRuntime(options: {
     cwd: string,
     owner: ConsumerContext,
     allowInvalid = false,
+    observe = true,
   ) => {
     let tree: Tree;
     let record: RecordState | undefined;
     try {
       tree = await resolveWorktree(cwd);
-      record = await locate(tree);
+      record = await locate(tree, true);
     } catch (error) {
       // 只有已附着原对象确实失效时，旧目录才可用于读取其事实或拒绝修改。
       record = records.find((item) => {
@@ -335,9 +354,10 @@ export async function openWorkspaceRuntime(options: {
       if (!allowInvalid) throw failure;
       return { record, tree };
     }
-    if (record.detach !== undefined) return { record, tree };
+    if (record.detach !== undefined || !observe) return { record, tree };
     const loss = await nativeLoss(record);
-    if (loss !== undefined) await invalidate(record, loss);
+    if (loss !== undefined && record.detach === undefined)
+      await invalidate(record, loss);
     if (!allowInvalid && record.info.source.error?.code === "native_view_lost")
       throw record.info.source.error;
     return { record, tree };
@@ -356,9 +376,67 @@ export async function openWorkspaceRuntime(options: {
       client.close();
       throw workspaceFailure("runtime_entry_invalid");
     }
+    if (record.info.runtime.status === "released") {
+      client.close();
+      throw workspaceFailure("workspace_detaching");
+    }
     clients.set(record.directory, client);
     client.onClosed(() => clients.delete(record.directory));
     return client;
+  };
+  const retainedTargets = (record: RecordState): TurnTarget[] => {
+    const targets = [
+      ...Object.values(record.commands ?? {}).flatMap((command) =>
+        command.target === undefined ? [] : [command.target],
+      ),
+      ...(record.completed ?? []).map(({ sessionId, turnId }) => ({
+        sessionId,
+        turnId,
+      })),
+    ];
+    return [
+      ...new Map(
+        targets.map((target) => [
+          target.sessionId + "/" + target.turnId,
+          target,
+        ]),
+      ).values(),
+    ];
+  };
+  const retain = (record: RecordState, completed: TurnCompleted[] = []) => {
+    record.completed ??= [];
+    for (const turn of completed)
+      if (
+        !record.completed.some(
+          (known) =>
+            known.sessionId === turn.sessionId && known.turnId === turn.turnId,
+        )
+      )
+        record.completed.push(turn);
+    const detachment = record.info.detachment;
+    if (detachment === undefined) return;
+    for (const target of retainedTargets(record)) {
+      let session = detachment.sessions.find(
+        (item) => item.sessionId === target.sessionId,
+      );
+      if (session === undefined) {
+        session = {
+          sessionId: target.sessionId,
+          outcome: "unknown",
+          turns: [],
+        };
+        detachment.sessions.push(session);
+      }
+      let turn = session.turns.find((item) => item.turnId === target.turnId);
+      if (turn === undefined) {
+        turn = { turnId: target.turnId };
+        session.turns.push(turn);
+      }
+      turn.completed ??= record.completed.find(
+        (item) =>
+          item.sessionId === target.sessionId && item.turnId === target.turnId,
+      );
+    }
   };
   const mutable = (method: ProtocolMethod) =>
     ["spawn", "send", "resolvePermission"].includes(method);
@@ -411,13 +489,48 @@ export async function openWorkspaceRuntime(options: {
                     if (key !== undefined) {
                       // ACK 只由原 daemon 产生；先保存其已知结果，再原样交付。
                       await exclusive(async () => {
-                        if (record.commands?.[key] !== undefined)
-                          record.commands[key].pending = false;
+                        const command = record.commands?.[key];
+                        if (command !== undefined) {
+                          command.pending = false;
+                          if (response.success && "result" in response.output) {
+                            const target = v.safeParse(
+                              v.object({
+                                sessionId: sessionIdSchema,
+                                turnId: turnIdSchema,
+                              }),
+                              response.output.result,
+                            );
+                            if (target.success)
+                              command.target ??= target.output;
+                          }
+                        }
+                        retain(record);
                         await persist(record);
                       });
                       if (response.success)
                         requests.delete(response.output.requestId);
                     }
+                    let completed: TurnCompleted[] = [];
+                    if (response.success && "result" in response.output) {
+                      const waited = v.safeParse(
+                        waitResultSchema,
+                        response.output.result,
+                      );
+                      if (waited.success) completed = waited.output.completed;
+                    } else if (
+                      event.message.kind === "notification" &&
+                      event.message.method === "event" &&
+                      event.message.params.event.type === "turn.completed"
+                    ) {
+                      const { type: _, ...turn } = event.message.params.event;
+                      const parsed = v.safeParse(turnCompletedSchema, turn);
+                      if (parsed.success) completed = [parsed.output];
+                    }
+                    if (completed.length !== 0)
+                      await exclusive(async () => {
+                        retain(record, completed);
+                        await persist(record);
+                      });
                     peer.send(event.message);
                   })
                   .catch(() => peer.close());
@@ -711,13 +824,15 @@ export async function openWorkspaceRuntime(options: {
         const list = await client.request("list", {});
         if ("error" in list) throw workspaceFailure("runtime_entry_invalid");
       } catch (error) {
-        const failure = normalize(error);
-        record.info.runtime = { status: "failed", error: failure };
-        if (active !== undefined) {
-          active.stage = "failed";
-          active.error = failure;
+        if (record.detach === undefined) {
+          const failure = normalize(error);
+          record.info.runtime = { status: "failed", error: failure };
+          if (active !== undefined) {
+            active.stage = "failed";
+            active.error = failure;
+          }
+          await persist(record);
         }
-        await persist(record);
       }
     }
     const attached = record.info.environment;
@@ -1019,6 +1134,7 @@ export async function openWorkspaceRuntime(options: {
         continue;
       const observation = (async () => {
         const loss = await nativeLoss(record);
+        if (record.detach !== undefined) return;
         if (loss !== undefined) await invalidate(record, loss);
         else if (record.info.source.error?.code === "native_view_lost")
           await invalidate(record, record.info.source.error.nativeView);
@@ -1031,8 +1147,7 @@ export async function openWorkspaceRuntime(options: {
   }, 1000);
   monitor.unref();
   return {
-    hasAttachments: () =>
-      records.some((record) => record.info.runtime.status !== "released"),
+    hasAttachments: () => records.some(active),
     async attach(cwd: string, bindingRefs: string[], owner: ConsumerContext) {
       v.parse(consumerContextSchema, owner);
       const tree = await resolveWorktree(cwd);
@@ -1184,39 +1299,166 @@ export async function openWorkspaceRuntime(options: {
       }
       return { cwd: tree.cwd };
     },
-    async detach(cwd: string, owner: ConsumerContext) {
-      const { record, tree } = await find(cwd, owner);
+    async detach(
+      cwd: string,
+      owner: ConsumerContext,
+      disposition: "require_none" | "kill",
+    ) {
+      const { record, tree } = await find(cwd, owner, true, false);
+      let listed: SessionInfo[] = [];
       await exclusive(async () => {
         if (record.detach !== undefined) return;
-        if (
-          preparing.has(record.directory) ||
-          Object.values(record.commands ?? {}).some(
-            (command) => command.pending,
-          )
-        )
+        if (preparing.has(record.directory))
           throw workspaceFailure("workspace_busy");
-        if (record.environmentStage === "started") {
-          const response = await (await connect(record)).request("list", {});
+        if (disposition === "require_none") {
           if (
-            "error" in response ||
-            response.result.some((session) => session.state !== "killed")
+            Object.values(record.commands ?? {}).some(
+              (command) => command.pending,
+            )
           )
             throw workspaceFailure("workspace_busy");
+          if (record.environmentStage === "started") {
+            const response = await (await connect(record)).request("list", {});
+            if (
+              "error" in response ||
+              response.result.some((session) => session.state !== "killed")
+            )
+              throw workspaceFailure("workspace_busy");
+            listed = response.result;
+          }
         }
-        record.detach = { disposition: "require_none" };
+        record.detach = { disposition };
+        record.info.detachment = {
+          disposition,
+          status: "detaching",
+          sessions: [],
+          resources: {
+            runtime: { status: "pending" },
+            credentials: { status: "pending" },
+            bindings: { status: "pending" },
+            routing: { status: "pending" },
+            ownership: { status: "pending" },
+          },
+        };
+        retain(record);
         await persist(record);
       });
-      clients.get(record.directory)?.close();
-      clients.delete(record.directory);
-      await docker(["rm", "-f", record.container]);
-      record.info.runtime = { status: "released" };
-      await persist(record);
-      await rm(join(record.directory, "home"), {
-        recursive: true,
-        force: true,
-      });
-      await (await routes.get(record.directory))?.close();
-      routes.delete(record.directory);
+      const detachment = record.info.detachment!;
+      let step: keyof WorkspaceDetachment["resources"] | undefined;
+      try {
+        const client =
+          record.environmentStage === "started"
+            ? await connect(record)
+            : undefined;
+        if (client !== undefined) {
+          if (detachment.disposition === "kill") {
+            const response = await client.request("list", {});
+            if ("error" in response) throw response.error;
+            listed = response.result;
+          }
+          for (const session of listed) {
+            let saved = detachment.sessions.find(
+              (item) => item.sessionId === session.sessionId,
+            );
+            if (saved === undefined) {
+              saved = {
+                sessionId: session.sessionId,
+                outcome: "unknown",
+                turns: [],
+              };
+              detachment.sessions.push(saved);
+            }
+            saved.session = session;
+            if (session.state === "killed") saved.outcome = "confirmed";
+            for (const turnId of [
+              ...(session.state === "busy" ? [session.activeTurnId] : []),
+              ...(session.lastCompletedTurn === undefined
+                ? []
+                : [session.lastCompletedTurn.turnId]),
+            ])
+              if (!saved.turns.some((turn) => turn.turnId === turnId))
+                saved.turns.push({ turnId });
+          }
+          const saveTurns = async () => {
+            const targets = detachment.sessions.flatMap((session) =>
+              session.turns.map((turn) => ({
+                sessionId: session.sessionId,
+                turnId: turn.turnId,
+              })),
+            );
+            if (targets.length !== 0) {
+              const waited = await client.request("wait", {
+                targets,
+                completion: "all",
+                timeoutMs: 0,
+              });
+              if ("result" in waited) retain(record, waited.result.completed);
+            }
+            await persist(record);
+          };
+          await saveTurns();
+          if (detachment.disposition === "kill")
+            for (const session of detachment.sessions) {
+              if (session.outcome === "confirmed") continue;
+              try {
+                const killed = await client.request("kill", {
+                  sessionId: session.sessionId,
+                });
+                if ("error" in killed) {
+                  session.error = killed.error;
+                  throw killed.error;
+                }
+                if (killed.result.status !== "killed")
+                  throw workspaceFailure("provider_failed");
+                session.outcome = "confirmed";
+                delete session.error;
+                await saveTurns();
+              } catch (error) {
+                const failure = machineFailure(error);
+                if (failure !== undefined) session.error = failure;
+                await persist(record);
+                throw error;
+              }
+            }
+        }
+        step = "runtime";
+        await docker(["rm", "-f", record.container]);
+        clients.get(record.directory)?.close();
+        clients.delete(record.directory);
+        record.info.runtime = { status: "released" };
+        detachment.resources.runtime = { status: "released" };
+        await persist(record);
+        step = "credentials";
+        await rm(join(record.directory, "home"), {
+          recursive: true,
+          force: true,
+        });
+        detachment.resources.credentials = { status: "released" };
+        await persist(record);
+        step = "bindings";
+        for (const binding of record.info.harnesses) binding.stage = "released";
+        detachment.resources.bindings = { status: "released" };
+        await persist(record);
+        step = "routing";
+        await (await routes.get(record.directory))?.close();
+        routes.delete(record.directory);
+        await rm(join(controlDirectory(record), "p.sock"), { force: true });
+        await rm(join(controlDirectory(record), "r.sock"), { force: true });
+        detachment.resources.routing = { status: "released" };
+        await persist(record);
+        detachment.resources.ownership = { status: "released" };
+        detachment.status = "released";
+        delete detachment.error;
+        await persist(record);
+      } catch (error) {
+        const failure = normalize(error);
+        detachment.status = "failed";
+        detachment.error = failure;
+        if (step !== undefined)
+          detachment.resources[step] = { status: "failed", error: failure };
+        await persist(record);
+        throw failure;
+      }
       return { ...record.info, cwd: tree.cwd };
     },
     async close() {
