@@ -315,23 +315,9 @@ function parseEventNotifications(text: string): {
   for (const line of text.split("\n")) {
     if (line === "") continue;
     const notification = readJsonRecord("attach notification", line);
-    if (notification.kind !== "notification") {
-      throw new Error(`Unexpected attach output line: ${line}`);
-    }
-    const method = requiredString(
-      notification,
-      "method",
-      "attach notification",
-    );
-    if (method === "event" || method === "attach.ended") {
-      if (!isRecord(notification.params)) {
-        throw new Error(`Attach notification ${method} has no params object`);
-      }
-      if (method === "event") events.push(notification.params);
-      else ended = notification.params;
-      continue;
-    }
-    throw new Error(`Unexpected attach notification method: ${method}`);
+    if (notification.type === "subscription.established") continue;
+    if (notification.type === "subscription.ended") ended = notification;
+    else events.push(notification);
   }
   return { events, ended };
 }
@@ -687,24 +673,17 @@ async function runWorkerRound(
 
   const attachOutput = await runCli(context, "attach-provided", [
     "attach",
-    providedSessionId,
+    ackTurnHandle,
+    "--scope",
+    "turn",
     "--replay",
-    "32",
-    "--exit-on",
-    "end_turn",
+    "available",
   ]);
   const attach = parseEventNotifications(attachOutput);
   const eventTypes = attach.events.map((event) =>
     requiredString(event, "type", "domain event"),
   );
-  const expectedEventTypes = [
-    "session.created",
-    "turn.started",
-    "turn.completed",
-    "turn.started",
-    "message",
-    "turn.completed",
-  ];
+  const expectedEventTypes = ["turn.started", "text", "turn.completed"];
   if (
     JSON.stringify(eventTypes) !== JSON.stringify(expectedEventTypes) ||
     attach.ended === undefined ||
@@ -717,7 +696,8 @@ async function runWorkerRound(
   const turnIds = new Set<string>();
   for (const event of attach.events) {
     if (
-      requiredString(event, "sessionId", "domain event") !== providedSessionId
+      requiredString(event, "sessionHandle", "domain event") !==
+      providedSessionId
     ) {
       throw new Error(
         `Domain event belongs to another session: ${JSON.stringify(event)}`,
@@ -727,9 +707,12 @@ async function runWorkerRound(
     if (
       type === "turn.started" ||
       type === "turn.completed" ||
-      type === "message"
+      type === "text"
     ) {
-      turnIds.add(requiredString(event, "turnId", "domain event"));
+      turnIds.add(
+        decodeTurnHandle(requiredString(event, "turnHandle", "domain event"))
+          .turnId,
+      );
     }
     if (type === "session.created") {
       if (event.harness !== scenario.harness) {
@@ -755,7 +738,7 @@ async function runWorkerRound(
       }
       continue;
     }
-    if (type === "message") {
+    if (type === "text") {
       if (
         event.role !== "caller" ||
         event.content !== scenario.followUpMessage
@@ -764,7 +747,10 @@ async function runWorkerRound(
           `Follow-up message event lost the authored input: ${JSON.stringify(event)}`,
         );
       }
-      if (requiredString(event, "turnId", "domain event") !== ackTurnId) {
+      if (
+        decodeTurnHandle(requiredString(event, "turnHandle", "domain event"))
+          .turnId !== ackTurnId
+      ) {
         throw new Error(
           `Message event turn diverged from the ack: ${JSON.stringify(event)}`,
         );
@@ -787,9 +773,9 @@ async function runWorkerRound(
       }
     }
   }
-  if (turnIds.size !== 2) {
+  if (turnIds.size !== 1 || !turnIds.has(ackTurnId)) {
     throw new Error(
-      `Two turns were expected, saw turn ids: ${JSON.stringify([...turnIds])}`,
+      `The subscribed turn was expected, saw turn ids: ${JSON.stringify([...turnIds])}`,
     );
   }
 

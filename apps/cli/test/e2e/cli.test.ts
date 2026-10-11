@@ -19,6 +19,8 @@ import {
   sessionIdSchema,
   turnIdSchema,
   encodeTurnHandle,
+  encodePermissionHandle,
+  permissionIdSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
@@ -409,9 +411,13 @@ describe("CLI 进程边界（缝 D）", () => {
         env,
       );
       sessionId = sessionIdFrom(spawned);
-      const result = await runCli(["attach", sessionId], env, {
-        timeoutMs: 100,
-      });
+      const result = await runCli(
+        ["attach", sessionId, "--scope", "session", "--replay", "none"],
+        env,
+        {
+          timeoutMs: 100,
+        },
+      );
       expect(result.exitCode).toBe(-1);
       expect(result.stderr).toBe("");
     } finally {
@@ -425,7 +431,16 @@ describe("CLI 进程边界（缝 D）", () => {
     const fixtureEnv = fixtureDaemonEnv(env, dir, "attach-long-replay");
     const child = spawn(
       process.execPath,
-      [cliBin, "--pretty", "attach", "prompt@g1"],
+      [
+        cliBin,
+        "--pretty",
+        "attach",
+        "prompt@g1",
+        "--scope",
+        "session",
+        "--replay",
+        "available",
+      ],
       {
         env: { ...process.env, ...fixtureEnv },
         stdio: ["ignore", "pipe", "pipe"],
@@ -896,12 +911,19 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     const attached = await runCli(
-      ["attach", sessionId, "--exit-on", "end_turn"],
+      [
+        "attach",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
       env,
     );
     expect(attached.exitCode).toBe(0);
-    expect(attached.stdout).toContain('"kind":"notification"');
-    expect(attached.stdout).toContain('"method":"event"');
+    expect(attached.stdout).toContain('"type":"subscription.established"');
+    expect(attached.stdout).toContain('"type":"text"');
     expect(attached.stdout).toContain('"stopReason":"end_turn"');
     expect(attached.stdout).toContain('"role":"worker"');
     await runCli(["kill", sessionId], env);
@@ -916,10 +938,11 @@ describe("CLI 进程边界（缝 D）", () => {
         env,
       );
       const sessionId = sessionIdFrom(spawned);
-      const attached = startCli(["attach", sessionId, "--replay", "10"], env);
-      await waitFor(() =>
-        attached.stdout.join("").includes('"kind":"notification"'),
+      const attached = startCli(
+        ["attach", sessionId, "--scope", "session", "--replay", "available"],
+        env,
       );
+      await waitFor(() => attached.stdout.join("").includes('"type":"text"'));
       // SIGTERM 现在是有序清理，会发送 session.killed；SIGKILL 才模拟断线。
       daemon.kill("SIGKILL");
       await waitForExit(daemon);
@@ -949,7 +972,15 @@ describe("CLI 进程边界（缝 D）", () => {
       );
       const sessionId = sessionIdFrom(spawned);
       const attached = startCli(
-        ["--pretty", "attach", sessionId, "--replay", "10"],
+        [
+          "--pretty",
+          "attach",
+          sessionId,
+          "--scope",
+          "session",
+          "--replay",
+          "available",
+        ],
         env,
       );
       await waitFor(() => attached.stdout.join("").includes("worker: interim"));
@@ -974,7 +1005,15 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
-      ["--pretty", "attach", sessionId, "--exit-on", "end_turn"],
+      [
+        "--pretty",
+        "attach",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
       env,
       true,
     );
@@ -995,7 +1034,15 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
-      ["--pretty", "attach", sessionId, "--exit-on", "end_turn"],
+      [
+        "--pretty",
+        "attach",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
       queueEnv,
       true,
     );
@@ -1038,7 +1085,15 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
-      ["--pretty", "attach", sessionId, "--exit-on", "end_turn"],
+      [
+        "--pretty",
+        "attach",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
       queueEnv,
       true,
     );
@@ -1056,7 +1111,15 @@ describe("CLI 进程边界（缝 D）", () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "prompt-disconnect");
     const attached = startCli(
-      ["--pretty", "attach", "prompt@g1", "--exit-on", "end_turn"],
+      [
+        "--pretty",
+        "attach",
+        fixtureTurnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
       fixtureEnv,
       true,
     );
@@ -1133,8 +1196,11 @@ describe("CLI 进程边界（缝 D）", () => {
         [
           ...prefix,
           "resolve-permission",
-          sessionId,
-          "p1",
+          encodePermissionHandle({
+            sessionId: v.parse(sessionIdSchema, sessionId),
+            turnId: v.parse(turnIdSchema, "t1"),
+            permissionId: v.parse(permissionIdSchema, "p1"),
+          }),
           "--outcome",
           "allow",
         ],
@@ -1144,13 +1210,15 @@ describe("CLI 进程边界（缝 D）", () => {
       expect(resolved.stderr).toBe("");
       if (mode === "json") {
         expect(JSON.parse(resolved.stdout)).toEqual({
-          sessionId,
-          permissionId: "p1",
+          permissionHandle: encodePermissionHandle({
+            sessionId: v.parse(sessionIdSchema, sessionId),
+            turnId: v.parse(turnIdSchema, "t1"),
+            permissionId: v.parse(permissionIdSchema, "p1"),
+          }),
+          status: "resolved",
         });
       } else {
-        expect(resolved.stdout).toBe(
-          `Resolved permission p1 on session ${sessionId}\n`,
-        );
+        expect(resolved.stdout).toBe("Permission resolved\n");
       }
       await runCli(["kill", sessionId], env);
     },
@@ -1173,7 +1241,15 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
-      ["attach", sessionId, "--pretty", "--exit-on", "end_turn"],
+      [
+        "attach",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--pretty",
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
       env,
       true,
     );
@@ -1211,8 +1287,17 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(sent.exitCode).toBe(0);
+    await runCli(["kill", sessionId], env);
     const attached = await runCli(
-      ["attach", sessionId, "--pretty", "--exit-on", "end_turn"],
+      [
+        "attach",
+        sessionId,
+        "--pretty",
+        "--scope",
+        "session",
+        "--replay",
+        "available",
+      ],
       env,
     );
     expect(attached.exitCode).toBe(0);
@@ -1308,6 +1393,12 @@ function sampleForKind(kind: ValueKind): string {
       return fixtureTurnHandle;
     case "turnId":
       return "t1";
+    case "permissionHandle":
+      return encodePermissionHandle({
+        sessionId: v.parse(sessionIdSchema, fixtureSessionId),
+        turnId: v.parse(turnIdSchema, "t1"),
+        permissionId: v.parse(permissionIdSchema, "p1"),
+      });
     case "permissionId":
       return "p1";
     case "diagnosticId":
@@ -1410,7 +1501,7 @@ function missingOptionCases(): UsageCase[] {
       .filter((option) => option.required === true)
       .map((option) => ({
         name: `${spec.name} missing option ${option.name}`,
-        args: [spec.name, ...spec.args.map(sampleForArg)],
+        args: baseArgs(spec, option.name),
         issue: "missing_argument" as const,
         target: "option" as const,
         field: option.flags,
@@ -1434,6 +1525,7 @@ type InvalidKindCategory =
   | "multiEnum"
   | "jsonObject"
   | "dynamicHarness"
+  | "permissionHandle"
   | "dynamicModel"
   | "dynamicReasoning";
 
@@ -1453,6 +1545,7 @@ function invalidCategory(
     case "sessionId":
     case "turnId":
     case "turnHandle":
+    case "permissionHandle":
     case "permissionId":
     case "diagnosticId":
     case "time":
@@ -1489,6 +1582,8 @@ function invalidValueFor(kind: ValueKind): string {
       return "bad-handle";
     case "turnId":
       return "T1";
+    case "permissionHandle":
+      return "permission1_invalid";
     case "permissionId":
       return "P1";
     case "diagnosticId":
@@ -1614,6 +1709,10 @@ function invalidCaseFor(
 }
 
 const fixtureValueKinds = {
+  permissionHandle: {
+    type: "permissionHandle",
+    hint: "Expected fixture PermissionHandle",
+  },
   number: {
     type: "number",
     integer: true,
@@ -1993,7 +2092,7 @@ describe("CLI 输出金样（逐字节）", () => {
 
   test("JSON 一次列全声明中可确定的缺失必填项", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["resolve-permission", "test@g2"], env);
+    const result = await runCli(["resolve-permission"], env);
     expect(result.exitCode).toBe(64);
     expect(result.stderr).toBe("");
     expect(JSON.parse(result.stdout)).toEqual({
@@ -2002,8 +2101,8 @@ describe("CLI 输出金样（逐字节）", () => {
         {
           issue: "missing_argument",
           target: "argument",
-          field: "permissionId",
-          hint: "Expected a valid PermissionId",
+          field: "permissionHandle",
+          hint: "Expected a valid PermissionHandle",
         },
         {
           issue: "missing_argument",
@@ -2013,27 +2112,24 @@ describe("CLI 输出金样（逐字节）", () => {
         },
       ],
       message:
-        "Missing required argument 'permissionId'. Expected a valid PermissionId. " +
+        "Missing required argument 'permissionHandle'. Expected a valid PermissionHandle. " +
         "Missing required option '--outcome <allow|deny>'. Allowed: allow, deny",
       usage:
-        "reins resolve-permission <sessionId> <permissionId> --outcome <allow|deny> [options]",
+        "reins resolve-permission <permissionHandle> --outcome <allow|deny> [options]",
     });
   });
 
   test("pretty 按声明顺序列出同一组缺失必填项", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(
-      ["--pretty", "resolve-permission", "test@g2"],
-      env,
-    );
+    const result = await runCli(["--pretty", "resolve-permission"], env);
     expect(result.exitCode).toBe(64);
     expect(result.stdout).toBe("");
     expect(result.stderr).toBe(
-      "error: Missing required argument 'permissionId'\n" +
-        "suggestion: Expected a valid PermissionId\n" +
+      "error: Missing required argument 'permissionHandle'\n" +
+        "suggestion: Expected a valid PermissionHandle\n" +
         "error: Missing required option '--outcome <allow|deny>'\n" +
         "suggestion: Allowed: allow, deny\n" +
-        "usage: reins resolve-permission <sessionId> <permissionId> --outcome <allow|deny> [options]\n",
+        "usage: reins resolve-permission <permissionHandle> --outcome <allow|deny> [options]\n",
     );
   });
 
@@ -2199,9 +2295,13 @@ describe("CLI 域错误（不夹带 usage）", () => {
   ])("attach 将 %s 保留为 invalid_daemon_response", async (fixtureMode) => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, fixtureMode);
-    const result = await runCli(["attach", "prompt@g1"], fixtureEnv, {
-      timeoutMs: 3_000,
-    });
+    const result = await runCli(
+      ["attach", "prompt@g1", "--scope", "session", "--replay", "available"],
+      fixtureEnv,
+      {
+        timeoutMs: 3_000,
+      },
+    );
     expect(result.exitCode).toBe(65);
     expect(result.stderr).toBe("");
     const lines = result.stdout
@@ -2220,9 +2320,21 @@ describe("CLI 域错误（不夹带 usage）", () => {
     );
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
-    const result = await runCli(["--pretty", "attach", sessionId], env, {
-      timeoutMs: 3_000,
-    });
+    const result = await runCli(
+      [
+        "--pretty",
+        "attach",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
+      env,
+      {
+        timeoutMs: 3_000,
+      },
+    );
     expect(result.exitCode).toBe(65);
     expect(result.stdout).toContain("Permission requested:");
     expect(result.stderr).toBe(

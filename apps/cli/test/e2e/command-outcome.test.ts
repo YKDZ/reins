@@ -218,19 +218,16 @@ test("真实 CLI 在 ACK 丢失后显式恢复原结果，正常重启后旧 tok
   const listed = await cli(["list"], env);
   expect(JSON.parse(listed.stdout)).toHaveLength(1);
   const events = await cli(
-    ["attach", session.sessionId, "--exit-on", "end_turn"],
+    ["attach", session.turnHandle, "--scope", "turn", "--replay", "available"],
     env,
   );
   expect(events.code).toBe(0);
   const records = events.stdout
     .trim()
     .split("\n")
-    .map(
-      (line) =>
-        JSON.parse(line) as { params?: { type?: string; role?: string } },
-    );
+    .map((line) => JSON.parse(line) as { type?: string; role?: string });
   expect(
-    records.filter((record) => record.params?.type === "turn.started"),
+    records.filter((record) => record.type === "turn.started"),
   ).toHaveLength(1);
   const prettyLost = await cli(
     [

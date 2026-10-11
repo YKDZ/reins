@@ -803,6 +803,7 @@ describe("driver event ingress ownership", () => {
       ),
     ).toHaveLength(1);
     await machine.resolvePermission({
+      turnId: ids.turn("t2"),
       sessionId: second,
       permissionId: ids.permission("p9"),
       resolution: { outcome: "allow", scope: "once" },
@@ -905,6 +906,7 @@ describe("driver event ingress ownership", () => {
     };
     fake.controls.emit({ ...request, turnId: ids.turn("t1") });
     await machine.resolvePermission({
+      turnId: ids.turn("t1"),
       sessionId,
       permissionId: request.permissionId,
       resolution: { outcome: "allow", scope: "once" },

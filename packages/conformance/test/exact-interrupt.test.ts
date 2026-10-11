@@ -79,9 +79,13 @@ test("精确 interrupt 等原生接受才 ACK，取消独立观察且保留会�
   const { sessionId, turnId } = spawned.result;
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
-  await client.request("attach", { sessionId });
+  await client.request("attach", {
+    scope: "session",
+    sessionId,
+    replay: { mode: "available" },
+  });
   let settled = false;
   const pending = client
     .request("interrupt", { sessionId, turnId })
