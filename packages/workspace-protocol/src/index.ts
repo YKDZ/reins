@@ -84,6 +84,8 @@ export const nativeViewLossSchema = v.variant("reason", [
     currentRoot: v.string(),
   }),
   v.strictObject({ reason: v.literal("replaced") }),
+  v.strictObject({ reason: v.literal("removed") }),
+  v.strictObject({ reason: v.literal("unreachable") }),
 ]);
 export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;
 export const workspaceErrorSchema = v.union([

@@ -9,7 +9,7 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { createReinsClient, type ReinsClient } from "@reins/client";
@@ -209,16 +209,83 @@ export async function openWorkspaceRuntime(options: {
           )),
     );
   };
+  const nativeLoss = async (
+    record: RecordState,
+  ): Promise<NativeViewLoss | undefined> => {
+    for (const saved of record.identities) {
+      let current: NativeIdentity;
+      try {
+        current = await identity(saved.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (saved.path === record.tree.root) {
+          try {
+            await stat(record.tree.gitDir);
+          } catch (gitError) {
+            if ((gitError as NodeJS.ErrnoException).code === "ENOENT")
+              return { reason: "removed" };
+            throw gitError;
+          }
+        }
+        return { reason: "unreachable" };
+      }
+      if (current.dev !== saved.dev || current.ino !== saved.ino)
+        return {
+          reason: saved.path === record.tree.root ? "replaced" : "unreachable",
+        };
+    }
+    try {
+      const tree = await resolveWorktree(record.tree.cwd);
+      if (
+        tree.root !== record.tree.root ||
+        tree.gitDir !== record.tree.gitDir ||
+        tree.commonDir !== record.tree.commonDir
+      )
+        return { reason: "unreachable" };
+    } catch {
+      return { reason: "unreachable" };
+    }
+    return undefined;
+  };
   const find = async (
     cwd: string,
     owner: ConsumerContext,
     allowInvalid = false,
   ) => {
-    const tree = await resolveWorktree(cwd);
-    const record = await locate(tree);
+    let tree: Tree;
+    let record: RecordState | undefined;
+    try {
+      tree = await resolveWorktree(cwd);
+      record = await locate(tree);
+    } catch (error) {
+      // 只有已附着原对象确实失效时，旧目录才可用于读取其事实或拒绝修改。
+      record = records.find((item) => {
+        const suffix = relative(item.tree.root, cwd);
+        return (
+          item.info.runtime.status !== "released" &&
+          isAbsolute(cwd) &&
+          suffix !== ".." &&
+          !suffix.startsWith("../") &&
+          !isAbsolute(suffix)
+        );
+      });
+      if (record === undefined) throw error;
+      if (record.owner !== owner) throw workspaceFailure("attachment_owned");
+      const loss = await nativeLoss(record);
+      if (
+        loss === undefined &&
+        record.info.source.error?.code !== "native_view_lost"
+      )
+        throw error;
+      if (loss !== undefined) await invalidate(record, loss);
+      tree = { ...record.tree, cwd };
+    }
     if (record === undefined) throw workspaceFailure("attachment_not_found");
     if (record.owner !== owner) throw workspaceFailure("attachment_owned");
-    if (record.info.source.error?.code === "native_view_lost") {
+    if (
+      record.info.source.error?.code === "native_view_lost" &&
+      record.info.source.error.nativeView.reason !== "unreachable"
+    ) {
       if (!allowInvalid) throw record.info.source.error;
       return { record, tree };
     }
@@ -230,24 +297,10 @@ export async function openWorkspaceRuntime(options: {
       if (!allowInvalid) throw failure;
       return { record, tree };
     }
-    for (const saved of record.identities) {
-      let current: NativeIdentity;
-      try {
-        current = await identity(saved.path);
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT")
-          throw workspaceFailure("native_view_mismatch");
-        throw error;
-      }
-      if (current.dev !== saved.dev || current.ino !== saved.ino) {
-        if (saved.path === record.tree.root) {
-          const failure = await invalidate(record, { reason: "replaced" });
-          if (!allowInvalid) throw failure;
-          return { record, tree };
-        }
-        throw workspaceFailure("native_view_mismatch");
-      }
-    }
+    const loss = await nativeLoss(record);
+    if (loss !== undefined) await invalidate(record, loss);
+    if (!allowInvalid && record.info.source.error?.code === "native_view_lost")
+      throw record.info.source.error;
     return { record, tree };
   };
   const connect = async (record: RecordState) => {
@@ -345,6 +398,13 @@ export async function openWorkspaceRuntime(options: {
         termination: { status: "stopping", sessions: [] },
       };
       await persist(record);
+    } else if (
+      record.info.source.error.nativeView.reason === "unreachable" &&
+      nativeView.reason !== "unreachable"
+    ) {
+      // 先前不可达的原对象可由后来取得的原生事实细化；终止事实保持单调。
+      record.info.source.error = error;
+      await persist(record);
     }
     if (
       !stopTasks.has(record.directory) &&
@@ -356,7 +416,7 @@ export async function openWorkspaceRuntime(options: {
         .finally(() => stopTasks.delete(record.directory))
         .catch(() => {});
     }
-    return error;
+    return record.info.source.error!;
   };
   const inspectContainer = async (record: RecordState) => {
     let actual: {
@@ -388,6 +448,8 @@ export async function openWorkspaceRuntime(options: {
     try {
       version = await docker([
         "exec",
+        "-w",
+        "/",
         record.container,
         `/opt/reins/harnesses/${binding.harness}/bin/${binary}`,
         "--version",
@@ -544,6 +606,8 @@ export async function openWorkspaceRuntime(options: {
         "-e",
         "if(process.platform!=='linux'||process.arch!=='x64'||process.versions.node.split('.')[0]!=='24')process.exit(1);const fs=require('node:fs'),p=process.env.HOME+'/reins-home-probe-'+process.pid;const fd=fs.openSync(p,'wx',0o600);fs.closeSync(fd);fs.unlinkSync(p)",
       ]);
+      if (record.info.source.error?.code === "native_view_lost")
+        throw record.info.source.error;
       record.info.source = { status: "verified" };
       await persist(record);
       // 提前保持真实控制连接；部分绑定失败或安装较慢时 daemon 不因空闲丢失已有环境。
@@ -658,6 +722,33 @@ export async function openWorkspaceRuntime(options: {
       preparing.delete(record.directory);
     }
   };
+  const observations = new Map<string, Promise<void>>();
+  const monitor = setInterval(() => {
+    for (const record of records) {
+      if (
+        record.environmentStage !== "started" ||
+        observations.has(record.directory) ||
+        record.info.runtime.status === "released"
+      )
+        continue;
+      if (
+        record.info.source.status !== "verified" &&
+        record.info.source.error?.code !== "native_view_lost"
+      )
+        continue;
+      const observation = (async () => {
+        const loss = await nativeLoss(record);
+        if (loss !== undefined) await invalidate(record, loss);
+        else if (record.info.source.error?.code === "native_view_lost")
+          await invalidate(record, record.info.source.error.nativeView);
+      })();
+      observations.set(record.directory, observation);
+      void observation
+        .finally(() => observations.delete(record.directory))
+        .catch(() => {});
+    }
+  }, 1000);
+  monitor.unref();
   return {
     hasAttachments: () =>
       records.some((record) => record.info.runtime.status !== "released"),
@@ -819,7 +910,9 @@ export async function openWorkspaceRuntime(options: {
       return { ...record.info, cwd: tree.cwd };
     },
     async close() {
+      clearInterval(monitor);
       await Promise.all(executions.values());
+      await Promise.allSettled(observations.values());
       await Promise.allSettled(stopTasks.values());
       for (const client of clients.values()) client.close();
       clients.clear();
