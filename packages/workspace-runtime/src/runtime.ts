@@ -1274,16 +1274,18 @@ export async function openWorkspaceRuntime(options: {
       commandId?: CommandId,
     ) {
       const { record, tree } = await find(cwd, owner, true);
+      // 已转发命令的显式恢复仍交原 daemon 裁决去重、冲突与运行代际。
       if (
         mutable(action) &&
-        record.detach !== undefined &&
-        (commandId === undefined || record.commands?.[commandId] === undefined)
+        commandId !== undefined &&
+        record.commands?.[commandId] !== undefined
       )
+        return { cwd: tree.cwd };
+      if (mutable(action) && record.detach !== undefined)
         throw workspaceFailure("workspace_detaching");
       if (
         ["spawn", "send", "resolvePermission"].includes(action) &&
-        record.info.source.error?.code === "native_view_lost" &&
-        (commandId === undefined || record.commands?.[commandId] === undefined)
+        record.info.source.error?.code === "native_view_lost"
       )
         throw record.info.source.error;
       if (action === "spawn") {
