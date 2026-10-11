@@ -659,14 +659,23 @@ try {
       }
       break;
     }
-    const detached = await cli([
-      "detach",
-      "-C",
-      cwd,
-      "--session-disposition",
-      "require_none",
-    ]);
-    assert.equal(detached.status, 0, JSON.stringify(detached));
+    // 失败事实可先于准备执行者释放发布；通过公开动作等待其实际收尾。
+    for (;;) {
+      const detached = await cli([
+        "detach",
+        "-C",
+        cwd,
+        "--session-disposition",
+        "require_none",
+      ]);
+      if (detached.status === 0) break;
+      assert.equal(
+        detached.value.code,
+        "workspace_busy",
+        JSON.stringify(detached),
+      );
+      await delay(100);
+    }
   }
   for (const scenario of [
     { name: "selected", credential: "login", expected: "ready" },
