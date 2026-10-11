@@ -771,7 +771,7 @@ export const workspaceGroupSpec: CommandSpec = {
 };
 
 export const publisherGroupSpec: CommandSpec = {
-  name: "reins",
+  name: "",
   description: "Publisher operations",
   args: [],
   options: [],
@@ -873,11 +873,17 @@ export function commandSpecForName(name: string): CommandSpec | undefined {
 
 export function commandSpecForToken(
   argv: readonly string[],
+  commandSet: "root" | "publisher" = "root",
 ): CommandSpec | undefined {
-  const workspaceIndex = argv.indexOf("workspace");
-  if (workspaceIndex !== -1) {
+  const commandIndex = commandTokenIndex(argv, commandSet === "root");
+  if (commandIndex === -1) return undefined;
+  const commandToken = argv[commandIndex];
+  if (commandSet === "publisher") {
+    return publisherCommandSpecs.find((spec) => spec.name === commandToken);
+  }
+  if (commandToken === "workspace") {
     const child = argv
-      .slice(workspaceIndex + 1)
+      .slice(commandIndex + 1)
       .find((token) => !token.startsWith("-"));
     return (
       workspaceCommandSpecs.find(
@@ -885,14 +891,12 @@ export function commandSpecForToken(
       ) ?? workspaceGroupSpec
     );
   }
-  for (const token of argv) {
-    if (token.startsWith("-")) continue;
-    const spec =
-      commandSpecs.find((candidate) => candidate.name === token) ??
-      publisherCommandSpecs.find((candidate) => candidate.name === token);
-    if (spec !== undefined) return spec;
-  }
-  return undefined;
+  return commandToken === undefined
+    ? undefined
+    : (commandSpecs.find((candidate) => candidate.name === commandToken) ??
+        publisherCommandSpecs.find(
+          (candidate) => candidate.name === commandToken,
+        ));
 }
 
 export function flagDisplay(flags: string): string {
@@ -1211,6 +1215,26 @@ function flagFor(spec: CommandSpec, name: string): string {
   return flagDisplay(
     spec.options.find((option) => option.name === name)?.flags ?? `--${name}`,
   );
+}
+
+function commandTokenIndex(
+  argv: readonly string[],
+  rootOptions: boolean,
+): number {
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index]!;
+    if (token === "--") return index + 1;
+    if (token === "--pretty" || token === "--version" || token === "-V")
+      continue;
+    if (rootOptions && token === "-C") {
+      index += 1;
+      continue;
+    }
+    if (rootOptions && token.startsWith("-C") && token.length > 2) continue;
+    if (token.startsWith("-")) return -1;
+    return index;
+  }
+  return -1;
 }
 
 function validateValue(

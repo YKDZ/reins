@@ -241,10 +241,7 @@ async function main() {
           case "publication.publish":
             throw workspaceFailure("invalid_request");
           case "publication.observe": {
-            const scopeKey = await runtime.publicationScope(
-              request.params.cwd,
-              consumer,
-            );
+            const scopeKey = await runtime.publicationScope(request.params.cwd);
             observations.set(request.params.observationId, scopeKey);
             return runtime.publications.list(consumer, scopeKey);
           }
@@ -254,7 +251,7 @@ async function main() {
           case "publication.list":
             return runtime.publications.list(
               consumer,
-              await runtime.publicationScope(request.params.cwd, consumer),
+              await runtime.publicationScope(request.params.cwd),
             );
           case "publication.read":
             return runtime.publications.read(

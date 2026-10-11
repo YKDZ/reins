@@ -144,6 +144,28 @@ test("publication discovery follows worktree scope and preserves execution locat
   assert.equal((await publications.list(owner, otherScope)).length, 0);
 });
 
+test("publication scope is resolvable without an active owner attachment", async () => {
+  const fixture = await mkdtemp(
+    join(tmpdir(), "reins-workspace-publication-unattached-scope-"),
+  );
+  directories.push(fixture);
+  const worktree = join(fixture, "worktree");
+  const nested = join(worktree, "src");
+  const stateDirectory = join(fixture, "state");
+  await mkdir(nested, { recursive: true });
+  await mkdir(stateDirectory);
+  await execute("git", ["init", "--quiet", worktree]);
+
+  const runtime = await openWorkspaceRuntime({ stateDirectory });
+  try {
+    const scope = await runtime.publicationScope(nested);
+    assert.equal(scope, await worktreeScopeKey(worktree));
+    assert.deepEqual(await runtime.publications.list(otherOwner, scope), []);
+  } finally {
+    await runtime.close();
+  }
+});
+
 test("a failed attachment resumes from its accepted bindings when runtime definitions drift", async () => {
   const fixture = await mkdtemp(
     join(tmpdir(), "reins-workspace-binding-retry-"),

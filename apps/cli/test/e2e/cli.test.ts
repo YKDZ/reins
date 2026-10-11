@@ -2035,6 +2035,32 @@ describe("workspace 与 publisher 声明入口", () => {
       usage: `reins ${publisherCommandSpecs[0]!.name} <file> [options]`,
     });
   });
+
+  test("publisher 错误反馈只使用实际声明的 publisher 命令", async () => {
+    const unknown = await runPublisher(["workspace"]);
+    expect(unknown.exitCode).toBe(64);
+    expect(JSON.parse(unknown.stdout)).toMatchObject({
+      issues: [
+        {
+          issue: "unknown_command",
+          value: "workspace",
+          valid: publisherCommandSpecs.map((spec) => spec.name),
+        },
+      ],
+      usage: "reins [options] <command>",
+    });
+
+    const invalidOption = await runPublisher([
+      "publish",
+      "workspace",
+      "--invalid",
+    ]);
+    expect(invalidOption.exitCode).toBe(64);
+    expect(JSON.parse(invalidOption.stdout)).toMatchObject({
+      issues: [{ issue: "unknown_option", value: "--invalid" }],
+      usage: "reins publish <file> [options]",
+    });
+  });
 });
 
 describe("CLI 错误矩阵（缝 D，从命令规范派生）", () => {

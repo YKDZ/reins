@@ -66,10 +66,57 @@ export function renderCliError(
 ): RenderedError {
   if (isWorkspaceError(error)) {
     const message = error.code.replaceAll("_", " ");
-    return renderedError(
+    const description =
       message[0]!.toUpperCase() +
-        message.slice(1) +
-        (error.detail === undefined ? "" : ": " + error.detail),
+      message.slice(1) +
+      (error.detail === undefined ? "" : ": " + error.detail);
+    const facts: string[] = [];
+    if ("availableBindings" in error && error.availableBindings !== undefined) {
+      facts.push(
+        `Available bindings: ${error.availableBindings.length === 0 ? "(none)" : error.availableBindings.join(", ")}`,
+      );
+    }
+    if ("gitImport" in error && error.gitImport !== undefined) {
+      const result = error.gitImport;
+      const objectDatabase = (
+        value:
+          | {
+              readonly loose: number;
+              readonly packed: number;
+              readonly packs: number;
+            }
+          | undefined,
+      ): string | undefined =>
+        value === undefined
+          ? undefined
+          : `${value.loose} loose objects, ${value.packed} packed objects, ${value.packs} packs`;
+      const before = objectDatabase(result.objectDatabaseBefore);
+      const after = objectDatabase(result.objectDatabaseAfter);
+      facts.push(
+        [
+          `Git import repository: ${result.repository}`,
+          `reference: ${result.reference}`,
+          `object write attempted: ${result.objectWriteAttempted ? "yes" : "no"}`,
+          `reference created: ${result.referenceCreated ? "yes" : "no"}`,
+          ...(before === undefined
+            ? []
+            : [`object database before: ${before}`]),
+          ...(after === undefined ? [] : [`object database after: ${after}`]),
+        ].join("; "),
+      );
+    }
+    if (error.code === "native_view_lost") {
+      facts.push(
+        [
+          `Native view reason: ${error.nativeView.reason}`,
+          ...(error.nativeView.reason === "moved"
+            ? [`current root: ${error.nativeView.currentRoot}`]
+            : []),
+        ].join("; "),
+      );
+    }
+    return renderedError(
+      facts.length === 0 ? description : `${description}. ${facts.join(". ")}`,
     );
   }
   if (error.code === "usage_error") return renderUsageError(error, spec);
@@ -342,7 +389,7 @@ function domainMessage(error: MachineError): string {
     case "daemon_shutting_down":
       return "Daemon is shutting down";
     case "native_view_lost":
-      return "Native worktree view is unavailable";
+      return `Native worktree view is unavailable (${error.nativeView.reason})${error.nativeView.reason === "moved" ? `: ${error.nativeView.currentRoot}` : ""}`;
     case "workspace_detaching":
       return "Workspace is detaching";
     case "invalid_params":

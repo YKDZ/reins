@@ -593,7 +593,7 @@ try {
           pidMode: runtime.HostConfig.PidMode,
         },
       });
-    } else {
+    } else if (fault === "move" || fault === "replace") {
       await rename(worktree, moved);
       movedRoot = await nativeIdentity(moved);
       assert.deepEqual(movedRoot, originalRoot);

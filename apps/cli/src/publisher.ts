@@ -100,13 +100,13 @@ export async function publisherMain(argv: readonly string[]): Promise<number> {
         if (error.code === "commander.help") program.outputHelp();
         return 0;
       }
-      const spec = commandSpecForToken(argv) ?? publisherGroupSpec;
+      const spec = commandSpecForToken(argv, "publisher") ?? publisherGroupSpec;
       const cliError = commanderToUsageError(error, spec);
       printError(cliError, mode, spec);
       return EXIT_USAGE;
     }
     const cliError = toCliError(error);
-    printError(cliError, mode, commandSpecForToken(argv));
+    printError(cliError, mode, commandSpecForToken(argv, "publisher"));
     return exitCodeForError(cliError);
   }
 }
