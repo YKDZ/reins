@@ -52,4 +52,6 @@ Manager 在原生视图验证后、绑定安装前建立并保持真实 daemon �
 
 Manager 正常停止时先关闭新请求受理，等待已受理请求和准备执行完成持久发布，随后关闭 daemon 连接并释放状态 lease，避免旧执行与新 Manager 同时写入。
 
+daemon 与容器重启是不同的部署动作。重新进入工作区时，Manager 实际核对原容器身份、原生工作树及 Git 元数据、执行目录、已选择绑定的本地 runtime 入口与 daemon 控制连接；已取得的共享客户端也不能凭旧准备事实放行新 worker。入口失效时先明确失败，调用方修正后显式重复原 `attach` 才继续验证，成功材料保持原样。正常重启后的旧会话及回合引用失效；原 worker 的停止事实与无法取得的旧业务结果分别表达。调用方用完整新消息和新名称显式 `spawn` 替代会话，复用代码与环境，不继承旧模型上下文，也不自动重放旧任务。厂商凭据刷新及具体原生控制的支持范围仍按各自真实组合验收。
+
 正式发行包包含 sibling `reins-workspace-manager`。默认状态位于 `$XDG_STATE_HOME/reins/workspace-manager`（未设置时为 `$HOME/.local/state/reins/workspace-manager`）。部署与测试可显式设置 `REINS_WORKSPACE_MANAGER_BIN`、`REINS_WORKSPACE_MANAGER_SOCKET` 和 `REINS_WORKSPACE_MANAGER_STATE_DIR`。开发 launcher 为当前 checkout/build 隔离这些路径。Docker 连接与公开镜像拉取使用 launcher 的现有 Docker 配置，产品不改用户配置。

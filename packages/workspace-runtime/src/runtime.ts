@@ -590,9 +590,16 @@ export async function openWorkspaceRuntime(options: {
       } catch (error) {
         const failure = normalize(error);
         record.info.runtime = { status: "failed", error: failure };
-        if (active !== undefined) {
-          active.stage = "failed";
-          active.error = failure;
+        // 绑定校验失败只撤销该绑定；共享容器或 daemon 失效则没有仍就绪的绑定。
+        const unavailable =
+          active === undefined
+            ? record.info.harnesses.filter(
+                (binding) => binding.stage === "ready",
+              )
+            : [active];
+        for (const binding of unavailable) {
+          binding.stage = "failed";
+          binding.error = failure;
         }
         await persist(record);
       }
@@ -1060,6 +1067,13 @@ export async function openWorkspaceRuntime(options: {
         record.info.source.error !== undefined
       )
         throw record.info.source.error;
+      if (action === "spawn") {
+        const current = await status(cwd, owner);
+        if (record.info.source.error !== undefined)
+          throw record.info.source.error;
+        if (current.runtime.status === "failed" && !hasReadyBinding(record))
+          throw current.runtime.error ?? workspaceFailure("provider_failed");
+      }
       if (!hasReadyBinding(record))
         throw workspaceFailure("workspace_not_ready");
       if (action === "spawn") {
