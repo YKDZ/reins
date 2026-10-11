@@ -26,7 +26,7 @@ const {
   consumerSha256: string;
   environmentBase?: string;
   skipAtomic?: boolean;
-  focus?: "all" | "kill" | "continuation";
+  focus?: "all" | "kill" | "continuation" | "provider";
 };
 async function command(
   binary: string,
@@ -385,15 +385,17 @@ const base=${JSON.stringify(base)};
 const args=process.argv.slice(2);
 const owned=args[0]==='rm' && args[1]==='-f' && args[2]?.startsWith('reins-wrr20-runtime-') && !args[2].includes('-material-');
 const log=value=>appendFileSync(base+'/evidence/provider.ndjson',JSON.stringify({...value,args,at:new Date().toISOString()})+'\\n');
+const providerBlocked=existsSync(base+'/linked-worktree/src/provider-fail') && !existsSync(base+'/linked-worktree/src/provider-allow');
 if(['create','start'].includes(args[0]))log({event:'prepare'});
 const pause=async phase=>{
   writeFileSync(base+'/rm-ready',JSON.stringify({phase,pid:process.pid,managerPid:process.ppid,args}));
   while(!existsSync(base+'/rm-release')) await delay(10);
 };
-if(args[0]==='container' && args[1]==='ls' && existsSync(base+'/proof-fail')) {
+if(args[0]==='container' && args[1]==='ls' && (existsSync(base+'/proof-fail') || providerBlocked)) {
   log({event:'proof-failed'});
   process.exit(42);
 }
+if(owned && providerBlocked){log({event:'remove-rejected'});process.exit(42);}
 if(owned){log({event:'remove-start'});if(!existsSync(base+'/rm-after'))await pause('before');}
 const r=spawnSync(base+'/tools/docker-real',args,{stdio:'inherit'});
 if(owned){log({event:'remove-end',status:r.status});if(r.status===0 && existsSync(base+'/rm-after'))await pause('after');}
@@ -493,7 +495,7 @@ if (!skipAtomic) {
     "04bdd04 dbf2b57d-da8b-412d-b140-7f09ae015089; independently verified by root",
   );
 }
-if (focus !== "continuation") {
+if (focus === "all" || focus === "kill") {
   let attachment:
     | {
         directory: string;
@@ -707,7 +709,7 @@ if (focus !== "continuation") {
     runtimeAbsent: true,
   });
 }
-if (focus !== "kill") {
+if (focus === "all" || focus === "continuation") {
   if (focus === "all") {
     const attachedAgain = await cli([
       "attach",
@@ -879,6 +881,223 @@ if (focus !== "kill") {
     explicitUpgrade: true,
     reverseRejected: true,
     sameIntentIdempotent: true,
+  });
+}
+if (focus === "all" || focus === "provider") {
+  if (focus === "all") {
+    const attachedAgain = await cli([
+      "attach",
+      "-C",
+      join(worktree, "src"),
+      "--binding",
+      "code",
+    ]);
+    assert.equal(attachedAgain.status, 0, JSON.stringify(attachedAgain));
+    await waitForRuntime("ready");
+  }
+  await rm(join(base, "rm-after"), { force: true });
+  await writeFile(join(base, "rm-release"), "release provider removal");
+  let attachment:
+    | {
+        directory: string;
+        container: string;
+        info: { runtime: { status: string } };
+      }
+    | undefined;
+  for (const entry of await readdir(managerState, { withFileTypes: true })) {
+    if (!entry.isDirectory() || entry.name.startsWith("c-")) continue;
+    const saved = JSON.parse(
+      await readFile(join(managerState, entry.name, "attachment.json"), "utf8"),
+    );
+    if (saved.info.runtime.status !== "released") attachment = saved;
+  }
+  assert.ok(attachment);
+  const projectedAuth = join(
+    attachment.directory,
+    "home",
+    ".codex",
+    "auth.json",
+  );
+  assert.equal((await stat(projectedAuth)).isFile(), true);
+  const known = await control([
+    "spawn",
+    "codex",
+    JSON.stringify({ path: "../tracked.txt" }),
+    "--name",
+    "provider-completed-worker",
+  ]);
+  assert.equal(known.status, 0, JSON.stringify(known));
+  const completed = await control([
+    "wait",
+    String(known.value.turnHandle),
+    "--completion",
+    "all",
+    "--timeout",
+    "5000",
+  ]);
+  assert.equal(completed.status, 0, JSON.stringify(completed));
+  const originalTerminal = (
+    completed.value.completed as { stopReason: string }[]
+  )[0]!;
+  assert.equal(originalTerminal.stopReason, "end_turn");
+  await rm(join(worktree, "src", "writer.json"), { force: true });
+  const worker = await control([
+    "spawn",
+    "codex",
+    JSON.stringify({
+      heldFile: "provider-held.txt",
+      relativeFile: "provider-relative.txt",
+      intervalMs: 25,
+      failTerminate: true,
+    }),
+    "--name",
+    "provider-unconfirmed-worker",
+  ]);
+  assert.equal(worker.status, 0, JSON.stringify(worker));
+  for (;;) {
+    try {
+      await readFile(join(worktree, "src", "writer.json"));
+      break;
+    } catch {
+      await delay(10);
+    }
+  }
+  await record(
+    "providerWriter",
+    JSON.parse(await readFile(join(worktree, "src", "writer.json"), "utf8")),
+  );
+  type Projection = {
+    status: string;
+    sessions: {
+      sessionId: string;
+      outcome: string;
+      turns: { turnId: string; completed?: unknown }[];
+    }[];
+    resources: Record<string, { status: string }>;
+  };
+  const rejected = await cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "kill",
+  ]);
+  await record("provider-first-detach", rejected);
+  assert.notEqual(rejected.status, 0, JSON.stringify(rejected));
+  const observed = await cli(["status", "-C", join(worktree, "src")]);
+  assert.equal(observed.status, 0, JSON.stringify(observed));
+  const uncertain = observed.value.detachment as Projection;
+  assert.equal(uncertain.status, "failed");
+  assert.notEqual(uncertain.resources.runtime!.status, "released");
+  assert.notEqual(uncertain.resources.ownership!.status, "released");
+  const unknownWorker = uncertain.sessions.find(
+    (item) => item.sessionId === worker.value.sessionId,
+  );
+  assert.ok(unknownWorker);
+  assert.equal(unknownWorker.outcome, "unknown");
+  assert.ok(unknownWorker.turns.every((turn) => turn.completed === undefined));
+  const knownWorker = uncertain.sessions.find(
+    (item) => item.sessionId === known.value.sessionId,
+  );
+  assert.ok(knownWorker);
+  assert.equal(knownWorker.outcome, "confirmed");
+  assert.ok(
+    knownWorker.turns.some(
+      (turn) =>
+        JSON.stringify(turn.completed) === JSON.stringify(originalTerminal),
+    ),
+  );
+  assert.equal((await stat(projectedAuth)).isFile(), true);
+  assert.equal(
+    await requireCommand("docker", [
+      "inspect",
+      "--format",
+      "{{.State.Running}}",
+      attachment.container,
+    ]),
+    "true",
+  );
+  const before = await stat(join(worktree, "src", "provider-held.txt"));
+  for (;;) {
+    if (
+      (await stat(join(worktree, "src", "provider-held.txt"))).size >
+      before.size
+    )
+      break;
+    await delay(10);
+  }
+  await record("provider-uncertain", {
+    projection: uncertain,
+    nativeWriterContinues: true,
+    projectedCredentialPresent: true,
+  });
+  await writeFile(
+    join(worktree, "src", "provider-allow"),
+    "Provider available",
+  );
+  const released = await cli([
+    "detach",
+    "-C",
+    join(worktree, "src"),
+    "--session-disposition",
+    "kill",
+  ]);
+  await record("provider-restored-detach", released);
+  assert.equal(released.status, 0, JSON.stringify(released));
+  const settled = released.value.detachment as Projection;
+  assert.equal(settled.status, "released");
+  assert.ok(
+    Object.values(settled.resources).every(
+      (step) => step.status === "released",
+    ),
+  );
+  const providerStopped = settled.sessions.find(
+    (item) => item.sessionId === worker.value.sessionId,
+  );
+  assert.ok(providerStopped);
+  assert.equal(providerStopped.outcome, "terminated_by_workspace_detach");
+  assert.ok(
+    providerStopped.turns.every((turn) => turn.completed === undefined),
+  );
+  const retained = settled.sessions.find(
+    (item) => item.sessionId === known.value.sessionId,
+  );
+  assert.ok(retained);
+  assert.equal(retained.outcome, "confirmed");
+  assert.deepEqual(retained.turns, knownWorker.turns);
+  assert.equal(
+    await requireCommand("docker", [
+      "container",
+      "ls",
+      "-a",
+      "--no-trunc",
+      "--filter",
+      "name=^/" + attachment.container + "$",
+      "--format",
+      "{{.ID}}",
+    ]),
+    "",
+  );
+  const stopped = await readFile(
+    join(worktree, "src", "provider-held.txt"),
+    "utf8",
+  );
+  await delay(100);
+  assert.equal(
+    await readFile(join(worktree, "src", "provider-held.txt"), "utf8"),
+    stopped,
+  );
+  await assert.rejects(stat(projectedAuth), { code: "ENOENT" });
+  assert.equal(
+    await readFile(join(worktree, "tracked.txt"), "utf8"),
+    "native worktree\n",
+  );
+  await record("providerRelease", {
+    providerProvedAbsent: true,
+    harnessUnconfirmed: true,
+    knownTerminalPreserved: true,
+    writesStopped: true,
+    projectedCredentialReleased: true,
   });
 }
 await record("result", "passed");

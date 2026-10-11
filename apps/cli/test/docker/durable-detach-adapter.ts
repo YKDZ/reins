@@ -1,4 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import { writeFile } from "node:fs/promises";
+import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 
@@ -10,10 +12,16 @@ import type {
 
 const driverFactory: AdapterDriverFactory = ({ emit }) => {
   let child: ChildProcessWithoutNullStreams;
+  let terminationFailure: string | undefined;
   const accepted = new Map<TurnId, () => void>();
   return {
     start(spec) {
-      const task = JSON.parse(spec.message) as { path?: string };
+      const task = JSON.parse(spec.message) as {
+        path?: string;
+        failTerminate?: boolean;
+      };
+      if (task.failTerminate)
+        terminationFailure = join(spec.cwd, "provider-fail");
       child = spawn(
         process.execPath,
         [
@@ -53,6 +61,10 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
     resolvePermission() {},
     async terminate() {
       if (child.exitCode !== null || child.signalCode !== null) return;
+      if (terminationFailure !== undefined) {
+        await writeFile(terminationFailure, "Native termination rejected");
+        throw new Error("Fixture native termination rejected");
+      }
       await new Promise<void>((resolve) => {
         child.once("close", resolve);
         child.kill("SIGTERM");
