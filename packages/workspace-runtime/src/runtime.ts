@@ -9,12 +9,14 @@ import {
   rm,
   stat,
 } from "node:fs/promises";
-import { basename, join } from "node:path";
+import { basename, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
 
 import { createReinsClient, type ReinsClient } from "@reins/client";
 import {
   consumerContextSchema,
+  machineErrorSchema,
+  type MachineError,
   spawnParamsSchema,
   type ProtocolMethod,
   type ConsumerContext,
@@ -25,6 +27,8 @@ import {
   workspaceErrorSchema,
   type ManagedWorkspaceInfo,
   type WorkspaceError,
+  type NativeViewLoss,
+  type NativeViewTermination,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
@@ -217,25 +221,103 @@ export async function openWorkspaceRuntime(options: {
           )),
     );
   };
-  const find = async (cwd: string, owner: ConsumerContext) => {
-    const tree = await resolveWorktree(cwd);
-    const record = await locate(tree);
-    if (record === undefined) throw workspaceFailure("attachment_not_found");
-    if (record.owner !== owner) throw workspaceFailure("attachment_owned");
-    if (record.tree.root !== tree.root)
-      throw workspaceFailure("native_view_mismatch");
+  const nativeLoss = async (
+    record: RecordState,
+  ): Promise<NativeViewLoss | undefined> => {
     for (const saved of record.identities) {
       let current: NativeIdentity;
       try {
         current = await identity(saved.path);
       } catch (error) {
-        if ((error as NodeJS.ErrnoException).code === "ENOENT")
-          throw workspaceFailure("native_view_mismatch");
-        throw error;
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        if (saved.path === record.tree.root) {
+          try {
+            await stat(record.tree.gitDir);
+          } catch (gitError) {
+            if ((gitError as NodeJS.ErrnoException).code === "ENOENT")
+              return { reason: "removed" };
+            throw gitError;
+          }
+        }
+        return { reason: "unreachable" };
       }
       if (current.dev !== saved.dev || current.ino !== saved.ino)
-        throw workspaceFailure("native_view_mismatch");
+        return {
+          reason: saved.path === record.tree.root ? "replaced" : "unreachable",
+        };
     }
+    try {
+      const tree = await resolveWorktree(record.tree.cwd);
+      if (
+        tree.root !== record.tree.root ||
+        tree.gitDir !== record.tree.gitDir ||
+        tree.commonDir !== record.tree.commonDir
+      )
+        return { reason: "unreachable" };
+    } catch {
+      return { reason: "unreachable" };
+    }
+    if (
+      record.environmentStage === "started" &&
+      record.info.source.error?.code !== "native_view_lost"
+    )
+      return await runtimeLoss(record);
+    return undefined;
+  };
+  const find = async (
+    cwd: string,
+    owner: ConsumerContext,
+    allowInvalid = false,
+  ) => {
+    let tree: Tree;
+    let record: RecordState | undefined;
+    try {
+      tree = await resolveWorktree(cwd);
+      record = await locate(tree);
+    } catch (error) {
+      // 只有已附着原对象确实失效时，旧目录才可用于读取其事实或拒绝修改。
+      record = records.find((item) => {
+        const suffix = relative(item.tree.root, cwd);
+        return (
+          item.info.runtime.status !== "released" &&
+          isAbsolute(cwd) &&
+          suffix !== ".." &&
+          !suffix.startsWith("../") &&
+          !isAbsolute(suffix)
+        );
+      });
+      if (record === undefined) throw error;
+      if (record.owner !== owner) throw workspaceFailure("attachment_owned");
+      const loss = await nativeLoss(record);
+      if (
+        loss === undefined &&
+        record.info.source.error?.code !== "native_view_lost"
+      )
+        throw error;
+      if (loss !== undefined) await invalidate(record, loss);
+      tree = { ...record.tree, cwd };
+    }
+    if (record === undefined) throw workspaceFailure("attachment_not_found");
+    if (record.owner !== owner) throw workspaceFailure("attachment_owned");
+    if (
+      record.info.source.error?.code === "native_view_lost" &&
+      record.info.source.error.nativeView.reason !== "unreachable"
+    ) {
+      if (!allowInvalid) throw record.info.source.error;
+      return { record, tree };
+    }
+    if (record.tree.root !== tree.root) {
+      const failure = await invalidate(record, {
+        reason: "moved",
+        currentRoot: tree.root,
+      });
+      if (!allowInvalid) throw failure;
+      return { record, tree };
+    }
+    const loss = await nativeLoss(record);
+    if (loss !== undefined) await invalidate(record, loss);
+    if (!allowInvalid && record.info.source.error?.code === "native_view_lost")
+      throw record.info.source.error;
     return { record, tree };
   };
   const connect = async (record: RecordState) => {
@@ -255,6 +337,103 @@ export async function openWorkspaceRuntime(options: {
     clients.set(record.directory, client);
     client.onClosed(() => clients.delete(record.directory));
     return client;
+  };
+  const stopTasks = new Map<string, Promise<void>>();
+  const machineFailure = (error: unknown): MachineError | undefined => {
+    let value = error;
+    if (error instanceof Error) {
+      try {
+        value = JSON.parse(error.message) as unknown;
+      } catch {
+        return undefined;
+      }
+    }
+    const parsed = v.safeParse(machineErrorSchema, value);
+    return parsed.success ? parsed.output : undefined;
+  };
+  const stopWorkers = async (record: RecordState) => {
+    const sessions: NativeViewTermination["sessions"] = [];
+    try {
+      const client = await connect(record);
+      const listed = await client.request("list", {});
+      if ("error" in listed) throw listed.error;
+      for (const session of listed.result) {
+        if (session.state === "killed") {
+          sessions.push({ sessionId: session.sessionId, outcome: "confirmed" });
+          continue;
+        }
+        try {
+          const killed = await client.request("kill", {
+            sessionId: session.sessionId,
+          });
+          if ("error" in killed)
+            sessions.push({
+              sessionId: session.sessionId,
+              outcome: "rejected",
+              error: killed.error,
+            });
+          else
+            sessions.push({
+              sessionId: session.sessionId,
+              outcome:
+                killed.result.status === "killed" ? "confirmed" : "unknown",
+            });
+        } catch (error) {
+          const failure = machineFailure(error);
+          sessions.push({
+            sessionId: session.sessionId,
+            outcome: "unknown",
+            ...(failure === undefined ? {} : { error: failure }),
+          });
+        }
+      }
+      record.info.source.termination = sessions.every(
+        (item) => item.outcome === "confirmed",
+      )
+        ? { status: "stopped", via: "harness", sessions }
+        : { status: "unknown", sessions };
+    } catch (error) {
+      const failure = machineFailure(error);
+      record.info.source.termination = {
+        status: "unknown",
+        sessions,
+        ...(failure === undefined ? {} : { error: failure }),
+      };
+    }
+    await persist(record);
+  };
+  const invalidate = async (
+    record: RecordState,
+    nativeView: NativeViewLoss,
+  ): Promise<WorkspaceError> => {
+    const error: WorkspaceError = { code: "native_view_lost", nativeView };
+    if (record.info.source.error?.code !== "native_view_lost") {
+      // 先关闭准入并持久化，再通过原 daemon 收束原会话；不重建环境或改投目录。
+      record.info.source = {
+        status: "failed",
+        error,
+        termination: { status: "stopping", sessions: [] },
+      };
+      await persist(record);
+    } else if (
+      record.info.source.error.nativeView.reason === "unreachable" &&
+      nativeView.reason !== "unreachable"
+    ) {
+      // 先前不可达的原对象可由后来取得的原生事实细化；终止事实保持单调。
+      record.info.source.error = error;
+      await persist(record);
+    }
+    if (
+      !stopTasks.has(record.directory) &&
+      record.info.source.termination?.status === "stopping"
+    ) {
+      const task = stopWorkers(record);
+      stopTasks.set(record.directory, task);
+      void task
+        .finally(() => stopTasks.delete(record.directory))
+        .catch(() => {});
+    }
+    return record.info.source.error!;
   };
   const inspectContainer = async (record: RecordState) => {
     let actual: {
@@ -277,6 +456,40 @@ export async function openWorkspaceRuntime(options: {
       throw workspaceFailure("runtime_resource_mismatch");
     return actual;
   };
+  const runtimeLoss = async (
+    record: RecordState,
+  ): Promise<NativeViewLoss | undefined> => {
+    const container = await inspectContainer(record);
+    if (!container.State.Running) return undefined;
+    // 在原容器自己的 namespace 检查同一组原生对象；provider 调用失败不冒充分裂。
+    const actual = JSON.parse(
+      await docker([
+        "exec",
+        "-w",
+        "/",
+        container.Id,
+        "node",
+        "-e",
+        "const fs=require('node:fs'),cp=require('node:child_process'),input=JSON.parse(process.argv[1]);let identities;try{identities=input.identities.map(({path})=>{const s=fs.statSync(path,{bigint:true});return {path,dev:String(s.dev),ino:String(s.ino)}});const git=flag=>fs.realpathSync(cp.execFileSync('git',['-C',input.tree.cwd,'rev-parse','--path-format=absolute',flag],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim());const tree={cwd:fs.realpathSync(input.tree.cwd),root:git('--show-toplevel'),gitDir:git('--git-dir'),commonDir:git('--git-common-dir')};console.log(JSON.stringify({identities,tree}))}catch(error){console.log(JSON.stringify({identities,error:error.code??'git_relationship_unavailable'}))}",
+        JSON.stringify({ identities: record.identities, tree: record.tree }),
+      ]),
+    ) as { identities: NativeIdentity[]; tree: Tree; error?: string };
+    if (
+      actual.identities !== undefined &&
+      JSON.stringify(actual.identities) !== JSON.stringify(record.identities)
+    )
+      return { reason: "split" };
+    if (actual.error !== undefined)
+      return { reason: actual.error === "ENOENT" ? "split" : "unreachable" };
+    if (
+      actual.tree.cwd !== record.tree.cwd ||
+      actual.tree.root !== record.tree.root ||
+      actual.tree.gitDir !== record.tree.gitDir ||
+      actual.tree.commonDir !== record.tree.commonDir
+    )
+      return { reason: "split" };
+    return undefined;
+  };
   const validateBinding = async (
     record: RecordState,
     binding: ManagedWorkspaceInfo["harnesses"][number],
@@ -286,6 +499,8 @@ export async function openWorkspaceRuntime(options: {
     try {
       version = await docker([
         "exec",
+        "-w",
+        "/",
         record.container,
         `/opt/reins/harnesses/${binding.harness}/bin/${binary}`,
         "--version",
@@ -313,7 +528,7 @@ export async function openWorkspaceRuntime(options: {
       throw workspaceFailure("runtime_entry_invalid");
   };
   const status = async (cwd: string, owner: ConsumerContext) => {
-    const { record, tree } = await find(cwd, owner);
+    const { record, tree } = await find(cwd, owner, true);
     if (record.info.runtime.status === "ready") {
       let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
       try {
@@ -458,6 +673,8 @@ export async function openWorkspaceRuntime(options: {
         "-e",
         "if(process.platform!=='linux'||process.arch!=='x64'||process.versions.node.split('.')[0]!=='24')process.exit(1);const fs=require('node:fs'),p=process.env.HOME+'/reins-home-probe-'+process.pid;const fd=fs.openSync(p,'wx',0o600);fs.closeSync(fd);fs.unlinkSync(p)",
       ]);
+      if (record.info.source.error?.code === "native_view_lost")
+        throw record.info.source.error;
       record.info.source = { status: "verified" };
       await persist(record);
       // 提前保持真实控制连接；部分绑定失败或安装较慢时 daemon 不因空闲丢失已有环境。
@@ -617,6 +834,33 @@ export async function openWorkspaceRuntime(options: {
       preparing.delete(record.directory);
     }
   };
+  const observations = new Map<string, Promise<void>>();
+  const monitor = setInterval(() => {
+    for (const record of records) {
+      if (
+        record.environmentStage !== "started" ||
+        observations.has(record.directory) ||
+        record.info.runtime.status === "released"
+      )
+        continue;
+      if (
+        record.info.source.status !== "verified" &&
+        record.info.source.error?.code !== "native_view_lost"
+      )
+        continue;
+      const observation = (async () => {
+        const loss = await nativeLoss(record);
+        if (loss !== undefined) await invalidate(record, loss);
+        else if (record.info.source.error?.code === "native_view_lost")
+          await invalidate(record, record.info.source.error.nativeView);
+      })();
+      observations.set(record.directory, observation);
+      void observation
+        .finally(() => observations.delete(record.directory))
+        .catch(() => {});
+    }
+  }, 1000);
+  monitor.unref();
   return {
     hasAttachments: () =>
       records.some((record) => record.info.runtime.status !== "released"),
@@ -726,7 +970,7 @@ export async function openWorkspaceRuntime(options: {
       const current = await status(cwd, owner);
       if (current.runtime.status !== "ready")
         throw workspaceFailure("workspace_not_ready");
-      const { record, tree } = await find(cwd, owner);
+      const { record, tree } = await find(cwd, owner, true);
       return {
         cwd: tree.cwd,
         socket: join(controlDirectory(record), "r.sock"),
@@ -738,7 +982,12 @@ export async function openWorkspaceRuntime(options: {
       action: ProtocolMethod,
       params: unknown,
     ) {
-      const { record, tree } = await find(cwd, owner);
+      const { record, tree } = await find(cwd, owner, true);
+      if (
+        ["spawn", "send", "resolvePermission"].includes(action) &&
+        record.info.source.error?.code === "native_view_lost"
+      )
+        throw record.info.source.error;
       if (record.info.runtime.status !== "ready")
         throw workspaceFailure("workspace_not_ready");
       if (action === "spawn") {
@@ -777,7 +1026,10 @@ export async function openWorkspaceRuntime(options: {
       return { ...record.info, cwd: tree.cwd };
     },
     async close() {
+      clearInterval(monitor);
       await Promise.all(executions.values());
+      await Promise.allSettled(observations.values());
+      await Promise.allSettled(stopTasks.values());
       for (const client of clients.values()) client.close();
       clients.clear();
     },

@@ -16,7 +16,7 @@ import { hasQoderAuthBinding, type QoderAuthBindings } from "./qoder-auth.ts";
 
 const execute = promisify(execFile);
 export function workspaceFailure(
-  code: WorkspaceError["code"],
+  code: Exclude<WorkspaceError["code"], "native_view_lost">,
   detail?: string,
 ): WorkspaceError {
   return { code, ...(detail === undefined ? {} : { detail }) };
