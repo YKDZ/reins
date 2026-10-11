@@ -381,7 +381,7 @@ try {
     "{{.Id}}",
     containers[0]!,
   ]);
-  const processState = async () =>
+  const processState = async (attempts = 0) =>
     JSON.parse(
       await requireCommand("docker", [
         "exec",
@@ -390,8 +390,9 @@ try {
         originalContainer,
         "node",
         "-e",
-        "const fs=require('node:fs');try{const s=fs.readFileSync('/proc/'+process.argv[1]+'/stat','utf8');console.log(JSON.stringify({state:s.slice(s.lastIndexOf(')')+2).split(' ')[0]}))}catch(e){if(e.code!=='ENOENT')throw e;console.log(JSON.stringify({state:'absent'}))}",
+        "const fs=require('node:fs');const read=()=>{try{const s=fs.readFileSync('/proc/'+process.argv[1]+'/stat','utf8');return s.slice(s.lastIndexOf(')')+2).split(' ')[0]}catch(e){if(e.code!=='ENOENT')throw e;return 'absent'}};(async()=>{let state=read();for(let i=0;i<Number(process.argv[2])&&!['absent','Z','X'].includes(state);i++){await new Promise(r=>setTimeout(r,250));state=read()}console.log(JSON.stringify({state}))})().catch(e=>{console.error(e);process.exitCode=1})",
         String(writer.pid),
+        String(attempts),
       ]),
     ) as { state: string };
   const initialProcess = await processState();
@@ -481,15 +482,7 @@ try {
         held: (await held.stat()).size,
         relative: (await relative.stat()).size,
       };
-      let passiveProcess = await processState();
-      for (
-        let attempt = 0;
-        attempt < 40 && !["absent", "Z", "X"].includes(passiveProcess.state);
-        attempt++
-      ) {
-        await delay(250);
-        passiveProcess = await processState();
-      }
+      const passiveProcess = await processState(40);
       passiveStopped = ["absent", "Z", "X"].includes(passiveProcess.state);
       const originalHeldContent = await held.readFile("utf8");
       const relativeErrorObserved = originalHeldContent.includes(
@@ -660,15 +653,7 @@ try {
       held: (await held.stat()).size,
       relative: (await relative.stat()).size,
     };
-    let originalProcess = await processState();
-    for (
-      let attempt = 0;
-      attempt < 40 && !["absent", "Z", "X"].includes(originalProcess.state);
-      attempt++
-    ) {
-      await delay(250);
-      originalProcess = await processState();
-    }
+    const originalProcess = await processState(40);
     const stopped = ["absent", "Z", "X"].includes(originalProcess.state);
     const stoppedSizes = {
       held: (await held.stat()).size,
