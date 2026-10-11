@@ -481,6 +481,11 @@ try {
         passiveProcess = await processState();
       }
       passiveStopped = ["absent", "Z", "X"].includes(passiveProcess.state);
+      const originalHeldContent = await held.readFile("utf8");
+      const relativeErrorObserved = originalHeldContent.includes(
+        '"relativeError":"ENOENT"',
+      );
+      if (!passiveStopped) assert.ok(relativeErrorObserved);
       await record("remove-without-caller-action", {
         originalContainer,
         pid: writer.pid,
@@ -488,6 +493,7 @@ try {
         originalGitDir,
         process: passiveProcess,
         stopped: passiveStopped,
+        relativeError: relativeErrorObserved ? "ENOENT" : undefined,
         before: removedSizes,
         after: {
           held: (await held.stat()).size,

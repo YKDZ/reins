@@ -1,6 +1,6 @@
 import {
-  appendFileSync,
   closeSync,
+  constants,
   fstatSync,
   openSync,
   renameSync,
@@ -23,18 +23,33 @@ createInterface({ input: process.stdin }).on("line", (line) => {
     intervalMs: number;
   };
   held = openSync(task.heldFile, "a");
+  closeSync(openSync(task.relativeFile, "a"));
   const output = (event: unknown) =>
     process.stdout.write(JSON.stringify(event) + "\n");
   let ticks = 0;
+  let published = false;
+  let reportedRelativeError = false;
   timer = setInterval(() => {
     writeSync(held!, "h\n");
     let relativeError: string | undefined;
+    let relative: number | undefined;
     try {
-      appendFileSync(task.relativeFile, "r\n");
+      relative = openSync(
+        task.relativeFile,
+        constants.O_WRONLY | constants.O_APPEND,
+      );
+      writeSync(relative, "r\n");
     } catch (error) {
       relativeError = (error as NodeJS.ErrnoException).code;
+      if (!reportedRelativeError) {
+        writeSync(held!, JSON.stringify({ relativeError }) + "\n");
+        reportedRelativeError = true;
+      }
+    } finally {
+      if (relative !== undefined) closeSync(relative);
     }
     ticks++;
+    if (published) return;
     const fd = fstatSync(held!);
     const cwd = statSync(".");
     try {
@@ -51,6 +66,7 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         }),
       );
       renameSync("writer.tmp", "writer.json");
+      published = true;
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
     }
