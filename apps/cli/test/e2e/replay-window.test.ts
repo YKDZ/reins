@@ -157,8 +157,13 @@ test("a disconnected observer resumes after its last event without replaying bus
     sessionId: target.sessionId,
     replay: { mode: "none" },
   });
-  const first: import("@reins/client").AgentEvent[] = [];
-  subscription.onEvent((event) => first.push(event));
+  const first: Exclude<
+    import("@reins/client").AgentEvent,
+    { type: "publication.ready" }
+  >[] = [];
+  subscription.onEvent((event) => {
+    if (event.type !== "publication.ready") first.push(event);
+  });
   await writeFile(gate, "release");
   await vi.waitFor(() => expect(first.at(-1)?.type).toBe("turn.completed"));
   const failure = subscription.done.catch((error) => JSON.parse(error.message));
@@ -187,8 +192,13 @@ test("a disconnected observer resumes after its last event without replaying bus
     sessionId: target.sessionId,
     replay: { mode: "after", cursor: disconnected.resumeCursor },
   } as never);
-  const events: import("@reins/client").AgentEvent[] = [];
-  recovered.onEvent((event) => events.push(event));
+  const events: Exclude<
+    import("@reins/client").AgentEvent,
+    { type: "publication.ready" }
+  >[] = [];
+  recovered.onEvent((event) => {
+    if (event.type !== "publication.ready") events.push(event);
+  });
   await vi.waitFor(() => expect(events.at(-1)?.type).toBe("turn.completed"));
   const ids = events.map((event) => event.eventId);
   expect(ids[0]).toBe(first.at(-1)!.eventId + 1);

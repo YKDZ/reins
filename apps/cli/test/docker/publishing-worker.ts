@@ -1,7 +1,8 @@
 import { execFileSync } from "node:child_process";
-import { writeFile, rm } from "node:fs/promises";
+import { writeFile, rm, access } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { createInterface } from "node:readline";
+import { setTimeout as delay } from "node:timers/promises";
 
 createInterface({ input: process.stdin }).on("line", (line) => {
   void (async () => {
@@ -17,7 +18,26 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       remove?: boolean;
       args?: string[];
       requestEnvironment?: boolean;
+      publishAfterFile?: string;
+      finishAfterFile?: string;
+      publishedFile?: string;
+      fail?: boolean;
     };
+    const output = (value: unknown) =>
+      process.stdout.write(JSON.stringify(value) + "\n");
+    output({ kind: "accepted", turnId: input.turnId });
+    const gate = async (path: string | undefined) => {
+      if (path === undefined) return;
+      for (;;) {
+        try {
+          await access(path);
+          return;
+        } catch {
+          await delay(25);
+        }
+      }
+    };
+    await gate(task.publishAfterFile);
     if (task.content !== undefined) await writeFile(task.path, task.content);
     if (task.remove) await rm(task.path);
     let result: unknown = { path: task.path };
@@ -59,6 +79,20 @@ createInterface({ input: process.stdin }).on("line", (line) => {
         };
       }
     }
+    if (task.publishedFile)
+      await writeFile(
+        task.publishedFile,
+        JSON.stringify({ pid: process.pid, result }),
+      );
+    await gate(task.finishAfterFile);
+    let failureStatus: number | undefined;
+    if (task.fail) {
+      try {
+        execFileSync(process.execPath, ["-e", "process.exit(7)"]);
+      } catch (error) {
+        failureStatus = (error as { status: number }).status;
+      }
+    }
     const options = Object.fromEntries(
       ["model", "reasoning", "authorizationMode", "sandbox", "agent"]
         .filter((key) => key in input)
@@ -68,17 +102,24 @@ createInterface({ input: process.stdin }).on("line", (line) => {
       result,
       message: input.message,
       options,
+      pid: process.pid,
+      ...(failureStatus === undefined ? {} : { failureStatus }),
     });
-    const output = (value: unknown) =>
-      process.stdout.write(JSON.stringify(value) + "\n");
-    output({ kind: "accepted", turnId: input.turnId });
     output({
       kind: "event",
       event: {
         type: "turn.completed",
         sessionId: input.sessionId,
         turnId: input.turnId,
-        stopReason: "end_turn",
+        ...(failureStatus === undefined
+          ? { stopReason: "end_turn" }
+          : {
+              stopReason: "failed",
+              failure: {
+                failureCategory: "unclassified",
+                retryDisposition: "unknown",
+              },
+            }),
         finalReply,
       },
     });

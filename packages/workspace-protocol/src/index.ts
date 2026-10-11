@@ -346,6 +346,8 @@ export const publishParamsSchema = v.strictObject({
 });
 export const workspaceMethods = [
   "publication.publish",
+  "publication.observe",
+  "publication.unobserve",
   "publication.list",
   "publication.read",
   "workspace.handoff",
@@ -361,6 +363,8 @@ export const workspaceMethods = [
 export type WorkspaceMethod = (typeof workspaceMethods)[number];
 export type WorkspaceParams = {
   "publication.publish": v.InferOutput<typeof publishParamsSchema>;
+  "publication.observe": { cwd: string; observationId: string };
+  "publication.unobserve": { observationId: string };
   "publication.list": { cwd: string };
   "publication.read": { publicationId: string };
   "workspace.handoff": v.InferOutput<typeof sourceHandoffSchema>;
@@ -386,6 +390,8 @@ export type WorkspaceParams = {
 };
 export type WorkspaceResults = {
   "publication.publish": Publication;
+  "publication.observe": Publication[];
+  "publication.unobserve": null;
   "publication.list": Publication[];
   "publication.read": v.InferOutput<typeof publicationPayloadSchema>;
   "workspace.handoff": {
@@ -403,6 +409,18 @@ export type WorkspaceResults = {
 };
 const pathParamsSchema = v.strictObject({ cwd: v.string() });
 export const workspaceRequestSchema = v.variant("method", [
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("publication.observe"),
+    params: v.strictObject({ cwd: v.string(), observationId: v.string() }),
+  }),
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("publication.unobserve"),
+    params: v.strictObject({ observationId: v.string() }),
+  }),
   v.strictObject({
     kind: v.literal("request"),
     requestId: v.string(),
@@ -504,10 +522,26 @@ export const workspaceResponseSchema = v.union([
   }),
 ]);
 export type WorkspaceResponse = v.InferOutput<typeof workspaceResponseSchema>;
-export type WorkspaceMessage = WorkspaceRequest | WorkspaceResponse;
+export const workspaceNotificationSchema = v.strictObject({
+  kind: v.literal("notification"),
+  method: v.literal("publication.ready"),
+  params: v.strictObject({
+    observationId: v.string(),
+    publication: publicationSchema,
+  }),
+});
+export type WorkspaceNotification = v.InferOutput<
+  typeof workspaceNotificationSchema
+>;
+export type WorkspaceMessage =
+  | WorkspaceRequest
+  | WorkspaceResponse
+  | WorkspaceNotification;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
   if (method === "publication.publish") return publicationSchema;
-  if (method === "publication.list") return v.array(publicationSchema);
+  if (method === "publication.list" || method === "publication.observe")
+    return v.array(publicationSchema);
+  if (method === "publication.unobserve") return v.null();
   if (method === "publication.read") return publicationPayloadSchema;
   return method === "workspace.handoff"
     ? v.strictObject({

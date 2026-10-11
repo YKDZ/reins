@@ -84,7 +84,7 @@ async function withClient<T>(
 
 function requireResult<M extends ProtocolMethod>(
   response: ProtocolResponseFor<M>,
-): ProtocolResult<M> {
+): import("@reins/client").ClientResult<M> {
   if ("error" in response) throw response.error;
   return response.result;
 }
