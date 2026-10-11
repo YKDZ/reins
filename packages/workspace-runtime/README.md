@@ -40,6 +40,6 @@ Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接�
 
 准备中重复相同绑定集合会观察当前尝试，不另起执行。失败后，调用方修正条件并显式重复相同请求才会受理新尝试；继续未完成的阶段，保留已完成的材料和私有 home。已接受的环境、运行材料及绑定快照不会因当前目录配置变化而被替换；不同显式绑定集合返回 `attachment_intent_conflict`。材料缺失与实际摘要核验失败分别持久表达为 `material_unavailable`、`material_digest_mismatch`。
 
-Manager 重启将失去执行者的准备尝试记为 `preparation_interrupted`，不会自动重试。续行先核对已保存的容器身份和真实运行状态，并实际执行已成功绑定的版本入口；ready 重入同样核验实际入口，失效时明确失败而不重装。创建或安装步骤的效果仍无法确定时返回 `preparation_outcome_unknown`，不通过重新创建覆盖未知结果。调用方的源码和有价值状态不因准备失败被清理。
+Manager 在原生视图验证后、绑定安装前建立并保持真实 daemon 控制连接，防止慢安装或部分绑定失败时空闲退出丢失已有环境；不创建会话。Manager 重启将失去执行者的准备尝试记为 `preparation_interrupted`，不会自动重试。续行先核对已保存的容器身份和真实运行状态，并实际执行已成功绑定的版本入口；ready 重入同样核验实际入口，失效时明确失败而不重装。创建或安装步骤的效果仍无法确定时返回 `preparation_outcome_unknown`，不通过重新创建覆盖未知结果。调用方的源码和有价值状态不因准备失败被清理。
 
 正式发行包包含 sibling `reins-workspace-manager`。默认状态位于 `$XDG_STATE_HOME/reins/workspace-manager`（未设置时为 `$HOME/.local/state/reins/workspace-manager`）。部署与测试可显式设置 `REINS_WORKSPACE_MANAGER_BIN`、`REINS_WORKSPACE_MANAGER_SOCKET` 和 `REINS_WORKSPACE_MANAGER_STATE_DIR`。开发 launcher 为当前 checkout/build 隔离这些路径。Docker 连接与公开镜像拉取使用 launcher 的现有 Docker 配置，产品不改用户配置。
