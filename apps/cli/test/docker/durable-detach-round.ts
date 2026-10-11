@@ -511,7 +511,9 @@ assert.equal(completedWorker.status, 0, JSON.stringify(completedWorker));
 const completed = await control([
   "wait",
   String(completedWorker.value.turnHandle),
-  "--timeout-ms",
+  "--completion",
+  "all",
+  "--timeout",
   "5000",
 ]);
 assert.equal(completed.status, 0, JSON.stringify(completed));
