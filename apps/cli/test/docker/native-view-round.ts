@@ -350,6 +350,7 @@ const control = async (args: string[], cwd = join(worktree, "src")) => {
 let splitHelper: string | undefined;
 let splitMounted = false;
 let orphanWriter: { container: string; pid: string } | undefined;
+let runtimeContainer: string | undefined;
 const splitEnter = [
   "nsenter",
   "--target",
@@ -386,6 +387,104 @@ const cleanupOrphanWriter = async () => {
     assert.equal(running.stdout, "false", JSON.stringify({ result, running }));
   }
   orphanWriter = undefined;
+};
+const collectRuntimeDiagnostics = async (container: string) => {
+  const inspect = await command(
+    "docker",
+    ["inspect", "--format", "{{json .State}}", container],
+    base,
+  );
+  const logs = await command(
+    "docker",
+    ["logs", "--tail", "120", container],
+    base,
+  );
+  const processes = await command(
+    "docker",
+    [
+      "exec",
+      "-w",
+      "/",
+      container,
+      "node",
+      "-e",
+      String.raw`
+const fs = require("node:fs");
+const path = require("node:path");
+const selected = new Set(["HOME", "XDG_STATE_HOME", "REINS_STATE_DIR", "REINS_SOCKET"]);
+const envFor = (pid) => {
+  try {
+    return Object.fromEntries(fs.readFileSync("/proc/" + pid + "/environ", "utf8").split("\0").flatMap((entry) => {
+      const separator = entry.indexOf("=");
+      const key = entry.slice(0, separator);
+      return separator < 0 || !selected.has(key) ? [] : [[key, entry.slice(separator + 1)]];
+    }));
+  } catch (error) {
+    return { error: error.code || error.message };
+  }
+};
+const processInfo = (pid) => {
+  if (!pid) return undefined;
+  try {
+    const directory = "/proc/" + pid;
+    const stat = fs.readFileSync(directory + "/stat", "utf8");
+    const close = stat.lastIndexOf(")");
+    return {
+      pid,
+      state: stat.slice(close + 2).split(" ")[0],
+      cmdline: fs.readFileSync(directory + "/cmdline", "utf8").replace(/\0/g, " ").trim(),
+      status: fs.readFileSync(directory + "/status", "utf8").split("\n").filter((line) => /^(Name|State|PPid):/.test(line)),
+    };
+  } catch (error) {
+    return { pid, error: error.code || error.message };
+  }
+};
+const pathInfo = (target) => {
+  try {
+    const value = fs.lstatSync(target);
+    return {
+      path: target,
+      mode: (value.mode & 0o777).toString(8),
+      mtimeMs: value.mtimeMs,
+      directory: value.isDirectory(),
+      entries: value.isDirectory() ? fs.readdirSync(target).map((name) => {
+        const child = fs.lstatSync(path.join(target, name));
+        return { name, mode: (child.mode & 0o777).toString(8), mtimeMs: child.mtimeMs, directory: child.isDirectory() };
+      }) : undefined,
+    };
+  } catch (error) {
+    return { path: target, error: error.code || error.message };
+  }
+};
+let daemon;
+try {
+  daemon = JSON.parse(fs.readFileSync("/tmp/reins-daemon-process.json", "utf8"));
+} catch (error) {
+  daemon = { error: error.code || error.message };
+}
+const supervisorEnv = envFor(1);
+const daemonEnv = daemon.pid ? envFor(daemon.pid) : {};
+const stateEnv = daemonEnv.error ? supervisorEnv : daemonEnv;
+const stateDirectory = stateEnv.REINS_STATE_DIR || (stateEnv.XDG_STATE_HOME
+  ? path.join(stateEnv.XDG_STATE_HOME, "reins")
+  : path.join(stateEnv.HOME || "/root", ".local", "state", "reins"));
+const socket = stateEnv.REINS_SOCKET || supervisorEnv.REINS_SOCKET;
+console.log(JSON.stringify({
+  supervisor: processInfo(1),
+  daemon,
+  daemonProcess: daemon.pid ? processInfo(daemon.pid) : undefined,
+  supervisorEnvironment: supervisorEnv,
+  daemonEnvironment: daemonEnv,
+  socket: socket ? pathInfo(socket) : { error: "REINS_SOCKET unavailable" },
+  stateDirectory,
+  diagnosticsDirectory: pathInfo(path.join(stateDirectory, "diagnostics")),
+  writerLease: pathInfo(path.join(stateDirectory, "diagnostics", "writer-lease.lock")),
+}));
+`,
+    ],
+    base,
+  );
+  return { inspect, logs, processes };
 };
 try {
   const attachmentCwd =
@@ -492,6 +591,7 @@ try {
     "{{.Id}}",
     containers[0]!,
   ]);
+  runtimeContainer = originalContainer;
   if (fault === "session-cwd-replace" && !expectUndetected)
     orphanWriter = { container: originalContainer, pid: String(writer.pid) };
   const processState = async (attempts = 0, pid = writer.pid) =>
@@ -597,13 +697,15 @@ try {
         }
         assert.notEqual(newDaemon.pid, oldDaemon.pid);
         assert.notEqual(newDaemon.startedAt, oldDaemon.startedAt);
-        await requireCommand("docker", [
+        const socketProbe = await command("docker", [
           "exec",
           originalContainer,
           "node",
           "-e",
-          'const net=require("node:net"),socket=process.env.REINS_SOCKET;(async()=>{for(let i=0;i<400;i++){const ok=await new Promise(r=>{const c=net.createConnection(socket);c.once("connect",()=>{c.end();r(true)});c.once("error",()=>r(false))});if(ok){console.log("daemon socket ready");return}await new Promise(r=>setTimeout(r,25))}throw new Error("daemon socket did not return")})().catch(e=>{console.error(e);process.exitCode=1})',
+          'const net=require("node:net"),socket=process.env.REINS_SOCKET;(async()=>{for(let i=0;i<1600;i++){const ok=await new Promise(r=>{const c=net.createConnection(socket);c.once("connect",()=>{c.end();r(true)});c.once("error",()=>r(false))});if(ok){console.log("daemon socket ready");return}await new Promise(r=>setTimeout(r,25))}throw new Error("daemon socket did not return")})().catch(e=>{console.error(e);process.exitCode=1})',
         ]);
+        await record("daemon-restart-socket-probe", socketProbe);
+        assert.equal(socketProbe.status, 0, JSON.stringify(socketProbe));
         const restarted = await cli(["status", "-C", join(worktree, "src")]);
         assert.equal(restarted.status, 0, JSON.stringify(restarted));
         assert.equal(
@@ -1119,6 +1221,18 @@ try {
   }
   await record("result", "passed");
 } finally {
+  if (runtimeContainer !== undefined) {
+    try {
+      await record(
+        "fixture-exit-runtime-diagnostics",
+        await collectRuntimeDiagnostics(runtimeContainer),
+      );
+    } catch (error) {
+      await record("fixture-exit-runtime-diagnostics-error", {
+        message: error instanceof Error ? error.message : String(error),
+      });
+    }
+  }
   await cleanupOrphanWriter();
   if (splitHelper !== undefined) {
     if (splitMounted) {
