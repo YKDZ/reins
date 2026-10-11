@@ -58,6 +58,7 @@ type RecordState = {
   tree: Tree;
   identities: NativeIdentity[];
   intent: string[];
+  bindingIntent: string;
   directory: string;
   container: string;
   environmentStage?: "pending" | "creating" | "created" | "started";
@@ -142,6 +143,41 @@ export async function openWorkspaceRuntime(options: {
   codexAuthBindings?: CodexAuthBindings;
   qoderAuthBindings?: QoderAuthBindings;
 }) {
+  // 绑定意图只保存不可逆摘要；原生来源路径与内容均不进入领域事实。
+  const bindingIntent = (
+    bindings: Pick<
+      ManagedWorkspaceInfo["harnesses"][number],
+      "ref" | "harness" | "credential"
+    >[],
+  ) =>
+    fingerprint(
+      bindings
+        .toSorted((left, right) => left.ref.localeCompare(right.ref))
+        .map((binding) => {
+          const credential = binding.credential;
+          const codex = options.codexAuthBindings ?? {};
+          const qoder = options.qoderAuthBindings ?? {};
+          const source =
+            credential.kind === "omitted"
+              ? undefined
+              : binding.harness === "codex"
+                ? Object.hasOwn(codex, credential.ref)
+                  ? { authFile: codex[credential.ref] }
+                  : undefined
+                : Object.hasOwn(qoder, credential.ref)
+                  ? {
+                      userFile: qoder[credential.ref]!.userFile,
+                      machineIdFile: qoder[credential.ref]!.machineIdFile,
+                    }
+                  : undefined;
+          return {
+            ref: binding.ref,
+            harness: binding.harness,
+            credential,
+            source,
+          };
+        }),
+    );
   const root = options.stateDirectory;
   await mkdir(root, { recursive: true, mode: 0o700 });
   const records: RecordState[] = [];
@@ -898,6 +934,22 @@ export async function openWorkspaceRuntime(options: {
           await find(cwd, owner);
           if (JSON.stringify(existing.intent) !== JSON.stringify(intent))
             throw workspaceFailure("attachment_intent_conflict");
+          const current = await workspaceHarnesses(
+            cwd,
+            options.codexAuthBindings,
+            options.qoderAuthBindings,
+          );
+          const selected = intent.map((ref) =>
+            current.bindings.find((binding) => binding.ref === ref),
+          );
+          if (
+            selected.some((binding) => binding === undefined) ||
+            existing.bindingIntent !==
+              bindingIntent(
+                selected as NonNullable<(typeof selected)[number]>[],
+              )
+          )
+            throw workspaceFailure("attachment_intent_conflict");
           if (existing.info.runtime.status === "failed")
             await executions.get(existing.directory);
           if (
@@ -948,6 +1000,7 @@ export async function openWorkspaceRuntime(options: {
           tree,
           identities,
           intent,
+          bindingIntent: bindingIntent(selected),
           directory,
           environmentStage: "pending",
           container: `${options.resourcePrefix ?? "reins-workspace"}-${randomUUID()}`,
@@ -1034,7 +1087,10 @@ export async function openWorkspaceRuntime(options: {
         )
       ) {
         const response = await (await connect(record)).request("list", {});
-        if ("error" in response || response.result.length !== 0)
+        if (
+          "error" in response ||
+          response.result.some((session) => session.state !== "killed")
+        )
           throw workspaceFailure("workspace_busy");
       }
       clients.get(record.directory)?.close();
