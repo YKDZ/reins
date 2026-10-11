@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { execFileSync, spawn } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   chmod,
@@ -14,6 +14,7 @@ import {
 } from "node:fs/promises";
 import { join } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
+import { Worker } from "node:worker_threads";
 
 import { createWorkspaceClient } from "@reins/client";
 import {
@@ -143,6 +144,18 @@ const sessions: {
   sessionId: SessionId;
 }[] = [];
 const incoming: string[] = [];
+const PREPARATION_CLEANUP_WAIT_MS = 300_000;
+const waitForPreparation = async (cwd: string) => {
+  const deadline = Date.now() + PREPARATION_CLEANUP_WAIT_MS;
+  let polls = 0;
+  let status = await manager.request("workspace.status", { cwd });
+  while (status.runtime.status === "preparing" && Date.now() < deadline) {
+    await delay(1_000);
+    status = await manager.request("workspace.status", { cwd });
+    polls += 1;
+  }
+  return { status, polls };
+};
 try {
   const first = JSON.parse(
     execFileSync(
@@ -318,26 +331,90 @@ try {
     { path: "src/large", source: "worktree" },
   ]);
   await rm(join(source, "src/large"));
-  // 独立进程持续覆写选定文件；产品不得把分片读取或不稳定输入报告为成功。
+  // 独立工作线程持续覆写选定文件；产品不得把不稳定输入报告为成功。
   const changingPath = join(source, "src/changing");
   await writeFile(changingPath, Buffer.alloc(8 * 1024 * 1024));
-  const writer = spawn(
-    process.execPath,
-    [
-      "-e",
-      'const fs=require("node:fs");const p=process.argv[1];let n=0;for(;;)fs.writeFileSync(p,Buffer.alloc(8*1024*1024,++n%255));',
-      changingPath,
-    ],
-    { stdio: "ignore" },
+  const writeCount = new Int32Array(
+    new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT),
   );
+  const writer = new Worker(
+    `
+      const fs = require("node:fs");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const count = new Int32Array(workerData.writeCount);
+      const descriptor = fs.openSync(workerData.path, "r+");
+      const bytes = Buffer.alloc(64 * 1024);
+      let version = 0;
+      function write() {
+        bytes.fill(++version % 251);
+        fs.writeSync(descriptor, bytes, 0, bytes.length, 0);
+        Atomics.add(count, 0, 1);
+        if (version === 1) parentPort.postMessage("ready");
+        setImmediate(write);
+      }
+      write();
+    `,
+    {
+      eval: true,
+      workerData: { path: changingPath, writeCount: writeCount.buffer },
+    },
+  );
+  let writerError: unknown;
+  writer.on("error", (error) => {
+    writerError = error;
+  });
   try {
-    await delay(100);
-    await captureReject("continuously-changing", [
-      { path: "src/changing", source: "worktree" },
-    ]);
+    const ready = new Promise<void>((resolve, reject) => {
+      writer.once("message", (message) => {
+        if (message === "ready") resolve();
+        else
+          reject(
+            new Error(`Unexpected selected-source writer message: ${message}`),
+          );
+      });
+      writer.once("error", reject);
+      writer.once("exit", (code) => {
+        if (code !== 0)
+          reject(new Error(`Selected-source writer exited with ${code}`));
+      });
+    });
+    await ready;
+    const writesBeforeCapture = Atomics.load(writeCount, 0);
+    let captureError: unknown;
+    try {
+      await captureSelectedWorkingFiles(source, commit, [
+        { path: "src/changing", source: "worktree" },
+      ]);
+    } catch (error) {
+      captureError = error;
+    }
+    const writesAfterCapture = Atomics.load(writeCount, 0);
+    const writerErrorFact =
+      writerError instanceof Error
+        ? { name: writerError.name, message: writerError.message }
+        : writerError === undefined
+          ? null
+          : typeof writerError;
+    await record("continuously-changing", {
+      rejected:
+        (captureError as { code?: unknown } | undefined)?.code ===
+        "source_invalid",
+      writesBeforeCapture,
+      writesAfterCapture,
+      writesDuringCapture: writesAfterCapture - writesBeforeCapture,
+      writerError: writerErrorFact,
+    });
+    assert.equal(
+      (captureError as { code?: unknown } | undefined)?.code,
+      "source_invalid",
+    );
+    assert.ok(
+      writesAfterCapture > writesBeforeCapture,
+      "The selected file must change while capture is running",
+    );
+    assert.equal(writerError, undefined);
   } finally {
-    writer.kill("SIGKILL");
-    await new Promise<void>((resolve) => writer.once("close", () => resolve()));
+    await writer.terminate();
     await rm(changingPath);
   }
   const beforeReject = await readdir(join(task.base, "manager-state/incoming"));
@@ -362,23 +439,48 @@ try {
   await record("whole-target-rejection", { incomingUnchanged: true });
   await record("result", "passed");
 } finally {
+  const cleanupFailures: string[] = [];
   for (const { control, sessionId } of sessions) {
-    const killed = await control.request("kill", { sessionId });
-    assert.ok("result" in killed, JSON.stringify(killed));
+    try {
+      const killed = await control.request("kill", { sessionId });
+      assert.ok("result" in killed, JSON.stringify(killed));
+    } catch (error) {
+      cleanupFailures.push(`kill ${sessionId}: ${String(error)}`);
+    }
   }
   for (const control of controls) control.close();
   for (const cwd of incoming) {
-    const detached = await manager.request(
-      "workspace.detach",
-      { cwd, sessionDisposition: "require_none" },
-      120000,
-    );
-    assert.equal(detached.runtime.status, "released", JSON.stringify(detached));
+    try {
+      const ready = await waitForPreparation(cwd);
+      await record("cleanup-preparation-settled", {
+        cwd,
+        polls: ready.polls,
+        status: ready.status.runtime.status,
+      });
+      if (ready.status.runtime.status !== "ready")
+        cleanupFailures.push(
+          `preparation ${cwd}: ${ready.status.runtime.status}`,
+        );
+      const detached = await manager.request(
+        "workspace.detach",
+        { cwd, sessionDisposition: "require_none" },
+        120000,
+      );
+      assert.equal(
+        detached.runtime.status,
+        "released",
+        JSON.stringify(detached),
+      );
+    } catch (error) {
+      cleanupFailures.push(`detach ${cwd}: ${String(error)}`);
+    }
   }
+  manager.close();
   await record("product-cleanup", {
     sessionsKilled: sessions.length,
     detached: incoming,
-    status: "passed",
+    status: cleanupFailures.length === 0 ? "passed" : "failed",
+    failures: cleanupFailures,
   });
-  manager.close();
+  assert.deepEqual(cleanupFailures, []);
 }
