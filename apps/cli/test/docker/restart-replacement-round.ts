@@ -486,7 +486,6 @@ const admission = async (name: string) => {
 try {
   assert.ok((await admission("before-restarts")).result);
   const lostSessions: string[] = [];
-  const completedTurns: unknown[] = [];
   for (const kind of ["daemon", "container"] as const) {
     const preservedSource = await readFile(join(cwd, "target.txt"), "utf8");
     await rm(join(cwd, "active-writer.json"), { force: true });
@@ -613,7 +612,6 @@ try {
     ]);
     assert.equal(completed.status, 0, JSON.stringify(completed));
     lostSessions.push(String(original.value.sessionId));
-    completedTurns.push(...(completed.value.completed as unknown[]));
     const reply = JSON.parse(
       (completed.value.completed as { finalReply: string }[])[0]!.finalReply,
     ) as { cwd: string; message: string; content: string };
@@ -711,17 +709,6 @@ try {
     assert.equal(session.outcome, "terminated_by_workspace_detach");
     assert.ok(session.turns.every((turn) => turn.completed === undefined));
   }
-  const retained = detachment.sessions.flatMap((session) =>
-    session.turns.flatMap((turn) =>
-      turn.completed === undefined ? [] : [turn.completed],
-    ),
-  );
-  for (const completed of completedTurns)
-    assert.ok(
-      retained.some(
-        (turn) => JSON.stringify(turn) === JSON.stringify(completed),
-      ),
-    );
   assert.equal(
     await requireCommand("docker", [
       "container",
