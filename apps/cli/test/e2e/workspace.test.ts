@@ -426,6 +426,35 @@ test("returns the finite configured binding choices when attachment names an unk
       code: "binding_unknown",
       availableBindings: ["code"],
     });
+
+    const pretty = await run(
+      process.execPath,
+      [
+        "--conditions=source",
+        join(repository, "apps/cli/src/cli.ts"),
+        "--pretty",
+        "workspace",
+        "attach",
+        "-C",
+        directory,
+        "--binding",
+        "missing",
+      ],
+      directory,
+      {
+        REINS_CONSUMER_CONTEXT: "reins-wrr02-binding",
+        REINS_WORKSPACE_MANAGER_SOCKET: join(directory, "manager.sock"),
+        REINS_WORKSPACE_MANAGER_STATE_DIR: join(directory, "state"),
+        REINS_WORKSPACE_MANAGER_BIN: join(
+          repository,
+          "apps/workspace-manager/src/main.ts",
+        ),
+      },
+    );
+    expect(pretty.status).toBe(1);
+    expect(pretty.stdout).toBe("");
+    expect(pretty.stderr).toContain("Binding unknown");
+    expect(pretty.stderr).toContain("Available bindings: code");
   } finally {
     await rm(directory, { recursive: true, force: true });
   }

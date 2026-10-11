@@ -66,6 +66,7 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
+    "rolldown": "catalog:",
     "typescript-7": "catalog:",
     "vitest": "catalog:"
   },

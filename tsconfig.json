@@ -12,7 +12,6 @@
     "oxfmt.config.ts",
     "oxlint.config.ts",
     "scripts/build-distribution.ts",
-    "scripts/bundle-workspace-client.ts",
     "scripts/check-boundaries.ts",
     "scripts/check-packed-cli.ts",
     "scripts/check-pnpm-consumer-round.ts",

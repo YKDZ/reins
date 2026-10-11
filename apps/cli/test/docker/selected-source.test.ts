@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 test("hands explicitly selected working files to new Git worktrees without changing the caller", async () => {
@@ -52,11 +54,10 @@ test("hands explicitly selected working files to new Git worktrees without chang
       .update(await readFile(join(input, "selected-reading-worker.ts")))
       .digest("hex"),
   });
-  execFileSync(process.execPath, [
-    join(repository, "scripts/bundle-workspace-client.ts"),
+  await bundleWorkspaceClient(
     join(repository, "apps/cli/test/docker/selected-source-client.ts"),
     join(input, "selected-source-client.js"),
-  ]);
+  );
   fingerprints.push({
     name: "selected-source-client.js",
     sha256: createHash("sha256")

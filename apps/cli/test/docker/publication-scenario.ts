@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { expect } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 export async function runPublicationScenario(
@@ -62,8 +64,7 @@ export async function runPublicationScenario(
       .update(await readFile(join(input, "publishing-worker.ts")))
       .digest("hex"),
   });
-  execFileSync(process.execPath, [
-    join(repository, "scripts/bundle-workspace-client.ts"),
+  await bundleWorkspaceClient(
     join(
       repository,
       "apps/cli/test/docker",
@@ -71,7 +72,7 @@ export async function runPublicationScenario(
         `${observation ? "publication-observation-client" : "publication-client"}.ts`,
     ),
     join(input, "publication-client.js"),
-  ]);
+  );
   fingerprints.push({
     name: "publication-client.js",
     sha256: createHash("sha256")

@@ -47,6 +47,16 @@ export async function resolveWorktree(cwd: string) {
 export function fingerprint(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
+export async function worktreeScopeKey(cwd: string): Promise<string> {
+  const tree = await resolveWorktree(cwd);
+  const identities = await Promise.all(
+    [tree.root, tree.gitDir, tree.commonDir].map(async (path) => {
+      const value = await stat(path, { bigint: true });
+      return [String(value.dev), String(value.ino)];
+    }),
+  );
+  return fingerprint(identities);
+}
 async function readConfiguration(cwd: string) {
   const tree = await resolveWorktree(cwd);
   let contents: string;
@@ -79,6 +89,33 @@ function selectEnvironment(
 }
 export async function workspaceEnvironment(cwd: string) {
   return selectEnvironment(await readConfiguration(cwd));
+}
+export async function workspaceBindingDeclarations(
+  cwd: string,
+): Promise<
+  Pick<
+    WorkspaceHarnessCatalog["bindings"][number],
+    "ref" | "harness" | "credential"
+  >[]
+> {
+  const configuration = await readConfiguration(cwd);
+  const refs = new Set<string>();
+  return configuration.bindings.map((binding) => {
+    if (refs.has(binding.ref)) throw workspaceFailure("binding_conflict");
+    refs.add(binding.ref);
+    return {
+      ref: binding.ref,
+      harness: binding.harness,
+      credential:
+        binding.credentialBindingRef === undefined
+          ? { kind: "omitted" as const }
+          : {
+              kind: "bound" as const,
+              ref: binding.credentialBindingRef,
+              label: binding.credentialBindingRef,
+            },
+    };
+  });
 }
 export async function workspaceHarnesses(
   cwd: string,

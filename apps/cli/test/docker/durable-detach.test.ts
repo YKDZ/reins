@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 test("durably detaches the workspace", async () => {
@@ -46,14 +48,9 @@ test("durably detaches the workspace", async () => {
     ],
   ] as const;
   const fingerprints: { name: string; sha256: string }[] = [];
-  execFileSync(
-    process.execPath,
-    [
-      join(repository, "scripts/bundle-workspace-client.ts"),
-      join(repository, "apps/cli/test/docker/durable-detach-client.ts"),
-      join(input, "durable-detach-client.js"),
-    ],
-    { cwd: repository, stdio: "pipe" },
+  await bundleWorkspaceClient(
+    join(repository, "apps/cli/test/docker/durable-detach-client.ts"),
+    join(input, "durable-detach-client.js"),
   );
   fingerprints.push({
     name: "durable-detach-client.js",

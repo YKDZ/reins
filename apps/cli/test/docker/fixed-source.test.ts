@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 test("hands fixed commits to new Git worktrees and keeps old sessions unchanged", async () => {
@@ -52,11 +54,10 @@ test("hands fixed commits to new Git worktrees and keeps old sessions unchanged"
       .update(await readFile(join(input, "workspace-reading-worker.ts")))
       .digest("hex"),
   });
-  execFileSync(process.execPath, [
-    join(repository, "scripts/bundle-workspace-client.ts"),
+  await bundleWorkspaceClient(
     join(repository, "apps/cli/test/docker/fixed-source-client.ts"),
     join(input, "fixed-source-client.js"),
-  ]);
+  );
   fingerprints.push({
     name: "fixed-source-client.js",
     sha256: createHash("sha256")

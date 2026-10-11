@@ -26,6 +26,12 @@ export function printJsonLine(value: unknown): void {
   process.stdout.write(`${JSON.stringify(value)}\n`);
 }
 
+export function printResult(value: unknown, mode: OutputMode): void {
+  process.stdout.write(
+    `${JSON.stringify(value, null, mode === "pretty" ? 2 : undefined)}\n`,
+  );
+}
+
 export function printError(
   error: CliError,
   mode: OutputMode,

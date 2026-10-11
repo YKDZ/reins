@@ -234,6 +234,9 @@ importers:
       oxlint-tsgolint:
         specifier: 'catalog:'
         version: 7.0.2001
+      rolldown:
+        specifier: 'catalog:'
+        version: 1.2.4
       typescript-7:
         specifier: 'catalog:'
         version: typescript@7.0.2

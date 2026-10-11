@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { expect } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 export async function runDurableWorkspaceScenario(options: {
@@ -51,14 +53,9 @@ export async function runDurableWorkspaceScenario(options: {
     ],
   ] as const;
   const fingerprints: { name: string; sha256: string }[] = [];
-  execFileSync(
-    process.execPath,
-    [
-      join(repository, "scripts/bundle-workspace-client.ts"),
-      join(repository, options.client),
-      join(input, "durable-history-client.js"),
-    ],
-    { cwd: repository, stdio: "pipe" },
+  await bundleWorkspaceClient(
+    join(repository, options.client),
+    join(input, "durable-history-client.js"),
   );
   fingerprints.push({
     name: "durable-history-client.js",

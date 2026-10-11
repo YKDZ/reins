@@ -372,6 +372,7 @@ export const publicationPayloadSchema = v.strictObject({
   contentBase64: v.string(),
 });
 export const publishParamsSchema = v.strictObject({
+  cwd: v.string(),
   path: v.string(),
   contentBase64: v.string(),
 });
