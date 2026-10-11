@@ -23,7 +23,7 @@ const {
 } = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
   image: string;
   consumerSha256: string;
-  fault?: "move" | "replace" | "remove";
+  fault?: "move" | "replace" | "remove" | "split";
 };
 async function command(
   binary: string,
@@ -319,6 +319,16 @@ const control = async (args: string[], cwd = join(worktree, "src")) => {
     value: JSON.parse(result.stdout) as Record<string, unknown>,
   };
 };
+let splitHelper: string | undefined;
+let splitMounted = false;
+const splitEnter = [
+  "nsenter",
+  "--target",
+  "1",
+  "--mount",
+  "--root=/proc/1/root",
+  "--wd=/",
+];
 try {
   const attached = await cli([
     "attach",
@@ -500,6 +510,78 @@ try {
           relative: (await relative.stat()).size,
         },
       });
+    } else if (fault === "split") {
+      const other = join(worktree, ".split-B");
+      await requireCommand(
+        "git",
+        ["worktree", "add", "--quiet", "--detach", other, "HEAD"],
+        git,
+      );
+      await mkdir(join(other, "src"));
+      const otherRoot = await nativeIdentity(other);
+      assert.notDeepEqual(otherRoot, originalRoot);
+      splitHelper = await requireCommand("docker", [
+        "run",
+        "-d",
+        "--name",
+        `reins-wrr09-split-helper-${process.pid}`,
+        "--pull=never",
+        "--network=none",
+        "--privileged",
+        `--pid=container:${originalContainer}`,
+        "--entrypoint",
+        "sleep",
+        nodeImage,
+        "infinity",
+      ]);
+      await requireCommand("docker", [
+        "exec",
+        splitHelper,
+        ...splitEnter,
+        "mount",
+        "--bind",
+        other,
+        worktree,
+      ]);
+      splitMounted = true;
+      const outerRoot = await nativeIdentity(worktree);
+      const inner = JSON.parse(
+        await requireCommand("docker", [
+          "exec",
+          "-w",
+          "/",
+          originalContainer,
+          "node",
+          "-e",
+          "const fs=require('node:fs');const id=p=>{const s=fs.statSync(p,{bigint:true});return {dev:String(s.dev),ino:String(s.ino)}};let cwd;try{cwd=id('/proc/'+process.argv[2]+'/cwd')}catch(e){if(e.code!=='ENOENT')throw e}console.log(JSON.stringify({root:id(process.argv[1]),cwd,mountNamespace:fs.readlinkSync('/proc/self/ns/mnt')}))",
+          worktree,
+          String(writer.pid),
+        ]),
+      ) as { root: { dev: string; ino: string }; cwd?: unknown };
+      assert.deepEqual(outerRoot, originalRoot);
+      assert.deepEqual(inner.root, otherRoot);
+      if (inner.cwd !== undefined) {
+        const originalCwd = writer.cwdIdentity as { dev: number; ino: number };
+        assert.deepEqual(inner.cwd, {
+          dev: String(originalCwd.dev),
+          ino: String(originalCwd.ino),
+        });
+      }
+      await record("split-original-runtime", {
+        originalContainer,
+        pid: writer.pid,
+        outerRoot,
+        otherRoot,
+        inner,
+        inspect: JSON.parse(
+          await requireCommand("docker", [
+            "inspect",
+            "--format",
+            "{{json .}}",
+            originalContainer,
+          ]),
+        ),
+      });
     } else {
       await rename(worktree, moved);
       movedRoot = await nativeIdentity(moved);
@@ -532,7 +614,9 @@ try {
         ? { reason: "replaced" }
         : fault === "remove"
           ? { reason: "removed" }
-          : { reason: "moved", currentRoot: moved };
+          : fault === "split"
+            ? { reason: "split" }
+            : { reason: "moved", currentRoot: moved };
     const rejected = await control(
       fault === "remove"
         ? [
@@ -665,6 +749,22 @@ try {
   }
   await record("result", "passed");
 } finally {
+  if (splitHelper !== undefined) {
+    if (splitMounted) {
+      const unmount = await command("docker", [
+        "exec",
+        splitHelper,
+        ...splitEnter,
+        "umount",
+        worktree,
+      ]);
+      await record("splitUnmount", unmount);
+      assert.equal(unmount.status, 0);
+    }
+    const removed = await command("docker", ["rm", "-f", splitHelper]);
+    await record("splitHelperRemoval", removed);
+    assert.equal(removed.status, 0);
+  }
   // 保留本票同一 Engine 的 build cache；最终由公开 platform destroy 回收。
   await record("fixtureImageCleanupOwner", {
     owner: "test-platform",
