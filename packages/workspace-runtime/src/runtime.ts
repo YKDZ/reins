@@ -78,7 +78,10 @@ type RecordState = {
   container: string;
   environmentStage?: "pending" | "creating" | "created" | "started";
   containerId?: string;
-  detach?: { disposition: "require_none" | "kill" };
+  detach?: {
+    disposition: "require_none" | "kill";
+    sessionsObserved?: boolean;
+  };
   completed?: TurnCompleted[];
   commands?: Record<
     string,
@@ -230,6 +233,7 @@ export async function openWorkspaceRuntime(options: {
     );
   const preparing = new Set<string>();
   const executions = new Map<string, Promise<void>>();
+  const detachments = new Map<string, Promise<void>>();
   // 单个 Manager 对受理与发布串行化，Docker 准备在锁外进行，status 始终可观察。
   let serial = Promise.resolve();
   const exclusive = <T>(action: () => Promise<T>): Promise<T> => {
@@ -1307,7 +1311,14 @@ export async function openWorkspaceRuntime(options: {
       const { record, tree } = await find(cwd, owner, true, false);
       let listed: SessionInfo[] = [];
       await exclusive(async () => {
-        if (record.detach !== undefined) return;
+        if (record.detach !== undefined) {
+          if (record.detach.disposition === disposition) return;
+          if (disposition !== "kill") throw workspaceFailure("invalid_request");
+          record.detach.disposition = "kill";
+          record.info.detachment!.disposition = "kill";
+          await persist(record);
+          return;
+        }
         if (preparing.has(record.directory))
           throw workspaceFailure("workspace_busy");
         if (disposition === "require_none") {
@@ -1327,7 +1338,10 @@ export async function openWorkspaceRuntime(options: {
             listed = response.result;
           }
         }
-        record.detach = { disposition };
+        record.detach = {
+          disposition,
+          ...(disposition === "require_none" ? { sessionsObserved: true } : {}),
+        };
         record.info.detachment = {
           disposition,
           status: "detaching",
@@ -1341,124 +1355,198 @@ export async function openWorkspaceRuntime(options: {
           },
         };
         retain(record);
+        for (const session of listed) {
+          const saved = record.info.detachment.sessions.find(
+            (item) => item.sessionId === session.sessionId,
+          );
+          if (saved === undefined)
+            record.info.detachment.sessions.push({
+              sessionId: session.sessionId,
+              session,
+              outcome: "confirmed",
+              turns: [],
+            });
+          else {
+            saved.session = session;
+            saved.outcome = "confirmed";
+          }
+        }
         await persist(record);
       });
       const detachment = record.info.detachment!;
-      let step: keyof WorkspaceDetachment["resources"] | undefined;
-      try {
-        const client =
-          record.environmentStage === "started"
-            ? await connect(record)
-            : undefined;
-        if (client !== undefined) {
-          if (detachment.disposition === "kill") {
-            const response = await client.request("list", {});
-            if ("error" in response) throw response.error;
-            listed = response.result;
-          }
-          for (const session of listed) {
-            let saved = detachment.sessions.find(
-              (item) => item.sessionId === session.sessionId,
-            );
-            if (saved === undefined) {
-              saved = {
-                sessionId: session.sessionId,
-                outcome: "unknown",
-                turns: [],
-              };
-              detachment.sessions.push(saved);
-            }
-            saved.session = session;
-            if (session.state === "killed") saved.outcome = "confirmed";
-            for (const turnId of [
-              ...(session.state === "busy" ? [session.activeTurnId] : []),
-              ...(session.lastCompletedTurn === undefined
-                ? []
-                : [session.lastCompletedTurn.turnId]),
-            ])
-              if (!saved.turns.some((turn) => turn.turnId === turnId))
-                saved.turns.push({ turnId });
-          }
-          const saveTurns = async () => {
-            const targets = detachment.sessions.flatMap((session) =>
-              session.turns.map((turn) => ({
-                sessionId: session.sessionId,
-                turnId: turn.turnId,
-              })),
-            );
-            if (targets.length !== 0) {
-              const waited = await client.request("wait", {
-                targets,
-                completion: "all",
-                timeoutMs: 0,
-              });
-              if ("result" in waited) retain(record, waited.result.completed);
-            }
+      let cleanup = detachments.get(record.directory);
+      if (cleanup === undefined && detachment.status !== "released") {
+        cleanup = (async () => {
+          let step: keyof WorkspaceDetachment["resources"] | undefined;
+          try {
+            detachment.status = "detaching";
+            delete detachment.error;
             await persist(record);
-          };
-          await saveTurns();
-          if (detachment.disposition === "kill")
-            for (const session of detachment.sessions) {
-              if (session.outcome === "confirmed") continue;
-              try {
-                const killed = await client.request("kill", {
-                  sessionId: session.sessionId,
-                });
-                if ("error" in killed) {
-                  session.error = killed.error;
-                  throw killed.error;
+            const runtimeAbsent = async () =>
+              (await docker([
+                "container",
+                "ls",
+                "-a",
+                "--no-trunc",
+                "--filter",
+                record.containerId === undefined
+                  ? "name=^/" + record.container + "$"
+                  : "id=" + record.containerId,
+                "--format",
+                "{{.ID}}",
+              ])) === "";
+            if (detachment.resources.runtime.status !== "released") {
+              step = "runtime";
+              const absent = await runtimeAbsent();
+              if (!absent) {
+                const client =
+                  record.environmentStage === "started" &&
+                  (!record.detach!.sessionsObserved ||
+                    detachment.sessions.some(
+                      (session) => session.outcome !== "confirmed",
+                    ))
+                    ? await connect(record)
+                    : undefined;
+                if (client !== undefined) {
+                  if (detachment.disposition === "kill") {
+                    const response = await client.request("list", {});
+                    if ("error" in response) throw response.error;
+                    listed = response.result;
+                    record.detach!.sessionsObserved = true;
+                  }
+                  for (const session of listed) {
+                    let saved = detachment.sessions.find(
+                      (item) => item.sessionId === session.sessionId,
+                    );
+                    if (saved === undefined) {
+                      saved = {
+                        sessionId: session.sessionId,
+                        outcome: "unknown",
+                        turns: [],
+                      };
+                      detachment.sessions.push(saved);
+                    }
+                    saved.session = session;
+                    if (session.state === "killed") saved.outcome = "confirmed";
+                    for (const turnId of [
+                      ...(session.state === "busy"
+                        ? [session.activeTurnId]
+                        : []),
+                      ...(session.lastCompletedTurn === undefined
+                        ? []
+                        : [session.lastCompletedTurn.turnId]),
+                    ])
+                      if (!saved.turns.some((turn) => turn.turnId === turnId))
+                        saved.turns.push({ turnId });
+                  }
+                  const saveTurns = async () => {
+                    const targets = detachment.sessions.flatMap((session) =>
+                      session.turns.map((turn) => ({
+                        sessionId: session.sessionId,
+                        turnId: turn.turnId,
+                      })),
+                    );
+                    if (targets.length !== 0) {
+                      const waited = await client.request("wait", {
+                        targets,
+                        completion: "all",
+                        timeoutMs: 0,
+                      });
+                      if ("result" in waited)
+                        retain(record, waited.result.completed);
+                    }
+                    await persist(record);
+                  };
+                  await saveTurns();
+                  if (detachment.disposition === "kill")
+                    for (const session of detachment.sessions) {
+                      if (session.outcome === "confirmed") continue;
+                      try {
+                        const killed = await client.request("kill", {
+                          sessionId: session.sessionId,
+                        });
+                        if ("error" in killed) {
+                          session.error = killed.error;
+                          throw killed.error;
+                        }
+                        if (killed.result.status !== "killed")
+                          throw workspaceFailure("provider_failed");
+                        session.outcome = "confirmed";
+                        delete session.error;
+                        await saveTurns();
+                      } catch (error) {
+                        const failure = machineFailure(error);
+                        if (failure !== undefined) session.error = failure;
+                        await persist(record);
+                        throw error;
+                      }
+                    }
                 }
-                if (killed.result.status !== "killed")
+                await docker(["rm", "-f", record.container]);
+                if (!(await runtimeAbsent()))
                   throw workspaceFailure("provider_failed");
-                session.outcome = "confirmed";
-                delete session.error;
-                await saveTurns();
-              } catch (error) {
-                const failure = machineFailure(error);
-                if (failure !== undefined) session.error = failure;
-                await persist(record);
-                throw error;
               }
+              clients.get(record.directory)?.close();
+              clients.delete(record.directory);
+              record.info.runtime = { status: "released" };
+              detachment.resources.runtime = { status: "released" };
+              await persist(record);
             }
-        }
-        step = "runtime";
-        await docker(["rm", "-f", record.container]);
-        clients.get(record.directory)?.close();
-        clients.delete(record.directory);
-        record.info.runtime = { status: "released" };
-        detachment.resources.runtime = { status: "released" };
-        await persist(record);
-        step = "credentials";
-        await rm(join(record.directory, "home"), {
-          recursive: true,
-          force: true,
-        });
-        detachment.resources.credentials = { status: "released" };
-        await persist(record);
-        step = "bindings";
-        for (const binding of record.info.harnesses) binding.stage = "released";
-        detachment.resources.bindings = { status: "released" };
-        await persist(record);
-        step = "routing";
-        await (await routes.get(record.directory))?.close();
-        routes.delete(record.directory);
-        await rm(join(controlDirectory(record), "p.sock"), { force: true });
-        await rm(join(controlDirectory(record), "r.sock"), { force: true });
-        detachment.resources.routing = { status: "released" };
-        await persist(record);
-        detachment.resources.ownership = { status: "released" };
-        detachment.status = "released";
-        delete detachment.error;
-        await persist(record);
-      } catch (error) {
-        const failure = normalize(error);
-        detachment.status = "failed";
-        detachment.error = failure;
-        if (step !== undefined)
-          detachment.resources[step] = { status: "failed", error: failure };
-        await persist(record);
-        throw failure;
+            if (detachment.resources.credentials.status !== "released") {
+              step = "credentials";
+              await rm(join(record.directory, "home"), {
+                recursive: true,
+                force: true,
+              });
+              detachment.resources.credentials = { status: "released" };
+              await persist(record);
+            }
+            if (detachment.resources.bindings.status !== "released") {
+              step = "bindings";
+              for (const binding of record.info.harnesses)
+                binding.stage = "released";
+              detachment.resources.bindings = { status: "released" };
+              await persist(record);
+            }
+            if (detachment.resources.routing.status !== "released") {
+              step = "routing";
+              await (await routes.get(record.directory))?.close();
+              routes.delete(record.directory);
+              await rm(join(controlDirectory(record), "p.sock"), {
+                force: true,
+              });
+              await rm(join(controlDirectory(record), "r.sock"), {
+                force: true,
+              });
+              detachment.resources.routing = { status: "released" };
+              await persist(record);
+            }
+            step = "ownership";
+            detachment.resources.ownership = { status: "released" };
+            detachment.status = "released";
+            delete detachment.error;
+            await persist(record);
+          } catch (error) {
+            const failure = normalize(error);
+            detachment.status = "failed";
+            detachment.error = failure;
+            if (
+              step !== undefined &&
+              detachment.resources[step].status !== "released"
+            )
+              detachment.resources[step] = { status: "failed", error: failure };
+            await persist(record);
+            throw failure;
+          }
+        })();
+        detachments.set(record.directory, cleanup);
+        const finished = () => {
+          if (detachments.get(record.directory) === cleanup)
+            detachments.delete(record.directory);
+        };
+        void cleanup.then(finished, finished);
       }
+      await cleanup;
       return { ...record.info, cwd: tree.cwd };
     },
     async close() {

@@ -384,7 +384,7 @@ import { setTimeout as delay } from 'node:timers/promises';
 const base=${JSON.stringify(base)};
 const args=process.argv.slice(2);
 const owned=args[0]==='rm' && args[1]==='-f' && args[2]?.startsWith('reins-wrr20-runtime-') && !args[2].includes('-material-');
-const log=value=>appendFileSync(base+'/provider.ndjson',JSON.stringify({...value,args,at:new Date().toISOString()})+'\\n');
+const log=value=>appendFileSync(base+'/evidence/provider.ndjson',JSON.stringify({...value,args,at:new Date().toISOString()})+'\\n');
 if(['create','start'].includes(args[0]))log({event:'prepare'});
 const pause=async phase=>{
   writeFileSync(base+'/rm-ready',JSON.stringify({phase,pid:process.pid,managerPid:process.ppid,args}));
@@ -844,7 +844,7 @@ if (focus !== "kill") {
     "kill",
   ]);
   assert.equal(repeated.status, 0, JSON.stringify(repeated));
-  const provider = (await readFile(join(base, "provider.ndjson"), "utf8"))
+  const provider = (await readFile(join(output, "provider.ndjson"), "utf8"))
     .trim()
     .split("\n")
     .map(
