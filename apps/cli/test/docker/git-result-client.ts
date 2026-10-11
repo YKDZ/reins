@@ -78,6 +78,17 @@ const record = async (name: string, value: unknown) => {
     JSON.stringify(facts, null, 2),
   );
 };
+const importFailure = (objectWriteAttempted?: boolean) => (error: unknown) => {
+  const failure = error as {
+    code: string;
+    gitImport: { referenceCreated: boolean; objectWriteAttempted: boolean };
+  };
+  assert.equal(failure.code, "git_import_failed");
+  assert.equal(failure.gitImport.referenceCreated, false);
+  if (objectWriteAttempted !== undefined)
+    assert.equal(failure.gitImport.objectWriteAttempted, objectWriteAttempted);
+  return true;
+};
 let control: Awaited<ReturnType<typeof manager.control>> | undefined;
 let sessionId: SessionId | undefined;
 try {
@@ -183,10 +194,7 @@ try {
       reference: existing,
       commit,
     }),
-    {
-      code: "git_import_failed",
-      gitImport: { referenceCreated: false, objectWriteAttempted: false },
-    },
+    importFailure(false),
   );
   assert.equal(git(target, ["rev-parse", existing]), before.head);
   const symbolic = "refs/received/symbolic";
@@ -197,7 +205,7 @@ try {
       reference: symbolic,
       commit,
     }),
-    { code: "git_import_failed", gitImport: { referenceCreated: false } },
+    importFailure(),
   );
   assert.equal(git(target, ["symbolic-ref", symbolic]), "refs/heads/absent");
   const race = await Promise.allSettled(
@@ -250,10 +258,7 @@ try {
       reference: "refs/received/plain",
       commit,
     }),
-    {
-      code: "git_import_failed",
-      gitImport: { referenceCreated: false, objectWriteAttempted: false },
-    },
+    importFailure(false),
   );
   assert.equal(git(target, ["for-each-ref", "refs/received/plain"]), "");
   const corrupt = await next({
@@ -300,10 +305,7 @@ try {
       reference: "refs/received/partial",
       commit: partial.commands[2].stdout,
     }),
-    {
-      code: "git_import_failed",
-      gitImport: { referenceCreated: false, objectWriteAttempted: false },
-    },
+    importFailure(false),
   );
   assert.equal(git(missing, ["for-each-ref"]), "");
   await record("ordinary-corrupt-and-missing-prerequisite-rejected", {
