@@ -458,14 +458,18 @@ export async function openWorkspaceRuntime(options: {
         container.Id,
         "node",
         "-e",
-        "const fs=require('node:fs'),cp=require('node:child_process'),input=JSON.parse(process.argv[1]);try{const identities=input.identities.map(({path})=>{const s=fs.statSync(path,{bigint:true});return {path,dev:String(s.dev),ino:String(s.ino)}});const git=flag=>fs.realpathSync(cp.execFileSync('git',['-C',input.tree.cwd,'rev-parse','--path-format=absolute',flag],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim());const tree={cwd:fs.realpathSync(input.tree.cwd),root:git('--show-toplevel'),gitDir:git('--git-dir'),commonDir:git('--git-common-dir')};console.log(JSON.stringify({identities,tree}))}catch(error){console.log(JSON.stringify({error:error.code??'git_relationship_unavailable'}))}",
+        "const fs=require('node:fs'),cp=require('node:child_process'),input=JSON.parse(process.argv[1]);let identities;try{identities=input.identities.map(({path})=>{const s=fs.statSync(path,{bigint:true});return {path,dev:String(s.dev),ino:String(s.ino)}});const git=flag=>fs.realpathSync(cp.execFileSync('git',['-C',input.tree.cwd,'rev-parse','--path-format=absolute',flag],{encoding:'utf8',stdio:['ignore','pipe','pipe']}).trim());const tree={cwd:fs.realpathSync(input.tree.cwd),root:git('--show-toplevel'),gitDir:git('--git-dir'),commonDir:git('--git-common-dir')};console.log(JSON.stringify({identities,tree}))}catch(error){console.log(JSON.stringify({identities,error:error.code??'git_relationship_unavailable'}))}",
         JSON.stringify({ identities: record.identities, tree: record.tree }),
       ]),
     ) as { identities: NativeIdentity[]; tree: Tree; error?: string };
+    if (
+      actual.identities !== undefined &&
+      JSON.stringify(actual.identities) !== JSON.stringify(record.identities)
+    )
+      return { reason: "split" };
     if (actual.error !== undefined)
       return { reason: actual.error === "ENOENT" ? "split" : "unreachable" };
     if (
-      JSON.stringify(actual.identities) !== JSON.stringify(record.identities) ||
       actual.tree.cwd !== record.tree.cwd ||
       actual.tree.root !== record.tree.root ||
       actual.tree.gitDir !== record.tree.gitDir ||
