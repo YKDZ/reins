@@ -102,7 +102,7 @@ jobs:
           TURBO_LOG_ORDER: grouped
           TURBO_LOG_PREFIX: task
           TURBO_OUTPUT_LOGS: errors-only
-        run: pnpm exec turbo run test:docker --filter=@reins/test-platform
+        run: pnpm exec turbo run test:docker --filter=@reins/test-platform --filter=./apps/cli
       - name: Upload the verified release package
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
@@ -121,6 +121,7 @@ jobs:
           path: |
             .artifacts/packed-cli-smoke/**
             .artifacts/acceptance-input/**
+            .artifacts/reins-wrr*/**
             .artifacts/s1-docker/**/evidence/**
             .artifacts/acceptance-docker/evidence/**
             .artifacts/recovery-docker/evidence/**

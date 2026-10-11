@@ -81,6 +81,50 @@ try {
 
 未附着、未就绪、未选择该 harness 或目录失效时，任务在启动 worker 前被类型化拒绝；不会退回宿主执行。能力目录查询不启动模型任务。只有显式传入的消息和可选参数进入 worker。
 
+## 从选定源码到取回文件
+
+启动器先按部署要求设置消费者上下文，并连接正在运行的 workspace Manager。选择调用方 Git 仓库中的一个固定提交，再逐项列出希望额外交给工作者的暂存文件或当前工作文件；未跟踪文件也可以按路径选择。下面以工作区定义中的 `code` 绑定和 `src` 子目录为例：
+
+```sh
+commit="$(git -C /native/project rev-parse HEAD)"
+reins workspace handoff \
+  --repository /native/project \
+  --commit "$commit" \
+  --subdirectory src \
+  --binding code \
+  --worktree-file src/changed.ts notes/decision.md
+```
+
+命令会返回已准备工作树的 `workspace.root` 和 `workspace.cwd`。把返回值填入下面的变量，再用 `workspace.cwd` 查看状态并创建自己的任务；`spawn` 返回的 `turnHandle` 用于等待这一回合：
+
+```sh
+workspace_root='/workspace.root 的返回值'
+workspace_cwd='/workspace.cwd 的返回值'
+reins workspace status -C "$workspace_cwd"
+reins -C "$workspace_cwd" spawn codex 'Use the selected files to update the implementation, write result/summary.md, then run reins publish -- result/summary.md' --name selected-input-worker
+turn_handle='spawn 返回的 turnHandle'
+reins -C "$workspace_cwd" wait "$turn_handle" --completion all
+```
+
+工作者在任务环境中明确发布自己选择的文件。发布结果带有独立 `publicationId`，之后由消费者查询并显式取回到活动工作树之外：
+
+工作者运行发布入口：
+
+```sh
+reins publish -- result/summary.md
+```
+
+消费者查询发布并明确取回：
+
+```sh
+reins workspace publications -C "$workspace_cwd"
+publication_id='workspace publications 返回的 publicationId'
+reins workspace receive "$publication_id" --directory /native/project-receipts --active-root "$workspace_root"
+reins workspace receipts --directory /native/project-receipts
+```
+
+取回记录会给出实际接收位置。发布、回合完成和消费者取回是各自独立的事实；不会自动选择文件、认定成果齐全或删除任一副本。
+
 ## 发行与验收
 
 - `pnpm deployment`：构建发行所需包，生成并校验正式发行产物（`.artifacts/release`，恰好一个 tarball 与 `SHA256SUMS`），随后对发行包执行 npm 干净安装 smoke。
@@ -92,4 +136,4 @@ try {
 
 - `pnpm check`：通过 Turbo 执行静态检查、单元测试、CLI e2e 和不使用缓存的真实 Docker 验收；自动构建并校验正式包、执行 npm smoke、准备消费者输入组。需要可运行特权容器的 Docker。
 - Linux 快速测试将可丢弃的运行目录放在 `/dev/shm`，避免宿主磁盘同步写入延迟耗尽进程协议的超时；安装目录与临时 checkout 使用普通临时目录，Docker 实机状态和证据使用 `.artifacts`。
-- `pnpm exec turbo run test:docker --filter=@reins/test-platform`：只运行正式候选与平台验收的完整依赖链，CI 使用相同入口。已保存输入组的重放直接调用组内入口，不重新生成锁。
+- `pnpm exec turbo run test:docker --filter=@reins/test-platform --filter=./apps/cli`：运行正式发行产品的 CLI Docker 工作流和平台验收，CI 使用相同入口。已保存输入组的重放直接调用组内入口，不重新生成锁。
