@@ -877,7 +877,8 @@ export function createProtocolServerInternal(
       }
       case "wait": {
         const params = request.params as WaitParams;
-        for (const sessionId of params.ids) assertSessionScope(sessionId);
+        for (const target of params.targets)
+          assertSessionScope(target.sessionId);
         return await options.machine.wait(params);
       }
       case "interrupt": {

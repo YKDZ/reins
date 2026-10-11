@@ -213,7 +213,9 @@ const server = createServer((socket) => {
       if (requestsFile !== undefined) {
         appendFileSync(requestsFile, `${request.method}\n`);
       }
-      // 消费者绑定握手是连接建立的一部分；各 mode 的反例仍作用在领域请求上。
+      // 消费者绑定握手是连接建立的一部分；timeout 验证其传输预算，
+      // 其余 mode 的反例作用在领域请求上，不为 wait 设置隐式期限。
+      if (mode === "timeout") continue;
       if (request.method === "initialize") {
         socket.write(
           `${JSON.stringify({
@@ -224,7 +226,6 @@ const server = createServer((socket) => {
         );
         continue;
       }
-      if (mode === "timeout") continue;
       if (mode === "attach-long-replay" && request.method === "attach") {
         const body = "x".repeat(16 * 1024);
         for (let index = 0; index < 1024; index += 1) {

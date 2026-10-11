@@ -14,7 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { makeDiagnosticId, sessionIdSchema } from "@reins/protocol";
+import {
+  makeDiagnosticId,
+  sessionIdSchema,
+  turnIdSchema,
+  encodeTurnHandle,
+} from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -198,6 +203,10 @@ async function waitFor(
 
 const cleanupDirs: string[] = [];
 const fixtureSessionId = v.parse(sessionIdSchema, "test-session@gfixture");
+const fixtureTurnHandle = encodeTurnHandle({
+  sessionId: fixtureSessionId,
+  turnId: v.parse(turnIdSchema, "t1"),
+});
 const missingSessionId = v.parse(sessionIdSchema, "missing@gfixture");
 
 afterEach(async () => {
@@ -1076,11 +1085,22 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
-    const waited = await runCli(["wait", sessionId, "--timeout", "100"], env);
+    const waited = await runCli(
+      [
+        "wait",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "100",
+      ],
+      env,
+    );
     expect(waited.exitCode).toBe(4);
     expect(JSON.parse(waited.stdout)).toEqual({
       status: "timeout",
-      results: [],
+      completed: [],
+      pending: [{ turnHandle: JSON.parse(spawned.stdout).turnHandle }],
     });
     await runCli(["kill", sessionId], env);
   });
@@ -1284,6 +1304,8 @@ function sampleForKind(kind: ValueKind): string {
       return "test-session";
     case "sessionId":
       return fixtureSessionId;
+    case "turnHandle":
+      return fixtureTurnHandle;
     case "turnId":
       return "t1";
     case "permissionId":
@@ -1403,6 +1425,7 @@ type InvalidKindCategory =
   | "sessionName"
   | "sessionId"
   | "turnId"
+  | "turnHandle"
   | "permissionId"
   | "diagnosticId"
   | "time"
@@ -1429,6 +1452,7 @@ function invalidCategory(
     case "sessionName":
     case "sessionId":
     case "turnId":
+    case "turnHandle":
     case "permissionId":
     case "diagnosticId":
     case "time":
@@ -1461,6 +1485,8 @@ function invalidValueFor(kind: ValueKind): string {
       return "daemon";
     case "sessionId":
       return "not-a-session-id";
+    case "turnHandle":
+      return "bad-handle";
     case "turnId":
       return "T1";
     case "permissionId":
@@ -1598,6 +1624,7 @@ const fixtureValueKinds = {
   sessionName: { type: "sessionName", hint: "Expected fixture SessionName" },
   sessionId: { type: "sessionId", hint: "Expected fixture SessionId" },
   turnId: { type: "turnId", hint: "Expected fixture TurnId" },
+  turnHandle: { type: "turnHandle", hint: "Expected fixture TurnHandle" },
   permissionId: {
     type: "permissionId",
     hint: "Expected fixture PermissionId",
@@ -2209,11 +2236,9 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "timeout");
     const started = Date.now();
-    const result = await runCli(
-      ["wait", fixtureSessionId, "--timeout", "1"],
-      fixtureEnv,
-      { timeoutMs: 7_000 },
-    );
+    const result = await runCli(["capabilities"], fixtureEnv, {
+      timeoutMs: 7_000,
+    });
     expect(result.exitCode).toBe(65);
     expect(result.stderr).toBe("");
     expect(JSON.parse(result.stdout)).toMatchObject({ code: "daemon_timeout" });
@@ -2384,7 +2409,18 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("wait 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["wait", missingSessionId], env);
+    const result = await runCli(
+      [
+        "wait",
+        encodeTurnHandle({
+          sessionId: missingSessionId,
+          turnId: v.parse(turnIdSchema, "t1"),
+        }),
+        "--completion",
+        "all",
+      ],
+      env,
+    );
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
@@ -2557,7 +2593,14 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     });
 
     const foreignWait = await runCli(
-      ["wait", sessionId, "--timeout", "50"],
+      [
+        "wait",
+        JSON.parse(spawned.stdout).turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "50",
+      ],
       beta,
     );
     expect(foreignWait.exitCode).toBe(65);

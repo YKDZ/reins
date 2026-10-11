@@ -491,3 +491,74 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
   });
   client.close();
 });
+
+test.each([undefined, 60_000])(
+  "wait keeps its domain budget beyond the ordinary 30s request timer (%s)",
+  async (timeoutMs) => {
+    vi.useFakeTimers();
+    const pair = createInMemoryTransportPair();
+    const client = createReinsClient(pair.client as never, binding);
+    try {
+      let settled = false;
+      const waiting = client
+        .request("wait", {
+          targets: [{ sessionId: "worker@g1" as never, turnId: "t1" as never }],
+          completion: "all",
+          ...(timeoutMs === undefined ? {} : { timeoutMs }),
+        })
+        .finally(() => {
+          settled = true;
+        });
+      await vi.advanceTimersByTimeAsync(45_000);
+      expect(settled).toBe(false);
+      pair.server.send({
+        kind: "response",
+        requestId: "cli1",
+        result: {
+          status: "satisfied",
+          completed: [
+            {
+              sessionId: "worker@g1",
+              turnId: "t1",
+              stopReason: "end_turn",
+              finalReply: "caller result",
+            },
+          ],
+          pending: [],
+        },
+      });
+      await expect(waiting).resolves.toMatchObject({
+        result: { status: "satisfied" },
+      });
+    } finally {
+      client.close();
+      vi.useRealTimers();
+    }
+  },
+);
+
+test.each(["disconnect", "malformed"])(
+  "wait preserves the real transport error on %s",
+  async (failure) => {
+    const pair = createInMemoryTransportPair();
+    const client = createReinsClient(pair.client as never, binding);
+    const waiting = client.request("wait", {
+      targets: [{ sessionId: "worker@g1" as never, turnId: "t1" as never }],
+      completion: "all",
+      timeoutMs: 0,
+    });
+    if (failure === "disconnect") pair.server.close();
+    else
+      pair.server.send({
+        kind: "response",
+        requestId: "cli1",
+        result: { status: "timeout", completed: "not an array", pending: [] },
+      });
+    await expect(waiting).rejects.toThrow(
+      failure === "disconnect"
+        ? "daemon_disconnected"
+        : "invalid_daemon_response",
+    );
+    client.close();
+  },
+);
