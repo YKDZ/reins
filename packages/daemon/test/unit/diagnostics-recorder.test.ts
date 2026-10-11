@@ -13,7 +13,7 @@ import {
   sessionNameSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { openDiagnosticsRuntimeForTest } from "../../src/diagnostics-recorder.testing.ts";
 import type { DiagnosticsRuntime } from "../../src/diagnostics-recorder.ts";
@@ -118,6 +118,31 @@ async function openRuntime(
 }
 
 describe("DiagnosticsRuntime", () => {
+  test("未结束的写入有界拒绝引用，释放查询水位且不重试", async () => {
+    const store = new MemoryStore();
+    const runtime = await openRuntime(store);
+    store.appendGate = new Promise(() => {});
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const record = runtime.record(input()).then((id) => {
+        settled = true;
+        return id;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      expect(await record).toBeUndefined();
+      await expect(runtime.query({})).rejects.toThrow(
+        "Diagnostics store is unavailable",
+      );
+      expect(runtime.health().status).toBe("degraded");
+      expect(store.records).toEqual([]);
+      await runtime.close();
+      expect(store.closed).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   test("queries wait for the record watermark captured at call time only", async () => {
     const store = new MemoryStore();
     let releaseFirst!: () => void;

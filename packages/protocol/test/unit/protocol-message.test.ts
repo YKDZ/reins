@@ -17,6 +17,7 @@ import {
   protocolResultSchemaFor,
   sessionIdSchema,
   turnIdSchema,
+  turnCompletedSchema,
 } from "../../src/index.ts";
 
 const ok = (schema: v.GenericSchema, input: unknown): void => {
@@ -26,6 +27,46 @@ const ok = (schema: v.GenericSchema, input: unknown): void => {
 const bad = (schema: v.GenericSchema, input: unknown): void => {
   expect(v.safeParse(schema, input).success).toBe(false);
 };
+
+test("failed 与其他终态严格区分，事件和 wait 共用失败事实", () => {
+  const base = { sessionId: "failure@g1", turnId: "t1", finalReply: null };
+  const failure = {
+    failureCategory: "quota_exhausted",
+    retryDisposition: "external_state_change",
+  };
+  for (const schema of [turnCompletedSchema, protocolResultSchemaFor("wait")]) {
+    const value = (terminal: unknown) =>
+      schema === turnCompletedSchema
+        ? terminal
+        : { status: "satisfied", completed: [terminal], pending: [] };
+    ok(schema, value({ ...base, stopReason: "failed", failure }));
+    bad(schema, value({ ...base, stopReason: "failed" }));
+    bad(
+      schema,
+      value({
+        ...base,
+        stopReason: "failed",
+        failure: { failureCategory: "quota_exhausted" },
+      }),
+    );
+    for (const stopReason of ["end_turn", "cancelled", "killed"]) {
+      ok(schema, value({ ...base, stopReason }));
+      bad(schema, value({ ...base, stopReason, failure }));
+    }
+  }
+  ok(domainEventSchema, {
+    type: "turn.completed",
+    ...base,
+    stopReason: "failed",
+    failure,
+  });
+  bad(domainEventSchema, {
+    type: "turn.completed",
+    ...base,
+    stopReason: "end_turn",
+    failure,
+  });
+});
 
 describe("协议 envelope", () => {
   test("request 必须携带 kind/requestId/method/params，未知方法被拒绝", () => {
@@ -351,7 +392,10 @@ describe("capabilities 矩阵", () => {
         {
           harness: "codex",
           code: "capability_query_failed",
-          cause: { kind: "upstream", message: "x" },
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          },
         },
       ],
     });

@@ -1,8 +1,10 @@
 import type { TurnJournal } from "@reins/adapter-kit";
 import {
   makeTextEvidence,
+  UNKNOWN_HARNESS_FAILURE,
   type DomainEvent,
   type PermissionOption,
+  type HarnessFailure,
 } from "@reins/protocol";
 
 import type {
@@ -14,6 +16,33 @@ import type {
   SDKSystemMessage,
   SDKUserMessage,
 } from "./sdk-seam.ts";
+
+// SDK 1.0.23 的结构化 error 标签；billing_error 不能证明余额耗尽。
+function classifyAssistantFailure(
+  error: SDKAssistantMessage["error"],
+): HarnessFailure {
+  switch (error) {
+    case "authentication_failed":
+      return {
+        failureCategory: "credential_rejected",
+        retryDisposition: "external_state_change",
+      };
+    case "rate_limit":
+      return { failureCategory: "rate_limited", retryDisposition: "wait" };
+    case "invalid_request":
+      return {
+        failureCategory: "request_rejected",
+        retryDisposition: "input_change",
+      };
+    case "server_error":
+      return {
+        failureCategory: "provider_unavailable",
+        retryDisposition: "wait",
+      };
+    default:
+      return UNKNOWN_HARNESS_FAILURE;
+  }
+}
 
 export type QoderMappingState = {
   currentAssistantId: string | null;
@@ -214,14 +243,31 @@ function mapStreamEvent(
   return [];
 }
 
-function mapAssistant(
+async function mapAssistant(
   session: TurnJournal,
   state: QoderMappingState,
   message: SDKAssistantMessage,
-): DomainEvent[] {
+): Promise<DomainEvent[]> {
   if (session.turnId === null) return [];
   const turnId = session.turnId;
   const events: DomainEvent[] = [];
+  if (message.isApiErrorMessage === true) {
+    events.push(...flushPendingText(session, state));
+    state.currentAssistantId = null;
+    const text = message.message.content
+      .filter((block) => block.type === "text")
+      .map((block) => block.text ?? "")
+      .join("");
+    events.push(
+      await session.failTurn(classifyAssistantFailure(message.error), {
+        kind: "turn_failure",
+        operation: "run_turn",
+        reason: "worker_reported_failure",
+        message: makeTextEvidence(text || "worker reported a failed turn"),
+      }),
+    );
+    return events;
+  }
   const nativeMessageId = isNonEmptyString(message.message.id)
     ? message.message.id
     : null;
@@ -276,17 +322,7 @@ function mapAssistant(
     session.setUsage(message.message.usage);
   }
 
-  if (message.isApiErrorMessage === true) {
-    void session.diagnostic({
-      kind: "turn_failure",
-      operation: "run_turn",
-      reason: "worker_reported_failure",
-      message: makeTextEvidence("worker reported a failed turn"),
-    });
-    events.push(...flushPendingText(session, state));
-    state.currentAssistantId = null;
-    events.push(session.endTurn("failed"));
-  } else if (message.aborted === true && session.cancelling) {
+  if (message.aborted === true && session.cancelling) {
     events.push(...flushPendingText(session, state));
     state.currentAssistantId = null;
     events.push(session.endTurn("cancelled"));
@@ -358,32 +394,32 @@ function mapSystemMessage(
   return events;
 }
 
-function mapResult(
+async function mapResult(
   session: TurnJournal,
   state: QoderMappingState,
   message: SDKResultMessage,
-): DomainEvent[] {
+): Promise<DomainEvent[]> {
   if (session.turnId === null) return [];
   if (message.is_error || message.subtype.startsWith("error")) {
-    void session.diagnostic({
+    const events = flushPendingText(session, state);
+    state.currentAssistantId = null;
+    const failed = await session.failTurn(UNKNOWN_HARNESS_FAILURE, {
       kind: "turn_failure",
       operation: "run_turn",
       reason: "worker_reported_failure",
       message: makeTextEvidence("worker reported a failed turn"),
     });
-    const events = flushPendingText(session, state);
-    state.currentAssistantId = null;
-    events.push(session.endTurn("failed"));
+    events.push(failed);
     return events;
   }
   return [];
 }
 
-export function mapSdkMessage(
+export async function mapSdkMessage(
   session: TurnJournal,
   state: QoderMappingState,
   message: SDKMessage,
-): DomainEvent[] {
+): Promise<DomainEvent[]> {
   switch (message.type) {
     case "stream_event":
       return mapStreamEvent(session, state, message);

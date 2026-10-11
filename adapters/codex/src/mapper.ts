@@ -1,7 +1,9 @@
 import type { TurnJournal } from "@reins/adapter-kit";
 import {
   makeTextEvidence,
+  UNKNOWN_HARNESS_FAILURE,
   type DomainEvent,
+  type HarnessFailure,
   type PermissionOption,
   type PermissionResolution,
 } from "@reins/protocol";
@@ -11,6 +13,43 @@ import type {
   CodexInboundItem,
   InboundMessage,
 } from "./transport.ts";
+
+// codex-cli 0.162.0 app-server 的 CodexErrorInfo；未知标签与 HTTP 状态不猜测。
+function classifyFailure(info: unknown): HarnessFailure {
+  switch (info) {
+    case "usageLimitExceeded":
+      return {
+        failureCategory: "quota_exhausted",
+        retryDisposition: "external_state_change",
+      };
+    case "rateLimitExceeded":
+      return { failureCategory: "rate_limited", retryDisposition: "wait" };
+    case "unauthorized":
+      return {
+        failureCategory: "credential_rejected",
+        retryDisposition: "external_state_change",
+      };
+    case "contextWindowExceeded":
+    case "badRequest":
+      return {
+        failureCategory: "request_rejected",
+        retryDisposition: "input_change",
+      };
+    case "serverOverloaded":
+    case "internalServerError":
+      return {
+        failureCategory: "provider_unavailable",
+        retryDisposition: "wait",
+      };
+    case "sandboxError":
+      return {
+        failureCategory: "runtime_unavailable",
+        retryDisposition: "external_state_change",
+      };
+    default:
+      return UNKNOWN_HARNESS_FAILURE;
+  }
+}
 
 function isFailedStatus(status: string): boolean {
   return status === "failed" || status === "declined";
@@ -93,10 +132,10 @@ function mapItemCompleted(
   return [];
 }
 
-export function mapNotification(
+export async function mapNotification(
   session: TurnJournal,
   message: Extract<InboundMessage, { kind: "notification" }>,
-): DomainEvent[] {
+): Promise<DomainEvent[]> {
   switch (message.method) {
     case "item/agentMessage/delta":
       if (session.turnId === null) return [];
@@ -122,15 +161,18 @@ export function mapNotification(
       if (turn.status === "completed") return [session.endTurn("end_turn")];
       if (turn.status === "interrupted") return [session.endTurn("cancelled")];
       if (turn.status === "failed") {
-        void session.diagnostic({
-          kind: "turn_failure",
-          operation: "run_turn",
-          reason: "worker_reported_failure",
-          message: makeTextEvidence(
-            turn.error?.message ?? "worker reported a failed turn",
-          ),
-        });
-        return [session.endTurn("failed")];
+        const failed = await session.failTurn(
+          classifyFailure(turn.error?.codexErrorInfo),
+          {
+            kind: "turn_failure",
+            operation: "run_turn",
+            reason: "worker_reported_failure",
+            message: makeTextEvidence(
+              turn.error?.message ?? "worker reported a failed turn",
+            ),
+          },
+        );
+        return [failed];
       }
       return [];
     }

@@ -34,7 +34,15 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
               type: "turn.completed",
               sessionId,
               turnId: reply.turnId,
-              stopReason: reply.stopReason,
+              ...(reply.stopReason === "failed"
+                ? {
+                    stopReason: reply.stopReason,
+                    failure: {
+                      failureCategory: "unclassified" as const,
+                      retryDisposition: "unknown" as const,
+                    },
+                  }
+                : { stopReason: reply.stopReason }),
               finalReply: reply.finalReply,
             });
         }

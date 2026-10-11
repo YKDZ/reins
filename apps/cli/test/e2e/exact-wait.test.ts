@@ -29,7 +29,7 @@ afterEach(async () => {
   for (const release of cleanup.splice(0).reverse()) await release();
 });
 
-async function fixture() {
+async function fixture(adapterFile = adapters) {
   const root = await mkdtemp(join(tmpdir(), "reins-wrr15-cwd-"));
   const runtime = await mkdtemp("/dev/shm/reins-wrr15-runtime-");
   cleanup.push(async () => {
@@ -51,7 +51,7 @@ async function fixture() {
   };
   const daemon: ChildProcess = spawn(
     process.execPath,
-    [daemonBin, "--adapters", adapters],
+    [daemonBin, "--adapters", adapterFile],
     { cwd: daemonCwd, env, stdio: ["ignore", "pipe", "pipe"] },
   );
   const errors: string[] = [];
@@ -135,6 +135,86 @@ test("wait reads the exact natural terminal even after the session is killed", a
       pending: [],
     },
   });
+});
+
+test("failed wait 的 JSON 与 pretty 从同一 typed 事实提供可读处置", async () => {
+  const { cli, client: connect } = await fixture();
+  const client = await connect();
+  const failed = await spawnTarget(cli, "reins-wrr19-render", {
+    stopReason: "failed",
+    reply: "native private text",
+  });
+  await waitIdle(client, failed.target.sessionId);
+  const json = await cli(["wait", failed.turnHandle, "--completion", "all"]);
+  expect(json.exitCode).toBe(1);
+  expect(JSON.parse(json.stdout)).toMatchObject({
+    completed: [
+      {
+        failure: {
+          failureCategory: "unclassified",
+          retryDisposition: "unknown",
+        },
+        message:
+          "Harness failure is unclassified. Retry disposition is unknown; inspect the available evidence before choosing another action",
+      },
+    ],
+  });
+  const pretty = await cli([
+    "--pretty",
+    "wait",
+    failed.turnHandle,
+    "--completion",
+    "all",
+  ]);
+  expect(pretty.exitCode).toBe(1);
+  expect(pretty.stdout).toContain(JSON.parse(json.stdout).completed[0].message);
+});
+
+test("CLI capabilities 保留成功与失败，并与 client 使用同一未知处置", async () => {
+  const { cli, client: connect } = await fixture(
+    join(repo, "packages/daemon/test/fixtures/failure-adapters.ts"),
+  );
+  const client = await connect();
+  const response = await client.request("capabilities", {});
+  expect(response).toMatchObject({
+    result: {
+      capabilities: [{ harness: "codex" }],
+      failures: [
+        {
+          harness: "unavailable",
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          },
+        },
+      ],
+    },
+  });
+  const json = await cli(["capabilities"]);
+  expect(json.exitCode).toBe(0);
+  const result = JSON.parse(json.stdout);
+  expect(result).toMatchObject({
+    capabilities: [{ harness: "codex" }],
+    failures: [
+      {
+        harness: "unavailable",
+        failure: {
+          failureCategory: "unclassified",
+          retryDisposition: "unknown",
+        },
+        message: expect.stringContaining("Harness failure is unclassified"),
+      },
+    ],
+  });
+  expect(json.stdout).not.toContain("private credential");
+  const pretty = await cli(["--pretty", "capabilities"]);
+  expect(pretty.exitCode).toBe(0);
+  expect(pretty.stdout).toContain("codex");
+  expect(pretty.stderr).toContain(
+    "Harness failure is unclassified. Retry disposition is unknown",
+  );
+  expect(pretty.stderr).toContain("reins diagnostics --id");
+  expect(pretty.stderr).not.toContain("private credential");
 });
 
 async function spawnTarget(
@@ -436,6 +516,16 @@ test.each([
       completed: turns.map(({ turnHandle }, index) => ({
         turnHandle,
         stopReason: reasons[index],
+        ...(reasons[index] === "failed"
+          ? {
+              failure: {
+                failureCategory: "unclassified",
+                retryDisposition: "unknown",
+              },
+              message:
+                "Harness failure is unclassified. Retry disposition is unknown; inspect the available evidence before choosing another action",
+            }
+          : {}),
         finalReply: reasons[index] === "killed" ? null : "caller fact " + index,
       })),
       pending: active === undefined ? [] : [{ turnHandle: active.turnHandle }],
