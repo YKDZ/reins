@@ -80,6 +80,7 @@ reins workspace receipts --directory /absolute/receipts
 ```
 
 共享客户端提供相同的 `publication.list` 查询、`receivePublication` 和 `receipts`。接收提交本地可用文件后才返回 `arrived`、来源、大小及实际 `localPath`；失败返回 `receipt_failed`，保留已成功发布的副本。发布和接收查询均限 launcher 绑定的消费者，跨消费者发布标识按不存在处理。本链可直接用于原生工作树附着，无需源码交接。回合完成、回复中的路径和发布成功都不会自动接收文件。
+
 `reins workspace history -C /absolute/worktree` 显式查询当前消费者在该真实工作树各次附着中实际收到的类型化历史；`--all-worktrees` 聚合当前消费者的工作树。它与当前代的会话列表、有界 `attach` 回放窗口分别存在。记录回显当时的环境与 harness 运行指纹，不暴露内部沿袭或附着代际标识。同一真实工作树脱离再附着可以查到前代；删除后在同一路径新建的工作树具有新的沿袭。
 
 历史日志在 Manager 状态目录中，位于可销毁环境之外，按收到的原始类型化事件追加并同步；同一 daemon 世代及会话内，重复订阅收到的同一事件只保存一次。查询的 `integrity: unknown` 明确表示这些记录不能证明尚未收到的事件或断连期间的事实齐全。历史健康单独投影写入、读取故障及未保存状态；故障不会改变已有回合终态，也不会为缺失记录编造事件。
@@ -93,3 +94,11 @@ REINS_WORKSPACE_MANAGER_STATE_DIR=/absolute/manager-state \
 ```
 
 管理命令使用同一状态目录的独占 lease，只删除明确消费者与真实工作树沿袭的历史，不删除源码、已发布副本或附着事实。它不进入普通消费者 CLI 候选。没有第二台真实管理器的复制协议、隐含保留期限或自动历史回收。
+
+工作区控制的既有 `wait` 返回原有 `status`、`completed`、`pending`，并附当前消费者／工作区的 `publications` 查询快照。发布不会使仍活动的回合满足等待条件，也不会把文件放入接收区。
+
+既有 `attach`／共享 client 的 `subscribe` 在同一 Manager 连接上接收 `publication.ready`。成果事实只在固定副本提交后产生，包含完整发布记录；它属于工作区，既不声称属于某个回合，也不借用 daemon 的 Session EventId 或恢复游标。建立观察时提供当前可取回成果，之后只在该观察存续期间发送新增事实；daemon 的 `none`／`available`／`after` 仍只控制原生会话事件的有界回放。任务终态和文件到达继续分别报告。
+
+关闭、结束或断开观察会移除对应的成果观察；没有等待或订阅时不承诺后台唤起。断连及通知丢失后，`workspace publications` 仍可查询固定副本，显式 `workspace receive` 才产生本地 `arrived` 事实。任务失败不删除发布，成果通知不证明任务完成或成果齐全。
+
+成果查询失败时，已确定的 `wait` 结果与订阅结束事实仍返回，并以独立的 `publicationError` 报告发现失败；不把失败投影为空成果，也不改写任务终态。

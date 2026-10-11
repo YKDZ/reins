@@ -1,5 +1,6 @@
 import type {
   ConsumerContext,
+  WaitResult,
   ProtocolMessage,
   ProtocolMethod,
   ProtocolParams,
@@ -11,6 +12,10 @@ import {
 import {
   WORKSPACE_PROTOCOL_MAJOR_VERSION,
   workspaceResponseSchema,
+  workspaceErrorSchema,
+  type WorkspaceError,
+  workspaceNotificationSchema,
+  type Publication,
   workspaceResultSchemaFor,
   type WorkspaceMessage,
   type WorkspaceMethod,
@@ -25,6 +30,7 @@ import {
   createReinsClient,
   parseRetryToken,
   type ReinsClient,
+  type AgentEvent,
 } from "./index.ts";
 import { receivePublication, listReceipts } from "./receipts.ts";
 import { createEventProjector } from "./subscription.ts";
@@ -52,14 +58,32 @@ export function createWorkspaceClient(
     string,
     { resolve: (message: unknown) => void; reject: (reason: unknown) => void }
   >();
+  const observations = new Map<string, (publication: Publication) => void>();
+  const managerClosed = new Set<() => void>();
   const fail = (code: string) => {
     closed = true;
     for (const entry of pending.values()) entry.reject({ code });
     pending.clear();
+    observations.clear();
+    for (const listener of managerClosed) listener();
   };
   const unsubscribe = connection.onEvent((event) => {
     if (event.kind !== "message") {
       fail("manager_disconnected");
+      return;
+    }
+    if (event.message.kind === "notification") {
+      const notification = v.safeParse(
+        workspaceNotificationSchema,
+        event.message,
+      );
+      if (!notification.success) {
+        fail("invalid_manager_response");
+        return;
+      }
+      observations.get(notification.output.params.observationId)?.(
+        notification.output.params.publication,
+      );
       return;
     }
     const response = v.safeParse(workspaceResponseSchema, event.message);
@@ -123,6 +147,22 @@ export function createWorkspaceClient(
       }
     });
   };
+  const discover = async (
+    cwd: string,
+  ): Promise<
+    { publications: Publication[] } | { publicationError: WorkspaceError }
+  > => {
+    try {
+      return { publications: await request("publication.list", { cwd }) };
+    } catch (error) {
+      const failure = v.safeParse(workspaceErrorSchema, error);
+      return {
+        publicationError: failure.success
+          ? failure.output
+          : { code: "invalid_manager_response" },
+      };
+    }
+  };
   return {
     initialize: () =>
       request("initialize", {
@@ -159,6 +199,8 @@ export function createWorkspaceClient(
         await createUnixSocketClient<ProtocolMessage>(route.socket),
         options,
       );
+      const onManagerClosed = () => client.close();
+      managerClosed.add(onManagerClosed);
       const admit = async <M extends ProtocolMethod>(
         action: M,
         params: ProtocolParams<M>,
@@ -169,7 +211,93 @@ export function createWorkspaceClient(
         ...client,
         async request(method, params, timeoutMs) {
           await admit(method, params);
-          return await client.request(method, params, timeoutMs);
+          const response = await client.request(method, params, timeoutMs);
+          if (method === "wait" && "result" in response)
+            return {
+              ...response,
+              result: {
+                ...(response.result as WaitResult),
+                ...(await discover(route.cwd)),
+              },
+            };
+          return response;
+        },
+        async subscribe(params) {
+          const observationId = `observation${++sequence}`;
+          const seen = new Set<string>();
+          const queued: AgentEvent[] = [];
+          const listeners = new Set<(event: AgentEvent) => void>();
+          let active = true;
+          const emit = (event: AgentEvent) => {
+            if (!active) return;
+            queued.push(event);
+            if (listeners.size === 0) return;
+            for (const item of queued.splice(0))
+              for (const listener of Array.from(listeners)) listener(item);
+          };
+          const receive = (publication: Publication) => {
+            if (seen.has(publication.publicationId)) return;
+            seen.add(publication.publicationId);
+            emit({ type: "publication.ready", publication });
+          };
+          const cleanup = () => {
+            active = false;
+            observations.delete(observationId);
+            void request("publication.unobserve", { observationId }).catch(
+              () => undefined,
+            );
+          };
+          observations.set(observationId, receive);
+          try {
+            // 成果是工作区快照与live事实，不借用daemon的有界事件游标。
+            for (const publication of await request("publication.observe", {
+              cwd: route.cwd,
+              observationId,
+            }))
+              receive(publication);
+            const subscription = await client.subscribe(params);
+            const unsubscribe = subscription.onEvent(emit);
+            const done = subscription.done
+              .then(async (end) => {
+                // 两条既有连接的到达顺序独立，结束前查询补齐已保存成果。
+                const discovered = await discover(route.cwd);
+                if ("publicationError" in discovered)
+                  return {
+                    ...end,
+                    publicationError: discovered.publicationError,
+                  };
+                for (const publication of discovered.publications)
+                  receive(publication);
+                return end;
+              })
+              .finally(() => {
+                unsubscribe();
+                cleanup();
+              });
+            void done.catch(() => undefined);
+            return {
+              establishment: subscription.establishment,
+              done,
+              onEvent(listener) {
+                listeners.add(listener);
+                for (const event of queued.splice(0))
+                  for (const current of Array.from(listeners)) current(event);
+                return () => {
+                  listeners.delete(listener);
+                };
+              },
+              close() {
+                subscription.close();
+              },
+            };
+          } catch (error) {
+            cleanup();
+            throw error;
+          }
+        },
+        close() {
+          managerClosed.delete(onManagerClosed);
+          client.close();
         },
         async retry(token, params, timeoutMs) {
           const parsed = parseRetryToken(token);

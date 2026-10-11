@@ -120,6 +120,7 @@ async function main() {
     connections += 1;
     clearTimeout(idle);
     let consumer: ConsumerContext | undefined;
+    const observations = new Map<string, string>();
     const send = (message: WorkspaceMessage) => {
       try {
         connection.send(message);
@@ -127,9 +128,21 @@ async function main() {
         connection.close();
       }
     };
+    const stopObserving = runtime.publications.observe((owner, publication) => {
+      if (consumer !== owner) return;
+      for (const [observationId, cwd] of observations)
+        if (cwd === publication.source.cwd)
+          send({
+            kind: "notification",
+            method: "publication.ready",
+            params: { observationId, publication },
+          });
+    });
     connection.onEvent((event) => {
       if (event.kind !== "message") {
         if (event.kind === "closed") {
+          stopObserving();
+          observations.clear();
           connections -= 1;
           scheduleIdle();
         }
@@ -177,6 +190,12 @@ async function main() {
         switch (request.method) {
           case "publication.publish":
             throw workspaceFailure("invalid_request");
+          case "publication.observe":
+            observations.set(request.params.observationId, request.params.cwd);
+            return runtime.publications.list(consumer, request.params.cwd);
+          case "publication.unobserve":
+            observations.delete(request.params.observationId);
+            return null;
           case "publication.list":
             return runtime.publications.list(consumer, request.params.cwd);
           case "publication.read":
