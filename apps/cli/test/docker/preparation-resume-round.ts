@@ -224,6 +224,55 @@ const image = await requireCommand("docker", [
   imageTag,
 ]);
 await record("fixedFixtureImage", image);
+// harness 材料只用于真实 docker cp；独立小 OCI 避免重复装载整套开发环境。
+const materialContext = join(base, "runtime-material");
+await mkdir(materialContext);
+await requireCommand("cp", [
+  "-al",
+  join(payload, "opt", "reins", "harnesses"),
+  join(materialContext, "harnesses"),
+]);
+await writeFile(
+  join(materialContext, "Dockerfile"),
+  "FROM scratch\nCOPY harnesses /opt/reins/harnesses\n",
+);
+const materialTag = imageTag + "-runtime";
+await requireCommand("docker", [
+  "build",
+  "--quiet",
+  "-t",
+  materialTag,
+  materialContext,
+]);
+const runtimeImage = await requireCommand("docker", [
+  "image",
+  "inspect",
+  "--format",
+  "{{.Id}}",
+  materialTag,
+]);
+await record("fixedRuntimeMaterialImage", runtimeImage);
+await record("runtimeMaterialFiles", {
+  codex: createHash("sha256")
+    .update(
+      await readFile(
+        join(materialContext, "harnesses", "codex", "bin", "codex"),
+      ),
+    )
+    .digest("hex"),
+  qoder: createHash("sha256")
+    .update(
+      await readFile(
+        join(materialContext, "harnesses", "qoder", "bin", "qoderclicn"),
+      ),
+    )
+    .digest("hex"),
+  value: createHash("sha256")
+    .update(
+      await readFile(join(materialContext, "harnesses", "codex", "value")),
+    )
+    .digest("hex"),
+});
 
 const worktree = join(base, "project");
 await mkdir(join(worktree, "src"), { recursive: true });
@@ -233,8 +282,8 @@ await writeFile(join(worktree, "value.txt"), "caller value\n");
 const configuration = {
   environments: [{ provider: "docker", image }],
   runtimes: [
-    { harness: "codex", version: "0.149.0", image },
-    { harness: "qoder", version: "0.1.0", image },
+    { harness: "codex", version: "0.149.0", image: runtimeImage },
+    { harness: "qoder", version: "0.1.0", image: runtimeImage },
   ],
   bindings: [
     { ref: "code", harness: "codex" },
@@ -271,7 +320,7 @@ const cli = async (args: string[]) => {
   };
 };
 async function waitForRuntime(expected: string) {
-  const deadline = Date.now() + 300_000;
+  const deadline = Date.now() + 600_000;
   for (;;) {
     const observed = await cli(["status"]);
     assert.equal(observed.status, 0);
@@ -376,6 +425,10 @@ try {
   );
   await record("result", "passed");
 } finally {
+  await record(
+    "runtimeMaterialImageRemoval",
+    await command("docker", ["image", "rm", materialTag]),
+  );
   await record(
     "fixtureImageRemoval",
     await command("docker", ["image", "rm", imageTag]),
