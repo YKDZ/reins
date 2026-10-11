@@ -988,6 +988,11 @@ export async function openWorkspaceRuntime(options: {
         record.info.source.error?.code === "native_view_lost"
       )
         throw record.info.source.error;
+      if (action === "spawn") {
+        const current = await status(cwd, owner);
+        if (current.runtime.status === "failed")
+          throw current.runtime.error ?? workspaceFailure("provider_failed");
+      }
       if (record.info.runtime.status !== "ready")
         throw workspaceFailure("workspace_not_ready");
       if (action === "spawn") {

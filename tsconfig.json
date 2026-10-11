@@ -12,6 +12,7 @@
     "oxfmt.config.ts",
     "oxlint.config.ts",
     "scripts/build-distribution.ts",
+    "scripts/bundle-workspace-client.ts",
     "scripts/check-boundaries.ts",
     "scripts/check-packed-cli.ts",
     "scripts/check-pnpm-consumer-round.ts",
@@ -27,6 +28,7 @@
     "scripts/release-package.ts",
     "scripts/run-development-cli.ts",
     "scripts/run-root-owned-task.ts",
+    "scripts/run-workspace-test-platform.ts",
     "scripts/validate-release-package.ts"
   ]
 }
