@@ -33,6 +33,16 @@ const task = JSON.parse(process.argv[2]!) as {
   runtimeImage: string;
   cliPath: string;
 };
+const connect = async (consumer: string) => {
+  const manager = createWorkspaceClient(
+    await createUnixSocketClient<WorkspaceMessage>(task.socket),
+    { consumerContext: v.parse(consumerContextSchema, consumer) },
+  );
+  await manager.initialize();
+  return manager;
+};
+const manager = await connect("reins-wrr24-owner-a");
+const other = await connect("reins-wrr24-owner-b");
 const source = join(task.base, "caller-source");
 await mkdir(join(source, "src"), { recursive: true });
 const git = (...args: string[]) =>
@@ -87,16 +97,6 @@ git(
   "second",
 );
 const nextMaterial = await captureFixedCommit(source, git("rev-parse", "HEAD"));
-const connect = async (consumer: string) => {
-  const manager = createWorkspaceClient(
-    await createUnixSocketClient<WorkspaceMessage>(task.socket),
-    { consumerContext: v.parse(consumerContextSchema, consumer) },
-  );
-  await manager.initialize();
-  return manager;
-};
-const manager = await connect("reins-wrr24-owner-a");
-const other = await connect("reins-wrr24-owner-b");
 const controls: Awaited<ReturnType<typeof manager.control>>[] = [];
 const sessions: {
   control: Awaited<ReturnType<typeof manager.control>>;
