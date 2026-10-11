@@ -10,7 +10,11 @@ import type {
 import { describe, expect, test } from "vitest";
 
 import { createCodexDriver } from "#/codex-driver";
-import { createCodexTransport, type CodexChild } from "#/transport";
+import {
+  CodexRequestError,
+  createCodexTransport,
+  type CodexChild,
+} from "#/transport";
 
 import { createFakeTransport } from "../helpers/fake-transport.ts";
 
@@ -191,10 +195,10 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed", error: null } },
+      params: { turn: { id: "turn1", status: "completed", error: null } },
     });
     await flush();
-    driver.deliver(sessionId, secondTurnId, "下一步");
+    await driver.deliver(sessionId, secondTurnId, "下一步", "new_turn");
     await flush();
     expect(fake.controls.requests().at(-1)?.params).toEqual({
       threadId: "thr1",
@@ -233,7 +237,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed", error: null } },
+      params: { turn: { id: "turn1", status: "completed", error: null } },
     });
     await flush();
 
@@ -380,6 +384,7 @@ describe("codex driver", () => {
       method: "turn/completed",
       params: {
         turn: {
+          id: "turn1",
           status: "failed",
           error: { message: "Requested reasoning effort is unsupported" },
         },
@@ -407,7 +412,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "failed", error: null } },
+      params: { turn: { id: "turn1", status: "failed", error: null } },
     });
     await flush();
 
@@ -471,7 +476,7 @@ describe("codex driver", () => {
     const { fake, driver } = setup();
     await flush();
 
-    driver.deliver(sessionId, firstTurnId, "继续");
+    await driver.deliver(sessionId, firstTurnId, "继续", "active_turn");
     await flush();
     const steer = fake.controls.requests().at(-1);
     expect(steer?.method).toBe("turn/steer");
@@ -484,10 +489,10 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed", error: null } },
+      params: { turn: { id: "turn1", status: "completed", error: null } },
     });
     await flush();
-    driver.deliver(sessionId, secondTurnId, "下一步");
+    await driver.deliver(sessionId, secondTurnId, "下一步", "new_turn");
     await flush();
     expect(fake.controls.requests().at(-1)?.method).toBe("turn/start");
   });
@@ -496,7 +501,9 @@ describe("codex driver", () => {
     const { diagnostics, driver } = setupWithMalformedResponse("turn/steer");
     await flush();
 
-    driver.deliver(sessionId, firstTurnId, "继续");
+    await expect(
+      driver.deliver(sessionId, firstTurnId, "继续", "active_turn"),
+    ).rejects.toMatchObject({ alreadyDiagnosed: true });
     await flush();
 
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
@@ -519,7 +526,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "interrupted", error: null } },
+      params: { turn: { id: "turn1", status: "interrupted", error: null } },
     });
     await flush();
     expect(events.at(-1)).toEqual({
@@ -638,7 +645,7 @@ describe("codex driver", () => {
     ]);
   });
 
-  test("transport 关闭后 deliver 补发 failed 而不是挂死", async () => {
+  test("transport 关闭后新消息拒绝且不伪造新回合事实", async () => {
     const { events, fake, driver } = setup();
     await flush();
 
@@ -646,12 +653,14 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed", error: null } },
+      params: { turn: { id: "turn1", status: "completed", error: null } },
     });
     await flush();
     fake.controls.end();
 
-    driver.deliver(sessionId, secondTurnId, "继续");
+    await expect(
+      driver.deliver(sessionId, secondTurnId, "继续", "new_turn"),
+    ).rejects.toThrow("codex app-server closed");
     await flush();
 
     expect(
@@ -659,15 +668,7 @@ describe("codex driver", () => {
         (event) =>
           event.type === "turn.completed" && event.turnId === secondTurnId,
       ),
-    ).toEqual([
-      {
-        type: "turn.completed",
-        sessionId,
-        turnId: secondTurnId,
-        stopReason: "failed",
-        finalReply: null,
-      },
-    ]);
+    ).toEqual([]);
   });
 
   test("worker stream 读取异常只记录 read_error", async () => {
@@ -721,7 +722,7 @@ describe("codex driver", () => {
     fake.controls.pushInbound({
       kind: "notification",
       method: "turn/completed",
-      params: { turn: { status: "completed", error: null } },
+      params: { turn: { id: "turn1", status: "completed", error: null } },
     });
     await flush();
     const completedBeforeEof = events.filter(
@@ -803,4 +804,124 @@ test("adapter rejects an out-of-menu answer without consuming the original nativ
   expect(fake.controls.responded()).toEqual([
     { id: 70, result: { decision: "accept" } },
   ]);
+});
+
+test("active_turn 等待原生 steer 接受并核对精确原生 TurnId", async () => {
+  const { driver, fake } = setup();
+  await flush();
+  let accept!: (ack: { turnId: string }) => void;
+  fake.controls.setResponse(
+    "turn/steer",
+    new Promise<{ turnId: string }>((resolve) => {
+      accept = resolve;
+    }),
+  );
+  let settled = false;
+  const delivering = Promise.resolve(
+    driver.deliver(sessionId, firstTurnId, "caller active task", "active_turn"),
+  ).then(() => {
+    settled = true;
+  });
+  try {
+    await flush();
+    expect(fake.controls.requests().at(-1)).toEqual({
+      method: "turn/steer",
+      params: {
+        threadId: "thr1",
+        input: [
+          { type: "text", text: "caller active task", text_elements: [] },
+        ],
+        expectedTurnId: "turn1",
+      },
+    });
+    expect(settled).toBe(false);
+  } finally {
+    accept({ turnId: "turn1" });
+  }
+  await delivering;
+  await driver.terminate(sessionId);
+});
+
+test("旧原生回合终态迟到不能结束新回合或改变 active_turn 目标", async () => {
+  const { driver, fake, events } = setup();
+  await flush();
+  fake.controls.pushInbound({
+    kind: "notification",
+    method: "turn/completed",
+    params: { turn: { id: "turn1", status: "completed", error: null } },
+  });
+  await flush();
+  await driver.deliver(sessionId, secondTurnId, "next caller task", "new_turn");
+  fake.controls.pushInbound({
+    kind: "notification",
+    method: "turn/completed",
+    params: { turn: { id: "turn1", status: "completed", error: null } },
+  } as never);
+  await flush();
+  expect(
+    events.filter((event) => event.type === "turn.completed"),
+  ).toHaveLength(1);
+  fake.controls.setResponse("turn/steer", { turnId: "turn2" });
+  await driver.deliver(
+    sessionId,
+    secondTurnId,
+    "active caller task",
+    "active_turn",
+  );
+  expect(fake.controls.requests().at(-1)).toMatchObject({
+    method: "turn/steer",
+    params: { expectedTurnId: "turn2" },
+  });
+  await driver.terminate(sessionId);
+});
+
+test("原生拒绝的精确分类依据已观察终态，不依据自由文本", async () => {
+  const { driver, fake } = setup();
+  await flush();
+  const noActiveText = new CodexRequestError(
+    '{"code":-32600,"message":"no active turn to steer"}',
+  );
+  fake.controls.setResponse(
+    "turn/steer",
+    Promise.reject(noActiveText) as never,
+  );
+  await expect(
+    driver.deliver(
+      sessionId,
+      firstTurnId,
+      "rejected while target is unclassified",
+      "active_turn",
+    ),
+  ).rejects.toBe(noActiveText);
+  let reject!: (error: unknown) => void;
+  fake.controls.setResponse(
+    "turn/steer",
+    new Promise<never>((_, fail) => {
+      reject = fail;
+    }) as never,
+  );
+  const delivering = driver.deliver(
+    sessionId,
+    firstTurnId,
+    "rejected after target ends",
+    "active_turn",
+  );
+  await flush();
+  fake.controls.pushInbound({
+    kind: "notification",
+    method: "turn/completed",
+    params: { turn: { id: "turn1", status: "completed", error: null } },
+  });
+  await flush();
+  reject(
+    new CodexRequestError(
+      '{"code":-32600,"message":"unclassified native refusal"}',
+    ),
+  );
+  await expect(delivering).rejects.toMatchObject({
+    code: "turn_not_active",
+    sessionId,
+    turnId: firstTurnId,
+  });
+  await driver.terminate(sessionId);
 });

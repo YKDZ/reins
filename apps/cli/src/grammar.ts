@@ -294,6 +294,10 @@ function longFlagsFor(spec: CommandSpec | undefined): string[] {
 // oxlint-disable-next-line typescript/consistent-return -- MachineError 是闭集；新增错误码必须显式设计文案。
 function domainMessage(error: MachineError): string {
   switch (error.code) {
+    case "session_busy":
+      return `Session is busy: ${error.sessionId}`;
+    case "turn_not_active":
+      return `Turn is no longer active: ${error.sessionId}/${error.turnId}`;
     case "session_not_found":
       return `Session not found${"sessionId" in error ? `: ${error.sessionId}` : ""}`;
     case "session_killed":

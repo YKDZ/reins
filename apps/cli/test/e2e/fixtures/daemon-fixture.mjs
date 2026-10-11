@@ -179,7 +179,7 @@ if (mode === "append-failure") {
           start() {
             throw new Error("worker start exploded");
           },
-          deliver() {},
+          async deliver() {},
           interrupt() {},
           resolvePermission() {},
           terminate() {},

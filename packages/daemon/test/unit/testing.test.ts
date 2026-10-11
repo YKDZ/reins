@@ -73,7 +73,7 @@ test("failed cleanup rejects connections and retries without reopening", async (
         {
           driverFactory: () => ({
             start() {},
-            deliver() {},
+            async deliver() {},
             interrupt() {},
             resolvePermission() {},
             async terminate() {

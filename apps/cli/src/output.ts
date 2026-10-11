@@ -93,13 +93,12 @@ export function printDiagnosticsResult(
 }
 
 export function printSendAck(ack: SendAck, mode: OutputMode): void {
-  if (mode === "json") {
-    printJsonLine(ack);
-  } else {
-    process.stdout.write(
-      `Sent message ${ack.messageId} (delivery: ${ack.deliveryPoint})\n`,
-    );
-  }
+  const turnHandle = encodeTurnHandle({
+    sessionId: ack.sessionId,
+    turnId: ack.turnId,
+  });
+  if (mode === "json") printJsonLine({ sessionId: ack.sessionId, turnHandle });
+  else process.stdout.write(`Sent message to ${turnHandle}\n`);
 }
 
 export function printWaitResult(result: WaitResult, mode: OutputMode): void {

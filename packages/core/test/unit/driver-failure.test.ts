@@ -249,7 +249,7 @@ describe("driver 抛错时动作整体回滚", () => {
     });
 
     await expect(
-      machine.send({ sessionId: id, message: "继续" }),
+      machine.send({ placement: "new_turn", sessionId: id, message: "继续" }),
     ).rejects.toEqual(
       expect.objectContaining({
         code: "internal_error",
@@ -355,7 +355,11 @@ describe("driver 抛错时动作整体回滚", () => {
     await vi.waitFor(() => expect(terminateCalls).toBe(1));
     const second = machine.kill({ sessionId: sessionId });
     await expect(
-      machine.send({ sessionId, message: "must not enter driver" }),
+      machine.send({
+        placement: "new_turn",
+        sessionId,
+        message: "must not enter driver",
+      }),
     ).rejects.toEqual({ code: "session_terminating", sessionId });
     await expect(machine.interrupt({ ids: [sessionId] })).rejects.toEqual({
       code: "session_terminating",

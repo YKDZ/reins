@@ -197,7 +197,7 @@ export const stopReasonSchema = v.picklist(STOP_REASONS);
 export type StopReason = v.InferOutput<typeof stopReasonSchema>;
 
 export const deliveryPointSchema = v.union([
-  v.literal("boundary"),
+  v.literal("active_turn"),
   v.literal("new_turn"),
 ]);
 export type DeliveryPoint = v.InferOutput<typeof deliveryPointSchema>;
@@ -308,10 +308,19 @@ export const spawnAckSchema = v.strictObject({
 });
 export type SpawnAck = v.InferOutput<typeof spawnAckSchema>;
 
-export const sendParamsSchema = v.strictObject({
-  sessionId: sessionIdSchema,
-  message: v.string(),
-});
+export const sendParamsSchema = v.variant("placement", [
+  v.strictObject({
+    placement: v.literal("new_turn"),
+    sessionId: sessionIdSchema,
+    message: v.string(),
+  }),
+  v.strictObject({
+    placement: v.literal("active_turn"),
+    sessionId: sessionIdSchema,
+    turnId: turnIdSchema,
+    message: v.string(),
+  }),
+]);
 export type SendParams = v.InferOutput<typeof sendParamsSchema>;
 
 export const sendAckSchema = v.strictObject({
@@ -1928,6 +1937,8 @@ export type AdapterCapabilities = v.InferOutput<
 // —— 错误码与机器错误（程序化契约；可读文案由 CLI / MCP 映射） ——
 
 export const errorCodeSchema = v.union([
+  v.literal("session_busy"),
+  v.literal("turn_not_active"),
   v.literal("session_not_found"),
   v.literal("session_killed"),
   v.literal("session_terminating"),
@@ -2028,6 +2039,14 @@ const unexpectedError = <const TCode extends UnexpectedErrorCode>(
     diagnosticId: v.optional(diagnosticIdSchema),
   });
 export const machineErrorSchema = v.union([
+  v.strictObject({
+    code: v.literal("session_busy"),
+    sessionId: sessionIdSchema,
+  }),
+  v.strictObject({
+    code: v.literal("turn_not_active"),
+    ...turnTargetSchema.entries,
+  }),
   v.strictObject({ code: v.literal("command_id_conflict") }),
   v.strictObject({ code: v.literal("stale_command_id") }),
   v.strictObject({
@@ -2137,7 +2156,12 @@ export interface WorkerDriver {
   // 启动 worker 进程/会话；worker 内容事件通过 emit 回调流入 core。
   start(spec: WorkerSpec): void;
   // 把消息交给 worker；turnId 标识它所属的回合。
-  deliver(sessionId: SessionId, turnId: TurnId, message: string): void;
+  deliver(
+    sessionId: SessionId,
+    turnId: TurnId,
+    message: string,
+    placement: SendParams["placement"],
+  ): Promise<void>;
   // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
   interrupt(sessionId: SessionId): void;
   // 把控制面的授权决议交还 adapter，翻译为 harness 原生回答。

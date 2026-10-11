@@ -106,7 +106,7 @@ function fakeAdapter(options: {
           });
         }
       },
-      deliver(_sessionId, turnId) {
+      async deliver(_sessionId, turnId) {
         if (current === null) return;
         const sessionId = current.sessionId;
         queueMicrotask(() => {

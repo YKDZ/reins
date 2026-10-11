@@ -239,7 +239,10 @@ describe("世代身份谱系：真实 CLI + 真实 daemon + 真实 state", () =>
     );
 
     // 操作旧引用：按不存在拒绝（退出 65）。
-    const stale = await runCli(["send", staleHandle, "stale"], env);
+    const stale = await runCli(
+      ["send", staleHandle, "stale", "--placement", "new_turn"],
+      env,
+    );
     expect(stale.exitCode).toBe(65);
     expect(JSON.parse(stale.stdout)).toMatchObject({
       code: "session_not_found",
