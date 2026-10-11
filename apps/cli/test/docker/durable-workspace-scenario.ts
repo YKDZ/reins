@@ -117,6 +117,7 @@ export async function runDurableWorkspaceScenario(options: {
       environmentBase:
         process.env[options.environmentPrefix + "ENVIRONMENT_BASE_IMAGE"] ??
         nodeImage,
+      resourcePrefix: options.name,
     }),
   );
   fingerprints.push({
