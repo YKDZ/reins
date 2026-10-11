@@ -42,7 +42,9 @@ Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署�
 
 固定 QoderCN SDK 1.0.23／worker 1.1.23 的材料目录还须包含完整的 `worker/` 闭包（实际入口 `worker/qoder-worker-runtime.obf.mjs`）；`bin/qoderclicn` 可以直接调用同一 worker 的 CLI 模式。provider 分别执行 CLI 与 worker 的真实版本入口。Manager 将固定 worker 路径通过 SDK 的公开 `pathToQoderCLIExecutable` 选项交付，SDK 按入口选择 WorkerTransport，不回退宿主全局 CLI。
 
-QoderCN Manager launcher 显式提供 `REINS_QODER_AUTH_BINDINGS`，例如 `{"selected-login":{"userFile":"/private/selected-user","machineIdFile":"/private/selected-machine-id"}}`。固定支持包只读取选定的两个非空原生文件，将原始字节写入私有 `HOME/.qoder-cn/.auth/user` 与 `machine_id`（0600），不解密或重造厂商格式，不复制 settings、cache、历史、锁文件或完整 home。`qodercliAuth()` 由原生 SDK 只读消费，源文件不回写；省略绑定不搜索宿主。缺失来源或空文件是 `credential_binding_unavailable`，材料版本或 worker 入口错误是 `runtime_entry_invalid`；非空但无效的原生登录由真实 worker 判定，不把 ready 当作远端认证成功。不承诺凭据刷新、并发轮换或重启恢复。
+QoderCN Manager launcher 显式提供 `REINS_QODER_AUTH_BINDINGS`，例如 `{"selected-login":{"userFile":"/private/selected-user","machineIdFile":"/private/selected-machine-id"}}`。固定支持包只读取选定的两个非空原生文件，将原始字节写入私有 `HOME/.qoder-cn/.auth/user` 与 `machine_id`（0600），不解密或重造厂商格式，不复制 settings、cache、历史、锁文件或完整 home。`qodercliAuth()` 由原生 SDK 只读消费，源文件不回写；省略绑定不搜索宿主。缺失来源或空文件是 `credential_binding_unavailable`，材料版本或 worker 入口错误是 `runtime_entry_invalid`；非空但无效的原生登录由真实 worker 判定，不把 ready 当作远端认证成功。
+
+该固定组合已实测同一绑定的两个任务并行，以及 daemon／容器重启后的显式新任务；旧会话身份不恢复，任务不自动重放。全会话 kill 先由原生入口取消执行，再关闭 SDK，已实测活动 Bash 工具进程组停止。精确 `active_turn` 与 `interrupt` 仍在原生效果前返回 `unsupported_feature`。个人凭据到期、刷新和轮换未验证，不承诺共享刷新或普遍并发保证；真实厂商验收独立留证，不作为 CI 在线门禁。
 
 附着受理与所有者写入 Manager 的持久状态，关闭 CLI 连接不会释放它。相同所有者及绑定集合复用已经准备的附着；不同所有者或不同意图被拒绝。每个 harness 最多选定一个绑定。逐绑定独立准备，一项失败仍继续其他项；全局 runtime 保留失败事实，ready 绑定仍可创建独立会话并发运行。
 
