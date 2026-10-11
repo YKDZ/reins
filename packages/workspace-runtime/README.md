@@ -34,7 +34,7 @@ reins workspace status -C /absolute/worktree/src
 reins workspace detach -C /absolute/worktree --session-disposition require_none
 ```
 
-Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略，不猜测凭据来源。附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。逐 harness 阶段、源码身份验证、runtime 状态和历史不可用事实分别投影；`preparation.attempts` 保留每次准备的状态及原错误；本地历史由后继票接入。
+Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略，不猜测凭据来源。Manager／shared client 的附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。CLI `attach` 等待同一次准备终态，失败时输出完整准备事实并非零退出；合法准备中不会成为失败，只读状态请求超时会重新查询。逐 harness 阶段、源码身份验证、runtime 状态和历史不可用事实分别投影；`preparation.attempts` 保留每次准备的状态及原错误；本地历史由后继票接入。
 
 Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署者在 Manager launcher 显式提供 `REINS_CODEX_AUTH_BINDINGS`，其值是凭据引用到绝对 `auth.json` 路径的 JSON 映射，例如 `{"selected-login":"/private/selected-auth.json"}`；项目绑定只写 `{"ref":"code","harness":"codex","credentialBindingRef":"selected-login"}`。路径和 secret 均不经过工作区动作协议；目录发现只返回非秘密引用及支持事实，不读取源文件或启动模型。
 
@@ -44,9 +44,9 @@ Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署�
 
 QoderCN Manager launcher 显式提供 `REINS_QODER_AUTH_BINDINGS`，例如 `{"selected-login":{"userFile":"/private/selected-user","machineIdFile":"/private/selected-machine-id"}}`。固定支持包只读取选定的两个非空原生文件，将原始字节写入私有 `HOME/.qoder-cn/.auth/user` 与 `machine_id`（0600），不解密或重造厂商格式，不复制 settings、cache、历史、锁文件或完整 home。`qodercliAuth()` 由原生 SDK 只读消费，源文件不回写；省略绑定不搜索宿主。缺失来源或空文件是 `credential_binding_unavailable`，材料版本或 worker 入口错误是 `runtime_entry_invalid`；非空但无效的原生登录由真实 worker 判定，不把 ready 当作远端认证成功。不承诺凭据刷新、并发轮换或重启恢复。
 
-附着受理与所有者写入 Manager 的持久状态，关闭 CLI 连接不会释放它。相同所有者及绑定集合复用已经准备的附着；不同所有者或不同意图被拒绝。`detach require_none` 只释放没有会话的环境，保留源码与准备事实。
+附着受理与所有者写入 Manager 的持久状态，关闭 CLI 连接不会释放它。相同所有者及绑定集合复用已经准备的附着；不同所有者或不同意图被拒绝。每个 harness 最多选定一个绑定。逐绑定独立准备，一项失败仍继续其他项；全局 runtime 保留失败事实，ready 绑定仍可创建独立会话并发运行。`detach require_none` 只释放没有会话的环境，保留源码与准备事实。
 
-准备中重复相同绑定集合会观察当前尝试，不另起执行。失败后，调用方修正条件并显式重复相同请求才会受理新尝试；继续未完成的阶段，保留已完成的材料和私有 home。已接受的环境、运行材料及绑定快照不会因当前目录配置变化而被替换；不同显式绑定集合返回 `attachment_intent_conflict`。材料缺失与实际摘要核验失败分别持久表达为 `material_unavailable`、`material_digest_mismatch`。
+准备中重复相同绑定集合会观察当前尝试，不另起执行。失败后，调用方修正条件并显式重复相同请求才会受理新尝试；继续未完成的阶段，保留已完成的材料和私有 home。已接受的环境、运行材料及绑定快照不会因当前目录配置变化而被替换；不同显式绑定集合返回 `attachment_intent_conflict`。同引用换 harness、凭据引用、省略状态或 launcher 原生来源路径同样被拒绝；来源路径只以私有不可逆意图摘要持久化。允许同一路径的内容修正，相同非空、顺序无关的绑定组合只续行失败阶段；成功绑定不重新安装或复制凭据。材料缺失与实际摘要核验失败分别持久表达为 `material_unavailable`、`material_digest_mismatch`。
 
 Manager 在原生视图验证后、绑定安装前建立并保持真实 daemon 控制连接，防止慢安装或部分绑定失败时空闲退出丢失已有环境；不创建会话。Manager 重启将失去执行者的准备尝试记为 `preparation_interrupted`，不会自动重试。续行先核对已保存的容器身份和真实运行状态，并实际执行已成功绑定的版本入口；ready 重入同样核验实际入口，失效时明确失败而不重装。创建或安装步骤的效果仍无法确定时返回 `preparation_outcome_unknown`，不通过重新创建覆盖未知结果。调用方的源码和有价值状态不因准备失败被清理。
 

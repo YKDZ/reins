@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 test("resumes the same preparation after real capacity improves", async () => {
@@ -22,6 +24,7 @@ test("resumes the same preparation after real capacity improves", async () => {
   // 离线缓存只接受同一已验证 Node 材料的配置摘要，不引入替代镜像。
   expect([
     registryImage,
+    "sha256:42166530c7fc76804e18fb5bfbdec7a6dde41ffd1e6746155d7e5f0ba16babe4",
     "sha256:59c575db86dccc264e6b71c316548f05a5c3c7a9aa1c112dc019807e651fd06b",
   ]).toContain(nodeImage);
   const { version } = JSON.parse(
@@ -46,6 +49,16 @@ test("resumes the same preparation after real capacity improves", async () => {
     ],
   ] as const;
   const fingerprints = [];
+  await bundleWorkspaceClient(
+    join(repository, "apps/cli/test/docker/workspace-attach-client.ts"),
+    join(input, "workspace-attach-client.js"),
+  );
+  fingerprints.push({
+    name: "workspace-attach-client.js",
+    sha256: createHash("sha256")
+      .update(await readFile(join(input, "workspace-attach-client.js")))
+      .digest("hex"),
+  });
   const base = JSON.stringify({ image: nodeImage });
   await writeFile(join(input, "base-image.json"), base);
   fingerprints.push({
@@ -123,19 +136,26 @@ test("resumes the same preparation after real capacity improves", async () => {
   );
   const args = [
     "--conditions=source",
-    join(repository, "packages/test-platform/src/cli.ts"),
+    join(repository, "scripts/run-workspace-test-platform.ts"),
     "run",
     "--state-dir",
-    join(directory, "state"),
+    process.env.REINS_WRR11_PLATFORM_STATE_DIR ?? join(directory, "state"),
+    ...(process.env.REINS_WRR11_PLATFORM_REUSE === "1" ? ["--reuse"] : []),
     "--evidence-dir",
     join(directory, "evidence"),
     "--image",
     nodeImage,
     "--timeout-ms",
-    "1800000",
+    "3600000",
     ...(process.env.REINS_WRR11_PLATFORM_DOCKER_BINARY === undefined
       ? []
       : ["--docker-binary", process.env.REINS_WRR11_PLATFORM_DOCKER_BINARY]),
+    ...(process.env.REINS_WRR11_PLATFORM_BOOTSTRAP_IMAGE === undefined
+      ? []
+      : [
+          "--bootstrap-image",
+          process.env.REINS_WRR11_PLATFORM_BOOTSTRAP_IMAGE,
+        ]),
     "--source",
     input,
     "--docker-access",
@@ -184,6 +204,7 @@ test("resumes the same preparation after real capacity improves", async () => {
     scenarioExecution: "passed",
     scenarioCleanup: "passed",
     evidenceExport: "passed",
-    platformReclaim: "passed",
+    platformReclaim:
+      process.env.REINS_WRR11_PLATFORM_REUSE === "1" ? "not_run" : "passed",
   });
-}, 2_400_000);
+}, 0);

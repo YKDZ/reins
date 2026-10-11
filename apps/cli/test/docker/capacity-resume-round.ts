@@ -139,7 +139,7 @@ await writeFile(
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const kind=path.basename(process.argv[1])==="codex"?"codex":"qoder";const root=path.resolve("../.reins");fs.appendFileSync(path.join(root,"version-"+kind),"1\\n");console.log(kind==="codex"?"codex-cli 0.149.0":fs.existsSync(path.join(root,"qoder-valid"))?"qoder-cli 0.1.0":"qoder-cli 0.0.0");\n',
+  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const kind=path.basename(process.argv[1])==="codex"?"codex":"qoder";const root=path.resolve(process.cwd()==="/"?fs.readlinkSync("/proc/1/cwd"):process.cwd(),"../.reins");fs.appendFileSync(path.join(root,"version-"+kind),"1\\n");console.log(kind==="codex"?"codex-cli 0.149.0":fs.existsSync(path.join(root,"qoder-valid"))?"qoder-cli 0.1.0":"qoder-cli 0.0.0");\n',
   { mode: 0o755 },
 );
 // 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
@@ -147,20 +147,26 @@ const payload = join(context, "payload");
 await mkdir(join(payload, "opt", "reins", "harnesses", "codex", "bin"), {
   recursive: true,
 });
-await mkdir(join(payload, "usr", "local"), { recursive: true });
-await requireCommand("cp", [
-  "-al",
-  join(base, "tools"),
-  join(payload, "usr", "local", "bin"),
-]);
-await rm(join(payload, "usr", "local", "bin", "docker"));
-await rm(join(payload, "usr", "local", "bin", "docker-native"));
-await rm(join(payload, "usr", "local", "bin", "docker-real"));
-await requireCommand("cp", [
-  "-al",
-  join(base, "consumer", "node_modules"),
-  join(payload, "opt", "reins", "node_modules"),
-]);
+// 精确缓存只复用同版本依赖与工具，发行 dist 始终由本轮覆盖。
+if (
+  nodeImage !==
+  "sha256:42166530c7fc76804e18fb5bfbdec7a6dde41ffd1e6746155d7e5f0ba16babe4"
+) {
+  await mkdir(join(payload, "usr", "local"), { recursive: true });
+  await requireCommand("cp", [
+    "-al",
+    join(base, "tools"),
+    join(payload, "usr", "local", "bin"),
+  ]);
+  await rm(join(payload, "usr", "local", "bin", "docker"));
+  await rm(join(payload, "usr", "local", "bin", "docker-native"));
+  await rm(join(payload, "usr", "local", "bin", "docker-real"));
+  await requireCommand("cp", [
+    "-al",
+    join(base, "consumer", "node_modules"),
+    join(payload, "opt", "reins", "node_modules"),
+  ]);
+}
 await requireCommand("cp", [
   "-al",
   join(installed, "dist"),
@@ -197,16 +203,16 @@ await writeFile(
     payload,
     "opt/reins/harnesses/qoder/worker/qoder-worker-runtime.obf.mjs",
   ),
-  'import fs from "node:fs";import path from "node:path";console.log(fs.existsSync(path.resolve("../.reins/qoder-valid"))?"0.1.0":"0.0.0");\n',
+  'import fs from "node:fs";import path from "node:path";console.log(fs.existsSync(path.resolve(process.cwd()==="/"?fs.readlinkSync("/proc/1/cwd"):process.cwd(),"../.reins/qoder-valid"))?"0.1.0":"0.0.0");\n',
 );
 
 // 在昂贵镜像提交前实际执行发行 CLI，验证夹具闭包的本地入口。
 await requireCommand(process.execPath, [
-  join(payload, "opt", "reins", "dist", "reins.js"),
+  join(installed, "dist", "reins.js"),
   "--version",
 ]);
 await requireCommand(process.execPath, [
-  join(payload, "opt", "reins", "dist", "reins.js"),
+  join(installed, "dist", "reins.js"),
   "list",
   "--help",
 ]);
@@ -363,6 +369,29 @@ const cli = async (args: string[]) => {
   assert.equal(result.status, 0);
   return JSON.parse(result.stdout);
 };
+const accept = async (args: string[]) => {
+  // 沿共享 client 保留持久受理/Preparing 的原始可观察行为，CLI 自身等待终态。
+  await cli(["harnesses"]);
+  const result = await command(
+    process.execPath,
+    [
+      join(base, "workspace-attach-client.js"),
+      JSON.stringify({
+        socket: env.REINS_WORKSPACE_MANAGER_SOCKET,
+        cwd: join(worktree, "src"),
+        consumer: env.REINS_CONSUMER_CONTEXT,
+        bindings: args.filter(
+          (value, index) => index > 0 && args[index - 1] === "--binding",
+        ),
+      }),
+    ],
+    base,
+    env,
+  );
+  await record("shared client attach", result);
+  assert.equal(result.status, 0);
+  return JSON.parse(result.stdout);
+};
 async function observeRuntime() {
   for (;;) {
     const info = await cli(["status"]);
@@ -451,7 +480,7 @@ try {
       await delay(25);
     }
   }
-  const first = await cli([
+  const first = await accept([
     "attach",
     "--binding",
     "code",
@@ -552,7 +581,13 @@ try {
   assert.equal(enlarged.mount!.split(" ")[0], initial.mount!.split(" ")[0]);
   assert.equal(enlarged.fs.blocks * enlarged.fs.bsize, 16 * 1024 * 1024);
   await record("sameMountCapacityImproved", enlarged);
-  const next = await cli(["attach", "--binding", "qoder", "--binding", "code"]);
+  const next = await accept([
+    "attach",
+    "--binding",
+    "qoder",
+    "--binding",
+    "code",
+  ]);
   assert.equal(next.runtime.status, "preparing");
   const ready = await observeRuntime();
   assert.equal(ready.runtime.status, "ready");
