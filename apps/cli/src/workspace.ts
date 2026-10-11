@@ -12,6 +12,8 @@ import {
   type WorkspaceMessage,
   type WorkspaceMethod,
   type WorkspaceParams,
+  type WorkspaceResults,
+  type ManagedWorkspaceInfo,
 } from "@reins/workspace-protocol";
 import { captureFixedCommit } from "@reins/workspace-source";
 import { Command } from "commander";
@@ -53,12 +55,43 @@ export function registerWorkspaceCommands(program: Command): void {
       );
       try {
         await client.initialize();
-        const result = await client.request(method, params);
+        let result = await client.request(method, params);
+        let preparation: ManagedWorkspaceInfo | undefined;
+        // CLI 等待被受理的准备；handoff 的目标 cwd 来自物化结果。
+        if (method === "workspace.attach" || method === "workspace.handoff") {
+          preparation =
+            method === "workspace.handoff"
+              ? (result as WorkspaceResults["workspace.handoff"]).workspace
+              : (result as ManagedWorkspaceInfo);
+          while (preparation.runtime.status === "preparing") {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            try {
+              preparation = await client.request("workspace.status", {
+                cwd: preparation.cwd,
+              });
+            } catch (error) {
+              const parsed = v.safeParse(workspaceErrorSchema, error);
+              if (!parsed.success || parsed.output.code !== "manager_timeout")
+                throw error;
+            }
+          }
+          result = (
+            method === "workspace.handoff"
+              ? {
+                  ...(result as WorkspaceResults["workspace.handoff"]),
+                  workspace: preparation,
+                }
+              : preparation
+          ) as typeof result;
+        }
         process.stdout.write(`${JSON.stringify(result)}\n`);
+        if (preparation?.runtime.status === "failed")
+          throw new ExitError(1, "workspace_failed");
       } finally {
         client.close();
       }
     } catch (error) {
+      if (error instanceof ExitError) throw error;
       const parsed = v.safeParse(workspaceErrorSchema, error);
       process.stdout.write(
         `${JSON.stringify(parsed.success ? parsed.output : { code: "manager_disconnected" })}\n`,
