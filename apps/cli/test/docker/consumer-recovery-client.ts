@@ -217,14 +217,17 @@ try {
   assert.equal(short.status, 0, short.stderr);
   await record("shortLauncherExited", short);
   const foreign = await connect(replacement);
-  await assert.rejects(
-    foreign.request("workspace.attach", {
-      cwd: task.worktree,
-      bindings: ["code"],
-    }),
-    /attachment_owned/,
-  );
-  foreign.close();
+  try {
+    await assert.rejects(
+      foreign.request("workspace.attach", {
+        cwd: task.worktree,
+        bindings: ["code"],
+      }),
+      { code: "attachment_owned" },
+    );
+  } finally {
+    foreign.close();
+  }
   const locked = await admin("inspect");
   assert.notEqual(locked.status, 0);
   await stopManager();
@@ -316,7 +319,7 @@ try {
       cwd: task.worktree,
       bindings: ["code"],
     }),
-    /workspace_detaching|attachment_owned/,
+    { code: "workspace_detaching" },
   );
   await record("newConsumerRejectedBeforeProvedRelease", {
     oldContainer: retained.runtime.containerId,
@@ -354,7 +357,9 @@ try {
     releasedInspect.history.entries[0].events,
     retained.history.entries[0].events,
   );
-  assert.notEqual((await admin("recover")).status, 0);
+  const noRecovery = await admin("recover");
+  assert.notEqual(noRecovery.status, 0);
+  assert.match(noRecovery.stderr, /attachment_not_found/);
   await restartManager(replacement);
   const next = await attach(replacement);
   const empty = await next.request("list", {});
@@ -366,6 +371,8 @@ try {
     timeoutMs: 0,
   });
   assert.ok("error" in hidden, JSON.stringify(hidden));
+  assert.equal(hidden.error.code, "session_not_found");
+  await record("oldSessionNotInherited", hidden);
   const newHistory = await manager.request("workspace.history", {
     cwd: task.worktree,
   });
@@ -406,7 +413,7 @@ try {
     );
     await record("finalProductCleanup", cleanup);
   } catch (error) {
-    await record("finalProductCleanupError", String(error));
+    await record("finalProductCleanupError", error);
   }
   await stopManager();
 }
