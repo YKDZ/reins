@@ -166,7 +166,11 @@ export const workspaceDetachmentSchema = v.strictObject({
     v.strictObject({
       sessionId: sessionIdSchema,
       session: v.optional(sessionInfoSchema),
-      outcome: v.picklist(["unknown", "confirmed"]),
+      outcome: v.picklist([
+        "unknown",
+        "confirmed",
+        "terminated_by_workspace_detach",
+      ]),
       error: v.optional(machineErrorSchema),
       turns: v.array(
         v.strictObject({

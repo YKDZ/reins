@@ -397,7 +397,9 @@ if(args[0]==='container' && args[1]==='ls' && (existsSync(base+'/proof-fail') ||
 }
 if(owned && providerBlocked){log({event:'remove-rejected'});process.exit(42);}
 if(owned){log({event:'remove-start'});if(!existsSync(base+'/rm-after'))await pause('before');}
-const r=spawnSync(base+'/tools/docker-real',args,{stdio:'inherit'});
+const proof=args[0]==='container' && args[1]==='ls';
+const r=spawnSync(base+'/tools/docker-real',args,{stdio:proof?['inherit','pipe','inherit']:'inherit'});
+if(proof){process.stdout.write(r.stdout??'');log({event:'proof',status:r.status,stdout:r.stdout?.toString()??''});}
 if(owned){log({event:'remove-end',status:r.status});if(r.status===0 && existsSync(base+'/rm-after'))await pause('after');}
 process.exitCode=r.status??1;
 `,
@@ -1105,6 +1107,30 @@ if (focus === "all" || focus === "provider") {
     stopped,
   );
   await assert.rejects(stat(projectedAuth), { code: "ENOENT" });
+  const providerProofs = (
+    await readFile(join(output, "provider.ndjson"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map(
+      (line) =>
+        JSON.parse(line) as {
+          event: string;
+          args: string[];
+          status?: number;
+          stdout?: string;
+        },
+    );
+  assert.ok(
+    providerProofs.some(
+      (proof) =>
+        proof.event === "proof" &&
+        proof.status === 0 &&
+        proof.stdout === "" &&
+        proof.args.some((argument) => argument.startsWith("id=")),
+    ),
+  );
+  await record("provider-absence-proofs", providerProofs);
   assert.equal(
     await readFile(join(worktree, "tracked.txt"), "utf8"),
     "native worktree\n",

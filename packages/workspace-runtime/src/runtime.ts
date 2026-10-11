@@ -441,6 +441,11 @@ export async function openWorkspaceRuntime(options: {
           item.sessionId === target.sessionId && item.turnId === target.turnId,
       );
     }
+    // runtime released 只在 provider 已证明环境消失后发布；不补造 harness 回合终态。
+    if (detachment.resources.runtime.status === "released")
+      for (const session of detachment.sessions)
+        if (session.outcome === "unknown")
+          session.outcome = "terminated_by_workspace_detach";
   };
   const mutable = (method: ProtocolMethod) =>
     ["spawn", "send", "resolvePermission"].includes(method);
@@ -1497,6 +1502,7 @@ export async function openWorkspaceRuntime(options: {
               clients.delete(record.directory);
               record.info.runtime = { status: "released" };
               detachment.resources.runtime = { status: "released" };
+              retain(record);
               await persist(record);
             }
             if (detachment.resources.credentials.status !== "released") {
