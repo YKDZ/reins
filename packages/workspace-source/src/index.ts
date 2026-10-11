@@ -1,6 +1,8 @@
 import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import {
+  chmod,
+  symlink,
   lstat,
   mkdir,
   readFile,
@@ -15,6 +17,7 @@ import { promisify } from "node:util";
 import type { ConsumerContext } from "@reins/protocol";
 import type {
   FixedCommitMaterial,
+  SelectedFile,
   WorkspaceHandle,
 } from "@reins/workspace-protocol";
 import type { WorkspaceError } from "@reins/workspace-protocol";
@@ -194,6 +197,7 @@ export async function materializeFixedCommit(
       )
         throw new Error("Source attributes mismatch");
     }
+    await applySelectedFiles(worktree, material);
     const cwd = await realpath(join(worktree, subdirectory));
     const within = relative(worktree, cwd);
     if (
@@ -249,4 +253,289 @@ export function openWorkspaceSourceBridge(stateDirectory: string) {
       }
     },
   };
+}
+
+export type WorkingFileSelection = {
+  path: string;
+  source: "index" | "worktree";
+};
+export const MAX_SELECTED_FILES = 1024;
+function validSelectedPath(path: string) {
+  return (
+    path.length > 0 &&
+    !isAbsolute(path) &&
+    !path.includes("\\") &&
+    !path.includes("\0") &&
+    path
+      .split("/")
+      .every(
+        (part) =>
+          part !== "" &&
+          part !== "." &&
+          part !== ".." &&
+          part.toLowerCase() !== ".git",
+      )
+  );
+}
+// 逐层检查父目录，避免跟随源树或固定提交中的符号链接。
+async function selectedParent(root: string, path: string, create: boolean) {
+  let parent = root;
+  for (const part of path.split("/").slice(0, -1)) {
+    parent = join(parent, part);
+    try {
+      if (!(await lstat(parent)).isDirectory())
+        throw new Error("Unsupported selected parent");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      if (create) await mkdir(parent);
+    }
+  }
+}
+async function optionalBytes(path: string) {
+  try {
+    return await readFile(path);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT")
+      return Buffer.alloc(0);
+    throw error;
+  }
+}
+async function sourceState(root: string) {
+  const gitPath = async (name: string) =>
+    (
+      await git([
+        "-C",
+        root,
+        "rev-parse",
+        "--path-format=absolute",
+        "--git-path",
+        name,
+      ])
+    )
+      .toString()
+      .trim();
+  for (const name of [
+    "MERGE_HEAD",
+    "REBASE_HEAD",
+    "CHERRY_PICK_HEAD",
+    "REVERT_HEAD",
+    "BISECT_LOG",
+    "rebase-merge",
+    "rebase-apply",
+    "sequencer",
+    "index.lock",
+  ]) {
+    try {
+      await lstat(await gitPath(name));
+      throw new Error("Unsupported ongoing Git operation");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+  }
+  if ((await git(["-C", root, "ls-files", "--unmerged", "-z"])).length !== 0)
+    throw new Error("Unmerged index");
+  return {
+    head: (await git(["-C", root, "rev-parse", "HEAD"])).toString(),
+    index: checksum(await optionalBytes(await gitPath("index"))),
+  };
+}
+async function readSelected(
+  root: string,
+  commit: string,
+  selection: WorkingFileSelection[],
+): Promise<SelectedFile[]> {
+  const entries: SelectedFile[] = [];
+  let total = 0;
+  for (const selected of selection) {
+    const { path } = selected;
+    if (!validSelectedPath(path)) throw new Error("Invalid selected path");
+    await selectedParent(root, path, false);
+    let mode: "100644" | "100755" | "120000";
+    let bytes: Buffer;
+    if (selected.source === "index") {
+      const entry = (
+        await git([
+          "-C",
+          root,
+          "ls-files",
+          "--stage",
+          "-z",
+          "--",
+          `:(literal)${path}`,
+        ])
+      ).toString();
+      if (entry === "") {
+        if (
+          (
+            await git([
+              "-C",
+              root,
+              "ls-tree",
+              "-z",
+              commit,
+              "--",
+              `:(literal)${path}`,
+            ])
+          ).length === 0
+        )
+          throw new Error("Missing selected file");
+        entries.push({ path, mode: "delete" });
+        continue;
+      }
+      const match = /^(100644|100755|120000) ([a-f0-9]{40}) 0\t[^\0]+\0$/u.exec(
+        entry,
+      );
+      if (match === null) throw new Error("Unsupported index entry");
+      mode = match[1] as typeof mode;
+      bytes = await git(["-C", root, "cat-file", "blob", match[2]!]);
+    } else if (selected.source === "worktree") {
+      const file = join(root, path);
+      let info;
+      try {
+        info = await lstat(file, { bigint: true });
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+        const known = await git([
+          "-C",
+          root,
+          "ls-tree",
+          "-z",
+          commit,
+          "--",
+          `:(literal)${path}`,
+        ]);
+        if (
+          known.length === 0 &&
+          (await git(["-C", root, "ls-files", "-z", "--", `:(literal)${path}`]))
+            .length === 0
+        )
+          throw new Error("Missing selected file");
+        entries.push({ path, mode: "delete" });
+        continue;
+      }
+      if (info.isSymbolicLink()) {
+        mode = "120000";
+        bytes = Buffer.from(await readlink(file));
+      } else if (
+        info.isFile() &&
+        info.nlink === 1n &&
+        ((info.mode & 0o7777n) === 0o644n || (info.mode & 0o7777n) === 0o755n)
+      ) {
+        if (info.size > BigInt(MAX_SOURCE_BYTES))
+          throw new Error("Selected source exceeds size limit");
+        mode = (info.mode & 0o111n) === 0n ? "100644" : "100755";
+        bytes = await readFile(file);
+      } else throw new Error("Unsupported selected attributes");
+      const after = await lstat(file, { bigint: true });
+      if (
+        ["dev", "ino", "size", "mode", "mtimeNs", "ctimeNs"].some(
+          (key) =>
+            info[key as keyof typeof info] !== after[key as keyof typeof after],
+        )
+      )
+        throw new Error("Selected source changed");
+    } else throw new Error("Invalid selection source");
+    total += bytes.length;
+    if (total > MAX_SOURCE_BYTES)
+      throw new Error("Selected source exceeds size limit");
+    entries.push({ path, mode, contentBase64: bytes.toString("base64") });
+  }
+  return entries;
+}
+export async function captureSelectedWorkingFiles(
+  repositoryPath: string,
+  commit: string,
+  selection: WorkingFileSelection[],
+): Promise<FixedCommitMaterial> {
+  try {
+    if (
+      selection.length === 0 ||
+      selection.length > MAX_SELECTED_FILES ||
+      new Set(selection.map((file) => file.path)).size !== selection.length
+    )
+      throw new Error("Invalid selected files");
+    const before = await sourceState(repositoryPath);
+    const material = await captureFixedCommit(repositoryPath, commit);
+    const selectedFiles = await readSelected(repositoryPath, commit, selection);
+    const repeated = await readSelected(repositoryPath, commit, selection);
+    if (
+      JSON.stringify(selectedFiles) !== JSON.stringify(repeated) ||
+      JSON.stringify(before) !==
+        JSON.stringify(await sourceState(repositoryPath))
+    )
+      throw new Error("Selected source changed");
+    const result = { ...material, selectedFiles };
+    validateSelectedFiles(result);
+    return result;
+  } catch {
+    throw workspaceFailure("source_invalid");
+  }
+}
+function validateSelectedFiles(material: FixedCommitMaterial) {
+  const entries = material.selectedFiles ?? [];
+  if (
+    entries.length > MAX_SELECTED_FILES ||
+    new Set(entries.map((file) => file.path)).size !== entries.length
+  )
+    throw new Error("Invalid selected files");
+  let total = Buffer.from(material.packBase64, "base64").length;
+  for (const entry of entries) {
+    if (!validSelectedPath(entry.path))
+      throw new Error("Invalid selected path");
+    if (entry.mode === "delete") continue;
+    const bytes = Buffer.from(entry.contentBase64, "base64");
+    if (
+      bytes.toString("base64") !== entry.contentBase64 ||
+      !["100644", "100755", "120000"].includes(entry.mode)
+    )
+      throw new Error("Invalid selected bytes");
+    if (
+      entry.mode === "120000" &&
+      (bytes.length === 0 ||
+        bytes.includes(0) ||
+        Buffer.from(bytes.toString()).compare(bytes) !== 0)
+    )
+      throw new Error("Unsupported symlink");
+    total += bytes.length;
+    if (total > MAX_SOURCE_BYTES)
+      throw new Error("Selected source exceeds size limit");
+  }
+}
+async function applySelectedFiles(
+  worktree: string,
+  material: FixedCommitMaterial,
+) {
+  validateSelectedFiles(material);
+  for (const entry of material.selectedFiles ?? []) {
+    await selectedParent(worktree, entry.path, true);
+    const file = join(worktree, entry.path);
+    try {
+      const current = await lstat(file);
+      if (!current.isFile() && !current.isSymbolicLink())
+        throw new Error("Unsupported selected replacement");
+      await rm(file);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    if (entry.mode === "delete") continue;
+    const bytes = Buffer.from(entry.contentBase64, "base64");
+    if (entry.mode === "120000") await symlink(bytes.toString(), file);
+    else {
+      await writeFile(file, bytes);
+      await chmod(file, entry.mode === "100755" ? 0o755 : 0o644);
+    }
+    const info = await lstat(file);
+    const actual =
+      entry.mode === "120000"
+        ? Buffer.from(await readlink(file))
+        : await readFile(file);
+    if (
+      !actual.equals(bytes) ||
+      (entry.mode === "120000"
+        ? !info.isSymbolicLink()
+        : !info.isFile() ||
+          (info.mode & 0o777) !== (entry.mode === "100755" ? 0o755 : 0o644))
+    )
+      throw new Error("Selected source mismatch");
+  }
 }
