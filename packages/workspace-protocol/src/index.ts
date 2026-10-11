@@ -1,5 +1,7 @@
 import {
   consumerContextSchema,
+  sessionIdSchema,
+  machineErrorSchema,
   protocolMethodSchema,
   type ProtocolMethod,
 } from "@reins/protocol";
@@ -38,7 +40,7 @@ export type EnvironmentDefinition = v.InferOutput<
 >;
 export type RuntimeDefinition = v.InferOutput<typeof runtimeDefinitionSchema>;
 export type HarnessBinding = v.InferOutput<typeof harnessBindingSchema>;
-export const workspaceErrorSchema = v.strictObject({
+const ordinaryWorkspaceErrorSchema = v.strictObject({
   code: v.picklist([
     "consumer_context_required",
     "consumer_context_conflict",
@@ -72,7 +74,50 @@ export const workspaceErrorSchema = v.strictObject({
   detail: v.optional(v.string()),
   availableBindings: v.optional(v.array(v.string())),
 });
+export const nativeViewLossSchema = v.strictObject({
+  reason: v.literal("moved"),
+  currentRoot: v.string(),
+});
+export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;
+export const workspaceErrorSchema = v.union([
+  ordinaryWorkspaceErrorSchema,
+  v.strictObject({
+    code: v.literal("native_view_lost"),
+    detail: v.optional(v.string()),
+    nativeView: nativeViewLossSchema,
+  }),
+]);
 export type WorkspaceError = v.InferOutput<typeof workspaceErrorSchema>;
+const sessionStopSchema = v.variant("outcome", [
+  v.strictObject({
+    sessionId: sessionIdSchema,
+    outcome: v.literal("confirmed"),
+  }),
+  v.strictObject({
+    sessionId: sessionIdSchema,
+    outcome: v.picklist(["unknown", "rejected"]),
+    error: v.optional(machineErrorSchema),
+  }),
+]);
+export const nativeViewTerminationSchema = v.variant("status", [
+  v.strictObject({
+    status: v.literal("stopping"),
+    sessions: v.array(sessionStopSchema),
+  }),
+  v.strictObject({
+    status: v.literal("stopped"),
+    via: v.literal("harness"),
+    sessions: v.array(sessionStopSchema),
+  }),
+  v.strictObject({
+    status: v.literal("unknown"),
+    sessions: v.array(sessionStopSchema),
+    error: v.optional(machineErrorSchema),
+  }),
+]);
+export type NativeViewTermination = v.InferOutput<
+  typeof nativeViewTerminationSchema
+>;
 export const catalogSchema = v.strictObject({
   environment: environmentDefinitionSchema,
   environmentFingerprint: v.string(),
@@ -105,6 +150,7 @@ export const preparationSchema = v.strictObject({
   source: v.strictObject({
     status: v.picklist(["pending", "verified", "failed"]),
     error: v.optional(workspaceErrorSchema),
+    termination: v.optional(nativeViewTerminationSchema),
   }),
   runtime: v.strictObject({
     status: v.picklist(["preparing", "ready", "failed", "released"]),

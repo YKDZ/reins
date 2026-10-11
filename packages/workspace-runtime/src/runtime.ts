@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 import { createReinsClient, type ReinsClient } from "@reins/client";
 import {
   consumerContextSchema,
+  machineErrorSchema,
+  type MachineError,
   spawnParamsSchema,
   type ProtocolMethod,
   type ConsumerContext,
@@ -25,6 +27,8 @@ import {
   workspaceErrorSchema,
   type ManagedWorkspaceInfo,
   type WorkspaceError,
+  type NativeViewLoss,
+  type NativeViewTermination,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
@@ -166,13 +170,27 @@ export async function openWorkspaceRuntime(options: {
           )),
     );
   };
-  const find = async (cwd: string, owner: ConsumerContext) => {
+  const find = async (
+    cwd: string,
+    owner: ConsumerContext,
+    allowInvalid = false,
+  ) => {
     const tree = await resolveWorktree(cwd);
     const record = await locate(tree);
     if (record === undefined) throw workspaceFailure("attachment_not_found");
     if (record.owner !== owner) throw workspaceFailure("attachment_owned");
-    if (record.tree.root !== tree.root)
-      throw workspaceFailure("native_view_mismatch");
+    if (record.tree.root !== tree.root) {
+      const failure = await invalidate(record, {
+        reason: "moved",
+        currentRoot: tree.root,
+      });
+      if (!allowInvalid) throw failure;
+      return { record, tree };
+    }
+    if (record.info.source.error?.code === "native_view_lost") {
+      if (!allowInvalid) throw record.info.source.error;
+      return { record, tree };
+    }
     for (const saved of record.identities) {
       let current: NativeIdentity;
       try {
@@ -205,8 +223,98 @@ export async function openWorkspaceRuntime(options: {
     client.onClosed(() => clients.delete(record.directory));
     return client;
   };
+  const stopTasks = new Map<string, Promise<void>>();
+  const machineFailure = (error: unknown): MachineError | undefined => {
+    let value = error;
+    if (error instanceof Error) {
+      try {
+        value = JSON.parse(error.message) as unknown;
+      } catch {
+        return undefined;
+      }
+    }
+    const parsed = v.safeParse(machineErrorSchema, value);
+    return parsed.success ? parsed.output : undefined;
+  };
+  const stopWorkers = async (record: RecordState) => {
+    const sessions: NativeViewTermination["sessions"] = [];
+    try {
+      const client = await connect(record);
+      const listed = await client.request("list", {});
+      if ("error" in listed) throw listed.error;
+      for (const session of listed.result) {
+        if (session.state === "killed") {
+          sessions.push({ sessionId: session.sessionId, outcome: "confirmed" });
+          continue;
+        }
+        try {
+          const killed = await client.request("kill", {
+            sessionId: session.sessionId,
+          });
+          if ("error" in killed)
+            sessions.push({
+              sessionId: session.sessionId,
+              outcome: "rejected",
+              error: killed.error,
+            });
+          else
+            sessions.push({
+              sessionId: session.sessionId,
+              outcome:
+                killed.result.status === "killed" ? "confirmed" : "unknown",
+            });
+        } catch (error) {
+          const failure = machineFailure(error);
+          sessions.push({
+            sessionId: session.sessionId,
+            outcome: "unknown",
+            ...(failure === undefined ? {} : { error: failure }),
+          });
+        }
+      }
+      record.info.source.termination = sessions.every(
+        (item) => item.outcome === "confirmed",
+      )
+        ? { status: "stopped", via: "harness", sessions }
+        : { status: "unknown", sessions };
+    } catch (error) {
+      const failure = machineFailure(error);
+      record.info.source.termination = {
+        status: "unknown",
+        sessions,
+        ...(failure === undefined ? {} : { error: failure }),
+      };
+    }
+    await persist(record);
+  };
+  const invalidate = async (
+    record: RecordState,
+    nativeView: NativeViewLoss,
+  ): Promise<WorkspaceError> => {
+    const error: WorkspaceError = { code: "native_view_lost", nativeView };
+    if (record.info.source.error?.code !== "native_view_lost") {
+      // 先关闭准入并持久化，再通过原 daemon 收束原会话；不重建环境或改投目录。
+      record.info.source = {
+        status: "failed",
+        error,
+        termination: { status: "stopping", sessions: [] },
+      };
+      await persist(record);
+    }
+    if (
+      !stopTasks.has(record.directory) &&
+      record.info.source.termination?.status === "stopping"
+    ) {
+      const task = stopWorkers(record);
+      stopTasks.set(record.directory, task);
+      void task
+        .finally(() => stopTasks.delete(record.directory))
+        .catch(() => {});
+    }
+    return error;
+  };
   const status = async (cwd: string, owner: ConsumerContext) => {
-    const { record, tree } = await find(cwd, owner);
+    const { record, tree } = await find(cwd, owner, true);
     if (record.info.runtime.status === "ready") {
       try {
         if (
@@ -505,7 +613,7 @@ export async function openWorkspaceRuntime(options: {
       const current = await status(cwd, owner);
       if (current.runtime.status !== "ready")
         throw workspaceFailure("workspace_not_ready");
-      const { record, tree } = await find(cwd, owner);
+      const { record, tree } = await find(cwd, owner, true);
       return {
         cwd: tree.cwd,
         socket: join(controlDirectory(record), "r.sock"),
@@ -517,7 +625,12 @@ export async function openWorkspaceRuntime(options: {
       action: ProtocolMethod,
       params: unknown,
     ) {
-      const { record, tree } = await find(cwd, owner);
+      const { record, tree } = await find(cwd, owner, true);
+      if (
+        ["spawn", "send", "resolvePermission"].includes(action) &&
+        record.info.source.error?.code === "native_view_lost"
+      )
+        throw record.info.source.error;
       if (record.info.runtime.status !== "ready")
         throw workspaceFailure("workspace_not_ready");
       if (action === "spawn") {
@@ -555,7 +668,8 @@ export async function openWorkspaceRuntime(options: {
       });
       return { ...record.info, cwd: tree.cwd };
     },
-    close() {
+    async close() {
+      await Promise.allSettled(stopTasks.values());
       for (const client of clients.values()) client.close();
       clients.clear();
     },

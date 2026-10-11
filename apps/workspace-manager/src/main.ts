@@ -48,7 +48,7 @@ async function main() {
   const stop = () => {
     stopping ??= (async () => {
       clearTimeout(idle);
-      runtime.close();
+      await runtime.close();
       await transport.close();
       await release();
     })();
