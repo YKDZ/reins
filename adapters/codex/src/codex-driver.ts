@@ -336,23 +336,39 @@ export function createCodexDriver(deps: {
           throw error;
         }
       },
-      interrupt(sessionId) {
-        void sessionId;
-        if (session !== null) session.cancelling = true;
-        if (activeTurnId !== null) {
-          void transport
-            ?.request("turn/interrupt", { threadId, turnId: activeTurnId })
-            .catch((error: unknown) => {
-              if (session !== null && !isAlreadyDiagnosedError(error)) {
-                void session.diagnostic({
-                  kind: "request_failure",
-                  operation: "interrupt",
-                  stage: "interrupt",
-                  reason: "upstream_error",
-                  message: makeTextEvidence(String(error)),
-                });
-              }
-            });
+      async interrupt(sessionId, turnId) {
+        const ready = nativeTurns.get(turnId);
+        if (
+          session === null ||
+          session.sessionId !== sessionId ||
+          ready === undefined ||
+          ended
+        )
+          throw {
+            code: "turn_not_active",
+            sessionId,
+            turnId,
+          } satisfies MachineError;
+        const nativeTurnId = await ready;
+        if (session.turnId !== turnId || ended || transport === null)
+          throw {
+            code: "turn_not_active",
+            sessionId,
+            turnId,
+          } satisfies MachineError;
+        try {
+          await transport.request("turn/interrupt", {
+            threadId,
+            turnId: nativeTurnId,
+          });
+        } catch (error) {
+          if (error instanceof CodexRequestError && session.turnId !== turnId)
+            throw {
+              code: "turn_not_active",
+              sessionId,
+              turnId,
+            } satisfies MachineError;
+          throw error;
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {

@@ -116,12 +116,19 @@ test("local CLI projects its cwd into an already running daemon and the worker r
     cwd: callerCwd,
     turnHandle: expect.stringMatching(/^[a-z0-9@/.-]+$/u),
   });
-  const waited = await cli(["wait", ack.sessionId, "--timeout", "5000"]);
+  const waited = await cli([
+    "wait",
+    ack.turnHandle,
+    "--completion",
+    "all",
+    "--timeout",
+    "5000",
+  ]);
   expect(waited.exitCode, waited.stderr).toBe(0);
   const waitResult = JSON.parse(waited.stdout) as {
-    results: { turn: { finalReply: string } }[];
+    completed: { finalReply: string }[];
   };
-  expect(JSON.parse(waitResult.results[0]!.turn.finalReply)).toEqual({
+  expect(JSON.parse(waitResult.completed[0]!.finalReply)).toEqual({
     cwd: callerCwd,
     marker: "caller-owned-marker",
   });
@@ -172,14 +179,24 @@ test("local CLI projects its cwd into an already running daemon and the worker r
   ]);
   expect(explicit.exitCode, explicit.stdout).toBe(0);
   const explicitAck = JSON.parse(explicit.stdout) as {
+    turnHandle: string;
     sessionId: string;
     cwd: string;
   };
   expect(explicitAck.cwd).toBe(daemonCwd);
   const explicitWait = JSON.parse(
-    (await cli(["wait", explicitAck.sessionId, "--timeout", "5000"])).stdout,
-  ) as { results: { turn: { finalReply: string } }[] };
-  expect(JSON.parse(explicitWait.results[0]!.turn.finalReply)).toEqual({
+    (
+      await cli([
+        "wait",
+        explicitAck.turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "5000",
+      ])
+    ).stdout,
+  ) as { completed: { finalReply: string }[] };
+  expect(JSON.parse(explicitWait.completed[0]!.finalReply)).toEqual({
     cwd: daemonCwd,
     marker: "daemon-owned-marker",
   });
@@ -277,7 +294,16 @@ test("session snapshots keep the exact active or completed turn without stale ac
   expect(pretty.stdout).toContain(ack.turnHandle);
   await writeFile(join(callerCwd, "release"), "finish");
   expect(
-    (await cli(["wait", ack.sessionId, "--timeout", "5000"])).exitCode,
+    (
+      await cli([
+        "wait",
+        ack.turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "5000",
+      ])
+    ).exitCode,
   ).toBe(0);
   const idle = JSON.parse((await cli(["list"])).stdout) as Record<
     string,
@@ -335,7 +361,16 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
   });
   await writeFile(join(callerCwd, "release"), "released");
   expect(
-    (await cli(["wait", initial.sessionId, "--timeout", "5000"])).exitCode,
+    (
+      await cli([
+        "wait",
+        initial.turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "5000",
+      ])
+    ).exitCode,
   ).toBe(0);
   const ended = await cli([
     "send",
@@ -369,4 +404,45 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
     "missing placement",
   ]);
   expect(unspecified.exitCode).toBe(64);
+});
+
+test("interrupt 单 TurnHandle 返回接受事实，ACK 不等于取消", async () => {
+  const { cli, callerCwd } = await fixture("reins-wrr16");
+  const created = await cli([
+    "spawn",
+    "codex",
+    "hold",
+    "--name",
+    "exact-interrupt",
+  ]);
+  expect(created.exitCode, created.stderr).toBe(0);
+  const original = JSON.parse(created.stdout) as {
+    sessionId: string;
+    turnHandle: string;
+  };
+  const accepted = await cli(["interrupt", original.turnHandle]);
+  expect(accepted.exitCode, accepted.stdout + accepted.stderr).toBe(0);
+  expect(JSON.parse(accepted.stdout)).toEqual({
+    sessionId: original.sessionId,
+    turnHandle: original.turnHandle,
+  });
+  expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
+    { sessionId: original.sessionId, state: "busy" },
+  ]);
+  const incomplete = await cli(["interrupt", original.sessionId]);
+  expect(incomplete.exitCode).toBe(64);
+  const multiple = await cli([
+    "interrupt",
+    original.turnHandle,
+    original.turnHandle,
+  ]);
+  expect(multiple.exitCode).toBe(64);
+  await writeFile(join(callerCwd, "release"), "released");
+  await vi.waitFor(async () =>
+    expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
+      { state: "idle" },
+    ]),
+  );
+  const stale = await cli(["interrupt", original.turnHandle]);
+  expect(stale.exitCode).toBe(65);
 });

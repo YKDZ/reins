@@ -361,7 +361,9 @@ describe("driver 抛错时动作整体回滚", () => {
         message: "must not enter driver",
       }),
     ).rejects.toEqual({ code: "session_terminating", sessionId });
-    await expect(machine.interrupt({ ids: [sessionId] })).rejects.toEqual({
+    await expect(
+      machine.interrupt({ sessionId: sessionId, turnId: ids.turn("t1") }),
+    ).rejects.toEqual({
       code: "session_terminating",
       sessionId,
     });

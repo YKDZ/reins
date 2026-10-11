@@ -119,7 +119,7 @@ function fakeAdapter(options: {
           });
         });
       },
-      interrupt() {},
+      async interrupt() {},
       resolvePermission(_sessionId, permissionId, resolution) {
         if (current === null) return;
         const requestsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;

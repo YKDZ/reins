@@ -172,7 +172,7 @@ describe("resolvePermission", () => {
     const { machine, fake, events, sessionId } = await spawnInteractive();
     request(fake, sessionId, [{ outcome: "allow", scope: "once" }]);
 
-    await machine.interrupt({ ids: [sessionId] });
+    await machine.interrupt({ sessionId: sessionId, turnId: ids.turn("t1") });
     fake.controls.emit({
       type: "turn.completed",
       sessionId,

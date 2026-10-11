@@ -4,7 +4,6 @@ import {
   type DiagnosticId,
   type CoreDiagnosticFact,
   type InterruptAck,
-  type InterruptOutcome,
   type InterruptParams,
   type InvalidParamIssue,
   interruptParamsSchema,
@@ -123,12 +122,6 @@ type WorkerEventIngressDecision =
 function createTurnScope(turnId: TurnId): TurnScope {
   return { turnId, messages: new Map(), tools: new Map() };
 }
-
-type WaitOutcome = {
-  sessionId: SessionId;
-  status: "completed" | "killed";
-  turn?: TurnCompleted;
-};
 
 function machineError(error: MachineError): MachineError {
   return error;
@@ -289,7 +282,8 @@ export function createSessionMachine(options: {
   const sessions = new Map<SessionId, SessionRecord>();
   const usedSessionNames = new Set<SessionName>();
   const waiters: Array<{
-    ids: ReadonlySet<SessionId>;
+    targets: readonly TurnTarget[];
+    completion: WaitParams["completion"];
     resolve: (result: WaitResult) => void;
     timer: ReturnType<typeof setTimeout> | null;
   }> = [];
@@ -811,41 +805,65 @@ export function createSessionMachine(options: {
     else delivering.events.push(event);
   };
 
-  function collectOutcomes(ids: ReadonlySet<SessionId>): WaitOutcome[] {
-    const outcomes: WaitOutcome[] = [];
-    for (const id of ids) {
-      const session = sessions.get(id);
-      if (session === undefined) continue;
-      if (session.state === "killed") {
-        outcomes.push({ sessionId: id, status: "killed" });
-      } else if (session.state === "idle" && session.turns.length > 0) {
-        const lastTurn = session.turns[session.turns.length - 1];
-        if (lastTurn !== undefined) {
-          outcomes.push({
-            sessionId: id,
-            status: "completed",
-            turn: lastTurn,
-          });
-        }
-      }
+  function assertTurnTarget(target: TurnTarget): void {
+    const parsed = v.safeParse(turnTargetSchema, target);
+    if (!parsed.success) throw invalidParamsError(parsed.issues);
+    const session = sessions.get(parsed.output.sessionId);
+    if (session === undefined)
+      throw machineError({
+        code: "session_not_found",
+        sessionId: parsed.output.sessionId,
+      });
+    if (
+      session.currentTurnId !== parsed.output.turnId &&
+      !session.turns.some((turn) => turn.turnId === parsed.output.turnId)
+    ) {
+      throw machineError({
+        code: "invalid_params",
+        issues: [{ issue: "invalid_value", path: "turnId" }],
+      });
     }
-    return outcomes;
+  }
+
+  function collectOutcomes(
+    targets: readonly TurnTarget[],
+  ): Pick<WaitResult, "completed" | "pending"> {
+    const completed: TurnCompleted[] = [];
+    const pending: TurnTarget[] = [];
+    for (const target of targets) {
+      const turn = sessions
+        .get(target.sessionId)
+        ?.turns.find((turn) => turn.turnId === target.turnId);
+      if (turn === undefined) pending.push(target);
+      else completed.push(turn);
+    }
+    return { completed, pending };
+  }
+
+  function isSatisfied(
+    snapshot: Pick<WaitResult, "completed" | "pending">,
+    completion: WaitParams["completion"],
+  ): boolean {
+    return completion === "any"
+      ? snapshot.completed.length > 0
+      : snapshot.pending.length === 0;
   }
 
   function settleWaiters(): void {
-    const resolved: Array<{
+    const satisfied: {
       waiter: (typeof waiters)[number];
-      outcomes: WaitOutcome[];
-    }> = [];
+      snapshot: Pick<WaitResult, "completed" | "pending">;
+    }[] = [];
     for (const waiter of waiters) {
-      const outcomes = collectOutcomes(waiter.ids);
-      if (outcomes.length > 0) resolved.push({ waiter, outcomes });
+      const snapshot = collectOutcomes(waiter.targets);
+      if (isSatisfied(snapshot, waiter.completion)) {
+        satisfied.push({ waiter, snapshot });
+      }
     }
-    for (const { waiter, outcomes } of resolved) {
+    for (const { waiter, snapshot } of satisfied) {
       if (waiter.timer !== null) clearTimeout(waiter.timer);
-      const index = waiters.indexOf(waiter);
-      if (index !== -1) waiters.splice(index, 1);
-      waiter.resolve({ status: "completed", results: outcomes });
+      waiters.splice(waiters.indexOf(waiter), 1);
+      waiter.resolve({ status: "satisfied", ...snapshot });
     }
   }
 
@@ -1066,75 +1084,77 @@ export function createSessionMachine(options: {
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
       }
-      const ids = new Set(parsed.output.ids);
-      for (const id of ids) {
-        if (!sessions.has(id)) {
-          throw machineError({ code: "session_not_found", sessionId: id });
-        }
-      }
-      const immediate = collectOutcomes(ids);
-      if (immediate.length > 0) {
-        return { status: "completed", results: immediate };
-      }
+      const { targets, completion, timeoutMs } = parsed.output;
+      for (const target of targets) assertTurnTarget(target);
+      const immediate = collectOutcomes(targets);
+      if (isSatisfied(immediate, completion))
+        return { status: "satisfied", ...immediate };
+      if (timeoutMs === 0) return { status: "timeout", ...immediate };
       return await new Promise<WaitResult>((resolve) => {
-        const timer =
-          parsed.output.timeoutMs === undefined
-            ? null
-            : setTimeout(() => {
-                const index = waiters.findIndex(
-                  (waiter) => waiter.resolve === resolve,
-                );
-                if (index !== -1) waiters.splice(index, 1);
-                resolve({ status: "timeout", results: [] });
-              }, parsed.output.timeoutMs);
-        waiters.push({ ids, resolve, timer });
+        const waiter: (typeof waiters)[number] = {
+          targets,
+          completion,
+          resolve,
+          timer: null,
+        };
+        const deadline =
+          timeoutMs === undefined ? undefined : performance.now() + timeoutMs;
+        function observeDeadline(): void {
+          if (deadline === undefined) return;
+          const remaining = deadline - performance.now();
+          if (remaining > 0) {
+            // Node 超过单次计时上限会钳为 1ms；分段只观察同一个单调截止点。
+            waiter.timer = setTimeout(
+              observeDeadline,
+              Math.min(remaining, 2_147_483_647),
+            );
+            return;
+          }
+          waiters.splice(waiters.indexOf(waiter), 1);
+          resolve({ status: "timeout", ...collectOutcomes(targets) });
+        }
+        waiters.push(waiter);
+        observeDeadline();
       });
     },
     async interrupt(params) {
       const parsed = v.safeParse(interruptParamsSchema, params);
-      if (!parsed.success) {
-        throw invalidParamsError(parsed.issues);
+      if (!parsed.success) throw invalidParamsError(parsed.issues);
+      const { sessionId, turnId } = parsed.output;
+      const session = sessions.get(sessionId);
+      if (session === undefined)
+        throw machineError({ code: "session_not_found", sessionId });
+      if (session.state === "killed")
+        throw machineError({ code: "session_killed", sessionId });
+      assertNotTerminating(sessionId);
+      if (pendingDeliveries.get(sessionId)?.creating)
+        throw machineError({ code: "turn_not_active", sessionId, turnId });
+      const current = activeProjection(sessionId) ?? session;
+      if (current.currentTurnId !== turnId) {
+        if (
+          session.turns.some((turn) => turn.turnId === turnId) ||
+          activeProjection(sessionId)?.completedTurnIds.has(turnId)
+        )
+          throw machineError({ code: "turn_not_active", sessionId, turnId });
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
       }
-      const outcomes: InterruptOutcome[] = [];
-      for (const id of parsed.output.ids) {
-        const session = sessions.get(id);
-        if (session === undefined) {
-          throw machineError({ code: "session_not_found", sessionId: id });
-        }
-        if (session.state === "killed") {
-          throw machineError({ code: "session_killed", sessionId: id });
-        }
-        assertNotTerminating(id);
-        if (session.state === "busy") {
-          try {
-            driverTransaction([], new Map([[id, projectSession(id)]]), () => {
-              driver.interrupt(id);
-            });
-          } catch (error) {
-            throw await unexpectedFailure(options.diagnostics, error, {
-              sessionId: id,
-              ...(session.currentTurnId === null
-                ? {}
-                : { turnId: session.currentTurnId }),
-              kind: "request_failure",
-              operation: "interrupt",
-              stage: "interrupt",
-              reason: "upstream_error",
-              message: evidence(error),
-            });
-          }
-          outcomes.push({
-            sessionId: id,
-            status: "requested",
-            ...(session.currentTurnId === null
-              ? {}
-              : { turnId: session.currentTurnId }),
-          });
-        } else {
-          outcomes.push({ sessionId: id, status: "idle" });
-        }
+      try {
+        await driver.interrupt(sessionId, turnId);
+      } catch (error) {
+        throw await unexpectedFailure(options.diagnostics, error, {
+          sessionId,
+          turnId,
+          kind: "request_failure",
+          operation: "interrupt",
+          stage: "interrupt",
+          reason: "upstream_error",
+          message: evidence(error),
+        });
       }
-      return outcomes;
+      return { sessionId, turnId };
     },
     async resolvePermission(params) {
       const parsed = v.safeParse(resolvePermissionParamsSchema, params);
@@ -1285,25 +1305,7 @@ export function createSessionMachine(options: {
           )
       );
     },
-    assertTurnTarget(target) {
-      const parsed = v.safeParse(turnTargetSchema, target);
-      if (!parsed.success) throw invalidParamsError(parsed.issues);
-      const session = sessions.get(parsed.output.sessionId);
-      if (session === undefined)
-        throw machineError({
-          code: "session_not_found",
-          sessionId: parsed.output.sessionId,
-        });
-      if (
-        session.currentTurnId !== parsed.output.turnId &&
-        !session.turns.some((turn) => turn.turnId === parsed.output.turnId)
-      ) {
-        throw machineError({
-          code: "invalid_params",
-          issues: [{ issue: "invalid_value", path: "turnId" }],
-        });
-      }
-    },
+    assertTurnTarget,
     subscribe(listener) {
       return bus.subscribe(listener);
     },

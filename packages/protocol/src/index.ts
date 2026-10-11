@@ -332,8 +332,18 @@ export const sendAckSchema = v.strictObject({
 export type SendAck = v.InferOutput<typeof sendAckSchema>;
 
 export const waitParamsSchema = v.strictObject({
-  ids: v.array(sessionIdSchema),
-  timeoutMs: v.optional(v.number()),
+  targets: v.pipe(
+    v.array(turnTargetSchema),
+    v.minLength(1),
+    v.check(
+      (targets) =>
+        new Set(targets.map((target) => `${target.sessionId}/${target.turnId}`))
+          .size === targets.length,
+      "Duplicate turn target",
+    ),
+  ),
+  completion: v.picklist(["any", "all"]),
+  timeoutMs: v.optional(v.pipe(v.number(), v.finite(), v.minValue(0))),
 });
 export type WaitParams = v.InferOutput<typeof waitParamsSchema>;
 
@@ -347,29 +357,17 @@ export const turnCompletedSchema = v.strictObject({
 export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
 export const waitResultSchema = v.strictObject({
-  status: v.union([v.literal("completed"), v.literal("timeout")]),
-  results: v.array(
-    v.strictObject({
-      sessionId: sessionIdSchema,
-      status: v.union([v.literal("completed"), v.literal("killed")]),
-      turn: v.optional(turnCompletedSchema),
-    }),
-  ),
+  status: v.picklist(["satisfied", "timeout"]),
+  completed: v.array(turnCompletedSchema),
+  pending: v.array(turnTargetSchema),
 });
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 
-export const interruptParamsSchema = v.strictObject({
-  ids: v.array(sessionIdSchema),
-});
+export const interruptParamsSchema = turnTargetSchema;
 export type InterruptParams = v.InferOutput<typeof interruptParamsSchema>;
 
-export const interruptOutcomeSchema = v.strictObject({
-  sessionId: sessionIdSchema,
-  status: v.union([v.literal("requested"), v.literal("idle")]),
-  turnId: v.optional(turnIdSchema),
-});
-export type InterruptOutcome = v.InferOutput<typeof interruptOutcomeSchema>;
-export type InterruptAck = readonly InterruptOutcome[];
+export const interruptAckSchema = turnTargetSchema;
+export type InterruptAck = v.InferOutput<typeof interruptAckSchema>;
 
 export const resolvePermissionParamsSchema = v.strictObject({
   sessionId: sessionIdSchema,
@@ -2163,7 +2161,7 @@ export interface WorkerDriver {
     placement: SendParams["placement"],
   ): Promise<void>;
   // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
-  interrupt(sessionId: SessionId): void;
+  interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;
   // 把控制面的授权决议交还 adapter，翻译为 harness 原生回答。
   resolvePermission(
     sessionId: SessionId,
@@ -2312,8 +2310,6 @@ export const attachResultSchema = v.strictObject({
   replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
-
-export const interruptAckSchema = v.array(interruptOutcomeSchema);
 
 // 每个方法的参数 / 结果 schema 由方法名静态确定，双端共用同一契约。
 const protocolParamsSchemas = {

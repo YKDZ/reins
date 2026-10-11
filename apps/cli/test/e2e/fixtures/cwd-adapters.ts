@@ -31,7 +31,7 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
       current = { sessionId, turnId };
       child.stdin.write(`${JSON.stringify({ message })}\n`);
     },
-    interrupt() {},
+    async interrupt() {},
     resolvePermission() {},
     async terminate() {
       if (child.exitCode !== null || child.signalCode !== null) return;

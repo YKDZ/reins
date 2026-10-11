@@ -102,47 +102,43 @@ export function printSendAck(ack: SendAck, mode: OutputMode): void {
 }
 
 export function printWaitResult(result: WaitResult, mode: OutputMode): void {
+  const completed = result.completed.map(({ sessionId, turnId, ...facts }) => ({
+    turnHandle: encodeTurnHandle({ sessionId, turnId }),
+    ...facts,
+  }));
+  const pending = result.pending.map((target) => ({
+    turnHandle: encodeTurnHandle(target),
+  }));
   if (mode === "json") {
-    printJsonLine(result);
+    printJsonLine({ status: result.status, completed, pending });
     return;
   }
   if (result.status === "timeout") {
     process.stdout.write("Timed out waiting for turn completion\n");
-    return;
   }
-  for (const entry of result.results) {
-    if (entry.status === "killed") {
-      process.stdout.write(`Session ${entry.sessionId} was killed\n`);
-      continue;
-    }
-    const turn = entry.turn;
-    if (turn === undefined) continue;
+  for (const turn of completed) {
     process.stdout.write(
-      `Turn completed: ${turn.stopReason} (${entry.sessionId})\n`,
+      `Turn completed: ${turn.stopReason} (${turn.turnHandle})\n`,
     );
     if (turn.finalReply !== null && turn.finalReply !== undefined) {
       process.stdout.write(`${turn.finalReply}\n`);
     }
   }
+  for (const target of pending) {
+    process.stdout.write(`Pending: ${target.turnHandle}\n`);
+  }
 }
 
 export function printInterruptResult(
-  outcomes: ProtocolResult<"interrupt">,
+  result: ProtocolResult<"interrupt">,
   mode: OutputMode,
 ): void {
+  const turnHandle = encodeTurnHandle(result);
   if (mode === "json") {
-    printJsonLine(outcomes);
+    printJsonLine({ sessionId: result.sessionId, turnHandle });
     return;
   }
-  for (const outcome of outcomes) {
-    if (outcome.status === "idle") {
-      process.stdout.write(`Session ${outcome.sessionId} is idle\n`);
-    } else {
-      process.stdout.write(
-        `Interrupted ${outcome.sessionId}${outcome.turnId === undefined ? "" : ` (turn ${outcome.turnId})`}\n`,
-      );
-    }
-  }
+  process.stdout.write(`Stop request accepted: ${turnHandle}\n`);
 }
 
 export function printKillResult(result: KillResult, mode: OutputMode): void {

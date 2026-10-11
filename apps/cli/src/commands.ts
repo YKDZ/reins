@@ -172,26 +172,45 @@ async function runSend(ctx: CommandInvocationFor<"send">): Promise<void> {
 }
 
 async function runWait(ctx: CommandInvocationFor<"wait">): Promise<void> {
-  const [ids] = ctx.args;
+  const [targets] = ctx.args;
   const timeoutMs = ctx.options.timeout;
   await withClient(ctx.mode, async (client) => {
-    const response = await client.request(
-      "wait",
-      { ids: [...ids], timeoutMs },
-      timeoutMs + 5000,
-    );
+    const response = await client.request("wait", {
+      targets: [...targets],
+      completion: ctx.options.completion,
+      ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    });
     const result = requireResult(response);
     printWaitResult(result, ctx.mode);
-    if (result.status === "timeout") throw new ExitError(EXIT_TIMEOUT);
+    const exitCode =
+      result.status === "timeout"
+        ? EXIT_TIMEOUT
+        : result.completed.some((turn) => turn.stopReason === "failed")
+          ? 1
+          : result.completed.some((turn) => turn.stopReason === "killed")
+            ? 3
+            : result.completed.some((turn) => turn.stopReason === "cancelled")
+              ? 2
+              : 0;
+    if (exitCode !== 0) throw new ExitError(exitCode);
   });
 }
 
 async function runInterrupt(
   ctx: CommandInvocationFor<"interrupt">,
 ): Promise<void> {
-  const [ids] = ctx.args;
+  const [target] = ctx.args;
+  if (!v.safeParse(turnHandleSchema, target).success)
+    throw usageError({
+      issue: "invalid_value",
+      target: "argument",
+      field: "target",
+      value: target,
+      hint: "Expected a valid TurnHandle",
+    });
+  const address = decodeTurnHandle(target);
   await withClient(ctx.mode, async (client) => {
-    const response = await client.request("interrupt", { ids: [...ids] });
+    const response = await client.request("interrupt", address);
     printInterruptResult(requireResult(response), ctx.mode);
   });
 }

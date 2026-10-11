@@ -308,7 +308,7 @@ function createFakeHarness(options: {
       current = { sessionId, turnId };
       calls.delivered.push({ sessionId, turnId, message });
     },
-    interrupt(sessionId) {
+    async interrupt(sessionId) {
       calls.interrupted.push(sessionId);
     },
     resolvePermission(sessionId, permissionId, resolution) {
@@ -745,22 +745,20 @@ describe("daemon 协议面（缝 C）", () => {
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
     fake.controls.completeTurn("end_turn", "ok");
     const waited = await requester("wait", {
-      ids: [sessionId],
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(resultOf(waited)).toEqual({
-      status: "completed",
-      results: [
+      status: "satisfied",
+      pending: [],
+      completed: [
         {
           sessionId,
-          status: "completed",
-          turn: {
-            sessionId,
-            turnId: "t1",
-            stopReason: "end_turn",
-            finalReply: "ok",
-            usage: undefined,
-          },
+          turnId: "t1",
+          stopReason: "end_turn",
+          finalReply: "ok",
+          usage: undefined,
         },
       ],
     });
@@ -898,23 +896,26 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
 
-    const interrupted = await requester("interrupt", { ids: [sessionId] });
-    expect(resultOf(interrupted)).toEqual([
-      { sessionId, status: "requested", turnId: "t1" },
-    ]);
+    const interrupted = await requester("interrupt", {
+      sessionId,
+      turnId: "t1",
+    });
+    expect(resultOf(interrupted)).toEqual({ sessionId, turnId: "t1" });
     expect(fake.calls.interrupted).toEqual([sessionId]);
     fake.controls.completeTurn("cancelled", null);
     const waited = await requester("wait", {
-      ids: [sessionId],
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(resultOf(waited)).toMatchObject({
-      status: "completed",
-      results: [{ sessionId, status: "completed" }],
+      status: "satisfied",
+      pending: [],
+      completed: [{ sessionId, turnId: "t1", stopReason: "cancelled" }],
     });
   });
 
-  test("kill 清理会话，wait 返回 per-id killed，未知 id 报 session_not_found", async () => {
+  test("kill 清理会话，wait 保留自然终态，未知 id 报 session_not_found", async () => {
     const fake = createFakeHarness({
       harness: "fake",
       capability: emptyCapability("fake"),
@@ -936,16 +937,21 @@ describe("daemon 协议面（缝 C）", () => {
     expect(fake.calls.terminated).toEqual([sessionId]);
 
     const waited = await requester("wait", {
-      ids: [sessionId],
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(resultOf(waited)).toEqual({
-      status: "completed",
-      results: [{ sessionId, status: "killed" }],
+      status: "satisfied",
+      pending: [],
+      completed: [
+        { sessionId, turnId: "t1", stopReason: "end_turn", finalReply: "done" },
+      ],
     });
 
     const missing = await requester("wait", {
-      ids: ["missing@gdaemontest"],
+      targets: [{ sessionId: "missing@gdaemontest", turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(missing).toMatchObject({
@@ -1541,7 +1547,7 @@ describe("daemon 协议面（缝 C）", () => {
     const dummyDriver: WorkerDriver = {
       start() {},
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate() {},
     };
@@ -1582,7 +1588,7 @@ describe("daemon 协议面（缝 C）", () => {
       driverFactory: () => ({
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       }),
@@ -1615,7 +1621,7 @@ describe("daemon 协议面（缝 C）", () => {
       driverFactory: () => ({
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       }),
@@ -1679,7 +1685,7 @@ describe("daemon 协议面（缝 C）", () => {
       driverFactory: () => ({
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       }),
@@ -1713,7 +1719,7 @@ describe("daemon 协议面（缝 C）", () => {
     const dummyDriver: WorkerDriver = {
       start() {},
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate() {},
     };
@@ -1753,7 +1759,7 @@ describe("daemon 协议面（缝 C）", () => {
         throw new Error("a".repeat(5000));
       },
       async deliver() {},
-      interrupt() {},
+      async interrupt() {},
       resolvePermission() {},
       async terminate() {},
     };
@@ -2254,10 +2260,14 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     expect(sent).toMatchObject({ error: { code: "session_not_found" } });
     expect(fake.calls.delivered).toEqual([]);
 
-    const waited = await beta("wait", { ids: [sessionId], timeoutMs: 1000 });
+    const waited = await beta("wait", {
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
+      timeoutMs: 1000,
+    });
     expect(waited).toMatchObject({ error: { code: "session_not_found" } });
 
-    const interrupted = await beta("interrupt", { ids: [sessionId] });
+    const interrupted = await beta("interrupt", { sessionId, turnId: "t1" });
     expect(interrupted).toMatchObject({ error: { code: "session_not_found" } });
     expect(fake.calls.interrupted).toEqual([]);
 
@@ -2537,9 +2547,9 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       "3",
     ),
   ).toHaveProperty("result");
-  expect(await command("interrupt", { ids: [sessionId] }, "4")).toHaveProperty(
-    "result",
-  );
+  expect(
+    await command("interrupt", { sessionId, turnId: "t2" }, "4"),
+  ).toHaveProperty("result");
   expect(
     await sendRaw(b, {
       kind: "request",

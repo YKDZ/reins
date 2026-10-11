@@ -162,7 +162,7 @@ describe("routing driver invariants", () => {
         "caller message for alpha",
         "active_turn",
       );
-      driver.interrupt(alpha.sessionId);
+      await driver.interrupt(alpha.sessionId, alpha.turnId);
       await driver.terminate(alpha.sessionId);
       expect(workerA.controls.requests().slice(initialA)).toEqual([
         {
@@ -195,7 +195,7 @@ describe("routing driver invariants", () => {
         "caller message for beta",
         "active_turn",
       );
-      driver.interrupt(beta.sessionId);
+      await driver.interrupt(beta.sessionId, beta.turnId);
       await driver.terminate(beta.sessionId);
       expect(workerB.controls.requests().slice(initialB)).toMatchObject([
         {
@@ -318,7 +318,7 @@ describe("routing driver invariants", () => {
       driverFactory: () => ({
         start() {},
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {
           throw new DriverFailure("close failed", diagnosticId);
@@ -419,7 +419,7 @@ describe("routing driver invariants", () => {
         driverFactory: () => ({
           start() {},
           async deliver() {},
-          interrupt() {},
+          async interrupt() {},
           resolvePermission() {},
           async terminate() {
             throw new DriverFailure("terminate failed", suppliedId);
@@ -594,7 +594,7 @@ describe("routing driver invariants", () => {
         return {
           start() {},
           async deliver() {},
-          interrupt() {},
+          async interrupt() {},
           resolvePermission() {},
           async terminate() {},
         };
@@ -668,7 +668,7 @@ describe("routing driver invariants", () => {
           });
         },
         async deliver() {},
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       }),

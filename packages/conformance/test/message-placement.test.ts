@@ -35,7 +35,7 @@ async function fixture(options?: { deliver?: () => Promise<void> }) {
           calls.delivered.push(args);
           await options?.deliver?.();
         },
-        interrupt() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       };

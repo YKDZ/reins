@@ -31,9 +31,9 @@ describe("interrupt", () => {
       cwd: "/tmp/demo",
     });
 
-    await expect(machine.interrupt({ ids: [id] })).rejects.toEqual(
-      expect.objectContaining({ code: "internal_error" }),
-    );
+    await expect(
+      machine.interrupt({ sessionId: id, turnId: ids.turn("t1") }),
+    ).rejects.toEqual(expect.objectContaining({ code: "internal_error" }));
     expect(diagnostics).toContainEqual(
       expect.objectContaining({
         sessionId: id,
@@ -61,11 +61,12 @@ describe("interrupt", () => {
       cwd: "/tmp/demo",
     });
 
-    const ack = await machine.interrupt({ ids: [id] });
+    const ack = await machine.interrupt({
+      sessionId: id,
+      turnId: ids.turn("t1"),
+    });
 
-    expect(ack).toEqual([
-      { sessionId: id, status: "requested", turnId: ids.turn("t1") },
-    ]);
+    expect(ack).toEqual({ sessionId: id, turnId: ids.turn("t1") });
     expect(fake.controls.interrupted).toEqual([{ sessionId: id }]);
 
     fake.controls.emit({
@@ -88,7 +89,7 @@ describe("interrupt", () => {
     );
   });
 
-  test("对 idle 会话幂等，不调用 driver", async () => {
+  test("原目标已结束时拒绝，不调用 driver", async () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({
       driverFactory: fake.factory,
@@ -110,9 +111,13 @@ describe("interrupt", () => {
       usage: {},
     });
 
-    await expect(machine.interrupt({ ids: [id] })).resolves.toEqual([
-      { sessionId: id, status: "idle" },
-    ]);
+    await expect(
+      machine.interrupt({ sessionId: id, turnId: ids.turn("t1") }),
+    ).rejects.toEqual({
+      code: "turn_not_active",
+      sessionId: id,
+      turnId: ids.turn("t1"),
+    });
     expect(fake.controls.interrupted).toEqual([]);
   });
 
@@ -131,11 +136,14 @@ describe("interrupt", () => {
     });
     await machine.kill({ sessionId: id });
 
-    await expect(machine.interrupt({ ids: [id] })).rejects.toEqual(
-      expect.objectContaining({ code: "session_killed" }),
-    );
     await expect(
-      machine.interrupt({ ids: [ids.session("missing@gtest")] }),
+      machine.interrupt({ sessionId: id, turnId: ids.turn("t1") }),
+    ).rejects.toEqual(expect.objectContaining({ code: "session_killed" }));
+    await expect(
+      machine.interrupt({
+        sessionId: ids.session("missing@gtest"),
+        turnId: ids.turn("t1"),
+      }),
     ).rejects.toEqual(expect.objectContaining({ code: "session_not_found" }));
   });
 });

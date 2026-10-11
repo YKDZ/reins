@@ -117,8 +117,8 @@ export function createRoutingDriverFactory(
         if (drivers.get(sessionId) === driver)
           sessionTurn.set(sessionId, turnId);
       },
-      interrupt(sessionId) {
-        driverFor(sessionId).interrupt(sessionId);
+      async interrupt(sessionId, turnId) {
+        await driverFor(sessionId).interrupt(sessionId, turnId);
       },
       resolvePermission(sessionId, permissionId, resolution) {
         driverFor(sessionId).resolvePermission(
