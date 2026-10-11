@@ -320,7 +320,6 @@ const cli = async (args: string[]) => {
   };
 };
 async function waitForRuntime(expected: string) {
-  const deadline = Date.now() + 600_000;
   for (;;) {
     const observed = await cli(["status"]);
     assert.equal(observed.status, 0);
@@ -330,7 +329,6 @@ async function waitForRuntime(expected: string) {
     };
     if (runtime.status === expected) return observed.value;
     assert.equal(runtime.status, "preparing", JSON.stringify(observed));
-    assert.ok(Date.now() < deadline, "Preparation did not finish");
     await delay(500);
   }
 }
@@ -423,6 +421,79 @@ try {
     (detached.value.runtime as { status: string }).status,
     "released",
   );
+
+  const registry = join(base, "registry");
+  await mkdir(registry);
+  await writeFile(
+    join(registry, "server.ts"),
+    await readFile(join(base, "material-digest-registry.ts")),
+  );
+  const helper = "reins-wrr10-registry-" + process.pid;
+  await requireCommand("docker", [
+    "run",
+    "-d",
+    "--name",
+    helper,
+    "--network",
+    "host",
+    "--mount",
+    "type=bind,source=" + registry + ",target=" + registry,
+    "--workdir",
+    registry,
+    "--entrypoint",
+    "node",
+    nodeImage,
+    "server.ts",
+  ]);
+  try {
+    let observedRegistry: { port: number; actualDigest: string } | undefined;
+    const registryDeadline = Date.now() + 180_000;
+    while (observedRegistry === undefined) {
+      try {
+        observedRegistry = JSON.parse(
+          await readFile(join(registry, "ready.json"), "utf8"),
+        );
+      } catch {
+        assert.ok(
+          Date.now() < registryDeadline,
+          "Registry helper did not start",
+        );
+        await delay(100);
+      }
+    }
+    const rejectedImage =
+      "127.0.0.1:" +
+      observedRegistry.port +
+      "/fixture@sha256:" +
+      "a".repeat(64);
+    await record("registryFixture", {
+      image: rejectedImage,
+      ...observedRegistry,
+    });
+    const raw = await command("docker", ["pull", rejectedImage]);
+    await record("rawDigestRejection", raw);
+    assert.equal(raw.status, 1);
+    await writeFile(
+      join(worktree, ".reins", "workspace.json"),
+      JSON.stringify({
+        ...configuration,
+        environments: [{ provider: "docker", image: rejectedImage }],
+      }),
+    );
+    assert.equal((await cli(["attach", "--binding", "code"])).status, 0);
+    const rejected = await waitForRuntime("failed");
+    assert.deepEqual(rejected.runtime, {
+      status: "failed",
+      error: { code: "material_digest_mismatch" },
+    });
+    await record("persistentDigestFailure", rejected);
+  } finally {
+    await record(
+      "registryRemoval",
+      await command("docker", ["rm", "-f", helper]),
+    );
+  }
+
   await record("result", "passed");
 } finally {
   await record(

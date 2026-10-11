@@ -98,8 +98,16 @@ async function ensureImage(image: string) {
     if (image.startsWith("sha256:"))
       throw workspaceFailure("material_unavailable");
     try {
-      await docker(["pull", image]);
-    } catch {
+      await execute("docker", ["pull", image], { maxBuffer: 8 * 1024 * 1024 });
+    } catch (error) {
+      const stderr = (error as { stderr?: unknown }).stderr;
+      const digest = image.slice(image.lastIndexOf("sha256:"));
+      // 只映射真实 Docker 对请求摘要给出的完整核验失败行，不猜测其他拉取错误。
+      if (
+        typeof stderr === "string" &&
+        stderr.trim() === `manifest verification failed for digest ${digest}`
+      )
+        throw workspaceFailure("material_digest_mismatch");
       throw workspaceFailure("material_unavailable");
     }
   }

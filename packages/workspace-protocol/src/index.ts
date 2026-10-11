@@ -55,6 +55,7 @@ export const workspaceErrorSchema = v.strictObject({
     "attachment_not_found",
     "native_view_mismatch",
     "material_unavailable",
+    "material_digest_mismatch",
     "runtime_entry_invalid",
     "credential_binding_unavailable",
     "provider_failed",

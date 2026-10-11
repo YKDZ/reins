@@ -40,6 +40,10 @@ test("resumes only failed preparation stages while preserving completed resource
       join(repository, "apps/cli/test/docker/codex-adapter.ts"),
       "codex-adapter.ts",
     ],
+    [
+      join(repository, "apps/cli/test/docker/material-digest-registry.ts"),
+      "material-digest-registry.ts",
+    ],
   ] as const;
   const fingerprints = [];
   const base = JSON.stringify({ image: nodeImage });
