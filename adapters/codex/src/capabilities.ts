@@ -5,6 +5,7 @@ import {
 } from "@reins/adapter-kit";
 import type { HarnessCapability } from "@reins/protocol";
 
+import { initializeCodexTransport } from "./initialization.ts";
 import {
   createCodexTransport,
   type CodexModel,
@@ -39,13 +40,8 @@ export function createCodexCapabilities(options?: {
     const transport =
       options?.transportFactory?.({ diagnostics: transportDiagnostics }) ??
       createCodexTransport({ diagnostics: transportDiagnostics });
-    transport.start();
     try {
-      await transport.request("initialize", {
-        clientInfo: { name: "reins", title: null, version: "0.0.0" },
-        capabilities: null,
-      });
-      transport.notify("initialized", {});
+      await initializeCodexTransport(transport);
       const response = await transport.request("model/list", {});
       return {
         harness: "codex",
