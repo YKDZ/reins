@@ -12,6 +12,7 @@ import {
 import * as v from "valibot";
 
 import { hasCodexAuthBinding, type CodexAuthBindings } from "./codex-auth.ts";
+import { hasQoderAuthBinding, type QoderAuthBindings } from "./qoder-auth.ts";
 
 const execute = promisify(execFile);
 export function workspaceFailure(
@@ -82,6 +83,7 @@ export async function workspaceEnvironment(cwd: string) {
 export async function workspaceHarnesses(
   cwd: string,
   codexAuthBindings: CodexAuthBindings = {},
+  qoderAuthBindings: QoderAuthBindings = {},
 ): Promise<WorkspaceHarnessCatalog> {
   const configuration = await readConfiguration(cwd);
   const environment = selectEnvironment(configuration);
@@ -124,6 +126,12 @@ export async function workspaceHarnesses(
           binding.harness,
           runtime.version,
           binding.credentialBindingRef,
+        ) ||
+        hasQoderAuthBinding(
+          qoderAuthBindings,
+          binding.harness,
+          runtime.version,
+          binding.credentialBindingRef,
         )
           ? ("supported" as const)
           : ("credential_binding_unavailable" as const),
@@ -136,4 +144,5 @@ export async function workspaceHarnesses(
   };
 }
 export { openWorkspaceRuntime } from "./runtime.ts";
+export { parseQoderAuthBindings } from "./qoder-auth.ts";
 export { parseCodexAuthBindings } from "./codex-auth.ts";

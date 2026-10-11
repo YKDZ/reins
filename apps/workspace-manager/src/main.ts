@@ -17,6 +17,7 @@ import {
   workspaceFailure,
   openWorkspaceRuntime,
   parseCodexAuthBindings,
+  parseQoderAuthBindings,
 } from "@reins/workspace-runtime";
 import lockfile from "proper-lockfile";
 import * as v from "valibot";
@@ -24,6 +25,9 @@ import * as v from "valibot";
 async function main() {
   const codexAuthBindings = parseCodexAuthBindings(
     process.env.REINS_CODEX_AUTH_BINDINGS,
+  );
+  const qoderAuthBindings = parseQoderAuthBindings(
+    process.env.REINS_QODER_AUTH_BINDINGS,
   );
   const socket = process.env.REINS_WORKSPACE_MANAGER_SOCKET;
   if (socket === undefined)
@@ -40,6 +44,7 @@ async function main() {
     runtime = await openWorkspaceRuntime({
       stateDirectory,
       codexAuthBindings,
+      qoderAuthBindings,
       ...(process.env.REINS_WORKSPACE_RESOURCE_PREFIX === undefined
         ? {}
         : { resourcePrefix: process.env.REINS_WORKSPACE_RESOURCE_PREFIX }),
@@ -133,7 +138,11 @@ async function main() {
           throw workspaceFailure("initialization_required");
         switch (request.method) {
           case "workspace.harnesses":
-            return workspaceHarnesses(request.params.cwd, codexAuthBindings);
+            return workspaceHarnesses(
+              request.params.cwd,
+              codexAuthBindings,
+              qoderAuthBindings,
+            );
           case "workspace.attach":
             return runtime.attach(
               request.params.cwd,
