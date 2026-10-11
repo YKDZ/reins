@@ -27,7 +27,7 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
       })();
       child.stdin.write(`${JSON.stringify({ message: spec.message })}\n`);
     },
-    deliver(sessionId, turnId, message) {
+    async deliver(sessionId, turnId, message) {
       current = { sessionId, turnId };
       child.stdin.write(`${JSON.stringify({ message })}\n`);
     },

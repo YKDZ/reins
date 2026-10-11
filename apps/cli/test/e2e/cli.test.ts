@@ -1186,7 +1186,10 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
-    const sent = await runCli(["send", sessionId, "next"], env);
+    const sent = await runCli(
+      ["send", sessionId, "next", "--placement", "new_turn"],
+      env,
+    );
     expect(sent.exitCode).toBe(0);
     const attached = await runCli(
       ["attach", sessionId, "--pretty", "--exit-on", "end_turn"],
@@ -1229,7 +1232,10 @@ describe("CLI 进程边界（缝 D）", () => {
         const newSessionId = sessionIdFrom(second);
         expect(newSessionId).not.toBe(oldSessionId);
 
-        const oldAddress = await runCli(["send", oldSessionId, "stale"], env);
+        const oldAddress = await runCli(
+          ["send", oldSessionId, "stale", "--placement", "new_turn"],
+          env,
+        );
         expect(oldAddress.exitCode).toBe(65);
         expect(JSON.parse(oldAddress.stdout)).toMatchObject({
           code: "session_not_found",
@@ -2373,7 +2379,10 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("send 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["send", missingSessionId, "hi"], env);
+    const result = await runCli(
+      ["send", missingSessionId, "hi", "--placement", "new_turn"],
+      env,
+    );
     expect(result.exitCode).toBe(65);
     expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
@@ -2414,7 +2423,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
   test("pretty 域错误不输出 suggestion 与 usage", async () => {
     const { env } = await freshEnv();
     const result = await runCli(
-      ["--pretty", "send", missingSessionId, "hi"],
+      ["--pretty", "send", missingSessionId, "hi", "--placement", "new_turn"],
       env,
     );
     expect(result.exitCode).toBe(65);
@@ -2538,7 +2547,10 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     expect(foreignList.exitCode).toBe(0);
     expect(JSON.parse(foreignList.stdout)).toEqual([]);
 
-    const foreignSend = await runCli(["send", sessionId, "intrude"], beta);
+    const foreignSend = await runCli(
+      ["send", sessionId, "intrude", "--placement", "new_turn"],
+      beta,
+    );
     expect(foreignSend.exitCode).toBe(65);
     expect(JSON.parse(foreignSend.stdout)).toMatchObject({
       code: "session_not_found",

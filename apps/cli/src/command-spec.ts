@@ -190,12 +190,12 @@ const commandSpecData = [
   }),
   defineCommand({
     name: "send",
-    description: "Send a message to a session",
+    description: "Send to an explicit active turn or create a new turn",
     args: [
       {
-        name: "sessionId",
-        description: "session id",
-        kind: { type: "sessionId", hint: "Expected a valid SessionId" },
+        name: "target",
+        description: "SessionHandle for new_turn or TurnHandle for active_turn",
+        kind: { type: "text" },
       },
       {
         name: "message",
@@ -204,7 +204,15 @@ const commandSpecData = [
         kind: { type: "text" },
       },
     ],
-    options: [],
+    options: [
+      {
+        name: "placement",
+        flags: "--placement <placement>",
+        required: true,
+        description: "Explicit message placement",
+        kind: { type: "enum", values: ["active_turn", "new_turn"] },
+      },
+    ],
   }),
   defineCommand({
     name: "wait",

@@ -254,7 +254,14 @@ test("副作用超时保留命令身份、不泄露原参，也不自动重发",
 });
 
 test.each([
-  ["send", { sessionId: "worker@gab12cd", message: "private-message" }],
+  [
+    "send",
+    {
+      placement: "new_turn",
+      sessionId: "worker@gab12cd",
+      message: "private-message",
+    },
+  ],
   ["interrupt", { ids: ["worker@gab12cd"] }],
   ["kill", { sessionId: "worker@gab12cd" }],
   [
@@ -455,6 +462,7 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
   });
   await initialized;
   const failed = client.request("send", {
+    placement: "new_turn",
     sessionId: "missing@gab12cd" as never,
     message: "caller task",
   });

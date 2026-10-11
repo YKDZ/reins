@@ -5,7 +5,12 @@ import { parseCommandInvocation } from "../../src/command-spec.ts";
 
 test("direct invocation parsing rejects missing required arguments", () => {
   expect(() =>
-    parseCommandInvocation("send", ["prompt@g1"], {}, "json"),
+    parseCommandInvocation(
+      "send",
+      ["prompt@g1"],
+      { placement: "new_turn" },
+      "json",
+    ),
   ).toThrowError(
     expect.objectContaining({
       code: "usage_error",

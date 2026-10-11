@@ -398,7 +398,7 @@ describe("daemon diagnostic error dispatch", () => {
         emit = ingress;
         return {
           start() {},
-          deliver() {},
+          async deliver() {},
           interrupt() {},
           resolvePermission() {},
           async terminate() {},
@@ -460,7 +460,7 @@ describe("daemon diagnostic error dispatch", () => {
       emit = ingress;
       return {
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -530,7 +530,7 @@ describe("daemon diagnostic error dispatch", () => {
       emit = context.emit;
       return {
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -973,7 +973,7 @@ describe("daemon diagnostic error dispatch", () => {
       start() {
         throw new Error("worker start failed");
       },
-      deliver() {},
+      async deliver() {},
       interrupt() {},
       resolvePermission() {},
       async terminate() {},
@@ -1071,7 +1071,7 @@ describe("daemon diagnostic error dispatch", () => {
         start() {
           throw new Error("worker start failed");
         },
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -1204,7 +1204,7 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const driverFactory: AdapterDriverFactory = () => ({
       start() {},
-      deliver() {},
+      async deliver() {},
       interrupt() {},
       resolvePermission() {},
       async terminate() {},
@@ -1353,7 +1353,7 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const driverFactory: AdapterDriverFactory = () => ({
       start() {},
-      deliver() {},
+      async deliver() {},
       interrupt() {},
       resolvePermission() {},
       async terminate() {},
@@ -2195,7 +2195,7 @@ describe("daemon diagnostic error dispatch", () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -2646,7 +2646,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       emit = context.emit;
       return {
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -2732,7 +2732,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
         });
         throw new Error("start failed");
       },
-      deliver() {},
+      async deliver() {},
       interrupt() {},
       resolvePermission() {},
       async terminate() {},

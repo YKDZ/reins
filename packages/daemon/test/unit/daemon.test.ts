@@ -304,7 +304,7 @@ function createFakeHarness(options: {
         });
       }
     },
-    deliver(sessionId, turnId, message) {
+    async deliver(sessionId, turnId, message) {
       current = { sessionId, turnId };
       calls.delivered.push({ sessionId, turnId, message });
     },
@@ -761,7 +761,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
   });
 
-  test("busy 中 send 在下一个消息边界注入", async () => {
+  test("busy 中显式 active_turn 直接等待原生接受", async () => {
     const fake = createFakeHarness({
       harness: "fake",
       capability: emptyCapability("fake"),
@@ -780,12 +780,11 @@ describe("daemon 协议面（缝 C）", () => {
     const sent = await requester("send", {
       sessionId,
       message: "边界消息",
+      placement: "active_turn",
+      turnId: "t1",
     });
-    expect(resultOf(sent)).toMatchObject({ deliveryPoint: "boundary" });
-    expect(fake.calls.delivered).toEqual([]);
-
+    expect(resultOf(sent)).toMatchObject({ deliveryPoint: "active_turn" });
     fake.controls.emitWorkerMessage("worker 部分产出");
-    await waitFor(() => fake.calls.delivered.length > 0);
     expect(fake.calls.delivered).toEqual([
       { sessionId, turnId: "t1", message: "边界消息" },
     ]);
@@ -808,7 +807,11 @@ describe("daemon 协议面（缝 C）", () => {
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
     fake.controls.completeTurn();
 
-    const sent = await requester("send", { sessionId, message: "再来一轮" });
+    const sent = await requester("send", {
+      placement: "new_turn",
+      sessionId,
+      message: "再来一轮",
+    });
     expect(resultOf(sent)).toMatchObject({ deliveryPoint: "new_turn" });
     await waitFor(() => fake.calls.delivered.length > 0);
     expect(fake.calls.delivered).toEqual([
@@ -839,6 +842,7 @@ describe("daemon 协议面（缝 C）", () => {
     const collector = collectNotifications(clientA);
     await requesterA("attach", { sessionId });
     const sent = await requesterB("send", {
+      placement: "new_turn",
       sessionId,
       message: "再来一轮",
     });
@@ -1011,7 +1015,11 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
     fake.controls.completeTurn("end_turn");
-    await requester("send", { sessionId, message: "second" });
+    await requester("send", {
+      placement: "new_turn",
+      sessionId,
+      message: "second",
+    });
     const collector = collectNotifications(client);
 
     const attached = await requester("attach", {
@@ -1386,7 +1394,11 @@ describe("daemon 协议面（缝 C）", () => {
     await requester("attach", { sessionId, exitOn: ["end_turn"], replay: 0 });
 
     fake.controls.completeTurn("failed");
-    await requester("send", { sessionId, message: "second" });
+    await requester("send", {
+      placement: "new_turn",
+      sessionId,
+      message: "second",
+    });
     fake.controls.completeTurn("end_turn");
     await flush();
 
@@ -1412,7 +1424,11 @@ describe("daemon 协议面（缝 C）", () => {
     await requester("attach", { sessionId, exitOn: [], replay: 0 });
 
     fake.controls.completeTurn();
-    await requester("send", { sessionId, message: "second" });
+    await requester("send", {
+      placement: "new_turn",
+      sessionId,
+      message: "second",
+    });
     fake.controls.completeTurn();
     await flush();
     expect(collector.ended).toEqual([]);
@@ -1440,7 +1456,11 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
     fake.controls.completeTurn();
-    await requester("send", { sessionId, message: "second" });
+    await requester("send", {
+      placement: "new_turn",
+      sessionId,
+      message: "second",
+    });
     const collector = collectNotifications(client);
     const attached = await requester("attach", {
       sessionId,
@@ -1511,7 +1531,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const dummyDriver: WorkerDriver = {
       start() {},
-      deliver() {},
+      async deliver() {},
       interrupt() {},
       resolvePermission() {},
       async terminate() {},
@@ -1552,7 +1572,7 @@ describe("daemon 协议面（缝 C）", () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -1585,7 +1605,7 @@ describe("daemon 协议面（缝 C）", () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -1649,7 +1669,7 @@ describe("daemon 协议面（缝 C）", () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
-        deliver() {},
+        async deliver() {},
         interrupt() {},
         resolvePermission() {},
         async terminate() {},
@@ -1683,7 +1703,7 @@ describe("daemon 协议面（缝 C）", () => {
   test("capability failure causes are UTF-8 bounded", async () => {
     const dummyDriver: WorkerDriver = {
       start() {},
-      deliver() {},
+      async deliver() {},
       interrupt() {},
       resolvePermission() {},
       async terminate() {},
@@ -1723,7 +1743,7 @@ describe("daemon 协议面（缝 C）", () => {
       start() {
         throw new Error("a".repeat(5000));
       },
-      deliver() {},
+      async deliver() {},
       interrupt() {},
       resolvePermission() {},
       async terminate() {},
@@ -2217,7 +2237,11 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
 
     expect(resultOf(await alpha("list", {}))).toHaveLength(1);
 
-    const sent = await beta("send", { sessionId, message: "侵入" });
+    const sent = await beta("send", {
+      placement: "new_turn",
+      sessionId,
+      message: "侵入",
+    });
     expect(sent).toMatchObject({ error: { code: "session_not_found" } });
     expect(fake.calls.delivered).toEqual([]);
 
@@ -2271,6 +2295,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
       ),
     ).toContain(sessionId);
     const sent = await secondAlpha("send", {
+      placement: "new_turn",
       sessionId,
       message: "同绑定续用",
     });
@@ -2280,7 +2305,11 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     await flush();
     expect(resultOf(await intruder("list", {}))).toEqual([]);
     expect(
-      await intruder("send", { sessionId, message: "越域" }),
+      await intruder("send", {
+        placement: "new_turn",
+        sessionId,
+        message: "越域",
+      }),
     ).toMatchObject({ error: { code: "session_not_found" } });
   });
 
@@ -2455,7 +2484,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
   const sessionId = testIdentity.session("commands");
   const missing = await command(
     "send",
-    { sessionId, message: "before spawn" },
+    { placement: "new_turn", sessionId, message: "before spawn" },
     "1",
   );
   expect(missing).toMatchObject({ error: { code: "session_not_found" } });
@@ -2476,7 +2505,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       kind: "request",
       requestId: "old-error",
       method: "send",
-      params: { message: "before spawn", sessionId },
+      params: { placement: "new_turn", message: "before spawn", sessionId },
       commandId: "test:00000001-0123-4123-8123-0123456789ab",
     }),
   ).toMatchObject({ error: { code: "session_not_found" } });
@@ -2493,7 +2522,11 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
   ).toHaveProperty("result");
   fake.controls.completeTurn();
   expect(
-    await command("send", { sessionId, message: "once" }, "3"),
+    await command(
+      "send",
+      { placement: "new_turn", sessionId, message: "once" },
+      "3",
+    ),
   ).toHaveProperty("result");
   expect(await command("interrupt", { ids: [sessionId] }, "4")).toHaveProperty(
     "result",
@@ -2503,7 +2536,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       kind: "request",
       requestId: "changed",
       method: "send",
-      params: { sessionId, message: "different" },
+      params: { placement: "new_turn", sessionId, message: "different" },
       commandId: "test:00000003-0123-4123-8123-0123456789ab",
     }),
   ).toMatchObject({ error: { code: "command_id_conflict" } });
