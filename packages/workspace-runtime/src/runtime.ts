@@ -170,11 +170,18 @@ export async function openWorkspaceRuntime(options: {
     if (record.owner !== owner) throw workspaceFailure("attachment_owned");
     if (record.tree.root !== tree.root)
       throw workspaceFailure("native_view_mismatch");
-    const current = await Promise.all(
-      record.identities.map((item) => identity(item.path)),
-    );
-    if (JSON.stringify(current) !== JSON.stringify(record.identities))
-      throw workspaceFailure("native_view_mismatch");
+    for (const saved of record.identities) {
+      let current: NativeIdentity;
+      try {
+        current = await identity(saved.path);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === "ENOENT")
+          throw workspaceFailure("native_view_mismatch");
+        throw error;
+      }
+      if (current.dev !== saved.dev || current.ino !== saved.ino)
+        throw workspaceFailure("native_view_mismatch");
+    }
     return { record, tree };
   };
   const connect = async (record: RecordState) => {
