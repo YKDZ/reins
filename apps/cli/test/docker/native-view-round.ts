@@ -397,6 +397,29 @@ try {
     "--binding",
     "code",
   ]);
+  if (attached.status !== 0) {
+    const containers = await command(
+      "docker",
+      ["ps", "-aq", "--filter", "name=reins-wrr09-runtime-"],
+      base,
+    );
+    await record("runtime-start-failure-containers", containers);
+    for (const container of containers.stdout.split("\n").filter(Boolean)) {
+      const [state, logs] = await Promise.all([
+        command(
+          "docker",
+          ["inspect", "--format", "{{json .State}}", container],
+          base,
+        ),
+        command("docker", ["logs", "--tail", "100", container], base),
+      ]);
+      await record("runtime-start-failure-diagnostics", {
+        container,
+        state,
+        logs,
+      });
+    }
+  }
   assert.equal(attached.status, 0, JSON.stringify(attached));
   await waitForRuntime("ready");
   const message = JSON.stringify({
