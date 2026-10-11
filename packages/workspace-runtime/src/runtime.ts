@@ -1775,8 +1775,9 @@ export async function openWorkspaceRuntime(options: {
                           session.error = killed.error;
                           throw killed.error;
                         }
-                        if (killed.result.status !== "killed")
-                          throw workspaceFailure("provider_failed");
+                        // 重启前的身份不能由当前 daemon 确认；保留 unknown，
+                        // 仅在下方实际证明容器消失后发布 provider 终止事实。
+                        if (killed.result.status === "not_found") continue;
                         session.outcome = "confirmed";
                         delete session.error;
                         await saveTurns();
