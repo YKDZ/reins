@@ -13,6 +13,7 @@ import {
   type WorkspaceMethod,
   type WorkspaceParams,
 } from "@reins/workspace-protocol";
+import { captureFixedCommit } from "@reins/workspace-source";
 import { Command } from "commander";
 import * as v from "valibot";
 
@@ -21,7 +22,9 @@ import { ExitError } from "./errors.ts";
 export function registerWorkspaceCommands(program: Command): void {
   const workspace = program
     .command("workspace")
-    .description("Prepare an existing native Git worktree");
+    .description(
+      "Prepare native Git worktrees and receive explicit source inputs",
+    );
   const nativeCwd = (path?: string) =>
     resolve(path ?? (program.opts().C as string | undefined) ?? process.cwd());
   const invoke = async <M extends WorkspaceMethod>(
@@ -63,6 +66,35 @@ export function registerWorkspaceCommands(program: Command): void {
       throw new ExitError(1, "workspace_failed");
     }
   };
+  workspace
+    .command("handoff")
+    .description("Transfer one fixed commit to a new incoming Git worktree")
+    .requiredOption("--repository <path>", "one caller-native Git root")
+    .requiredOption("--commit <sha>", "full fixed commit object name")
+    .requiredOption(
+      "--subdirectory <path>",
+      "relative target working directory",
+    )
+    .requiredOption(
+      "--binding <refs...>",
+      "explicit harness binding references",
+    )
+    .action(
+      async (options: {
+        repository: string;
+        commit: string;
+        subdirectory: string;
+        binding: string[];
+      }) =>
+        invoke("workspace.handoff", {
+          material: await captureFixedCommit(
+            resolve(options.repository),
+            options.commit,
+          ),
+          subdirectory: options.subdirectory,
+          bindings: options.binding,
+        }),
+    );
   workspace
     .command("harnesses")
     .description("Discover explicit project harness bindings")
