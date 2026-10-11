@@ -340,6 +340,10 @@ function domainMessage(error: MachineError): string {
       return `Session is terminating${"sessionId" in error ? `: ${error.sessionId}` : ""}`;
     case "daemon_shutting_down":
       return "Daemon is shutting down";
+    case "native_view_lost":
+      return "Native worktree view is unavailable";
+    case "workspace_detaching":
+      return "Workspace is detaching";
     case "invalid_params":
       return "Invalid parameters";
     case "unknown_harness":
