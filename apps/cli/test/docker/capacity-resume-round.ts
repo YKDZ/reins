@@ -334,6 +334,7 @@ let managerError = "";
 let stopped = false;
 let helper: string | undefined;
 let capacityDirectory: string | undefined;
+let lastStatus: string | undefined;
 const cli = async (args: string[]) => {
   const result = await command(
     process.execPath,
@@ -347,7 +348,9 @@ const cli = async (args: string[]) => {
     base,
     env,
   );
-  await record("cli " + args.join(" "), result);
+  if (args[0] !== "status" || result.stdout !== lastStatus)
+    await record("cli " + args.join(" "), result);
+  if (args[0] === "status") lastStatus = result.stdout;
   assert.equal(result.status, 0);
   return JSON.parse(result.stdout);
 };

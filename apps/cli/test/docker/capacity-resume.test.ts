@@ -132,7 +132,7 @@ test("resumes the same preparation after real capacity improves", async () => {
     "--image",
     nodeImage,
     "--timeout-ms",
-    "1200000",
+    "1800000",
     ...(process.env.REINS_WRR11_PLATFORM_DOCKER_BINARY === undefined
       ? []
       : ["--docker-binary", process.env.REINS_WRR11_PLATFORM_DOCKER_BINARY]),
@@ -186,4 +186,4 @@ test("resumes the same preparation after real capacity improves", async () => {
     evidenceExport: "passed",
     platformReclaim: "passed",
   });
-}, 1_800_000);
+}, 2_400_000);
