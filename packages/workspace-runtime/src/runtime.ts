@@ -16,6 +16,9 @@ import { promisify } from "node:util";
 import { createReinsClient, type ReinsClient } from "@reins/client";
 import {
   consumerContextSchema,
+  initializeResultSchema,
+  protocolEventNotificationSchema,
+  type DaemonGeneration,
   machineErrorSchema,
   type MachineError,
   spawnParamsSchema,
@@ -41,6 +44,9 @@ import {
 } from "@reins/transport";
 import {
   workspaceErrorSchema,
+  type WorkspaceHistory,
+  type WorkspaceHistoryHealth,
+  type WorkspaceHistoryEvent,
   type ManagedWorkspaceInfo,
   type WorkspaceError,
   type NativeViewLoss,
@@ -54,6 +60,11 @@ import {
   projectCodexAuth,
   type CodexAuthBindings,
 } from "./codex-auth.ts";
+import {
+  readWorkspaceHistory,
+  appendWorkspaceHistory,
+  historyEventKey,
+} from "./history.ts";
 import {
   fingerprint,
   resolveWorktree,
@@ -99,6 +110,80 @@ type RecordState = {
 async function identity(path: string): Promise<NativeIdentity> {
   const value = await stat(path, { bigint: true });
   return { path, dev: String(value.dev), ino: String(value.ino) };
+}
+async function loadRecords(root: string): Promise<RecordState[]> {
+  const records: RecordState[] = [];
+  for (const entry of await readdir(root, { withFileTypes: true })) {
+    if (!entry.isDirectory()) continue;
+    try {
+      const record = JSON.parse(
+        await readFile(join(root, entry.name, "attachment.json"), "utf8"),
+      ) as RecordState;
+      // 旧清理快照不含权威事件日志，不能从 completed 投影补造原事件。
+      if (!("integrity" in record.info.history))
+        record.info.history = {
+          status: "unavailable",
+          integrity: "unknown",
+          errors: [],
+        };
+      records.push(record);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
+      throw workspaceFailure("provider_failed");
+    }
+  }
+  return records;
+}
+async function historyRecords(
+  records: RecordState[],
+  owner: ConsumerContext,
+  cwd?: string,
+): Promise<RecordState[]> {
+  v.parse(consumerContextSchema, owner);
+  const tree = cwd === undefined ? undefined : await resolveWorktree(cwd);
+  const identities =
+    tree === undefined
+      ? []
+      : await Promise.all(
+          [tree.root, tree.gitDir, tree.commonDir].map(identity),
+        );
+  // 只比对真实 root 与 Git metadata 的身份；路径、提交和分支不构成沿袭。
+  return records.filter(
+    (record) =>
+      record.owner === owner &&
+      (tree === undefined ||
+        [record.tree.root, record.tree.gitDir, record.tree.commonDir].every(
+          (path, index) => {
+            const saved = record.identities.find((item) => item.path === path);
+            return (
+              saved?.dev === identities[index]?.dev &&
+              saved?.ino === identities[index]?.ino
+            );
+          },
+        )),
+  );
+}
+// 管理入口持有与在线 Manager 相同的 lease；不打开运行时或改写清理账本。
+export async function deleteWorkspaceHistory(options: {
+  stateDirectory: string;
+  owner: ConsumerContext;
+  cwd?: string;
+}): Promise<{ deleted: number }> {
+  const selected = await historyRecords(
+    await loadRecords(options.stateDirectory),
+    options.owner,
+    options.cwd,
+  );
+  for (const record of selected) {
+    await rm(join(record.directory, "history.ndjson"), { force: true });
+    record.info.history = {
+      status: "deleted",
+      integrity: "unknown",
+      errors: [],
+    };
+    await persist(record);
+  }
+  return { deleted: selected.length };
 }
 const writes = new WeakMap<RecordState, Promise<void>>();
 function persist(record: RecordState): Promise<void> {
@@ -222,26 +307,7 @@ export async function openWorkspaceRuntime(options: {
     Awaited<ReturnType<typeof servePublisher>>
   >();
   await mkdir(root, { recursive: true, mode: 0o700 });
-  const records: RecordState[] = [];
-  for (const entry of await readdir(root, { withFileTypes: true })) {
-    if (!entry.isDirectory()) continue;
-    try {
-      records.push(
-        JSON.parse(
-          await readFile(join(root, entry.name, "attachment.json"), "utf8"),
-        ) as RecordState,
-      );
-    } catch (error) {
-      if (
-        typeof error === "object" &&
-        error !== null &&
-        "code" in error &&
-        error.code === "ENOENT"
-      )
-        continue;
-      throw workspaceFailure("provider_failed");
-    }
-  }
+  const records = await loadRecords(root);
   for (const record of records) {
     record.info.preparation ??= {
       attempts: [
@@ -266,6 +332,44 @@ export async function openWorkspaceRuntime(options: {
       await persist(record);
     }
   }
+  const historyKeys = new Map<string, Set<string>>();
+  const recordEvent = async (
+    record: RecordState,
+    event: WorkspaceHistoryEvent,
+  ) => {
+    let keys = historyKeys.get(record.directory);
+    if (keys === undefined) {
+      const prior = await readWorkspaceHistory(
+        record.directory,
+        record.info.history,
+      );
+      keys = new Set(prior.events.map(historyEventKey));
+      historyKeys.set(record.directory, keys);
+    }
+    const key = historyEventKey(event);
+    if (keys.has(key)) return;
+    try {
+      await appendWorkspaceHistory(record.directory, event);
+      keys.add(key);
+      if (
+        record.info.history.status === "unavailable" ||
+        record.info.history.status === "deleted"
+      ) {
+        record.info.history.status = "available";
+        await persist(record);
+      }
+    } catch {
+      record.info.history.status = "failed";
+      if (!record.info.history.errors.includes("write_failed"))
+        record.info.history.errors.push("write_failed");
+      // 历史故障只更新自己的事实轴，不阻止原帧或已确定的回合结果交付。
+      await persist(record).catch(() => {});
+    }
+  };
+  const historyHealth = async (
+    record: RecordState,
+  ): Promise<WorkspaceHistoryHealth> =>
+    (await readWorkspaceHistory(record.directory, record.info.history)).health;
   const clients = new Map<string, ReinsClient>();
   const routes = new Map<string, Promise<TransportServer<ProtocolMessage>>>();
   // 保留完整 UUID 身份，用紧凑目录避开 Unix socket 的路径长度上限。
@@ -524,6 +628,7 @@ export async function openWorkspaceRuntime(options: {
           Promise<TransportConnection<ProtocolMessage>>
         >();
         let closing = false;
+        const deliveries = new Set<Promise<void>>();
         server.onConnection((peer) => {
           const requests = new Map<string, string>();
           const native = createUnixSocketClient<ProtocolMessage>(
@@ -540,6 +645,7 @@ export async function openWorkspaceRuntime(options: {
               }
               nativeConnections.add(connection);
               let outgoing = Promise.resolve();
+              let generation: DaemonGeneration | undefined;
               connection.onEvent((event) => {
                 // 保存 ACK 的异步 I/O 不得改变同一原生连接的帧顺序。
                 outgoing = outgoing
@@ -553,6 +659,30 @@ export async function openWorkspaceRuntime(options: {
                       protocolResponseSchema,
                       event.message,
                     );
+                    if (response.success && "result" in response.output) {
+                      const initialized = v.safeParse(
+                        initializeResultSchema,
+                        response.output.result,
+                      );
+                      if (initialized.success)
+                        generation = initialized.output.daemonGeneration;
+                    }
+                    const notification = v.safeParse(
+                      protocolEventNotificationSchema,
+                      event.message,
+                    );
+                    if (notification.success && generation !== undefined) {
+                      const { eventId, event: fact } =
+                        notification.output.params;
+                      const daemonGeneration = generation;
+                      await exclusive(() =>
+                        recordEvent(record, {
+                          daemonGeneration,
+                          eventId,
+                          event: fact,
+                        }),
+                      );
+                    }
                     const key = response.success
                       ? requests.get(response.output.requestId)
                       : undefined;
@@ -604,6 +734,9 @@ export async function openWorkspaceRuntime(options: {
                     peer.send(event.message);
                   })
                   .catch(() => peer.close());
+                const pending = outgoing;
+                deliveries.add(pending);
+                void pending.finally(() => deliveries.delete(pending));
               });
             })
             .catch(() => {
@@ -680,6 +813,7 @@ export async function openWorkspaceRuntime(options: {
               [...connecting].map(async (pending) => (await pending).close()),
             );
             await server.close();
+            await Promise.allSettled(deliveries);
           },
         };
       })();
@@ -940,7 +1074,12 @@ export async function openWorkspaceRuntime(options: {
     } catch (error) {
       definition = { status: "unavailable", attached, error: normalize(error) };
     }
-    return { ...record.info, cwd: tree.cwd, definition };
+    return {
+      ...record.info,
+      cwd: tree.cwd,
+      definition,
+      history: await historyHealth(record),
+    };
   };
   const prepare = async (record: RecordState) => {
     const control = controlDirectory(record);
@@ -1254,6 +1393,41 @@ export async function openWorkspaceRuntime(options: {
   return {
     publications,
     hasAttachments: () => records.some(active),
+    async history(
+      cwd: string,
+      owner: ConsumerContext,
+      allWorktrees = false,
+    ): Promise<WorkspaceHistory> {
+      return exclusive(async () => {
+        const entries: WorkspaceHistory["entries"] = [];
+        const selected = await historyRecords(
+          records,
+          owner,
+          allWorktrees ? undefined : cwd,
+        );
+        for (const record of selected) {
+          const { health, events } = await readWorkspaceHistory(
+            record.directory,
+            record.info.history,
+          );
+          entries.push({
+            cwd: record.tree.cwd,
+            root: record.tree.root,
+            environment: record.info.environment,
+            environmentFingerprint: record.info.environmentFingerprint,
+            harnesses: record.info.harnesses.map(
+              ({ harness, runtimeFingerprint }) => ({
+                harness,
+                runtimeFingerprint,
+              }),
+            ),
+            health,
+            events,
+          });
+        }
+        return { entries, integrity: "unknown" };
+      });
+    },
     async attach(cwd: string, bindingRefs: string[], owner: ConsumerContext) {
       v.parse(consumerContextSchema, owner);
       const tree = await resolveWorktree(cwd);
@@ -1352,7 +1526,11 @@ export async function openWorkspaceRuntime(options: {
               ...binding,
               stage: "pending",
             })),
-            history: { status: "unavailable" },
+            history: {
+              status: "unavailable",
+              integrity: "unknown",
+              errors: [],
+            },
             preparation: { attempts: [{ status: "preparing" }] },
           },
         };

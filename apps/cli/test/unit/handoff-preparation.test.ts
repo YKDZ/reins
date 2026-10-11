@@ -31,7 +31,7 @@ test("handoff CLI waits for nested preparation and reports failure with its work
     harnesses: [],
     environment: { provider: "docker", image: `sha256:${"a".repeat(64)}` },
     environmentFingerprint: "fixed-environment",
-    history: { status: "unavailable" },
+    history: { status: "unavailable", integrity: "unknown", errors: [] },
     preparation: {
       attempts: [{ status: "failed", error: { code: "material_unavailable" } }],
     },

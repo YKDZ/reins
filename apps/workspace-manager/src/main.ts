@@ -2,8 +2,9 @@
 import { lstat, mkdir, unlink } from "node:fs/promises";
 import { createConnection } from "node:net";
 import { dirname } from "node:path";
+import { parseArgs } from "node:util";
 
-import type { ConsumerContext } from "@reins/protocol";
+import { consumerContextSchema, type ConsumerContext } from "@reins/protocol";
 import { createUnixSocketServer } from "@reins/transport";
 import {
   WORKSPACE_PROTOCOL_MAJOR_VERSION,
@@ -16,6 +17,7 @@ import {
   workspaceHarnesses,
   workspaceFailure,
   openWorkspaceRuntime,
+  deleteWorkspaceHistory,
   parseCodexAuthBindings,
   parseQoderAuthBindings,
 } from "@reins/workspace-runtime";
@@ -24,6 +26,40 @@ import lockfile from "proper-lockfile";
 import * as v from "valibot";
 
 async function main() {
+  if (process.argv.length > 2) {
+    if (process.argv[2] !== "history-delete")
+      throw new Error("Unknown Workspace Manager administration command");
+    const { values } = parseArgs({
+      args: process.argv.slice(3),
+      options: {
+        "consumer-context": { type: "string" },
+        cwd: { type: "string" },
+        "all-worktrees": { type: "boolean" },
+      },
+    });
+    const owner = v.parse(consumerContextSchema, values["consumer-context"]);
+    if ((values.cwd !== undefined) === (values["all-worktrees"] === true))
+      throw new Error("Specify either --cwd or --all-worktrees");
+    const stateDirectory = process.env.REINS_WORKSPACE_MANAGER_STATE_DIR;
+    if (stateDirectory === undefined)
+      throw new Error("REINS_WORKSPACE_MANAGER_STATE_DIR is required");
+    await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
+    const release = await lockfile.lock(stateDirectory);
+    try {
+      console.log(
+        JSON.stringify(
+          await deleteWorkspaceHistory({
+            stateDirectory,
+            owner,
+            ...(values.cwd === undefined ? {} : { cwd: values.cwd }),
+          }),
+        ),
+      );
+    } finally {
+      await release();
+    }
+    return;
+  }
   const codexAuthBindings = parseCodexAuthBindings(
     process.env.REINS_CODEX_AUTH_BINDINGS,
   );
@@ -166,6 +202,12 @@ async function main() {
             return runtime.publications.read(
               consumer,
               request.params.publicationId,
+            );
+          case "workspace.history":
+            return runtime.history(
+              request.params.cwd,
+              consumer,
+              request.params.allWorktrees,
             );
           case "workspace.handoff": {
             const incoming = await sourceBridge.receive(

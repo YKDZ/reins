@@ -22,6 +22,7 @@ import {
   type WorkspaceParams,
   type WorkspaceResults,
   type WorkspaceHandle,
+  type WorkspaceHistory,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
@@ -33,6 +34,20 @@ import {
   type AgentEvent,
 } from "./index.ts";
 import { receivePublication, listReceipts } from "./receipts.ts";
+import { createEventProjector } from "./subscription.ts";
+
+export function projectWorkspaceHistory(history: WorkspaceHistory) {
+  return {
+    ...history,
+    entries: history.entries.map(({ events, ...attachment }) => {
+      const project = createEventProjector();
+      return {
+        ...attachment,
+        events: events.flatMap(({ event }) => project(event)),
+      };
+    }),
+  };
+}
 
 export function createWorkspaceClient(
   connection: TransportConnection<WorkspaceMessage>,
@@ -168,6 +183,11 @@ export function createWorkspaceClient(
     },
     receipts: (directory: string) =>
       listReceipts(options.consumerContext, directory),
+    async history(params: WorkspaceParams["workspace.history"]) {
+      return projectWorkspaceHistory(
+        await request("workspace.history", params),
+      );
+    },
     async importGitPublication(
       publicationId: string,
       destination: { repository: string; reference: string; commit: string },
