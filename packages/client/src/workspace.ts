@@ -41,18 +41,23 @@ export function createWorkspaceClient(
   const request = <M extends WorkspaceMethod>(
     method: M,
     params: WorkspaceParams[M],
-    timeoutMs = 30_000,
+    timeoutMs?: number,
   ): Promise<WorkspaceResults[M]> => {
     if (closed) return Promise.reject({ code: "manager_disconnected" });
     const requestId = `workspace${++sequence}`;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => {
-        pending.delete(requestId);
-        reject({ code: "manager_timeout" });
-      }, timeoutMs);
+      // detach 等待实际释放完成；普通短请求保留传输预算，显式期限仍由调用方决定。
+      const budget = timeoutMs ?? (method === "workspace.detach" ? null : 30_000);
+      const timer =
+        budget === null
+          ? null
+          : setTimeout(() => {
+              pending.delete(requestId);
+              reject({ code: "manager_timeout" });
+            }, budget);
       pending.set(requestId, {
         resolve(message) {
-          clearTimeout(timer);
+          if (timer !== null) clearTimeout(timer);
           pending.delete(requestId);
           const response = v.parse(workspaceResponseSchema, message);
           if ("error" in response) {
@@ -70,7 +75,7 @@ export function createWorkspaceClient(
           resolve(parsed.output as WorkspaceResults[M]);
         },
         reject(reason) {
-          clearTimeout(timer);
+          if (timer !== null) clearTimeout(timer);
           reject(reason);
         },
       });
