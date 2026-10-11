@@ -157,6 +157,7 @@ async function main() {
               consumer,
               request.params.action,
               request.params.params,
+              request.params.commandId,
             );
           case "workspace.status":
             return runtime.status(request.params.cwd, consumer);

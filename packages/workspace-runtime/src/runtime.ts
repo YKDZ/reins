@@ -21,8 +21,15 @@ import {
   type ProtocolMethod,
   type ConsumerContext,
   type ProtocolMessage,
+  protocolRequestSchema,
+  protocolResponseSchema,
+  type CommandId,
 } from "@reins/protocol";
-import { createUnixSocketClient } from "@reins/transport";
+import {
+  createUnixSocketClient,
+  createUnixSocketServer,
+  type TransportServer,
+} from "@reins/transport";
 import {
   workspaceErrorSchema,
   type ManagedWorkspaceInfo,
@@ -62,6 +69,8 @@ type RecordState = {
   container: string;
   environmentStage?: "pending" | "creating" | "created" | "started";
   containerId?: string;
+  detach?: { disposition: "require_none" };
+  commands?: Record<string, { fingerprint: string; pending: boolean }>;
   bindingStages?: Record<
     string,
     "pending" | "installing" | "installed" | "validated" | "ready"
@@ -72,14 +81,24 @@ async function identity(path: string): Promise<NativeIdentity> {
   const value = await stat(path, { bigint: true });
   return { path, dev: String(value.dev), ino: String(value.ino) };
 }
-async function persist(record: RecordState) {
+const writes = new WeakMap<RecordState, Promise<void>>();
+function persist(record: RecordState): Promise<void> {
+  // 调用顺序就是事实提交顺序，慢文件系统不能让旧快照覆盖已接受的清理意图。
+  const snapshot = JSON.stringify(record);
+  const next = (writes.get(record) ?? Promise.resolve())
+    .catch(() => {})
+    .then(() => writeRecord(record, snapshot));
+  writes.set(record, next);
+  return next;
+}
+async function writeRecord(record: RecordState, snapshot: string) {
   await mkdir(record.directory, { recursive: true, mode: 0o700 });
   const target = join(record.directory, "attachment.json");
   const temp = `${target}.${randomUUID()}.tmp`;
   try {
     const file = await open(temp, "wx", 0o600);
     try {
-      await file.writeFile(JSON.stringify(record));
+      await file.writeFile(snapshot);
       await file.sync();
     } finally {
       await file.close();
@@ -189,6 +208,7 @@ export async function openWorkspaceRuntime(options: {
     }
   }
   const clients = new Map<string, ReinsClient>();
+  const routes = new Map<string, Promise<TransportServer<ProtocolMessage>>>();
   // 保留完整 UUID 身份，用紧凑目录避开 Unix socket 的路径长度上限。
   const controlDirectory = (record: RecordState) =>
     join(
@@ -314,6 +334,7 @@ export async function openWorkspaceRuntime(options: {
       if (!allowInvalid) throw failure;
       return { record, tree };
     }
+    if (record.detach !== undefined) return { record, tree };
     const loss = await nativeLoss(record);
     if (loss !== undefined) await invalidate(record, loss);
     if (!allowInvalid && record.info.source.error?.code === "native_view_lost")
@@ -337,6 +358,105 @@ export async function openWorkspaceRuntime(options: {
     clients.set(record.directory, client);
     client.onClosed(() => clients.delete(record.directory));
     return client;
+  };
+  const mutable = (method: ProtocolMethod) =>
+    ["spawn", "send", "resolvePermission"].includes(method);
+  const routedSocket = async (record: RecordState) => {
+    let route = routes.get(record.directory);
+    const path = join(controlDirectory(record), "p.sock");
+    if (route === undefined) {
+      route = (async () => {
+        await rm(path, { force: true });
+        const server = createUnixSocketServer<ProtocolMessage>({ path });
+        server.onConnection((peer) => {
+          const requests = new Map<string, string>();
+          const native = createUnixSocketClient<ProtocolMessage>(
+            join(controlDirectory(record), "r.sock"),
+          );
+          void native
+            .then((connection) => {
+              connection.onEvent((event) => {
+                if (event.kind !== "message") {
+                  peer.close();
+                  return;
+                }
+                const response = v.safeParse(
+                  protocolResponseSchema,
+                  event.message,
+                );
+                const key = response.success
+                  ? requests.get(response.output.requestId)
+                  : undefined;
+                if (key === undefined) {
+                  peer.send(event.message);
+                  return;
+                }
+                // ACK 只由原 daemon 产生；先保存其已知结果，再原样交付。
+                void exclusive(async () => {
+                  if (record.commands?.[key] !== undefined)
+                    record.commands[key].pending = false;
+                  await persist(record);
+                  peer.send(event.message);
+                }).catch(() => peer.close());
+              });
+            })
+            .catch(() => peer.close());
+          peer.onEvent((event) => {
+            if (event.kind !== "message") {
+              void native
+                .then((connection) => connection.close())
+                .catch(() => {});
+              return;
+            }
+            const parsed = v.safeParse(protocolRequestSchema, event.message);
+            const request = parsed.success ? parsed.output : undefined;
+            const forward = async () => {
+              const connection = await native;
+              if (request !== undefined && mutable(request.method)) {
+                const known =
+                  request.commandId === undefined
+                    ? undefined
+                    : record.commands?.[request.commandId];
+                if (record.detach !== undefined && known === undefined) {
+                  peer.send({
+                    kind: "response",
+                    requestId: request.requestId,
+                    error: { code: "workspace_detaching" },
+                  });
+                  return;
+                }
+                if (request.commandId !== undefined) {
+                  record.commands ??= {};
+                  // 原 CommandId 的冲突检查与去重仍由 daemon 负责，不替换或重试请求。
+                  record.commands[request.commandId] ??= {
+                    fingerprint: fingerprint({
+                      method: request.method,
+                      params: request.params,
+                    }),
+                    pending: true,
+                  };
+                  requests.set(request.requestId, request.commandId);
+                  await persist(record);
+                }
+              }
+              connection.send(event.message);
+            };
+            // 只串行化准入、落盘和写帧；原生回合、只读请求、kill 与订阅控制不占锁。
+            void (
+              request !== undefined && mutable(request.method)
+                ? exclusive(forward)
+                : forward()
+            ).catch(() => peer.close());
+          });
+        });
+        await server.listen();
+        return server;
+      })();
+      routes.set(record.directory, route);
+      void route.catch(() => routes.delete(record.directory));
+    }
+    await route;
+    return path;
   };
   const stopTasks = new Map<string, Promise<void>>();
   const machineFailure = (error: unknown): MachineError | undefined => {
@@ -529,7 +649,7 @@ export async function openWorkspaceRuntime(options: {
   };
   const status = async (cwd: string, owner: ConsumerContext) => {
     const { record, tree } = await find(cwd, owner, true);
-    if (record.info.runtime.status === "ready") {
+    if (record.info.runtime.status === "ready" && record.detach === undefined) {
       let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
       try {
         if (!(await inspectContainer(record)).State.Running)
@@ -839,6 +959,7 @@ export async function openWorkspaceRuntime(options: {
     for (const record of records) {
       if (
         record.environmentStage !== "started" ||
+        record.detach !== undefined ||
         observations.has(record.directory) ||
         record.info.runtime.status === "released"
       )
@@ -876,6 +997,8 @@ export async function openWorkspaceRuntime(options: {
       const { record, created } = await exclusive(async () => {
         const existing = await locate(tree);
         if (existing !== undefined) {
+          if (existing.detach !== undefined)
+            throw workspaceFailure("workspace_detaching");
           await find(cwd, owner);
           if (JSON.stringify(existing.intent) !== JSON.stringify(intent))
             throw workspaceFailure("attachment_intent_conflict");
@@ -973,7 +1096,7 @@ export async function openWorkspaceRuntime(options: {
       const { record, tree } = await find(cwd, owner, true);
       return {
         cwd: tree.cwd,
-        socket: join(controlDirectory(record), "r.sock"),
+        socket: await routedSocket(record),
       };
     },
     async admit(
@@ -981,8 +1104,15 @@ export async function openWorkspaceRuntime(options: {
       owner: ConsumerContext,
       action: ProtocolMethod,
       params: unknown,
+      commandId?: CommandId,
     ) {
       const { record, tree } = await find(cwd, owner, true);
+      if (
+        mutable(action) &&
+        record.detach !== undefined &&
+        (commandId === undefined || record.commands?.[commandId] === undefined)
+      )
+        throw workspaceFailure("workspace_detaching");
       if (
         ["spawn", "send", "resolvePermission"].includes(action) &&
         record.info.source.error?.code === "native_view_lost"
@@ -1007,13 +1137,26 @@ export async function openWorkspaceRuntime(options: {
     },
     async detach(cwd: string, owner: ConsumerContext) {
       const { record, tree } = await find(cwd, owner);
-      if (preparing.has(record.directory))
-        throw workspaceFailure("workspace_busy");
-      if (record.info.runtime.status === "ready") {
-        const response = await (await connect(record)).request("list", {});
-        if ("error" in response || response.result.length !== 0)
+      await exclusive(async () => {
+        if (record.detach !== undefined) return;
+        if (
+          preparing.has(record.directory) ||
+          Object.values(record.commands ?? {}).some(
+            (command) => command.pending,
+          )
+        )
           throw workspaceFailure("workspace_busy");
-      }
+        if (record.environmentStage === "started") {
+          const response = await (await connect(record)).request("list", {});
+          if (
+            "error" in response ||
+            response.result.some((session) => session.state !== "killed")
+          )
+            throw workspaceFailure("workspace_busy");
+        }
+        record.detach = { disposition: "require_none" };
+        await persist(record);
+      });
       clients.get(record.directory)?.close();
       clients.delete(record.directory);
       await docker(["rm", "-f", record.container]);
@@ -1023,6 +1166,8 @@ export async function openWorkspaceRuntime(options: {
         recursive: true,
         force: true,
       });
+      await (await routes.get(record.directory))?.close();
+      routes.delete(record.directory);
       return { ...record.info, cwd: tree.cwd };
     },
     async close() {
@@ -1032,6 +1177,10 @@ export async function openWorkspaceRuntime(options: {
       await Promise.allSettled(stopTasks.values());
       for (const client of clients.values()) client.close();
       clients.clear();
+      await Promise.allSettled(
+        [...routes.values()].map(async (route) => (await route).close()),
+      );
+      routes.clear();
     },
   };
 }

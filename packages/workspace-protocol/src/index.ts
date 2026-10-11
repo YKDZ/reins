@@ -4,6 +4,8 @@ import {
   machineErrorSchema,
   protocolMethodSchema,
   type ProtocolMethod,
+  commandIdSchema,
+  type CommandId,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -70,6 +72,7 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
     "preparation_outcome_unknown",
     "runtime_resource_mismatch",
     "workspace_busy",
+    "workspace_detaching",
     "workspace_not_ready",
     "harness_not_prepared",
     "manager_disconnected",
@@ -239,7 +242,12 @@ export type WorkspaceParams = {
   "workspace.attach": { cwd: string; bindings: string[] };
   "workspace.status": { cwd: string };
   "workspace.route": { cwd: string };
-  "workspace.admit": { cwd: string; action: ProtocolMethod; params: unknown };
+  "workspace.admit": {
+    cwd: string;
+    action: ProtocolMethod;
+    params: unknown;
+    commandId?: CommandId;
+  };
   "workspace.detach": { cwd: string; sessionDisposition: "require_none" };
 };
 export type WorkspaceResults = {
@@ -267,6 +275,7 @@ export const workspaceRequestSchema = v.variant("method", [
       cwd: v.string(),
       action: protocolMethodSchema,
       params: v.unknown(),
+      commandId: v.optional(commandIdSchema),
     }),
   }),
   v.strictObject({

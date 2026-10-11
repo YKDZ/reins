@@ -2088,6 +2088,7 @@ export const errorCodeSchema = v.union([
   v.literal("session_killed"),
   v.literal("session_terminating"),
   v.literal("daemon_shutting_down"),
+  v.literal("workspace_detaching"),
   v.literal("invalid_params"),
   v.literal("permission_not_pending"),
   v.literal("permission_resolution_mismatch"),
@@ -2208,6 +2209,7 @@ export const machineErrorSchema = v.union([
     sessionId: sessionIdSchema,
   }),
   v.strictObject({ code: v.literal("daemon_shutting_down") }),
+  v.strictObject({ code: v.literal("workspace_detaching") }),
   v.strictObject({
     code: v.literal("permission_not_pending"),
     sessionId: sessionIdSchema,

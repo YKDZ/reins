@@ -203,6 +203,7 @@ export function exitCodeForError(error: CliError): number {
     case "session_killed":
     case "session_terminating":
     case "daemon_shutting_down":
+    case "workspace_detaching":
     case "permission_not_pending":
     case "permission_resolution_mismatch":
     case "diagnostic_not_found":
