@@ -102,3 +102,12 @@ REINS_WORKSPACE_MANAGER_STATE_DIR=/absolute/manager-state \
 关闭、结束或断开观察会移除对应的成果观察；没有等待或订阅时不承诺后台唤起。断连及通知丢失后，`workspace publications` 仍可查询固定副本，显式 `workspace receive` 才产生本地 `arrived` 事实。任务失败不删除发布，成果通知不证明任务完成或成果齐全。
 
 成果查询失败时，已确定的 `wait` 结果与订阅结束事实仍返回，并以独立的 `publicationError` 报告发现失败；不把失败投影为空成果，也不改写任务终态。
+
+已发布副本跨环境脱离保留；脱离后仍以原工作目录查询并显式接收。发布记录的 `storagePath` 是 Manager 上的实际固定副本位置；接收记录的 `localPath` 是消费者可使用的文件，`receiptId` 用于明确选择该次接收。同一发布可接收多次，接收不会删除发布。
+
+```sh
+reins workspace remove-publication pub-<uuid>
+reins workspace remove-receipt receipt-<uuid> --directory /absolute/receipts
+```
+
+共享客户端分别使用 `request("publication.remove", { publicationId })` 与 `removeReceipt(directory, receiptId)`。每次只清理明确选中的当前消费者副本；另一端、未选副本、原生 Git 引用／对象、活动工作树和本地历史均独立保留。结果报告 `released` 或 `failed`，并列出目录、元数据和 payload 的实际 `present`／`absent`／`unknown` 状态；失败不冒充已经释放，CLI 非零退出。调用方修正原因后可再次明确清理同一副本；重复清理已经消失的副本返回实际为空的释放结果。产品副本清理不包含平台回收或 Git GC。

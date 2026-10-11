@@ -203,6 +203,11 @@ async function main() {
               consumer,
               request.params.publicationId,
             );
+          case "publication.remove":
+            return runtime.publications.remove(
+              consumer,
+              request.params.publicationId,
+            );
           case "workspace.history":
             return runtime.history(
               request.params.cwd,

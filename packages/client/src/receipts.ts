@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import {
   mkdir,
+  lstat,
   open,
   readFile,
   readdir,
@@ -11,12 +12,17 @@ import {
 import { isAbsolute, join, relative, resolve } from "node:path";
 
 import type { ConsumerContext } from "@reins/protocol";
-import { publicationSchema, type Publication } from "@reins/workspace-protocol";
+import {
+  publicationSchema,
+  type Publication,
+  type CopyCleanup,
+} from "@reins/workspace-protocol";
 import * as v from "valibot";
 
 export type Receipt = Omit<Publication, "state"> & {
   state: "arrived";
   localPath: string;
+  receiptId: string;
 };
 const hash = (value: string | Buffer) =>
   createHash("sha256").update(value).digest("hex");
@@ -58,6 +64,7 @@ export async function receivePublication(
     const receipt: Receipt = {
       ...publication,
       state: "arrived",
+      receiptId: name,
       localPath: join(committed, "payload"),
     };
     await mkdir(staging, { recursive: true, mode: 0o700 });
@@ -114,6 +121,9 @@ export async function listReceipts(
       bytes: value.bytes,
       sha256: value.sha256,
       state: "ready",
+      ...(value.storagePath === undefined
+        ? {}
+        : { storagePath: value.storagePath }),
     });
     const localPath = join(parent, name, "payload");
     const bytes = await readFile(localPath);
@@ -122,7 +132,50 @@ export async function listReceipts(
       hash(bytes) !== publication.sha256
     )
       throw { code: "receipt_failed" };
-    result.push({ ...publication, state: "arrived", localPath });
+    result.push({
+      ...publication,
+      state: "arrived",
+      localPath,
+      receiptId: name,
+    });
   }
   return result;
+}
+export async function removeReceipt(
+  owner: ConsumerContext,
+  directory: string,
+  receiptId: string,
+): Promise<CopyCleanup> {
+  if (!/^receipt-[a-f0-9-]{36}$/u.test(receiptId))
+    throw { code: "invalid_request" };
+  const folder = join(consumerDirectory(directory, owner), receiptId);
+  let detail: string | undefined;
+  try {
+    await rm(folder, { recursive: true, force: true });
+  } catch (error) {
+    detail = String(error);
+  }
+  const presence = async (path: string) => {
+    try {
+      await lstat(path);
+      return "present" as const;
+    } catch (error) {
+      return (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? ("absent" as const)
+        : ("unknown" as const);
+    }
+  };
+  const remaining = {
+    directory: await presence(folder),
+    metadata: await presence(join(folder, "receipt.json")),
+    payload: await presence(join(folder, "payload")),
+  };
+  return {
+    state: Object.values(remaining).every((value) => value === "absent")
+      ? "released"
+      : "failed",
+    storagePath: join(folder, "payload"),
+    remaining,
+    ...(detail === undefined ? {} : { detail }),
+  };
 }
