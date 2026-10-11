@@ -1,7 +1,7 @@
+import { encodePermissionHandle } from "@reins/protocol";
 import type {
   CapabilitiesResult,
   DiagnosticsResult,
-  DomainEvent,
   KillResult,
   ProtocolResult,
   SessionInfo,
@@ -34,8 +34,12 @@ export function printError(
   const rendered = renderCliError(error, spec);
   if (mode === "json") {
     const message = jsonErrorMessage(rendered);
+    const projected =
+      "permissionId" in error
+        ? { code: error.code, sessionId: error.sessionId }
+        : error;
     printJsonLine({
-      ...error,
+      ...projected,
       message:
         "diagnosticId" in error && error.diagnosticId !== undefined
           ? `${message}. reins diagnostics --id ${error.diagnosticId}`
@@ -213,12 +217,17 @@ export function printResolvePermissionAck(
   mode: OutputMode,
 ): void {
   if (mode === "json") {
-    printJsonLine(ack);
+    printJsonLine({
+      permissionHandle: encodePermissionHandle({
+        sessionId: ack.sessionId,
+        turnId: ack.turnId,
+        permissionId: ack.permissionId,
+      }),
+      status: "resolved",
+    });
     return;
   }
-  process.stdout.write(
-    `Resolved permission ${ack.permissionId} on session ${ack.sessionId}\n`,
-  );
+  process.stdout.write("Permission resolved\n");
 }
 
 export function printCapabilitiesResult(
@@ -254,80 +263,42 @@ export function printCapabilitiesResult(
   }
 }
 
-export function printNotification(
-  kind: "event" | "attach.ended",
-  params: unknown,
+export function printAgentEvent(
+  event: import("@reins/client").AgentEvent,
   mode: OutputMode,
 ): void {
   if (mode === "json") {
-    let projected = params;
-    if (kind === "event") {
-      const event = params as DomainEvent;
-      if (event.type === "turn.completed" && event.stopReason === "failed")
-        projected = {
-          ...event,
-          message: harnessFailureMessage(event.failure, event.diagnosticId),
-        };
-    }
-    printJsonLine({
-      kind: "notification",
-      method: kind,
-      params: projected,
-    });
-    return;
-  }
-  if (kind === "attach.ended") {
-    const ended = params as { sessionId: string; reason: string };
-    process.stdout.write(
-      `[attach ended] ${ended.sessionId}: ${ended.reason}\n`,
+    printJsonLine(
+      event.type === "turn.completed" && event.stopReason === "failed"
+        ? {
+            ...event,
+            message: harnessFailureMessage(event.failure, event.diagnosticId),
+          }
+        : event,
     );
     return;
   }
-  printPrettyEvent(params as DomainEvent);
-}
-
-function printPrettyEvent(event: DomainEvent): void {
-  switch (event.type) {
-    case "text.delta":
-      process.stdout.write(event.delta);
-      break;
-    case "message":
+  if (event.type === "text") {
+    if (event.start && event.complete) process.stdout.write(event.role + ": ");
+    process.stdout.write(event.content);
+    if (event.complete && !event.content.endsWith("\n"))
+      process.stdout.write("\n");
+  } else if (
+    event.type === "tool.requested" ||
+    event.type === "tool.completed"
+  ) {
+    process.stdout.write(
+      `[tool] ${event.name} ${event.type === "tool.requested" ? "requested" : "completed"}\n`,
+    );
+  } else if (event.type === "permission.resolved")
+    process.stdout.write(`[permission] resolved ${event.permissionHandle}\n`);
+  else if (event.type === "turn.completed") {
+    process.stdout.write(`[turn completed] ${event.stopReason}\n`);
+    if (event.stopReason === "failed")
       process.stdout.write(
-        `${event.role === "worker" ? "worker" : "caller"}: ${event.content}\n`,
+        `${harnessFailureMessage(event.failure, event.diagnosticId)}\n`,
       );
-      break;
-    case "tool.requested":
-      process.stdout.write(
-        `[tool] ${event.name} requested (${event.toolCallId})\n`,
-      );
-      break;
-    case "tool.completed":
-      process.stdout.write(
-        `[tool] ${event.name} completed (${event.toolCallId})${event.isError ? " with error" : ""}\n`,
-      );
-      break;
-    case "permission.resolved":
-      process.stdout.write(
-        `[permission] resolved ${event.permissionId}: ${JSON.stringify(event.resolution)}\n`,
-      );
-      break;
-    case "turn.completed":
-      process.stdout.write(
-        `[turn completed] ${event.stopReason} (${event.sessionId})\n`,
-      );
-      if (event.stopReason === "failed")
-        process.stdout.write(
-          `${harnessFailureMessage(event.failure, event.diagnosticId)}\n`,
-        );
-      if (event.usage !== undefined) {
-        process.stdout.write(`usage: ${JSON.stringify(event.usage)}\n`);
-      }
-      break;
-    case "session.created":
-    case "session.killed":
-    case "turn.started":
-      break;
-    case "permission.requested":
-      break;
+    if (event.usage !== undefined)
+      process.stdout.write(`usage: ${JSON.stringify(event.usage)}\n`);
   }
 }

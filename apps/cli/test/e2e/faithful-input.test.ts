@@ -15,6 +15,7 @@ import { createReinsClient } from "@reins/client";
 import {
   consumerContextSchema,
   decodeTurnHandle,
+  encodePermissionHandle,
   type DomainEvent,
   type ProtocolMessage,
 } from "@reins/protocol";
@@ -189,10 +190,14 @@ test("Codex approval advertises only native decisions that can be faithfully ans
   const client = await connectClient();
   const events: DomainEvent[] = [];
   client.onNotification((n) => {
-    if (n.method === "event") events.push(n.params);
+    if (n.method === "event") events.push(n.params.event);
   });
   expect(
-    await client.request("attach", { sessionId: target.sessionId, replay: 20 }),
+    await client.request("attach", {
+      scope: "session",
+      sessionId: target.sessionId,
+      replay: { mode: "available" },
+    }),
   ).toHaveProperty("result");
   await vi.waitFor(() =>
     expect(events.some((e) => e.type === "permission.requested")).toBe(true),
@@ -203,6 +208,7 @@ test("Codex approval advertises only native decisions that can be faithfully ans
   expect(requested.options).toEqual([{ outcome: "allow", scope: "once" }]);
   expect(
     await client.request("resolvePermission", {
+      turnId: target.turnId,
       sessionId: target.sessionId,
       permissionId: requested.permissionId,
       resolution: { outcome: "deny", feedback: "caller authored feedback" },
@@ -210,6 +216,7 @@ test("Codex approval advertises only native decisions that can be faithfully ans
   ).toMatchObject({ error: { code: "permission_resolution_mismatch" } });
   expect(
     await client.request("resolvePermission", {
+      turnId: target.turnId,
       sessionId: target.sessionId,
       permissionId: requested.permissionId,
       resolution: { outcome: "allow", scope: "once" },
@@ -392,9 +399,13 @@ test.each(["permission", "session-permission"])(
     const client = await connectClient();
     const events: DomainEvent[] = [];
     client.onNotification((n) => {
-      if (n.method === "event") events.push(n.params);
+      if (n.method === "event") events.push(n.params.event);
     });
-    await client.request("attach", { sessionId: target.sessionId, replay: 20 });
+    await client.request("attach", {
+      scope: "session",
+      sessionId: target.sessionId,
+      replay: { mode: "available" },
+    });
     await vi.waitFor(() =>
       expect(events.some((e) => e.type === "permission.requested")).toBe(true),
     );
@@ -409,8 +420,11 @@ test.each(["permission", "session-permission"])(
       ]);
       const wrong = await cli([
         "resolve-permission",
-        target.sessionId,
-        requested.permissionId,
+        encodePermissionHandle({
+          sessionId: target.sessionId,
+          turnId: target.turnId,
+          permissionId: requested.permissionId,
+        }),
         "--outcome",
         "allow",
         "--scope",
@@ -422,8 +436,11 @@ test.each(["permission", "session-permission"])(
       });
       const missing = await cli([
         "resolve-permission",
-        target.sessionId,
-        requested.permissionId,
+        encodePermissionHandle({
+          sessionId: target.sessionId,
+          turnId: target.turnId,
+          permissionId: requested.permissionId,
+        }),
         "--outcome",
         "deny",
       ]);
@@ -433,8 +450,11 @@ test.each(["permission", "session-permission"])(
       });
       const denied = await cli([
         "resolve-permission",
-        target.sessionId,
-        requested.permissionId,
+        encodePermissionHandle({
+          sessionId: target.sessionId,
+          turnId: target.turnId,
+          permissionId: requested.permissionId,
+        }),
         "--outcome",
         "deny",
         "--feedback",
@@ -450,8 +470,11 @@ test.each(["permission", "session-permission"])(
         (
           await cli([
             "resolve-permission",
-            target.sessionId,
-            requested.permissionId,
+            encodePermissionHandle({
+              sessionId: target.sessionId,
+              turnId: target.turnId,
+              permissionId: requested.permissionId,
+            }),
             "--outcome",
             "allow",
             "--scope",
@@ -514,9 +537,13 @@ test("an already resolved native approval cannot acknowledge an unperformed call
   const client = await connectClient();
   const events: DomainEvent[] = [];
   client.onNotification((n) => {
-    if (n.method === "event") events.push(n.params);
+    if (n.method === "event") events.push(n.params.event);
   });
-  await client.request("attach", { sessionId: target.sessionId, replay: 20 });
+  await client.request("attach", {
+    scope: "session",
+    sessionId: target.sessionId,
+    replay: { mode: "available" },
+  });
   await vi.waitFor(() =>
     expect(events.some((e) => e.type === "permission.requested")).toBe(true),
   );
@@ -525,6 +552,7 @@ test("an already resolved native approval cannot acknowledge an unperformed call
     throw new Error("Missing permission");
   expect(
     await client.request("resolvePermission", {
+      turnId: target.turnId,
       sessionId: target.sessionId,
       permissionId: requested.permissionId,
       resolution: { outcome: "allow", scope: "once" },

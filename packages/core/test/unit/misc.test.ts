@@ -34,6 +34,7 @@ describe("权限与事件", () => {
     expect(machine.list()[0]?.state).toBe("busy");
 
     await machine.resolvePermission({
+      turnId: ids.turn("t1"),
       sessionId: id,
       permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },

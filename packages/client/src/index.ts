@@ -1,3 +1,18 @@
+import {
+  createEventProjector,
+  projectSubscriptionTarget,
+  type AgentSubscriptionEnd,
+  type AgentSubscription,
+  type AgentEvent,
+  type Subscribe,
+} from "./subscription.ts";
+export type {
+  AgentSubscription,
+  AgentEvent,
+  AgentEstablishment,
+  AgentSubscriptionEnd,
+  AgentTarget,
+} from "./subscription.ts";
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -43,7 +58,7 @@ export type ReinsClientOptions = {
 
 export type ReinsClient = {
   initialize(timeoutMs?: number): Promise<ProtocolResponseFor<"initialize">>;
-  // wait 只使用 params.timeoutMs 领域预算；其余请求使用此处的传输预算。
+  // wait 只使用领域预算；attach 持续到显式关闭或终止，其他请求有传输预算。
   request<M extends ProtocolMethod>(
     method: M,
     params: ProtocolParams<M>,
@@ -56,6 +71,7 @@ export type ReinsClient = {
   ): Promise<ProtocolResponseFor<SideEffectMethod>>;
   onNotification(listener: NotificationListener): () => void;
   onClosed(listener: (reason: MachineError) => void): () => void;
+  subscribe: Subscribe;
   close(): void;
 };
 
@@ -253,9 +269,9 @@ export function createReinsClient(
         pending.delete(requestId);
         action();
       };
-      // wait 的观察预算由 daemon 的领域计时器拥有，传输断连仍独立报错。
+      // wait 的预算由 daemon 拥有，attach 不继承普通请求时限；断连仍独立报错。
       const timer =
-        method === "wait"
+        method === "wait" || method === "attach"
           ? null
           : setTimeout(() => {
               settle(() =>
@@ -306,6 +322,119 @@ export function createReinsClient(
     });
   };
 
+  const subscribe: Subscribe = async (params) => {
+    const queued: AgentEvent[] = [];
+    const initial: ProtocolNotification[] = [];
+    const eventListeners = new Set<(event: AgentEvent) => void>();
+    let establishment: ProtocolResult<"attach"> | undefined;
+    let ended = false;
+    let resolveDone!: (end: AgentSubscriptionEnd) => void;
+    let rejectDone!: (error: Error) => void;
+    const done = new Promise<AgentSubscriptionEnd>((resolve, reject) => {
+      resolveDone = resolve;
+      rejectDone = reject;
+    });
+    void done.catch(() => undefined);
+    const project = createEventProjector();
+    const wake = () => {
+      if (eventListeners.size === 0) return;
+      for (const event of queued.splice(0))
+        for (const listener of Array.from(eventListeners)) listener(event);
+    };
+    const cleanup = () => {
+      listeners.delete(receive);
+      closedListeners.delete(disconnect);
+    };
+    const disconnect = (reason: MachineError) => {
+      if (ended) return;
+      ended = true;
+      const failure = new Error(JSON.stringify(reason));
+      cleanup();
+      rejectDone(failure);
+      wake();
+    };
+    const receive = (notification: ProtocolNotification) => {
+      if (establishment === undefined) {
+        initial.push(notification);
+        return;
+      }
+      if (
+        notification.params.subscriptionId !== establishment.subscriptionId ||
+        ended
+      )
+        return;
+      if (notification.method === "event") {
+        for (const projected of project(notification.params.event)) {
+          const event = { ...projected, eventId: notification.params.eventId };
+          if (
+            event.type === "permission.resolved" ||
+            event.type === "turn.completed"
+          ) {
+            for (let index = queued.length - 1; index >= 0; index -= 1) {
+              const previous = queued[index];
+              if (
+                previous?.type === "permission.requested" &&
+                (event.type === "permission.resolved"
+                  ? previous.permissionHandle === event.permissionHandle
+                  : previous.turnHandle === event.turnHandle)
+              )
+                queued.splice(index, 1);
+            }
+          }
+          queued.push(event);
+        }
+      } else {
+        ended = true;
+        cleanup();
+        resolveDone({
+          target: projectSubscriptionTarget(notification.params.target),
+          reason: notification.params.reason,
+          lastEventId: notification.params.lastEventId,
+        });
+      }
+      wake();
+    };
+    listeners.add(receive);
+    closedListeners.add(disconnect);
+    try {
+      const response = await request("attach", params);
+      if ("error" in response) throw new Error(JSON.stringify(response.error));
+      establishment = response.result;
+      for (const notification of initial.splice(0)) receive(notification);
+    } catch (error) {
+      cleanup();
+      throw error;
+    }
+    const subscription: AgentSubscription = {
+      establishment: {
+        target: projectSubscriptionTarget(establishment.target),
+        window: establishment.window,
+        replayed: establishment.replayed,
+      },
+      done,
+      onEvent(listener) {
+        eventListeners.add(listener);
+        wake();
+        return () => {
+          eventListeners.delete(listener);
+        };
+      },
+      close() {
+        if (ended) return;
+        try {
+          connection.send({
+            kind: "control",
+            method: "subscription.close",
+            subscriptionId: establishment.subscriptionId,
+          });
+        } catch {
+          terminate(clientMachineError("daemon_disconnected"));
+        }
+      },
+    };
+    return subscription;
+  };
+
   return {
     initialize(timeoutMs) {
       return request(
@@ -318,6 +447,7 @@ export function createReinsClient(
       );
     },
     request,
+    subscribe,
     retry(token, params, timeoutMs) {
       const identity = parseRetryToken(token);
       const restored =

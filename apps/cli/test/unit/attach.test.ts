@@ -1,39 +1,47 @@
 import { PassThrough } from "node:stream";
 
+import { createReinsClient, type ReinsClient } from "@reins/client";
 import type {
-  NotificationListener,
-  ProtocolResponseFor,
-  ReinsClient,
-} from "@reins/client";
-import type {
-  MachineError,
-  ProtocolMethod,
-  ProtocolNotification,
-  ProtocolParams,
+  DomainEvent,
+  ProtocolMessage,
+  ProtocolRequest,
 } from "@reins/protocol";
 import {
   messageIdSchema,
   permissionIdSchema,
-  protocolNotificationSchema,
-  requestIdSchema,
+  consumerContextSchema,
+  subscriptionIdSchema,
+  eventIdSchema,
   sessionIdSchema,
   turnIdSchema,
 } from "@reins/protocol";
+import type { TransportConnection, TransportEvent } from "@reins/transport";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { runAttach } from "../../src/attach.ts";
 
+type LegacyNotification =
+  | { kind: "notification"; method: "event"; params: DomainEvent }
+  | {
+      kind: "notification";
+      method: "attach.ended";
+      params: {
+        sessionId: import("@reins/protocol").SessionId;
+        reason: "session_killed";
+      };
+    };
+const legacyNotification = (value: LegacyNotification): LegacyNotification =>
+  value;
 const sessionId = v.parse(sessionIdSchema, "prompt@g1");
 const turnId = v.parse(turnIdSchema, "t1");
 const secondTurnId = v.parse(turnIdSchema, "t2");
-const requestId = v.parse(requestIdSchema, "test");
 const messageId = v.parse(messageIdSchema, "m1");
 const requested = (
   permissionId: "p1" | "p2" | "p3",
   targetTurnId = turnId,
-): ProtocolNotification =>
-  v.parse(protocolNotificationSchema, {
+): LegacyNotification =>
+  legacyNotification({
     kind: "notification",
     method: "event",
     params: {
@@ -49,8 +57,8 @@ const requested = (
     },
   });
 
-const resolved = (permissionId: "p1" | "p2"): ProtocolNotification =>
-  v.parse(protocolNotificationSchema, {
+const resolved = (permissionId: "p1" | "p2"): LegacyNotification =>
+  legacyNotification({
     kind: "notification",
     method: "event",
     params: {
@@ -62,7 +70,7 @@ const resolved = (permissionId: "p1" | "p2"): ProtocolNotification =>
     },
   });
 
-const completed = (targetTurnId = turnId): ProtocolNotification => ({
+const completed = (targetTurnId = turnId): LegacyNotification => ({
   kind: "notification",
   method: "event",
   params: {
@@ -76,58 +84,110 @@ const completed = (targetTurnId = turnId): ProtocolNotification => ({
 
 class ControlledClient implements ReinsClient {
   readonly resolutions: string[] = [];
-  private readonly notifications = new Set<NotificationListener>();
-  private readonly closed = new Set<(reason: MachineError) => void>();
-  private attachResolve:
-    | ((response: ProtocolResponseFor<"attach">) => void)
-    | undefined;
-
-  // attach 层接到的是已握手的连接，握手不在本用例边界内。
-  initialize(): never {
-    throw new Error("attach does not drive the handshake");
+  readonly request: ReinsClient["request"];
+  readonly retry: ReinsClient["retry"];
+  readonly subscribe: ReinsClient["subscribe"];
+  readonly onNotification: ReinsClient["onNotification"];
+  readonly onClosed: ReinsClient["onClosed"];
+  readonly initialize: ReinsClient["initialize"];
+  readonly close: ReinsClient["close"];
+  private readonly listeners = new Set<
+    (event: TransportEvent<ProtocolMessage>) => void
+  >();
+  private attachRequest: ProtocolRequest | undefined;
+  private position = 0;
+  constructor() {
+    const connection: TransportConnection<ProtocolMessage> = {
+      send: (message) => {
+        if (message.kind === "control") {
+          this.end();
+          return;
+        }
+        if (message.kind !== "request") return;
+        if (message.method === "attach") {
+          this.attachRequest = message;
+          return;
+        }
+        const params =
+          message.params as import("@reins/protocol").ResolvePermissionParams;
+        const result =
+          message.method === "initialize"
+            ? { protocolMajorVersion: 1, daemonGeneration: "gunit" }
+            : {
+                sessionId: params.sessionId,
+                turnId: params.turnId,
+                permissionId: params.permissionId,
+              };
+        if (message.method === "resolvePermission")
+          this.resolutions.push(params.permissionId);
+        this.deliver({
+          kind: "response",
+          requestId: message.requestId,
+          result,
+        });
+      },
+      onEvent: (listener) => {
+        this.listeners.add(listener);
+        return () => this.listeners.delete(listener);
+      },
+      close: () => {},
+    };
+    const client = createReinsClient(connection, {
+      consumerContext: v.parse(consumerContextSchema, "unit"),
+    });
+    this.request = client.request.bind(client);
+    this.retry = client.retry.bind(client);
+    this.subscribe = client.subscribe.bind(client);
+    this.onNotification = client.onNotification.bind(client);
+    this.onClosed = client.onClosed.bind(client);
+    this.initialize = client.initialize.bind(client);
+    this.close = client.close.bind(client);
+    void client.initialize();
   }
-
-  retry(): never {
-    throw new Error("attach does not recover commands");
+  private deliver(message: ProtocolMessage): void {
+    for (const listener of this.listeners)
+      listener({ kind: "message", message });
   }
-
-  request<M extends ProtocolMethod>(
-    method: M,
-    params: ProtocolParams<M>,
-  ): Promise<ProtocolResponseFor<M>> {
-    if (method === "attach") {
-      return new Promise((resolve) => {
-        this.attachResolve = resolve;
-      }) as Promise<ProtocolResponseFor<M>>;
-    }
-    let result: unknown = {};
-    if (method === "resolvePermission") {
-      const resolution = params as ProtocolParams<"resolvePermission">;
-      this.resolutions.push(resolution.permissionId);
-      result = {
-        sessionId: resolution.sessionId,
-        permissionId: resolution.permissionId,
-      };
-    }
-    return Promise.resolve({
-      kind: "response",
-      requestId,
-      result,
-    }) as Promise<ProtocolResponseFor<M>>;
-  }
-
   acceptAttach(): void {
-    this.attachResolve?.({
+    if (this.attachRequest === undefined)
+      throw new Error("Missing attach request");
+    this.deliver({
       kind: "response",
-      requestId,
-      result: { sessionId, replayed: 0 },
+      requestId: this.attachRequest.requestId,
+      result: {
+        sessionId,
+        subscriptionId: "subscription-unit",
+        target: { scope: "session", sessionId },
+        window: { oldest: null, head: null },
+        replayed: 0,
+      },
     });
   }
-
-  emit(notification: ProtocolNotification): void {
-    for (const listener of this.notifications) listener(notification);
+  emit(notification: LegacyNotification): void {
+    const subscriptionId = v.parse(subscriptionIdSchema, "subscription-unit");
+    if (notification.method === "event")
+      this.deliver({
+        kind: "notification",
+        method: "event",
+        params: {
+          subscriptionId,
+          eventId: v.parse(eventIdSchema, ++this.position),
+          event: notification.params,
+        },
+      });
+    else
+      this.deliver({
+        kind: "notification",
+        method: "attach.ended",
+        params: {
+          ...notification.params,
+          subscriptionId,
+          target: { scope: "session", sessionId },
+          lastEventId:
+            this.position === 0 ? null : v.parse(eventIdSchema, this.position),
+        },
+      });
   }
-
   end(): void {
     this.emit({
       kind: "notification",
@@ -135,18 +195,6 @@ class ControlledClient implements ReinsClient {
       params: { sessionId, reason: "session_killed" },
     });
   }
-
-  onNotification(listener: NotificationListener): () => void {
-    this.notifications.add(listener);
-    return () => this.notifications.delete(listener);
-  }
-
-  onClosed(listener: (reason: MachineError) => void): () => void {
-    this.closed.add(listener);
-    return () => this.closed.delete(listener);
-  }
-
-  close(): void {}
 }
 
 const tick = async (): Promise<void> => {
@@ -164,7 +212,7 @@ test("replayed request followed by resolution never opens a prompt", async () =>
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -186,7 +234,7 @@ test("a replayed terminal clears its pending permission before attach acceptance
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -206,7 +254,7 @@ test("a live turn terminal aborts its active permission without resolving it", a
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -227,7 +275,7 @@ test("a late answer after terminal abort cannot authorize the next turn", async 
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -255,7 +303,7 @@ test("a late answer after external resolution cannot authorize the next permissi
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -283,7 +331,7 @@ test("surplus lines for one permission cannot pre-authorize the next", async () 
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -311,7 +359,7 @@ test("allow with surplus input and EOF resolves only its active permission", asy
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -336,7 +384,7 @@ test("a terminal clears its turn while a later turn keeps FIFO progress", async 
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -364,7 +412,10 @@ test("pretty replay waits for attach acceptance and flushes a complete body once
     return true;
   });
   const client = new ControlledClient();
-  const attached = runAttach(client, { params: { sessionId }, mode: "pretty" });
+  const attached = runAttach(client, {
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
+    mode: "pretty",
+  });
   client.emit({
     kind: "notification",
     method: "event",
@@ -405,7 +456,7 @@ test("a coherent replay body is rendered before its permission menu starts", asy
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -440,7 +491,10 @@ test("an end received before the attach ACK flushes its initial batch before res
   });
   const client = new ControlledClient();
   let resolvedEarly = false;
-  const attached = runAttach(client, { params: { sessionId }, mode: "pretty" });
+  const attached = runAttach(client, {
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
+    mode: "pretty",
+  });
   void attached.then(() => {
     resolvedEarly = true;
   });
@@ -463,24 +517,27 @@ test("an end received before the attach ACK flushes its initial batch before res
   client.acceptAttach();
   await expect(attached).resolves.toMatchObject({ reason: "session_killed" });
   expect(output.join("")).toBe(
-    "worker: last replay\n[attach ended] prompt@g1: session_killed\n",
+    "worker: last replay\n[attach ended] session_killed\n",
   );
 });
 
-test("JSON attach emits every notification without presenter projection", async () => {
+test("JSON attach waits for ACK and emits merged readable text", async () => {
   const output: string[] = [];
   vi.spyOn(process.stdout, "write").mockImplementation((chunk) => {
     output.push(String(chunk));
     return true;
   });
   const client = new ControlledClient();
-  const attached = runAttach(client, { params: { sessionId }, mode: "json" });
-  const delta: ProtocolNotification = {
+  const attached = runAttach(client, {
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
+    mode: "json",
+  });
+  const delta: LegacyNotification = {
     kind: "notification",
     method: "event",
     params: { type: "text.delta", sessionId, turnId, messageId, delta: "same" },
   };
-  const snapshot: ProtocolNotification = {
+  const snapshot: LegacyNotification = {
     kind: "notification",
     method: "event",
     params: {
@@ -494,13 +551,15 @@ test("JSON attach emits every notification without presenter projection", async 
   };
   client.emit(delta);
   client.emit(snapshot);
-  expect(output.map((line) => JSON.parse(line) as unknown)).toEqual([
-    delta,
-    snapshot,
-  ]);
+  expect(output).toEqual([]);
   client.acceptAttach();
   client.end();
   await attached;
+  const events = output
+    .map((line) => JSON.parse(line))
+    .filter((event) => event.type === "text");
+  expect(events.map((event) => event.content).join("")).toBe("same");
+  expect(events.every((event) => !("messageId" in event))).toBe(true);
 });
 
 test("pending permissions drain once in FIFO order after attach acceptance", async () => {
@@ -508,7 +567,7 @@ test("pending permissions drain once in FIFO order after attach acceptance", asy
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -532,7 +591,7 @@ test("a live external resolution cancels the active prompt without replying", as
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -552,7 +611,7 @@ test("stdin EOF is a typed terminal error instead of a silent wait", async () =>
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -571,7 +630,7 @@ test("feedback EOF has its own typed recovery reason", async () => {
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -591,7 +650,7 @@ test("same-tick natural close preserves queued feedback for its owner", async ()
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });
@@ -613,7 +672,7 @@ test("input end with choice and feedback resolves the same permission", async ()
   const client = new ControlledClient();
   const input = new PassThrough();
   const attached = runAttach(client, {
-    params: { sessionId },
+    params: { scope: "session", sessionId, replay: { mode: "available" } },
     mode: "pretty",
     input,
   });

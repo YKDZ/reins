@@ -237,9 +237,12 @@ function collectNotifications(client: TransportConnection<ProtocolMessage>): {
     const message = event.message;
     if (message.kind !== "notification") return;
     if (message.method === "event") {
-      events.push(message.params);
+      events.push(message.params.event);
     } else if (message.method === "attach.ended") {
-      ended.push(message.params);
+      ended.push({
+        sessionId: message.params.sessionId,
+        reason: message.params.reason,
+      });
     }
   });
   return { events, ended };
@@ -459,7 +462,11 @@ describe("daemon 公共接口", () => {
     await flush();
     try {
       await expect(
-        makeRequester(client).request("attach", { sessionId, replay: 0 }),
+        makeRequester(client).request("attach", {
+          scope: "session",
+          sessionId,
+          replay: { mode: "none" },
+        }),
       ).resolves.toMatchObject({ result: { sessionId, replayed: 0 } });
       expect(replayHookCalls).toBe(0);
     } finally {
@@ -670,15 +677,16 @@ describe("daemon 协议面（缝 C）", () => {
 
     const collector = collectNotifications(client);
     const attached = await requester("attach", {
+      scope: "turn",
       sessionId: "reviewer@gdaemontest",
-      exitOn: ["end_turn"],
+      turnId: "t1",
+      replay: { mode: "available" },
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId: "reviewer@gdaemontest", replayed: 3 },
+      result: { sessionId: "reviewer@gdaemontest", replayed: 2 },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
-      "session.created",
       "turn.started",
       "turn.completed",
     ]);
@@ -906,7 +914,11 @@ describe("daemon 协议面（缝 C）", () => {
     fake.controls.completeTurn();
 
     const collector = collectNotifications(clientA);
-    await requesterA("attach", { sessionId });
+    await requesterA("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
     const sent = await requesterB("send", {
       placement: "new_turn",
       sessionId,
@@ -1045,7 +1057,11 @@ describe("daemon 协议面（缝 C）", () => {
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
-    await requester("attach", { sessionId });
+    await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
 
     const permissionEvent = collector.events.find(
       (event) => event.type === "permission.requested",
@@ -1056,6 +1072,7 @@ describe("daemon 协议面（缝 C）", () => {
     ).permissionId;
 
     const resolved = await requester("resolvePermission", {
+      turnId: "t1",
       sessionId,
       permissionId,
       resolution: { outcome: "allow", scope: "once" },
@@ -1077,7 +1094,7 @@ describe("daemon 协议面（缝 C）", () => {
     );
   });
 
-  test("attach exitOn binds the active turn instead of an older replayed completion", async () => {
+  test("explicit turn scope excludes older turn history", async () => {
     const fake = createFakeHarness({
       harness: "fake",
       capability: emptyCapability("fake"),
@@ -1101,9 +1118,10 @@ describe("daemon 协议面（缝 C）", () => {
     const collector = collectNotifications(client);
 
     const attached = await requester("attach", {
+      scope: "turn",
       sessionId,
-      exitOn: ["end_turn"],
-      replay: 100,
+      turnId: "t2",
+      replay: { mode: "available" },
     });
     expect(attached).toMatchObject({ result: { sessionId } });
     expect(collector.ended).toEqual([]);
@@ -1111,7 +1129,7 @@ describe("daemon 协议面（缝 C）", () => {
       collector.events.some(
         (event) => event.type === "turn.completed" && event.turnId === "t1",
       ),
-    ).toBe(true);
+    ).toBe(false);
 
     fake.controls.completeTurn("end_turn");
     await waitFor(() => collector.ended.length === 1);
@@ -1151,24 +1169,28 @@ describe("daemon 协议面（缝 C）", () => {
         event.message.method === "event"
       ) {
         order.push(
-          event.message.params.type === "message"
+          event.message.params.event.type === "message"
             ? "live"
-            : event.message.params.type,
+            : event.message.params.event.type,
         );
       }
     });
 
-    const attached = await requester("attach", { sessionId, replay: 100 });
+    const attached = await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
     expect(attached).toMatchObject({ result: { sessionId, replayed: 2 } });
     expect(order).toEqual([
+      "response",
       "session.created",
       "turn.started",
       "live",
-      "response",
     ]);
   });
 
-  test("attach expands a requested slice to the coherent message boundary", async () => {
+  test("available replay preserves complete message history", async () => {
     const fake = createFakeHarness({
       harness: "fake",
       capability: emptyCapability("fake"),
@@ -1191,10 +1213,19 @@ describe("daemon 协议面（缝 C）", () => {
     fake.controls.emitSnapshot(messageId, "prepost");
     const collector = collectNotifications(client);
 
-    const attached = await requester("attach", { sessionId, replay: 2 });
+    const attached = await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
 
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 4 } });
-    expect(collector.events).toEqual([
+    expect(attached).toMatchObject({ result: { sessionId, replayed: 6 } });
+    expect(
+      collector.events.filter(
+        (event) =>
+          event.type !== "session.created" && event.type !== "turn.started",
+      ),
+    ).toEqual([
       { type: "text.delta", sessionId, turnId: "t1", messageId, delta: "pre" },
       {
         type: "tool.requested",
@@ -1235,16 +1266,22 @@ describe("daemon 协议面（缝 C）", () => {
     fake.controls.completeTurn("end_turn", "observed");
     const collector = collectNotifications(client);
 
-    const attached = await requester("attach", { sessionId, replay: 1 });
+    const attached = await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
 
-    expect(attached).toMatchObject({ result: { replayed: 2 } });
+    expect(attached).toMatchObject({ result: { replayed: 4 } });
     expect(collector.events.map((event) => event.type)).toEqual([
+      "session.created",
+      "turn.started",
       "text.delta",
       "turn.completed",
     ]);
   });
 
-  test("attach replay zero returns the whole active span but stays empty when idle", async () => {
+  test("explicit none does not replay an active or completed message", async () => {
     const fake = createFakeHarness({
       harness: "fake",
       capability: emptyCapability("fake"),
@@ -1264,21 +1301,23 @@ describe("daemon 协议面（缝 C）", () => {
     fake.controls.emitText(messageId, "lo");
     const activeCollector = collectNotifications(client);
 
-    const active = await requester("attach", { sessionId, replay: 0 });
+    const active = await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "none" },
+    });
 
-    expect(active).toMatchObject({ result: { replayed: 2 } });
-    expect(activeCollector.events).toEqual([
-      { type: "text.delta", sessionId, turnId: "t1", messageId, delta: "hel" },
-      { type: "text.delta", sessionId, turnId: "t1", messageId, delta: "lo" },
-    ]);
+    expect(active).toMatchObject({ result: { replayed: 0 } });
+    expect(activeCollector.events).toEqual([]);
 
     fake.controls.emitSnapshot(messageId, "hello");
     const idleClient = server.connect();
     await flush();
     const idleCollector = collectNotifications(idleClient);
     const idle = await makeRequester(idleClient)("attach", {
+      scope: "session",
       sessionId,
-      replay: 0,
+      replay: { mode: "none" },
     });
     expect(idle).toMatchObject({ result: { replayed: 0 } });
     expect(idleCollector.events).toEqual([]);
@@ -1306,7 +1345,11 @@ describe("daemon 协议面（缝 C）", () => {
       fake.controls.emitText(messageId, delta);
     }
     const activeCollector = collectNotifications(client);
-    const active = await requester("attach", { sessionId, replay: 0 });
+    const active = await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
     expect(active).toMatchObject({ result: { replayed: 4 } });
     expect(activeCollector.events).toHaveLength(4);
 
@@ -1315,8 +1358,9 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const idleCollector = collectNotifications(idleClient);
     const completed = await makeRequester(idleClient)("attach", {
+      scope: "session",
       sessionId,
-      replay: 100,
+      replay: { mode: "available" },
     });
     expect(completed).toMatchObject({ result: { replayed: 0 } });
     expect(idleCollector.events).toEqual([]);
@@ -1345,9 +1389,15 @@ describe("daemon 协议面（缝 C）", () => {
     injectLive = () => fake.controls.emitText(messageId, "llo");
     const collector = collectNotifications(client);
 
-    const attached = await requester("attach", { sessionId, replay: 0 });
-    expect(attached).toMatchObject({ result: { replayed: 1 } });
-    expect(collector.events).toEqual([
+    const attached = await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
+    expect(attached).toMatchObject({ result: { replayed: 3 } });
+    expect(
+      collector.events.filter((event) => event.type === "text.delta"),
+    ).toEqual([
       { type: "text.delta", sessionId, turnId: "t1", messageId, delta: "he" },
       {
         type: "text.delta",
@@ -1380,7 +1430,12 @@ describe("daemon 协议面（缝 C）", () => {
     completeTarget = () => fake.controls.completeTurn("end_turn");
     const collector = collectNotifications(client);
 
-    await requester("attach", { sessionId, exitOn: ["end_turn"], replay: 100 });
+    await requester("attach", {
+      scope: "turn",
+      sessionId,
+      turnId: "t1",
+      replay: { mode: "available" },
+    });
     await flush();
 
     expect(collector.ended).toEqual([{ sessionId, reason: "end_turn" }]);
@@ -1411,14 +1466,26 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
     const collector = collectNotifications(client);
-    await expect(requester("attach", { sessionId })).resolves.toMatchObject({
+    await expect(
+      requester("attach", {
+        scope: "session",
+        sessionId,
+        replay: { mode: "available" },
+      }),
+    ).resolves.toMatchObject({
       error: { code: "internal_error" },
     });
     fake.controls.emitWorkerMessage("after-failure");
     await flush();
     expect(collector.events).toEqual([]);
     fail = false;
-    await expect(requester("attach", { sessionId })).resolves.toMatchObject({
+    await expect(
+      requester("attach", {
+        scope: "session",
+        sessionId,
+        replay: { mode: "available" },
+      }),
+    ).resolves.toMatchObject({
       result: { sessionId },
     });
   });
@@ -1443,9 +1510,10 @@ describe("daemon 协议面（缝 C）", () => {
     const collector = collectNotifications(client);
 
     const attached = await requester("attach", {
+      scope: "turn",
       sessionId,
-      exitOn: ["end_turn"],
-      replay: 0,
+      turnId: "t1",
+      replay: { mode: "none" },
     });
 
     expect(attached).toMatchObject({ result: { sessionId, replayed: 0 } });
@@ -1453,7 +1521,7 @@ describe("daemon 协议面（缝 C）", () => {
     expect(collector.ended).toEqual([{ sessionId, reason: "end_turn" }]);
   });
 
-  test("attach target does not rebind when its terminal reason does not match", async () => {
+  test("turn subscription ends at every terminal and never follows a successor", async () => {
     const fake = createFakeHarness({
       harness: "fake",
       capability: emptyCapability("fake"),
@@ -1469,7 +1537,12 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
     const collector = collectNotifications(client);
-    await requester("attach", { sessionId, exitOn: ["end_turn"], replay: 0 });
+    await requester("attach", {
+      scope: "turn",
+      sessionId,
+      turnId: "t1",
+      replay: { mode: "none" },
+    });
 
     fake.controls.completeTurn("failed");
     await requester("send", {
@@ -1480,7 +1553,7 @@ describe("daemon 协议面（缝 C）", () => {
     fake.controls.completeTurn("end_turn");
     await flush();
 
-    expect(collector.ended).toEqual([]);
+    expect(collector.ended).toEqual([{ sessionId, reason: "failed" }]);
   });
 
   test("empty attach exitOn remains subscribed across turns until the session is killed", async () => {
@@ -1499,7 +1572,11 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
     const collector = collectNotifications(client);
-    await requester("attach", { sessionId, exitOn: [], replay: 0 });
+    await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "none" },
+    });
 
     fake.controls.completeTurn();
     await requester("send", {
@@ -1541,9 +1618,10 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const collector = collectNotifications(client);
     const attached = await requester("attach", {
+      scope: "turn",
       sessionId,
-      exitOn: ["end_turn"],
-      replay: 1,
+      turnId: "t2",
+      replay: { mode: "available" },
     });
 
     expect(attached).toMatchObject({ result: { replayed: 1 } });
@@ -1558,7 +1636,9 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("attach", {
+      scope: "session",
       sessionId: "missing@gdaemontest",
+      replay: { mode: "available" },
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -1585,7 +1665,11 @@ describe("daemon 协议面（缝 C）", () => {
     await requester("kill", { sessionId: sessionId });
 
     const collector = collectNotifications(client);
-    const attached = await requester("attach", { sessionId });
+    const attached = await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
     expect(attached).toMatchObject({
       kind: "response",
       result: { sessionId, replayed: 4 },
@@ -2300,7 +2384,11 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     expect(interrupted).toMatchObject({ error: { code: "session_not_found" } });
     expect(fake.calls.interrupted).toEqual([]);
 
-    const attached = await beta("attach", { sessionId });
+    const attached = await beta("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
     expect(attached).toMatchObject({ error: { code: "session_not_found" } });
 
     const killed = await beta("kill", { sessionId: sessionId });
@@ -2383,7 +2471,11 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
-    await alpha("attach", { sessionId });
+    await alpha("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    });
     const permissionEvent = collector.events.find(
       (event) => event.type === "permission.requested",
     );
@@ -2396,6 +2488,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     await flush();
     await expect(
       beta("resolvePermission", {
+        turnId: "t1",
         sessionId,
         permissionId,
         resolution: { outcome: "allow", scope: "once" },
@@ -2404,6 +2497,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     expect(fake.calls.resolved).toEqual([]);
 
     const resolved = await alpha("resolvePermission", {
+      turnId: "t1",
       sessionId,
       permissionId,
       resolution: { outcome: "allow", scope: "once" },
@@ -2561,6 +2655,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
     await command(
       "resolvePermission",
       {
+        turnId: "t1",
         sessionId,
         permissionId: "p1",
         resolution: { outcome: "allow", scope: "once" },
@@ -2727,4 +2822,47 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
     client.close();
     recovery.close();
   }
+});
+
+test("none turn scope ends from authoritative terminal history after event retention discards that turn", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: emptyCapability("fake"),
+  });
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    eventLogLimit: 1,
+  });
+  const client = server.connect();
+  await flush();
+  const request = makeRequester(client);
+  const spawned = await request("spawn", {
+    sessionName: "retained-terminal",
+    harness: "fake",
+    message: "first",
+  });
+  const { sessionId, turnId } = resultOf(spawned) as {
+    sessionId: SessionId;
+    turnId: TurnId;
+  };
+  const target = { sessionId, turnId };
+  fake.controls.completeTurn();
+  await request("send", {
+    sessionId: target.sessionId,
+    placement: "new_turn",
+    message: "second",
+  });
+  fake.controls.completeTurn();
+  const collector = collectNotifications(client);
+  expect(
+    await request("attach", {
+      scope: "turn",
+      ...target,
+      replay: { mode: "none" },
+    }),
+  ).toHaveProperty("result");
+  await flush();
+  expect(collector.events).toEqual([]);
+  expect(collector.ended).toEqual([
+    { sessionId: target.sessionId, reason: "end_turn" },
+  ]);
 });

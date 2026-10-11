@@ -2,9 +2,11 @@ import {
   DIAGNOSTIC_KINDS,
   DIAGNOSTIC_SEVERITIES,
   DIAGNOSTIC_SOURCES,
-  STOP_REASONS,
   diagnosticIdSchema,
   permissionIdSchema,
+  permissionHandleSchema,
+  decodePermissionHandle,
+  type PermissionTarget,
   sessionIdSchema,
   sessionNameSchema,
   turnIdSchema,
@@ -35,6 +37,7 @@ export type ValueKind =
   | { readonly type: "turnId"; readonly hint: string }
   | { readonly type: "turnHandle"; readonly hint: string }
   | { readonly type: "permissionId"; readonly hint: string }
+  | { readonly type: "permissionHandle"; readonly hint: string }
   | { readonly type: "diagnosticId"; readonly hint: string }
   | { readonly type: "time"; readonly hint: string }
   | { readonly type: "boolean" }
@@ -309,33 +312,28 @@ const commandSpecData = [
   }),
   defineCommand({
     name: "attach",
-    description:
-      "Stream a session's complete domain event flow (use diagnostics for stored diagnostics)",
+    description: "Subscribe to an exact session or turn",
     args: [
       {
-        name: "sessionId",
-        description: "session id",
-        kind: { type: "sessionId", hint: "Expected a valid SessionId" },
+        name: "target",
+        description: "SessionHandle or complete TurnHandle",
+        kind: { type: "text" },
       },
     ],
     options: [
       {
-        name: "replay",
-        flags: "--replay <n>",
-        description: "number of recent events to replay",
-        kind: {
-          type: "number",
-          integer: true,
-          min: 0,
-          hint: "Expected a non-negative integer",
-        },
+        name: "scope",
+        flags: "--scope <session|turn>",
+        required: true,
+        description: "subscription scope",
+        kind: { type: "enum", values: ["session", "turn"] },
       },
       {
-        name: "exitOn",
-        flags: "--exit-on <reasons...>",
-        variadic: true,
-        description: "stop reasons to exit on",
-        kind: { type: "enum", values: STOP_REASONS },
+        name: "replay",
+        flags: "--replay <none|available>",
+        required: true,
+        description: "explicit history policy",
+        kind: { type: "enum", values: ["none", "available"] },
       },
     ],
   }),
@@ -455,19 +453,15 @@ const commandSpecData = [
   }),
   defineCommand({
     name: "resolve-permission",
-    description: "Resolve a pending permission request",
+    description:
+      "Resolve a pending permission using its complete PermissionHandle",
     args: [
       {
-        name: "sessionId",
-        description: "session id",
-        kind: { type: "sessionId", hint: "Expected a valid SessionId" },
-      },
-      {
-        name: "permissionId",
-        description: "permission request id",
+        name: "permissionHandle",
+        description: "complete PermissionHandle",
         kind: {
-          type: "permissionId",
-          hint: "Expected a valid PermissionId",
+          type: "permissionHandle",
+          hint: "Expected a valid PermissionHandle",
         },
       },
     ],
@@ -538,26 +532,28 @@ type ParsedValue<K extends ValueKind> = K extends { readonly type: "text" }
         ? TurnTarget
         : K extends { readonly type: "turnId" }
           ? TurnId
-          : K extends { readonly type: "permissionId" }
-            ? PermissionId
-            : K extends { readonly type: "diagnosticId" }
-              ? DiagnosticId
-              : K extends { readonly type: "time" }
-                ? string
-                : K extends { readonly type: "boolean" }
-                  ? boolean
-                  : K extends {
-                        readonly type: "enum";
-                        readonly values: readonly (infer E extends string)[];
-                      }
-                    ? E
-                    : K extends { readonly type: "number" }
-                      ? number
-                      : K extends { readonly type: "jsonObject" }
-                        ? Record<string, unknown>
-                        : K extends { readonly type: "dynamic" }
-                          ? string
-                          : never;
+          : K extends { readonly type: "permissionHandle" }
+            ? PermissionTarget
+            : K extends { readonly type: "permissionId" }
+              ? PermissionId
+              : K extends { readonly type: "diagnosticId" }
+                ? DiagnosticId
+                : K extends { readonly type: "time" }
+                  ? string
+                  : K extends { readonly type: "boolean" }
+                    ? boolean
+                    : K extends {
+                          readonly type: "enum";
+                          readonly values: readonly (infer E extends string)[];
+                        }
+                      ? E
+                      : K extends { readonly type: "number" }
+                        ? number
+                        : K extends { readonly type: "jsonObject" }
+                          ? Record<string, unknown>
+                          : K extends { readonly type: "dynamic" }
+                            ? string
+                            : never;
 
 type FieldValue<F extends CommandArg | CommandOption> = F extends {
   readonly variadic: true;
@@ -1036,6 +1032,18 @@ function validateValue(
           hint: kind.hint,
         });
       return;
+    case "permissionHandle":
+      if (
+        typeof value !== "string" ||
+        !v.safeParse(permissionHandleSchema, value).success
+      )
+        throw usageError({
+          issue: "invalid_value",
+          field,
+          value: String(value),
+          hint: kind.hint,
+        });
+      return;
     case "permissionId":
       if (
         typeof value !== "string" ||
@@ -1134,6 +1142,8 @@ function parseFieldValue(
       return decodeTurnHandle(String(value));
     case "turnId":
       return v.parse(turnIdSchema, value);
+    case "permissionHandle":
+      return decodePermissionHandle(String(value));
     case "permissionId":
       return v.parse(permissionIdSchema, value);
     case "diagnosticId":
@@ -1155,6 +1165,7 @@ export function valueHint(kind: ValueKind): string | undefined {
     case "turnId":
     case "turnHandle":
     case "permissionId":
+    case "permissionHandle":
     case "diagnosticId":
     case "time":
     case "number":
