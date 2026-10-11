@@ -36,6 +36,9 @@ const other = await connect("reins-wrr26-owner-b");
 const root = join(task.base, "native-source");
 await mkdir(join(root, ".reins"), { recursive: true });
 execFileSync("git", ["init", "--quiet", root]);
+const sessionCwd = join(root, "src");
+await mkdir(sessionCwd);
+await mkdir(join(root, "other"));
 await writeFile(
   join(root, ".reins/workspace.json"),
   JSON.stringify({
@@ -95,7 +98,7 @@ try {
   });
   const started = await control.request("spawn", {
     harness: "codex",
-    cwd: root,
+    cwd: sessionCwd,
     sessionName: v.parse(sessionNameSchema, "publisher"),
     message: firstMessage,
   });
@@ -129,8 +132,8 @@ try {
   assert.equal(publication.state, "ready");
   assert.equal(publication.bytes, 18);
   assert.deepEqual(publication.source, {
-    cwd: root,
-    path: join(root, "--result.txt"),
+    cwd: sessionCwd,
+    path: join(sessionCwd, "--result.txt"),
   });
   const subscription = await control.subscribe({
     scope: "session",
@@ -195,7 +198,7 @@ try {
     observed.find(
       (event) =>
         event.type === "publication.ready" &&
-        event.publication.source.path === join(root, "second.txt"),
+        event.publication.source.path === join(sessionCwd, "second.txt"),
     ),
   );
   assert.equal(notification.type, "publication.ready");
@@ -209,7 +212,7 @@ try {
       (event) =>
         event.type === "publication.ready" &&
         (event.publication as { source: { path: string } }).source.path ===
-          join(root, "second.txt"),
+          join(sessionCwd, "second.txt"),
     ),
   );
   const pending = await control.request("wait", {
@@ -334,6 +337,10 @@ try {
     600_000,
   );
   assert.equal(recovered.length, 3);
+  assert.equal(
+    (await manager.request("publication.list", { cwd: sessionCwd })).length,
+    3,
+  );
   const thirdPublication = JSON.parse(workerPublication.result.stdout);
   assert.ok(
     recovered.some(
@@ -343,9 +350,10 @@ try {
   );
   assert.equal(observed.length, observedBeforeDisconnect);
   assert.deepEqual(await other.request("publication.list", { cwd: root }), []);
-  assert.deepEqual(
-    await manager.request("publication.list", { cwd: join(root, "other") }),
-    [],
+  assert.equal(
+    (await manager.request("publication.list", { cwd: join(root, "other") }))
+      .length,
+    3,
   );
   assert.deepEqual(await manager.receipts(receipts), []);
   await record("disconnected-without-observer-query-recovers", {

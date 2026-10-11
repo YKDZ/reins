@@ -22,6 +22,7 @@ import {
   type TurnId,
   type TurnTarget,
 } from "@reins/protocol";
+import { PUBLISHER_CAPABILITIES } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
 import {
@@ -81,6 +82,8 @@ export type CommandSpec = {
   readonly description: string;
   readonly args: readonly CommandArg[];
   readonly options: readonly CommandOption[];
+  readonly usage?: string;
+  readonly children?: readonly string[];
   readonly constraints?: readonly CommandConstraint[];
 };
 
@@ -532,6 +535,250 @@ export const commandSpecs: readonly (CommandSpec & {
   readonly name: CommandName;
 })[] = commandSpecData;
 
+const text = { type: "text" } as const;
+const nativeCwd = {
+  name: "C",
+  flags: "-C <path>",
+  description: "native directory context",
+  kind: text,
+} as const;
+
+export const workspaceCommandSpecs = [
+  defineCommand({
+    name: "workspace import-git",
+    description:
+      "Import a published Git bundle into a new reference without checkout or merge",
+    args: [{ name: "publication", description: "publication id", kind: text }],
+    options: [
+      {
+        name: "repository",
+        flags: "--repository <path>",
+        required: true,
+        description: "target Git repository",
+        kind: text,
+      },
+      {
+        name: "ref",
+        flags: "--ref <reference>",
+        required: true,
+        description: "new fully qualified Git reference",
+        kind: text,
+      },
+      {
+        name: "commit",
+        flags: "--commit <object>",
+        required: true,
+        description: "full commit object name advertised by the bundle",
+        kind: text,
+      },
+    ],
+  }),
+  defineCommand({
+    name: "workspace publications",
+    description: "Query files explicitly published from this worktree",
+    args: [],
+    options: [nativeCwd],
+  }),
+  defineCommand({
+    name: "workspace receive",
+    description:
+      "Explicitly receive one fixed publication outside the active tree",
+    args: [{ name: "publication", description: "publication id", kind: text }],
+    options: [
+      {
+        name: "directory",
+        flags: "--directory <path>",
+        required: true,
+        description: "local receipt directory",
+        kind: text,
+      },
+      {
+        name: "activeRoot",
+        flags: "--active-root <path>",
+        required: true,
+        description: "active Git worktree root",
+        kind: text,
+      },
+    ],
+  }),
+  defineCommand({
+    name: "workspace receipts",
+    description:
+      "List this consumer's received files, sources and actual locations",
+    args: [],
+    options: [
+      {
+        name: "directory",
+        flags: "--directory <path>",
+        required: true,
+        description: "local receipt directory",
+        kind: text,
+      },
+    ],
+  }),
+  defineCommand({
+    name: "workspace remove-publication",
+    description:
+      "Explicitly remove one published copy without removing receipts",
+    args: [{ name: "publication", description: "publication id", kind: text }],
+    options: [],
+  }),
+  defineCommand({
+    name: "workspace remove-receipt",
+    description:
+      "Explicitly remove one local receipt without removing its publication",
+    args: [{ name: "receipt", description: "receipt id", kind: text }],
+    options: [
+      {
+        name: "directory",
+        flags: "--directory <path>",
+        required: true,
+        description: "local receipt directory",
+        kind: text,
+      },
+    ],
+  }),
+  defineCommand({
+    name: "workspace handoff",
+    description:
+      "Transfer a fixed commit and explicitly selected files to a new Git worktree",
+    args: [],
+    options: [
+      {
+        name: "repository",
+        flags: "--repository <path>",
+        required: true,
+        description: "one caller-native Git root",
+        kind: text,
+      },
+      {
+        name: "commit",
+        flags: "--commit <sha>",
+        required: true,
+        description: "full fixed commit object name",
+        kind: text,
+      },
+      {
+        name: "subdirectory",
+        flags: "--subdirectory <path>",
+        required: true,
+        description: "relative target working directory",
+        kind: text,
+      },
+      {
+        name: "binding",
+        flags: "--binding <refs...>",
+        required: true,
+        variadic: true,
+        description: "explicit harness binding references",
+        kind: text,
+      },
+      {
+        name: "indexFile",
+        flags: "--index-file <paths...>",
+        variadic: true,
+        description: "explicit repository-relative staged file versions",
+        kind: text,
+      },
+      {
+        name: "worktreeFile",
+        flags: "--worktree-file <paths...>",
+        variadic: true,
+        description: "explicit repository-relative working file versions",
+        kind: text,
+      },
+    ],
+  }),
+  defineCommand({
+    name: "workspace harnesses",
+    description: "Discover explicit project harness bindings",
+    args: [],
+    options: [nativeCwd],
+  }),
+  defineCommand({
+    name: "workspace attach",
+    description:
+      "Prepare explicitly selected harness bindings without starting a worker",
+    args: [],
+    options: [
+      nativeCwd,
+      {
+        name: "binding",
+        flags: "--binding <refs...>",
+        required: true,
+        variadic: true,
+        description: "explicit harness binding references",
+        kind: text,
+      },
+    ],
+  }),
+  defineCommand({
+    name: "workspace history",
+    description: "Query durable consumed events across worktree attachments",
+    args: [],
+    options: [
+      nativeCwd,
+      {
+        name: "allWorktrees",
+        flags: "--all-worktrees",
+        description: "query this consumer's worktrees",
+        kind: { type: "boolean" },
+      },
+    ],
+  }),
+  defineCommand({
+    name: "workspace status",
+    description: "Inspect native worktree preparation facts",
+    args: [],
+    options: [nativeCwd],
+  }),
+  defineCommand({
+    name: "workspace detach",
+    description: "Release an environment with an explicit session disposition",
+    args: [],
+    options: [
+      nativeCwd,
+      {
+        name: "sessionDisposition",
+        flags: "--session-disposition <value>",
+        required: true,
+        description: "require_none or kill",
+        kind: { type: "enum", values: ["require_none", "kill"] },
+      },
+    ],
+  }),
+] as const satisfies readonly CommandSpec[];
+
+export const publisherCommandSpecs: readonly CommandSpec[] =
+  PUBLISHER_CAPABILITIES.map((capability) =>
+    defineCommand({
+      name: capability.name,
+      description: capability.description,
+      args: [{ name: "file", description: "selected file", kind: text }],
+      options: [],
+    }),
+  );
+
+export const workspaceGroupSpec: CommandSpec = {
+  name: "workspace",
+  description: "Workspace operations",
+  args: [],
+  options: [],
+  usage: "[options] <command>",
+  children: workspaceCommandSpecs.map((spec) =>
+    spec.name.slice("workspace ".length),
+  ),
+};
+
+export const publisherGroupSpec: CommandSpec = {
+  name: "reins",
+  description: "Publisher operations",
+  args: [],
+  options: [],
+  usage: "[options] <command>",
+  children: publisherCommandSpecs.map((spec) => spec.name),
+};
+
 type CommandSpecData = (typeof commandSpecData)[number];
 
 type ParsedValue<K extends ValueKind> = K extends {
@@ -617,15 +864,32 @@ export type CommandInvocation = {
 }[CommandName];
 
 export function commandSpecForName(name: string): CommandSpec | undefined {
-  return commandSpecs.find((spec) => spec.name === name);
+  return (
+    commandSpecs.find((spec) => spec.name === name) ??
+    workspaceCommandSpecs.find((spec) => spec.name === name) ??
+    publisherCommandSpecs.find((spec) => spec.name === name)
+  );
 }
 
 export function commandSpecForToken(
   argv: readonly string[],
 ): CommandSpec | undefined {
+  const workspaceIndex = argv.indexOf("workspace");
+  if (workspaceIndex !== -1) {
+    const child = argv
+      .slice(workspaceIndex + 1)
+      .find((token) => !token.startsWith("-"));
+    return (
+      workspaceCommandSpecs.find(
+        (spec) => spec.name === `workspace ${child}`,
+      ) ?? workspaceGroupSpec
+    );
+  }
   for (const token of argv) {
     if (token.startsWith("-")) continue;
-    const spec = commandSpecForName(token);
+    const spec =
+      commandSpecs.find((candidate) => candidate.name === token) ??
+      publisherCommandSpecs.find((candidate) => candidate.name === token);
     if (spec !== undefined) return spec;
   }
   return undefined;
@@ -638,6 +902,7 @@ export function flagDisplay(flags: string): string {
 
 export function usageFor(spec: CommandSpec | undefined): string {
   if (spec === undefined) return ROOT_USAGE;
+  if (spec.usage !== undefined) return spec.usage;
   let usage = "";
   for (const arg of spec.args) {
     usage += ` <${arg.name}${arg.variadic === true ? "..." : ""}>`;
@@ -725,6 +990,20 @@ export function parseCommandInvocation(
 ): CommandInvocation {
   const spec = commandSpecForName(name);
   if (spec === undefined) throw new Error(`Missing command spec: ${name}`);
+  const parsed = parseDeclaredInput(spec, args, options);
+  // 上述 arity、required/default、值类型与约束均已由同一 spec 证明；
+  // 只收窄动态容器，最终 invocation 对象由泛型构造器保持字段关联。
+  return invocationFromParsed(name, parsed.args, parsed.options, mode);
+}
+
+export function parseDeclaredInput(
+  spec: CommandSpec,
+  args: readonly unknown[],
+  options: Record<string, unknown>,
+): {
+  readonly args: readonly unknown[];
+  readonly options: Record<string, unknown>;
+} {
   validateInvocationShape(spec, args, options);
   const materializedOptions: Record<string, unknown> = {};
   for (const option of spec.options) {
@@ -749,9 +1028,7 @@ export function parseCommandInvocation(
       "variadic" in option && option.variadic,
     );
   }
-  // 上述 arity、required/default、值类型与约束均已由同一 spec 证明；
-  // 只收窄动态容器，最终 invocation 对象由泛型构造器保持字段关联。
-  return invocationFromParsed(name, parsedArgs, parsedOptions, mode);
+  return { args: parsedArgs, options: parsedOptions };
 }
 
 function invocationFromParsed(

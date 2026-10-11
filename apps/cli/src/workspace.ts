@@ -23,20 +23,32 @@ import {
   captureFixedCommit,
   captureSelectedWorkingFiles,
 } from "@reins/workspace-source";
-import { Command } from "commander";
+import { Command, CommanderError } from "commander";
 import * as v from "valibot";
 
-import { ExitError } from "./errors.ts";
+import {
+  parseDeclaredInput,
+  usageFor,
+  valueHint,
+  workspaceCommandSpecs,
+  type CommandSpec,
+} from "./command-spec.ts";
+import { ExitError, exitCodeForError, toCliError } from "./errors.ts";
+import { commanderToUsageError } from "./grammar.ts";
+import { printError, printResult } from "./output.ts";
 
 export function registerWorkspaceCommands(program: Command): void {
   const workspace = program
     .command("workspace")
     .description(
       "Prepare native Git worktrees and receive explicit source inputs",
-    );
+    )
+    .option("--pretty", "human-readable output (default: NDJSON)");
   const nativeCwd = (path?: string) =>
     resolve(path ?? (program.opts().C as string | undefined) ?? process.cwd());
   const invoke = async <M extends WorkspaceMethod>(
+    spec: CommandSpec,
+    mode: "json" | "pretty",
     method: M,
     input: WorkspaceParams[M] | (() => Promise<WorkspaceParams[M]>),
     operation?: (
@@ -97,8 +109,13 @@ export function registerWorkspaceCommands(program: Command): void {
                 }
               : preparation;
         }
-        process.stdout.write(
-          `${JSON.stringify(method === "workspace.history" ? projectWorkspaceHistory(result as WorkspaceResults["workspace.history"]) : result)}\n`,
+        printResult(
+          method === "workspace.history"
+            ? projectWorkspaceHistory(
+                result as WorkspaceResults["workspace.history"],
+              )
+            : result,
+          mode,
         );
         if (preparation?.runtime.status === "failed")
           throw new ExitError(1, "workspace_failed");
@@ -114,216 +131,206 @@ export function registerWorkspaceCommands(program: Command): void {
       }
     } catch (error) {
       if (error instanceof ExitError) throw error;
+      const cliError = toCliError(error);
       const parsed = v.safeParse(workspaceErrorSchema, error);
-      process.stdout.write(
-        `${JSON.stringify(parsed.success ? parsed.output : { code: "manager_disconnected" })}\n`,
-      );
-      throw new ExitError(1, "workspace_failed");
+      if (mode === "json")
+        process.stdout.write(
+          `${JSON.stringify(parsed.success ? parsed.output : { code: "manager_disconnected" })}\n`,
+        );
+      else printError(cliError, mode, spec);
+      throw new ExitError(1, cliError.code);
     }
   };
-  workspace
-    .command("import-git")
-    .description(
-      "Import a published Git bundle into a new reference without checkout or merge",
-    )
-    .argument("<publication>")
-    .requiredOption("--repository <path>", "target Git repository")
-    .requiredOption("--ref <reference>", "new fully qualified Git reference")
-    .requiredOption(
-      "--commit <object>",
-      "full commit object name advertised by the bundle",
-    )
-    .action(
-      (
-        publicationId: string,
-        options: { repository: string; ref: string; commit: string },
-      ) =>
-        invoke("publication.read", { publicationId }, (client) =>
-          client.importGitPublication(publicationId, {
-            repository: resolve(options.repository),
-            reference: options.ref,
-            commit: options.commit,
+  for (const spec of workspaceCommandSpecs) {
+    const leaf = spec.name.slice("workspace ".length);
+    const command = workspace
+      .command(leaf)
+      .description(spec.description)
+      .usage(usageFor(spec));
+    for (const arg of spec.args) {
+      command.argument(
+        "variadic" in arg && arg.variadic === true
+          ? `[${arg.name}...]`
+          : `[${arg.name}]`,
+        arg.description,
+      );
+    }
+    for (const option of spec.options) {
+      const hint = valueHint(option.kind);
+      command.option(
+        option.flags,
+        hint === undefined || option.description.includes(hint)
+          ? option.description
+          : `${option.description}; ${hint}`,
+      );
+    }
+    command.option("--pretty", "human-readable output (default: NDJSON)");
+    command.action(async (...values: unknown[]) => {
+      const { args, options } = unsafeCommanderCallbackInput(values);
+      const mode =
+        options.pretty === true ||
+        workspace.opts().pretty === true ||
+        program.opts().pretty === true
+          ? "pretty"
+          : "json";
+      try {
+        const parsed = parseDeclaredInput(spec, args, options);
+        await runWorkspaceCommand(
+          leaf,
+          parsed.args,
+          parsed.options,
+          spec,
+          mode,
+          invoke,
+          nativeCwd,
+        );
+      } catch (error) {
+        if (error instanceof ExitError) throw error;
+        const cliError = toCliError(
+          error instanceof CommanderError
+            ? commanderToUsageError(error, spec)
+            : error,
+        );
+        printError(cliError, mode, spec);
+        throw new ExitError(exitCodeForError(cliError), cliError.code);
+      }
+    });
+  }
+}
+
+function unsafeCommanderCallbackInput(values: readonly unknown[]): {
+  readonly args: readonly unknown[];
+  readonly options: Record<string, unknown>;
+} {
+  return {
+    args: values.slice(0, -2),
+    options: values.at(-2) as Record<string, unknown>,
+  };
+}
+
+async function runWorkspaceCommand(
+  name: string,
+  args: readonly unknown[],
+  options: Record<string, unknown>,
+  spec: CommandSpec,
+  mode: "json" | "pretty",
+  invoke: <M extends WorkspaceMethod>(
+    spec: CommandSpec,
+    mode: "json" | "pretty",
+    method: M,
+    input: WorkspaceParams[M] | (() => Promise<WorkspaceParams[M]>),
+    operation?: (
+      client: ReturnType<typeof createWorkspaceClient>,
+    ) => Promise<unknown>,
+  ) => Promise<void>,
+  nativeCwd: (path?: string) => string,
+): Promise<void> {
+  const option = <T>(field: string) => options[field] as T;
+  const [first] = args as [string?];
+  switch (name) {
+    case "import-git":
+      return invoke(
+        spec,
+        mode,
+        "publication.read",
+        { publicationId: first! },
+        (client) =>
+          client.importGitPublication(first!, {
+            repository: resolve(option<string>("repository")),
+            reference: option<string>("ref"),
+            commit: option<string>("commit"),
           }),
-        ),
-    );
-  workspace
-    .command("publications")
-    .description("Query files explicitly published from this worktree")
-    .option("-C <path>", "native directory context")
-    .action((options: { C?: string }) =>
-      invoke("publication.list", { cwd: nativeCwd(options.C) }),
-    );
-  workspace
-    .command("receive")
-    .description(
-      "Explicitly receive one fixed publication outside the active tree",
-    )
-    .argument("<publication>")
-    .requiredOption("--directory <path>", "local receipt directory")
-    .requiredOption("--active-root <path>", "active Git worktree root")
-    .action(
-      (
-        publicationId: string,
-        options: { directory: string; activeRoot: string },
-      ) =>
-        invoke("publication.read", { publicationId }, (client) =>
-          client.receivePublication(publicationId, {
-            directory: resolve(options.directory),
-            activeRoot: resolve(options.activeRoot),
+      );
+    case "publications":
+      return invoke(spec, mode, "publication.list", {
+        cwd: nativeCwd(option<string | undefined>("C")),
+      });
+    case "receive":
+      return invoke(
+        spec,
+        mode,
+        "publication.read",
+        { publicationId: first! },
+        (client) =>
+          client.receivePublication(first!, {
+            directory: resolve(option<string>("directory")),
+            activeRoot: resolve(option<string>("activeRoot")),
           }),
-        ),
-    );
-  workspace
-    .command("receipts")
-    .description(
-      "List this consumer's received files, sources and actual locations",
-    )
-    .requiredOption("--directory <path>", "local receipt directory")
-    .action((options: { directory: string }) =>
-      invoke("publication.list", { cwd: nativeCwd() }, (client) =>
-        client.receipts(resolve(options.directory)),
-      ),
-    );
-  workspace
-    .command("remove-publication")
-    .description(
-      "Explicitly remove one published copy without removing receipts",
-    )
-    .argument("<publication>")
-    .action((publicationId: string) =>
-      invoke("publication.remove", { publicationId }),
-    );
-  workspace
-    .command("remove-receipt")
-    .description(
-      "Explicitly remove one local receipt without removing its publication",
-    )
-    .argument("<receipt>")
-    .requiredOption("--directory <path>", "local receipt directory")
-    .action((receiptId: string, options: { directory: string }) =>
-      invoke("publication.list", { cwd: nativeCwd() }, (client) =>
-        client.removeReceipt(resolve(options.directory), receiptId),
-      ),
-    );
-  workspace
-    .command("handoff")
-    .description(
-      "Transfer a fixed commit and explicitly selected files to a new Git worktree",
-    )
-    .requiredOption("--repository <path>", "one caller-native Git root")
-    .requiredOption("--commit <sha>", "full fixed commit object name")
-    .requiredOption(
-      "--subdirectory <path>",
-      "relative target working directory",
-    )
-    .requiredOption(
-      "--binding <refs...>",
-      "explicit harness binding references",
-    )
-    .option(
-      "--index-file <paths...>",
-      "explicit repository-relative staged file versions",
-    )
-    .option(
-      "--worktree-file <paths...>",
-      "explicit repository-relative working file versions",
-    )
-    .action(
-      async (options: {
-        indexFile?: string[];
-        worktreeFile?: string[];
-        repository: string;
-        commit: string;
-        subdirectory: string;
-        binding: string[];
-      }) =>
-        invoke("workspace.handoff", async () => ({
-          material:
-            options.indexFile === undefined &&
-            options.worktreeFile === undefined
-              ? await captureFixedCommit(
-                  resolve(options.repository),
-                  options.commit,
-                )
-              : await captureSelectedWorkingFiles(
-                  resolve(options.repository),
-                  options.commit,
-                  [
-                    ...(options.indexFile ?? []).map((path) => ({
-                      path,
-                      source: "index" as const,
-                    })),
-                    ...(options.worktreeFile ?? []).map((path) => ({
-                      path,
-                      source: "worktree" as const,
-                    })),
-                  ],
-                ),
-          subdirectory: options.subdirectory,
-          bindings: options.binding,
-        })),
-    );
-  workspace
-    .command("harnesses")
-    .description("Discover explicit project harness bindings")
-    .option("-C <path>", "native directory context")
-    .action((options: { C?: string }) =>
-      invoke("workspace.harnesses", {
-        cwd: nativeCwd(options.C),
-      }),
-    );
-  workspace
-    .command("attach")
-    .description(
-      "Prepare explicitly selected harness bindings without starting a worker",
-    )
-    .option("-C <path>", "native directory context")
-    .requiredOption(
-      "--binding <refs...>",
-      "explicit harness binding references",
-    )
-    .action((options: { C?: string; binding: string[] }) =>
-      invoke("workspace.attach", {
-        cwd: nativeCwd(options.C),
-        bindings: options.binding,
-      }),
-    );
-  workspace
-    .command("history")
-    .description("Query durable consumed events across worktree attachments")
-    .option("-C <path>", "native directory context")
-    .option("--all-worktrees", "query this consumer's worktrees")
-    .action((options: { C?: string; allWorktrees?: boolean }) =>
-      invoke("workspace.history", {
-        cwd: nativeCwd(options.C),
+      );
+    case "receipts":
+      return invoke(
+        spec,
+        mode,
+        "publication.list",
+        { cwd: nativeCwd() },
+        (client) => client.receipts(resolve(option<string>("directory"))),
+      );
+    case "remove-publication":
+      return invoke(spec, mode, "publication.remove", {
+        publicationId: first!,
+      });
+    case "remove-receipt":
+      return invoke(
+        spec,
+        mode,
+        "publication.list",
+        { cwd: nativeCwd() },
+        (client) =>
+          client.removeReceipt(resolve(option<string>("directory")), first!),
+      );
+    case "handoff": {
+      const repository = resolve(option<string>("repository"));
+      const commit = option<string>("commit");
+      const indexFile = option<string[] | undefined>("indexFile");
+      const worktreeFile = option<string[] | undefined>("worktreeFile");
+      return invoke(spec, mode, "workspace.handoff", async () => ({
+        material:
+          indexFile === undefined && worktreeFile === undefined
+            ? await captureFixedCommit(repository, commit)
+            : await captureSelectedWorkingFiles(repository, commit, [
+                ...(indexFile ?? []).map((path) => ({
+                  path,
+                  source: "index" as const,
+                })),
+                ...(worktreeFile ?? []).map((path) => ({
+                  path,
+                  source: "worktree" as const,
+                })),
+              ]),
+        subdirectory: option<string>("subdirectory"),
+        bindings: option<string[]>("binding"),
+      }));
+    }
+    case "harnesses":
+      return invoke(spec, mode, "workspace.harnesses", {
+        cwd: nativeCwd(option<string | undefined>("C")),
+      });
+    case "attach":
+      return invoke(spec, mode, "workspace.attach", {
+        cwd: nativeCwd(option<string | undefined>("C")),
+        bindings: option<string[]>("binding"),
+      });
+    case "history":
+      return invoke(spec, mode, "workspace.history", {
+        cwd: nativeCwd(option<string | undefined>("C")),
         ...(options.allWorktrees === undefined
           ? {}
-          : { allWorktrees: options.allWorktrees }),
-      }),
-    );
-  workspace
-    .command("status")
-    .description("Inspect native worktree preparation facts")
-    .option("-C <path>", "native directory context")
-    .action((options: { C?: string }) =>
-      invoke("workspace.status", { cwd: nativeCwd(options.C) }),
-    );
-  workspace
-    .command("detach")
-    .description("Release an environment with an explicit session disposition")
-    .option("-C <path>", "native directory context")
-    .requiredOption("--session-disposition <value>", "require_none or kill")
-    .action((options: { C?: string; sessionDisposition: string }) => {
-      if (
-        options.sessionDisposition !== "require_none" &&
-        options.sessionDisposition !== "kill"
-      )
-        throw new ExitError(64, "Invalid session disposition");
-      return invoke("workspace.detach", {
-        cwd: nativeCwd(options.C),
-        sessionDisposition: options.sessionDisposition,
+          : { allWorktrees: option<boolean>("allWorktrees") }),
       });
-    });
+    case "status":
+      return invoke(spec, mode, "workspace.status", {
+        cwd: nativeCwd(option<string | undefined>("C")),
+      });
+    case "detach":
+      return invoke(spec, mode, "workspace.detach", {
+        cwd: nativeCwd(option<string | undefined>("C")),
+        sessionDisposition: option<"require_none" | "kill">(
+          "sessionDisposition",
+        ),
+      });
+    default:
+      throw new Error(`Unhandled workspace command: ${name}`);
+  }
 }
 async function connectManager(socket: string, stateDirectory: string) {
   try {

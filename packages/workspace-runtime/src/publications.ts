@@ -23,14 +23,14 @@ import {
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
-import { workspaceFailure } from "./index.ts";
+import { worktreeScopeKey, workspaceFailure } from "./index.ts";
 
 const digest = (content: Buffer | string) =>
   createHash("sha256").update(content).digest("hex");
 export function openPublications(stateDirectory: string) {
   const root = join(stateDirectory, "publications");
   const observers = new Set<
-    (owner: ConsumerContext, publication: Publication) => void
+    (owner: ConsumerContext, publication: Publication, scopeKey: string) => void
   >();
   const directory = (owner: ConsumerContext) => join(root, digest(owner));
   const read = async (owner: ConsumerContext, publicationId: string) => {
@@ -38,10 +38,22 @@ export function openPublications(stateDirectory: string) {
       if (!/^pub-[a-f0-9-]{36}$/u.test(publicationId))
         throw new Error("Invalid publication");
       const folder = join(directory(owner), publicationId);
+      const stored: unknown = JSON.parse(
+        await readFile(join(folder, "record.json"), "utf8"),
+      );
       const publication = v.parse(
         publicationSchema,
-        JSON.parse(await readFile(join(folder, "record.json"), "utf8")),
+        typeof stored === "object" && stored !== null && "publication" in stored
+          ? stored.publication
+          : stored,
       );
+      const scopeKey =
+        typeof stored === "object" &&
+        stored !== null &&
+        "scopeKey" in stored &&
+        typeof stored.scopeKey === "string"
+          ? stored.scopeKey
+          : await worktreeScopeKey(publication.source.cwd);
       const payload = await readFile(join(folder, "payload"));
       if (
         publication.publicationId !== publicationId ||
@@ -51,6 +63,7 @@ export function openPublications(stateDirectory: string) {
         throw new Error("Invalid publication");
       return {
         publication: { ...publication, storagePath: join(folder, "payload") },
+        scopeKey,
         contentBase64: payload.toString("base64"),
       };
     } catch {
@@ -97,14 +110,18 @@ export function openPublications(stateDirectory: string) {
       };
     },
     observe(
-      listener: (owner: ConsumerContext, publication: Publication) => void,
+      listener: (
+        owner: ConsumerContext,
+        publication: Publication,
+        scopeKey: string,
+      ) => void,
     ) {
       observers.add(listener);
       return () => {
         observers.delete(listener);
       };
     },
-    async list(owner: ConsumerContext, cwd: string) {
+    async list(owner: ConsumerContext, scopeKey: string) {
       let names: string[];
       try {
         names = await readdir(directory(owner));
@@ -114,21 +131,21 @@ export function openPublications(stateDirectory: string) {
       }
       const result: Publication[] = [];
       for (const name of names.filter((name) => name.startsWith("pub-"))) {
-        const { publication } = await read(owner, name);
-        if (publication.source.cwd === cwd) result.push(publication);
+        const stored = await read(owner, name);
+        if (stored.scopeKey === scopeKey) result.push(stored.publication);
       }
       return result;
     },
     async publish(
       owner: ConsumerContext,
-      cwd: string,
+      scopeKey: string,
       params: WorkspaceParams["publication.publish"],
     ): Promise<Publication> {
       const payload = Buffer.from(params.contentBase64, "base64");
       const publicationId = `pub-${randomUUID()}`;
       const publication: Publication = {
         publicationId,
-        source: { cwd, path: resolve(cwd, params.path) },
+        source: { cwd: params.cwd, path: resolve(params.cwd, params.path) },
         bytes: payload.length,
         sha256: digest(payload),
         state: "ready",
@@ -141,7 +158,7 @@ export function openPublications(stateDirectory: string) {
         await mkdir(staging, { recursive: true, mode: 0o700 });
         for (const [name, content] of [
           ["payload", payload],
-          ["record.json", JSON.stringify(publication)],
+          ["record.json", JSON.stringify({ scopeKey, publication })],
         ] as const) {
           const file = await open(join(staging, name), "wx", 0o600);
           try {
@@ -166,7 +183,7 @@ export function openPublications(stateDirectory: string) {
       // 观察只跟随已提交副本；消费端断连不能撤销发布。
       for (const listener of observers) {
         try {
-          listener(owner, publication);
+          listener(owner, publication, scopeKey);
         } catch {
           /* 观察连接可独立失效。 */
         }

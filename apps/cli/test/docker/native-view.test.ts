@@ -9,6 +9,7 @@ import { expect, test } from "vitest";
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 const fault = process.env.REINS_WRR09_FAULT ?? "move";
+const expectUndetected = process.env.REINS_WRR09_EXPECT_UNDETECTED === "1";
 test(`stops the original writer after native view loss: ${fault}`, async () => {
   const directory = join(
     repository,
@@ -171,6 +172,7 @@ test(`stops the original writer after native view loss: ${fault}`, async () => {
     "--docker-access",
     "--log-path",
     "evidence",
+    ...(expectUndetected ? ["--env", "REINS_WRR09_EXPECT_UNDETECTED"] : []),
     "--",
     "node",
     "native-view-round.ts",

@@ -724,19 +724,27 @@ describe("routing driver invariants", () => {
 
   test("does not retain failed starts and retains failed termination for retry", async () => {
     const workers: ReturnType<typeof createNativeWorker>[] = [];
+    const codexDriverFactory = createCodexDriver({
+      transportFactory() {
+        const worker = createNativeWorker("thread-retry");
+        workers.push(worker);
+        return worker.transport;
+      },
+    });
+    let starts = 0;
     const adapter: HarnessAdapter = {
-      driverFactory: createCodexDriver({
-        transportFactory() {
-          const worker = createNativeWorker("thread-retry");
-          workers.push(worker);
-          if (workers.length === 1) {
-            worker.transport.start = () => {
-              throw new Error("start failed");
-            };
-          }
-          return worker.transport;
-        },
-      }),
+      driverFactory(context) {
+        if (starts++ !== 0) return codexDriverFactory(context);
+        return {
+          start() {
+            throw new Error("start failed");
+          },
+          async deliver() {},
+          async interrupt() {},
+          resolvePermission() {},
+          async terminate() {},
+        };
+      },
       capabilities: async () => ({ harness: "codex", models: [] }),
     };
     const driver = createRoutingDriverFactory(new Map([["codex", adapter]]), {
@@ -762,11 +770,11 @@ describe("routing driver invariants", () => {
       ).rejects.toThrow("No routing entry");
       driver.start(spec);
       await vi.waitFor(() => {
-        expect(workers[1]?.controls.requests().at(-1)?.method).toBe(
+        expect(workers[0]?.controls.requests().at(-1)?.method).toBe(
           "turn/start",
         );
       });
-      const retryWorker = workers[1];
+      const retryWorker = workers[0];
       if (retryWorker === undefined) throw new Error("Expected retry worker");
       await driver.deliver(
         sessionId,
@@ -778,7 +786,6 @@ describe("routing driver invariants", () => {
         method: "turn/steer",
         params: { input: [{ text: "retry message" }] },
       });
-      expect(workers[0]?.controls.requests()).toEqual([]);
       retryWorker.controls.setCloseError(new Error("terminate failed"));
       await expect(driver.terminate(sessionId)).rejects.toThrow(
         "terminate failed",

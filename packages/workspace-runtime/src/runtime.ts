@@ -69,8 +69,10 @@ import {
   fingerprint,
   resolveWorktree,
   workspaceFailure,
+  workspaceBindingDeclarations,
   workspaceEnvironment,
   workspaceHarnesses,
+  worktreeScopeKey,
 } from "./index.ts";
 import { openPublications, servePublisher } from "./publications.ts";
 import {
@@ -390,7 +392,9 @@ export async function openWorkspaceRuntime(options: {
     publishers.set(
       record.directory,
       await servePublisher(join(control, "f.sock"), (params) =>
-        publications.publish(record.owner, record.tree.cwd, params),
+        worktreeScopeKey(record.tree.cwd).then((scopeKey) =>
+          publications.publish(record.owner, scopeKey, params),
+        ),
       ),
     );
   };
@@ -496,7 +500,8 @@ export async function openWorkspaceRuntime(options: {
         );
       });
       if (record === undefined) throw error;
-      if (record.owner !== owner) throw workspaceFailure("attachment_owned");
+      if (record.owner !== owner)
+        throw workspaceFailure("attachment_not_found");
       const loss = await nativeLoss(record);
       if (
         loss === undefined &&
@@ -507,7 +512,7 @@ export async function openWorkspaceRuntime(options: {
       tree = { ...record.tree, cwd };
     }
     if (record === undefined) throw workspaceFailure("attachment_not_found");
-    if (record.owner !== owner) throw workspaceFailure("attachment_owned");
+    if (record.owner !== owner) throw workspaceFailure("attachment_not_found");
     if (
       record.info.source.error?.code === "native_view_lost" &&
       record.info.source.error.nativeView.reason !== "unreachable"
@@ -1392,6 +1397,10 @@ export async function openWorkspaceRuntime(options: {
   monitor.unref();
   return {
     publications,
+    async publicationScope(cwd: string, owner: ConsumerContext) {
+      const { record } = await find(cwd, owner);
+      return worktreeScopeKey(record.tree.cwd);
+    },
     hasAttachments: () => records.some(active),
     // 独立管理程序在同一 state lease 下调用；不登记到 agent 协议。
     async inspectAttachment(cwd: string) {
@@ -1497,18 +1506,16 @@ export async function openWorkspaceRuntime(options: {
       const { record, created } = await exclusive(async () => {
         const existing = await locate(tree);
         if (existing !== undefined) {
+          if (existing.owner !== owner)
+            throw workspaceFailure("attachment_owned");
           if (existing.detach !== undefined)
             throw workspaceFailure("workspace_detaching");
           await find(cwd, owner);
           if (JSON.stringify(existing.intent) !== JSON.stringify(intent))
             throw workspaceFailure("attachment_intent_conflict");
-          const current = await workspaceHarnesses(
-            cwd,
-            options.codexAuthBindings,
-            options.qoderAuthBindings,
-          );
+          const current = await workspaceBindingDeclarations(cwd);
           const selected = intent.map((ref) =>
-            current.bindings.find((binding) => binding.ref === ref),
+            current.find((binding) => binding.ref === ref),
           );
           if (
             selected.some((binding) => binding === undefined) ||

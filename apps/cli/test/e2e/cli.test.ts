@@ -34,6 +34,8 @@ import {
   fullUsageFor,
   validateCommand,
   valueHint,
+  publisherCommandSpecs,
+  workspaceCommandSpecs,
   type CommandArg,
   type CommandConstraint,
   type CommandOption,
@@ -131,6 +133,29 @@ function runCli(
     child.on("close", (code) => {
       finish(timedOut ? -1 : (code ?? -1));
     });
+  });
+}
+
+function runPublisher(args: readonly string[]): Promise<CliResult> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(
+      process.execPath,
+      [join(repoRoot, "apps/cli/dist/publisher-cli.js"), ...args],
+      { env: { ...process.env, REINS_CONSUMER_CONTEXT: "" }, stdio: "pipe" },
+    );
+    const stdout: string[] = [];
+    const stderr: string[] = [];
+    child.stdout.on("data", (chunk) => stdout.push(String(chunk)));
+    child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
+    child.once("error", reject);
+    child.once("close", (code) =>
+      resolve({
+        stdout: stdout.join(""),
+        stderr: stderr.join(""),
+        exitCode: code ?? -1,
+        pid: child.pid ?? -1,
+      }),
+    );
   });
 }
 
@@ -1931,6 +1956,86 @@ const usageCases: UsageCase[] = [
   unknownOptionCase,
   removedInterruptMessageOptionCase,
 ];
+
+describe("workspace 与 publisher 声明入口", () => {
+  test("handoff 一次返回全部必填问题和子命令 canonical usage", async () => {
+    const result = await runCli(["workspace", "handoff"], {
+      REINS_CONSUMER_CONTEXT: "",
+    });
+    expect(result.exitCode).toBe(64);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      code: "usage_error",
+      issues: [
+        { issue: "missing_argument", field: "--repository <path>" },
+        { issue: "missing_argument", field: "--commit <sha>" },
+        { issue: "missing_argument", field: "--subdirectory <path>" },
+        { issue: "missing_argument", field: "--binding <refs...>" },
+      ],
+      usage:
+        "reins workspace handoff --repository <path> --commit <sha> --subdirectory <path> --binding <refs...> [options]",
+    });
+  });
+
+  test("detach 枚举错误在 JSON 与 pretty 中都走声明语法", async () => {
+    const json = await runCli(
+      ["workspace", "detach", "--session-disposition", "invalid"],
+      { REINS_CONSUMER_CONTEXT: "" },
+    );
+    expect(json.exitCode).toBe(64);
+    expect(JSON.parse(json.stdout)).toMatchObject({
+      code: "usage_error",
+      issues: [
+        {
+          issue: "invalid_value",
+          field: "--session-disposition",
+          value: "invalid",
+        },
+      ],
+      usage: "reins workspace detach --session-disposition <value> [options]",
+    });
+
+    const pretty = await runCli(
+      ["--pretty", "workspace", "detach", "--session-disposition", "invalid"],
+      { REINS_CONSUMER_CONTEXT: "" },
+    );
+    expect(pretty.exitCode).toBe(64);
+    expect(pretty.stdout).toBe("");
+    expect(pretty.stderr).toContain("suggestion: Allowed: require_none, kill");
+    expect(pretty.stderr).toContain("usage: reins workspace detach");
+  });
+
+  test("未知 workspace 子命令只列出实际子命令", async () => {
+    const result = await runCli(["workspace", "typo"], {
+      REINS_CONSUMER_CONTEXT: "",
+    });
+    expect(result.exitCode).toBe(64);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      issues: [
+        {
+          issue: "unknown_command",
+          valid: workspaceCommandSpecs.map((spec) =>
+            spec.name.slice("workspace ".length),
+          ),
+        },
+      ],
+      usage: "reins workspace [options] <command>",
+    });
+  });
+
+  test("publisher 缺 file 使用相同完整 issue 与 canonical usage", async () => {
+    const result = await runPublisher(["publish"]);
+    expect(result.exitCode).toBe(64);
+    expect(result.stderr).toBe("");
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      code: "usage_error",
+      issues: [
+        { issue: "missing_argument", target: "argument", field: "file" },
+      ],
+      usage: `reins ${publisherCommandSpecs[0]!.name} <file> [options]`,
+    });
+  });
+});
 
 describe("CLI 错误矩阵（缝 D，从命令规范派生）", () => {
   test("每个公开值类型都由真实命令或同一派生器的专用 fixture 覆盖", () => {

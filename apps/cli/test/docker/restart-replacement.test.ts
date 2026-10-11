@@ -7,6 +7,8 @@ import { fileURLToPath } from "node:url";
 import { decodeTurnHandle } from "@reins/protocol";
 import { expect, test } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 test("revalidates admission and explicitly replaces sessions after daemon and container restarts", async () => {
@@ -57,11 +59,10 @@ test("revalidates admission and explicitly replaces sessions after daemon and co
       .update(await readFile(join(input, "restart-replacement-worker.ts")))
       .digest("hex"),
   });
-  execFileSync(process.execPath, [
-    join(repository, "scripts/bundle-workspace-client.ts"),
+  await bundleWorkspaceClient(
     join(repository, "apps/cli/test/docker/restart-client.ts"),
     join(input, "restart-client.js"),
-  ]);
+  );
   fingerprints.push({
     name: "restart-client.js",
     sha256: createHash("sha256")

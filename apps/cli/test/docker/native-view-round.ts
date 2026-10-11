@@ -23,7 +23,7 @@ const {
 } = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
   image: string;
   consumerSha256: string;
-  fault?: "move" | "replace" | "remove" | "split";
+  fault?: "move" | "replace" | "remove" | "split" | "session-cwd-replace";
 };
 async function command(
   binary: string,
@@ -330,10 +330,12 @@ const splitEnter = [
   "--wd=/",
 ];
 try {
+  const attachmentCwd =
+    fault === "session-cwd-replace" ? worktree : join(worktree, "src");
   const attached = await cli([
     "attach",
     "-C",
-    join(worktree, "src"),
+    attachmentCwd,
     "--binding",
     "code",
   ]);
@@ -617,16 +619,33 @@ try {
         originalHead,
       );
     }
+    let movedSessionCwd: string | undefined;
+    if (fault === "session-cwd-replace") {
+      movedSessionCwd = join(worktree, "moved-src");
+      await rename(join(worktree, "src"), movedSessionCwd);
+      await mkdir(join(worktree, "src"));
+      const originalCwd = writer.cwdIdentity as { dev: number; ino: number };
+      const replacementCwd = await nativeIdentity(join(worktree, "src"));
+      assert.notDeepEqual(replacementCwd, {
+        dev: String(originalCwd.dev),
+        ino: String(originalCwd.ino),
+      });
+    }
     const target = fault === "move" ? moved : worktree;
     const expectedLoss =
-      fault === "replace"
-        ? { reason: "replaced" }
-        : fault === "remove"
-          ? { reason: "removed" }
-          : fault === "split"
-            ? { reason: "split" }
-            : { reason: "moved", currentRoot: moved };
-    const rejected = await control(
+      fault === "session-cwd-replace"
+        ? { reason: "unreachable" }
+        : fault === "replace"
+          ? { reason: "replaced" }
+          : fault === "remove"
+            ? { reason: "removed" }
+            : fault === "split"
+              ? { reason: "split" }
+              : { reason: "moved", currentRoot: moved };
+    const expectUndetected =
+      process.env.REINS_WRR09_EXPECT_UNDETECTED === "1" &&
+      fault === "session-cwd-replace";
+    const attempted = await control(
       fault === "remove"
         ? [
             "-C",
@@ -648,102 +667,150 @@ try {
           ],
       base,
     );
-    assert.equal(rejected.status, 65, JSON.stringify(rejected));
-    const detected = {
-      held: (await held.stat()).size,
-      relative: (await relative.stat()).size,
-    };
-    const originalProcess = await processState(40);
-    const stopped = ["absent", "Z", "X"].includes(originalProcess.state);
-    const stoppedSizes = {
-      held: (await held.stat()).size,
-      relative: (await relative.stat()).size,
-    };
-    await delay(1000);
-    const stable =
-      stoppedSizes.held === (await held.stat()).size &&
-      stoppedSizes.relative === (await relative.stat()).size;
-    await record(`${fault}-original-writer`, {
-      originalRoot,
-      movedRoot,
-      replacementRoot,
-      originalHead,
-      writer,
-      originalContainer,
-      initialProcess,
-      originalProcess,
-      stopped,
-      spawn: spawned.value,
-      rejection: rejected.value,
-      before: detected,
-      after: {
+    if (expectUndetected) {
+      assert.equal(attempted.status, 0, JSON.stringify(attempted));
+      assert.equal(attempted.value.code, undefined);
+      const stillRunning = await processState();
+      assert.ok(!["absent", "Z", "X"].includes(stillRunning.state));
+      const continued = {
         held: (await held.stat()).size,
         relative: (await relative.stat()).size,
-      },
-      stable,
-    });
-    if (fault === "remove")
+      };
+      await delay(150);
+      assert.ok((await held.stat()).size > continued.held);
+      assert.ok((await relative.stat()).size > continued.relative);
+      await record("session-cwd-replacement-undetected", {
+        originalContainer,
+        pid: writer.pid,
+        writer,
+        movedSessionCwd,
+        replacementCwd: join(worktree, "src"),
+        originalSessionStillRunning: stillRunning,
+        replacementSpawn: attempted.value,
+      });
+      const killedOriginal = await control([
+        "kill",
+        String(spawned.value.sessionId),
+      ]);
+      assert.equal(killedOriginal.status, 0, JSON.stringify(killedOriginal));
+      const killedReplacement = await control([
+        "kill",
+        String(attempted.value.sessionId),
+      ]);
       assert.equal(
-        passiveStopped,
-        true,
-        "Original writer must stop after actual removal without a new caller action",
+        killedReplacement.status,
+        0,
+        JSON.stringify(killedReplacement),
       );
-    assert.equal(
-      stopped,
-      true,
-      "Original writer process must stop after native view loss is detected",
-    );
-    assert.equal(
-      stable,
-      true,
-      "Original held-FD and cwd-relative writer must stop after native view loss is detected",
-    );
-    assert.equal(rejected.value.code, "native_view_lost");
-    assert.deepEqual(rejected.value.nativeView, expectedLoss);
-    const lost = await cli(["status", "-C", join(target, "src")]);
-    assert.equal(lost.status, 0);
-    const source = lost.value.source as {
-      status: string;
-      error: { code: string; nativeView: unknown };
-      termination: { status: string; via: string; sessions: unknown[] };
-    };
-    assert.equal(source.status, "failed");
-    assert.equal(source.error.code, "native_view_lost");
-    assert.deepEqual(source.error.nativeView, expectedLoss);
-    assert.deepEqual(source.termination, {
-      status: "stopped",
-      via: "harness",
-      sessions: [{ sessionId: spawned.value.sessionId, outcome: "confirmed" }],
-    });
-    const terminal = await control(
-      [
-        "-C",
-        join(target, "src"),
-        "wait",
-        String(spawned.value.turnHandle),
-        "--completion",
-        "all",
-        "--timeout",
-        "0",
-      ],
-      base,
-    );
-    assert.equal(terminal.status, 3, JSON.stringify(terminal));
-    assert.equal(
-      (terminal.value.completed as { stopReason: string }[])[0]!.stopReason,
-      "killed",
-    );
-    if (fault === "replace") {
-      for (const name of ["held.txt", "relative.txt", "writer.json"])
-        await assert.rejects(readFile(join(worktree, "src", name)), {
-          code: "ENOENT",
-        });
-      assert.equal(
-        await readFile(join(worktree, "tracked.txt"), "utf8"),
-        "native worktree\n",
-      );
+      const cleanedProcess = await processState(40);
+      assert.ok(["absent", "Z", "X"].includes(cleanedProcess.state));
+      await record("session-cwd-replacement-red-cleanup", {
+        original: killedOriginal.value,
+        replacement: killedReplacement.value,
+        originalProcess: cleanedProcess,
+      });
     }
-    await record("original-stop-facts", { source, terminal: terminal.value });
+    if (!expectUndetected) {
+      assert.equal(attempted.status, 65, JSON.stringify(attempted));
+      const rejected = attempted;
+      const detected = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      const originalProcess = await processState(40);
+      const stopped = ["absent", "Z", "X"].includes(originalProcess.state);
+      const stoppedSizes = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      await delay(1000);
+      const stable =
+        stoppedSizes.held === (await held.stat()).size &&
+        stoppedSizes.relative === (await relative.stat()).size;
+      await record(`${fault}-original-writer`, {
+        originalRoot,
+        movedRoot,
+        replacementRoot,
+        originalHead,
+        writer,
+        originalContainer,
+        initialProcess,
+        originalProcess,
+        stopped,
+        spawn: spawned.value,
+        rejection: rejected.value,
+        before: detected,
+        after: {
+          held: (await held.stat()).size,
+          relative: (await relative.stat()).size,
+        },
+        stable,
+      });
+      if (fault === "remove")
+        assert.equal(
+          passiveStopped,
+          true,
+          "Original writer must stop after actual removal without a new caller action",
+        );
+      assert.equal(
+        stopped,
+        true,
+        "Original writer process must stop after native view loss is detected",
+      );
+      assert.equal(
+        stable,
+        true,
+        "Original held-FD and cwd-relative writer must stop after native view loss is detected",
+      );
+      assert.equal(rejected.value.code, "native_view_lost");
+      assert.deepEqual(rejected.value.nativeView, expectedLoss);
+      const lost = await cli(["status", "-C", join(target, "src")]);
+      assert.equal(lost.status, 0);
+      const source = lost.value.source as {
+        status: string;
+        error: { code: string; nativeView: unknown };
+        termination: { status: string; via: string; sessions: unknown[] };
+      };
+      assert.equal(source.status, "failed");
+      assert.equal(source.error.code, "native_view_lost");
+      assert.deepEqual(source.error.nativeView, expectedLoss);
+      assert.deepEqual(source.termination, {
+        status: "stopped",
+        via: "harness",
+        sessions: [
+          { sessionId: spawned.value.sessionId, outcome: "confirmed" },
+        ],
+      });
+      const terminal = await control(
+        [
+          "-C",
+          join(target, "src"),
+          "wait",
+          String(spawned.value.turnHandle),
+          "--completion",
+          "all",
+          "--timeout",
+          "0",
+        ],
+        base,
+      );
+      assert.equal(terminal.status, 3, JSON.stringify(terminal));
+      assert.equal(
+        (terminal.value.completed as { stopReason: string }[])[0]!.stopReason,
+        "killed",
+      );
+      if (fault === "replace") {
+        for (const name of ["held.txt", "relative.txt", "writer.json"])
+          await assert.rejects(readFile(join(worktree, "src", name)), {
+            code: "ENOENT",
+          });
+        assert.equal(
+          await readFile(join(worktree, "tracked.txt"), "utf8"),
+          "native worktree\n",
+        );
+      }
+      await record("original-stop-facts", { source, terminal: terminal.value });
+    }
   } finally {
     await held.close();
     await relative.close();

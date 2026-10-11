@@ -171,7 +171,8 @@ export function commanderToUsageError(
       return usageError({
         issue: "unknown_command",
         ...(quoted === undefined ? {} : { value: quoted }),
-        valid: commandSpecs.map((candidate) => candidate.name),
+        valid:
+          spec?.children ?? commandSpecs.map((candidate) => candidate.name),
         ...(didYouMean === undefined ? {} : { didYouMean }),
       });
     case "commander.unknownOption":
