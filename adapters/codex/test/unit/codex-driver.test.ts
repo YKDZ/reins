@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   DriverDiagnosticFact,
   DomainEvent,
@@ -28,6 +30,46 @@ const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;
 const sessionName = "reviewer" as SessionName;
+
+function deferred<T>(): {
+  promise: Promise<T>;
+  resolve(value: T): void;
+  reject(error: unknown): void;
+} {
+  let resolve!: (value: T) => void;
+  let reject!: (error: unknown) => void;
+  const promise = new Promise<T>((done, fail) => {
+    resolve = done;
+    reject = fail;
+  });
+  return { promise, reject, resolve };
+}
+
+function makeDriver(fake: ReturnType<typeof createFakeTransport>) {
+  const events: DomainEvent[] = [];
+  const driver = createCodexDriver({
+    transportFactory: () => fake.transport,
+  })({
+    emit: (event) => events.push(event),
+    diagnostics: async () => undefined,
+  });
+  return { driver, events };
+}
+
+function startTracked(
+  driver: ReturnType<ReturnType<typeof createCodexDriver>>,
+  sessionId: SessionId,
+  turnId: TurnId,
+): void {
+  driver.start({
+    sessionId,
+    turnId,
+    sessionName: sessionId.split("@")[0] as SessionName,
+    harness: "codex",
+    message: "caller task",
+    cwd: "/tmp/demo",
+  });
+}
 
 test("结构化额度失败不从正文猜测限流，停止等待在途失败提交", async () => {
   const fake = createFakeTransport();
@@ -196,6 +238,174 @@ function setupWithMalformedResponse(method: "turn/steer" | "thread/delete") {
 }
 
 describe("codex driver", () => {
+  test("冷 HOME 首次 initialize 成功前排队，之后 worker 可并发初始化", async () => {
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = `/tmp/reins-codex-cold-${randomUUID()}`;
+    const firstFake = createFakeTransport();
+    const secondFake = createFakeTransport();
+    const thirdFake = createFakeTransport();
+    const firstInitialize = deferred<Record<string, never>>();
+    const secondInitialize = deferred<Record<string, never>>();
+    const thirdInitialize = deferred<Record<string, never>>();
+    firstFake.controls.setResponse("initialize", firstInitialize.promise);
+    secondFake.controls.setResponse("initialize", secondInitialize.promise);
+    thirdFake.controls.setResponse("initialize", thirdInitialize.promise);
+    let firstStarts = 0;
+    let secondStarts = 0;
+    let thirdStarts = 0;
+    firstFake.transport.start = () => {
+      firstStarts += 1;
+    };
+    secondFake.transport.start = () => {
+      secondStarts += 1;
+    };
+    thirdFake.transport.start = () => {
+      thirdStarts += 1;
+    };
+    const first = makeDriver(firstFake);
+    const second = makeDriver(secondFake);
+    const third = makeDriver(thirdFake);
+    const firstSession = "cold-first@g1" as SessionId;
+    const secondSession = "cold-second@g1" as SessionId;
+    const thirdSession = "cold-third@g1" as SessionId;
+
+    try {
+      startTracked(first.driver, firstSession, firstTurnId);
+      await flush();
+      expect(firstStarts).toBe(1);
+      expect(firstFake.controls.requests().map(({ method }) => method)).toEqual(
+        ["initialize"],
+      );
+
+      startTracked(second.driver, secondSession, secondTurnId);
+      await flush();
+      expect(secondStarts).toBe(0);
+      expect(secondFake.controls.requests()).toEqual([]);
+
+      firstInitialize.resolve({});
+      await flush();
+      expect(secondStarts).toBe(1);
+      expect(
+        secondFake.controls.requests().map(({ method }) => method),
+      ).toEqual(["initialize"]);
+
+      startTracked(third.driver, thirdSession, "t3" as TurnId);
+      await flush();
+      expect(thirdStarts).toBe(1);
+      expect(thirdFake.controls.requests().map(({ method }) => method)).toEqual(
+        ["initialize"],
+      );
+    } finally {
+      firstInitialize.resolve({});
+      secondInitialize.resolve({});
+      thirdInitialize.resolve({});
+      await Promise.all([
+        first.driver.terminate(firstSession),
+        second.driver.terminate(secondSession),
+        third.driver.terminate(thirdSession),
+      ]);
+      if (previousHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
+  test("冷 HOME initialize 失败保留失败且不会自动启动排队 worker", async () => {
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = `/tmp/reins-codex-failed-${randomUUID()}`;
+    const firstFake = createFakeTransport();
+    const queuedFake = createFakeTransport();
+    const laterFake = createFakeTransport();
+    const firstInitialize = deferred<Record<string, never>>();
+    firstFake.controls.setResponse("initialize", firstInitialize.promise);
+    let queuedStarts = 0;
+    let laterStarts = 0;
+    queuedFake.transport.start = () => {
+      queuedStarts += 1;
+    };
+    laterFake.transport.start = () => {
+      laterStarts += 1;
+    };
+    const first = makeDriver(firstFake);
+    const queued = makeDriver(queuedFake);
+    const later = makeDriver(laterFake);
+    const firstSession = "failed-first@g1" as SessionId;
+    const queuedSession = "failed-queued@g1" as SessionId;
+    const laterSession = "failed-later@g1" as SessionId;
+
+    try {
+      startTracked(first.driver, firstSession, firstTurnId);
+      await flush();
+      startTracked(queued.driver, queuedSession, secondTurnId);
+      await flush();
+      expect(queuedStarts).toBe(0);
+
+      firstInitialize.reject(new Error("sqlite initialization failed"));
+      await flush();
+      expect(queuedStarts).toBe(0);
+      for (const events of [first.events, queued.events]) {
+        expect(
+          events.some(
+            (event) =>
+              event.type === "turn.completed" && event.stopReason === "failed",
+          ),
+        ).toBe(true);
+      }
+
+      startTracked(later.driver, laterSession, "t3" as TurnId);
+      await flush();
+      expect(laterStarts).toBe(1);
+      expect(
+        laterFake.controls.requests().map(({ method }) => method),
+      ).toContain("initialize");
+    } finally {
+      firstInitialize.resolve({});
+      await Promise.all([
+        first.driver.terminate(firstSession),
+        queued.driver.terminate(queuedSession),
+        later.driver.terminate(laterSession),
+      ]);
+      if (previousHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
+  test("终止排队 worker 后首次 initialize 完成不会复活它", async () => {
+    const previousHome = process.env.CODEX_HOME;
+    process.env.CODEX_HOME = `/tmp/reins-codex-cancelled-${randomUUID()}`;
+    const firstFake = createFakeTransport();
+    const queuedFake = createFakeTransport();
+    const firstInitialize = deferred<Record<string, never>>();
+    firstFake.controls.setResponse("initialize", firstInitialize.promise);
+    let queuedStarts = 0;
+    queuedFake.transport.start = () => {
+      queuedStarts += 1;
+    };
+    const first = makeDriver(firstFake);
+    const queued = makeDriver(queuedFake);
+    const firstSession = "cancel-first@g1" as SessionId;
+    const queuedSession = "cancel-queued@g1" as SessionId;
+
+    try {
+      startTracked(first.driver, firstSession, firstTurnId);
+      await flush();
+      startTracked(queued.driver, queuedSession, secondTurnId);
+      await flush();
+      expect(queuedStarts).toBe(0);
+
+      await queued.driver.terminate(queuedSession);
+      expect(queuedFake.controls.closed()).toBe(true);
+      firstInitialize.resolve({});
+      await flush();
+      expect(queuedStarts).toBe(0);
+      expect(queuedFake.controls.requests()).toEqual([]);
+    } finally {
+      firstInitialize.resolve({});
+      await first.driver.terminate(firstSession);
+      if (previousHome === undefined) delete process.env.CODEX_HOME;
+      else process.env.CODEX_HOME = previousHome;
+    }
+  });
+
   test("spawn 走 initialize → thread/start → turn/start", async () => {
     const { fake } = setup();
     await flush();

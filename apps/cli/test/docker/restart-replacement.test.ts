@@ -4,6 +4,7 @@ import { copyFile, mkdir, readFile, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { decodeTurnHandle } from "@reins/protocol";
 import { expect, test } from "vitest";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -230,7 +231,11 @@ test("revalidates admission and explicitly replaces sessions after daemon and co
   );
   expect(result.status, `${directory}\n${result.stderr}`).toBe(0);
   const envelope = JSON.parse(result.stdout) as {
-    data: { verification: Record<string, string> };
+    data: {
+      verification: Record<string, string>;
+      roundId: string;
+      scenarios: { id: string }[];
+    };
   };
   expect(envelope.data.verification).toEqual({
     scenarioExecution: "passed",
@@ -239,4 +244,48 @@ test("revalidates admission and explicitly replaces sessions after daemon and co
     platformReclaim:
       process.env.REINS_WRR21_PLATFORM_REUSE === "1" ? "not_run" : "passed",
   });
+  const facts = JSON.parse(
+    await readFile(
+      join(
+        directory,
+        "evidence",
+        "rounds",
+        envelope.data.roundId,
+        "scenarios",
+        envelope.data.scenarios[0]!.id,
+        "collected",
+        "evidence",
+        "workspace-facts.json",
+      ),
+      "utf8",
+    ),
+  ) as { name: string; value: unknown }[];
+  const detached = facts.find((fact) => fact.name === "detach-after-restarts")!
+    .value as {
+    value: {
+      detachment: {
+        sessions: {
+          sessionId: string;
+          turns: { turnId: string; completed?: unknown }[];
+        }[];
+      };
+    };
+  };
+  // CLI handle 与账本的原生 target 使用公开 codec 关联，再比较完整终态载荷。
+  for (const kind of ["daemon", "container"]) {
+    const replacement = facts.find(
+      (fact) => fact.name === `${kind}-restart-replacement`,
+    )!.value as {
+      completed: {
+        completed: { turnHandle: string; [key: string]: unknown }[];
+      };
+    };
+    for (const { turnHandle, ...payload } of replacement.completed.completed) {
+      const target = decodeTurnHandle(turnHandle);
+      const saved = detached.value.detachment.sessions
+        .find((session) => session.sessionId === target.sessionId)!
+        .turns.find((turn) => turn.turnId === target.turnId);
+      expect(saved?.completed).toEqual({ ...target, ...payload });
+    }
+  }
 }, 1_800_000);
