@@ -602,6 +602,7 @@ type ParsedOptions<O extends readonly CommandOption[]> = {
 
 type InvocationFor<S extends CommandSpecData> = {
   readonly command: S["name"];
+  readonly contextCwd?: string;
   readonly args: ParsedArgs<S["args"]>;
   readonly options: ParsedOptions<S["options"]>;
   readonly mode: OutputMode;

@@ -10,7 +10,12 @@ import {
   type CommandSpec,
   type ValueKind,
 } from "./command-spec.ts";
-import type { CliError, UsageError, UsageIssue } from "./errors.ts";
+import {
+  isWorkspaceError,
+  type CliError,
+  type UsageError,
+  type UsageIssue,
+} from "./errors.ts";
 import { usageError } from "./errors.ts";
 
 export type RenderedErrorItem = {
@@ -59,6 +64,14 @@ export function renderCliError(
   error: CliError,
   spec?: CommandSpec,
 ): RenderedError {
+  if (isWorkspaceError(error)) {
+    const message = error.code.replaceAll("_", " ");
+    return renderedError(
+      message[0]!.toUpperCase() +
+        message.slice(1) +
+        (error.detail === undefined ? "" : ": " + error.detail),
+    );
+  }
   if (error.code === "usage_error") return renderUsageError(error, spec);
   if (error.code === "command_outcome_unknown")
     return renderedError(

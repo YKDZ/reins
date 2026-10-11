@@ -1,4 +1,8 @@
-import { consumerContextSchema } from "@reins/protocol";
+import {
+  consumerContextSchema,
+  protocolMethodSchema,
+  type ProtocolMethod,
+} from "@reins/protocol";
 import * as v from "valibot";
 
 export const WORKSPACE_PROTOCOL_MAJOR_VERSION = 1;
@@ -63,6 +67,8 @@ export const workspaceErrorSchema = v.strictObject({
     "preparation_outcome_unknown",
     "runtime_resource_mismatch",
     "workspace_busy",
+    "workspace_not_ready",
+    "harness_not_prepared",
     "manager_disconnected",
     "manager_timeout",
     "invalid_manager_response",
@@ -136,6 +142,20 @@ export const preparationSchema = v.strictObject({
   ),
   environment: environmentDefinitionSchema,
   environmentFingerprint: v.string(),
+  definition: v.optional(
+    v.variant("status", [
+      v.strictObject({
+        status: v.picklist(["unchanged", "drifted"]),
+        attached: environmentDefinitionSchema,
+        current: environmentDefinitionSchema,
+      }),
+      v.strictObject({
+        status: v.literal("unavailable"),
+        attached: environmentDefinitionSchema,
+        error: workspaceErrorSchema,
+      }),
+    ]),
+  ),
   history: v.strictObject({ status: v.literal("unavailable") }),
   preparation: v.strictObject({
     attempts: v.array(
@@ -153,6 +173,8 @@ export const workspaceMethods = [
   "workspace.attach",
   "workspace.status",
   "workspace.detach",
+  "workspace.route",
+  "workspace.admit",
 ] as const;
 export type WorkspaceMethod = (typeof workspaceMethods)[number];
 export type WorkspaceParams = {
@@ -163,6 +185,8 @@ export type WorkspaceParams = {
   "workspace.harnesses": { cwd: string };
   "workspace.attach": { cwd: string; bindings: string[] };
   "workspace.status": { cwd: string };
+  "workspace.route": { cwd: string };
+  "workspace.admit": { cwd: string; action: ProtocolMethod; params: unknown };
   "workspace.detach": { cwd: string; sessionDisposition: "require_none" };
 };
 export type WorkspaceResults = {
@@ -170,10 +194,28 @@ export type WorkspaceResults = {
   "workspace.harnesses": WorkspaceHarnessCatalog;
   "workspace.attach": ManagedWorkspaceInfo;
   "workspace.status": ManagedWorkspaceInfo;
+  "workspace.route": { cwd: string; socket: string };
+  "workspace.admit": { cwd: string };
   "workspace.detach": ManagedWorkspaceInfo;
 };
 const pathParamsSchema = v.strictObject({ cwd: v.string() });
 export const workspaceRequestSchema = v.variant("method", [
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("workspace.route"),
+    params: pathParamsSchema,
+  }),
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("workspace.admit"),
+    params: v.strictObject({
+      cwd: v.string(),
+      action: protocolMethodSchema,
+      params: v.unknown(),
+    }),
+  }),
   v.strictObject({
     kind: v.literal("request"),
     requestId: v.string(),
@@ -234,7 +276,11 @@ export function workspaceResultSchemaFor(method: WorkspaceMethod) {
     ? v.strictObject({
         protocolMajorVersion: v.literal(WORKSPACE_PROTOCOL_MAJOR_VERSION),
       })
-    : method === "workspace.harnesses"
-      ? catalogSchema
-      : preparationSchema;
+    : method === "workspace.route"
+      ? v.strictObject({ cwd: v.string(), socket: v.string() })
+      : method === "workspace.admit"
+        ? v.strictObject({ cwd: v.string() })
+        : method === "workspace.harnesses"
+          ? catalogSchema
+          : preparationSchema;
 }

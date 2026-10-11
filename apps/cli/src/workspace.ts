@@ -4,7 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createWorkspaceClient } from "@reins/client";
+import { createWorkspaceClient, type ReinsClient } from "@reins/client";
 import { consumerContextSchema } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
 import {
@@ -22,6 +22,8 @@ export function registerWorkspaceCommands(program: Command): void {
   const workspace = program
     .command("workspace")
     .description("Prepare an existing native Git worktree");
+  const nativeCwd = (path?: string) =>
+    resolve(path ?? (program.opts().C as string | undefined) ?? process.cwd());
   const invoke = async <M extends WorkspaceMethod>(
     method: M,
     params: WorkspaceParams[M],
@@ -67,7 +69,7 @@ export function registerWorkspaceCommands(program: Command): void {
     .option("-C <path>", "native directory context")
     .action((options: { C?: string }) =>
       invoke("workspace.harnesses", {
-        cwd: resolve(options.C ?? process.cwd()),
+        cwd: nativeCwd(options.C),
       }),
     );
   workspace
@@ -82,7 +84,7 @@ export function registerWorkspaceCommands(program: Command): void {
     )
     .action((options: { C?: string; binding: string[] }) =>
       invoke("workspace.attach", {
-        cwd: resolve(options.C ?? process.cwd()),
+        cwd: nativeCwd(options.C),
         bindings: options.binding,
       }),
     );
@@ -91,7 +93,7 @@ export function registerWorkspaceCommands(program: Command): void {
     .description("Inspect native worktree preparation facts")
     .option("-C <path>", "native directory context")
     .action((options: { C?: string }) =>
-      invoke("workspace.status", { cwd: resolve(options.C ?? process.cwd()) }),
+      invoke("workspace.status", { cwd: nativeCwd(options.C) }),
     );
   workspace
     .command("detach")
@@ -102,7 +104,7 @@ export function registerWorkspaceCommands(program: Command): void {
       if (options.sessionDisposition !== "require_none")
         throw new ExitError(64, "Invalid session disposition");
       return invoke("workspace.detach", {
-        cwd: resolve(options.C ?? process.cwd()),
+        cwd: nativeCwd(options.C),
         sessionDisposition: "require_none",
       });
     });
@@ -147,5 +149,40 @@ async function connectManager(socket: string, stateDirectory: string) {
         throw { code: "manager_disconnected" };
       await new Promise((resolve) => setTimeout(resolve, 25));
     }
+  }
+}
+
+export async function openWorkspaceControl(cwd: string): Promise<ReinsClient> {
+  const context = v.parse(
+    consumerContextSchema,
+    process.env.REINS_CONSUMER_CONTEXT ?? "",
+  );
+  const stateDirectory =
+    process.env.REINS_WORKSPACE_MANAGER_STATE_DIR ??
+    join(
+      process.env.XDG_STATE_HOME ?? join(homedir(), ".local", "state"),
+      "reins",
+      "workspace-manager",
+    );
+  const socket =
+    process.env.REINS_WORKSPACE_MANAGER_SOCKET ??
+    join(stateDirectory, "manager.sock");
+  const manager = createWorkspaceClient(
+    await connectManager(socket, stateDirectory),
+    { consumerContext: context },
+  );
+  try {
+    await manager.initialize();
+    const client = await manager.control(cwd);
+    return {
+      ...client,
+      close() {
+        client.close();
+        manager.close();
+      },
+    };
+  } catch (error) {
+    manager.close();
+    throw error;
   }
 }

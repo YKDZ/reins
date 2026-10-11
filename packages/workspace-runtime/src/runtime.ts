@@ -15,6 +15,8 @@ import { promisify } from "node:util";
 import { createReinsClient, type ReinsClient } from "@reins/client";
 import {
   consumerContextSchema,
+  spawnParamsSchema,
+  type ProtocolMethod,
   type ConsumerContext,
   type ProtocolMessage,
 } from "@reins/protocol";
@@ -30,6 +32,7 @@ import {
   fingerprint,
   resolveWorktree,
   workspaceFailure,
+  workspaceEnvironment,
   workspaceHarnesses,
 } from "./index.ts";
 
@@ -306,7 +309,22 @@ export async function openWorkspaceRuntime(options: {
         await persist(record);
       }
     }
-    return { ...record.info, cwd: tree.cwd };
+    const attached = record.info.environment;
+    let definition: NonNullable<ManagedWorkspaceInfo["definition"]>;
+    try {
+      const current = await workspaceEnvironment(tree.cwd);
+      definition = {
+        status:
+          fingerprint(attached) === fingerprint(current)
+            ? "unchanged"
+            : "drifted",
+        attached,
+        current,
+      };
+    } catch (error) {
+      definition = { status: "unavailable", attached, error: normalize(error) };
+    }
+    return { ...record.info, cwd: tree.cwd, definition };
   };
   const prepare = async (record: RecordState) => {
     const control = controlDirectory(record);
@@ -627,6 +645,40 @@ export async function openWorkspaceRuntime(options: {
       return { ...record.info, cwd: tree.cwd };
     },
     status,
+    async route(cwd: string, owner: ConsumerContext) {
+      const current = await status(cwd, owner);
+      if (current.runtime.status !== "ready")
+        throw workspaceFailure("workspace_not_ready");
+      const { record, tree } = await find(cwd, owner);
+      return {
+        cwd: tree.cwd,
+        socket: join(controlDirectory(record), "r.sock"),
+      };
+    },
+    async admit(
+      cwd: string,
+      owner: ConsumerContext,
+      action: ProtocolMethod,
+      params: unknown,
+    ) {
+      const { record, tree } = await find(cwd, owner);
+      if (record.info.runtime.status !== "ready")
+        throw workspaceFailure("workspace_not_ready");
+      if (action === "spawn") {
+        const supplied = v.safeParse(spawnParamsSchema, params);
+        if (!supplied.success) throw workspaceFailure("invalid_request");
+        const execution = await resolveWorktree(supplied.output.cwd);
+        if (execution.root !== record.tree.root)
+          throw workspaceFailure("invalid_directory");
+        const binding = record.info.harnesses.find(
+          (item) => item.harness === supplied.output.harness,
+        );
+        if (binding === undefined) throw workspaceFailure("binding_unknown");
+        if (binding.stage !== "ready")
+          throw workspaceFailure("harness_not_prepared");
+      }
+      return { cwd: tree.cwd };
+    },
     async detach(cwd: string, owner: ConsumerContext) {
       const { record, tree } = await find(cwd, owner);
       if (preparing.has(record.directory))
