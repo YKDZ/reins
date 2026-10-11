@@ -12,7 +12,10 @@ import {
   type WorkspaceMessage,
   type WorkspaceMethod,
   type WorkspaceParams,
+  type WorkspaceResults,
+  type ManagedWorkspaceInfo,
 } from "@reins/workspace-protocol";
+import { captureFixedCommit } from "@reins/workspace-source";
 import { Command } from "commander";
 import * as v from "valibot";
 
@@ -21,7 +24,9 @@ import { ExitError } from "./errors.ts";
 export function registerWorkspaceCommands(program: Command): void {
   const workspace = program
     .command("workspace")
-    .description("Prepare an existing native Git worktree");
+    .description(
+      "Prepare native Git worktrees and receive explicit source inputs",
+    );
   const nativeCwd = (path?: string) =>
     resolve(path ?? (program.opts().C as string | undefined) ?? process.cwd());
   const invoke = async <M extends WorkspaceMethod>(
@@ -50,12 +55,43 @@ export function registerWorkspaceCommands(program: Command): void {
       );
       try {
         await client.initialize();
-        const result = await client.request(method, params);
+        let result = await client.request(method, params);
+        let preparation: ManagedWorkspaceInfo | undefined;
+        // CLI 等待被受理的准备；handoff 的目标 cwd 来自物化结果。
+        if (method === "workspace.attach" || method === "workspace.handoff") {
+          preparation =
+            method === "workspace.handoff"
+              ? (result as WorkspaceResults["workspace.handoff"]).workspace
+              : (result as ManagedWorkspaceInfo);
+          while (preparation.runtime.status === "preparing") {
+            await new Promise((resolve) => setTimeout(resolve, 2000));
+            try {
+              preparation = await client.request("workspace.status", {
+                cwd: preparation.cwd,
+              });
+            } catch (error) {
+              const parsed = v.safeParse(workspaceErrorSchema, error);
+              if (!parsed.success || parsed.output.code !== "manager_timeout")
+                throw error;
+            }
+          }
+          result = (
+            method === "workspace.handoff"
+              ? {
+                  ...(result as WorkspaceResults["workspace.handoff"]),
+                  workspace: preparation,
+                }
+              : preparation
+          ) as typeof result;
+        }
         process.stdout.write(`${JSON.stringify(result)}\n`);
+        if (preparation?.runtime.status === "failed")
+          throw new ExitError(1, "workspace_failed");
       } finally {
         client.close();
       }
     } catch (error) {
+      if (error instanceof ExitError) throw error;
       const parsed = v.safeParse(workspaceErrorSchema, error);
       process.stdout.write(
         `${JSON.stringify(parsed.success ? parsed.output : { code: "manager_disconnected" })}\n`,
@@ -63,6 +99,35 @@ export function registerWorkspaceCommands(program: Command): void {
       throw new ExitError(1, "workspace_failed");
     }
   };
+  workspace
+    .command("handoff")
+    .description("Transfer one fixed commit to a new incoming Git worktree")
+    .requiredOption("--repository <path>", "one caller-native Git root")
+    .requiredOption("--commit <sha>", "full fixed commit object name")
+    .requiredOption(
+      "--subdirectory <path>",
+      "relative target working directory",
+    )
+    .requiredOption(
+      "--binding <refs...>",
+      "explicit harness binding references",
+    )
+    .action(
+      async (options: {
+        repository: string;
+        commit: string;
+        subdirectory: string;
+        binding: string[];
+      }) =>
+        invoke("workspace.handoff", {
+          material: await captureFixedCommit(
+            resolve(options.repository),
+            options.commit,
+          ),
+          subdirectory: options.subdirectory,
+          bindings: options.binding,
+        }),
+    );
   workspace
     .command("harnesses")
     .description("Discover explicit project harness bindings")

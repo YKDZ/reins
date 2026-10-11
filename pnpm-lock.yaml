@@ -192,6 +192,9 @@ importers:
       '@reins/workspace-protocol':
         specifier: workspace:*
         version: link:../../packages/workspace-protocol
+      '@reins/workspace-source':
+        specifier: workspace:*
+        version: link:../../packages/workspace-source
       commander:
         specifier: 'catalog:'
         version: 15.0.0
@@ -209,6 +212,8 @@ importers:
       '@reins/transport':
         injected: false
       '@reins/workspace-protocol':
+        injected: false
+      '@reins/workspace-source':
         injected: false
     devDependencies:
       '@reins/typescript-config':
@@ -250,6 +255,9 @@ importers:
       '@reins/workspace-runtime':
         specifier: workspace:*
         version: link:../../packages/workspace-runtime
+      '@reins/workspace-source':
+        specifier: workspace:*
+        version: link:../../packages/workspace-source
       proper-lockfile:
         specifier: 'catalog:'
         version: 4.1.2
@@ -264,6 +272,8 @@ importers:
       '@reins/workspace-protocol':
         injected: false
       '@reins/workspace-runtime':
+        injected: false
+      '@reins/workspace-source':
         injected: false
     devDependencies:
       '@reins/typescript-config':
@@ -698,6 +708,39 @@ importers:
       '@reins/protocol':
         injected: false
       '@reins/transport':
+        injected: false
+      '@reins/workspace-protocol':
+        injected: false
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
+
+  packages/workspace-source:
+    dependencies:
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@reins/workspace-protocol':
+        specifier: workspace:*
+        version: link:../workspace-protocol
+    dependenciesMeta:
+      '@reins/protocol':
         injected: false
       '@reins/workspace-protocol':
         injected: false

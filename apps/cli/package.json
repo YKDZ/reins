@@ -54,6 +54,7 @@
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
     "@reins/workspace-protocol": "workspace:*",
+    "@reins/workspace-source": "workspace:*",
     "commander": "catalog:",
     "proper-lockfile": "catalog:",
     "valibot": "catalog:"
@@ -79,6 +80,9 @@
       "injected": false
     },
     "@reins/workspace-protocol": {
+      "injected": false
+    },
+    "@reins/workspace-source": {
       "injected": false
     }
   },
