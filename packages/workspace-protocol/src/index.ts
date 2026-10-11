@@ -54,6 +54,7 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
     "publication_failed",
     "publication_not_found",
     "receipt_failed",
+    "git_import_failed",
     "consumer_context_required",
     "consumer_context_conflict",
     "initialization_required",
@@ -92,6 +93,28 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
   ]),
   detail: v.optional(v.string()),
   availableBindings: v.optional(v.array(v.string())),
+  gitImport: v.optional(
+    v.strictObject({
+      repository: v.string(),
+      reference: v.string(),
+      objectWriteAttempted: v.boolean(),
+      referenceCreated: v.boolean(),
+      objectDatabaseBefore: v.optional(
+        v.strictObject({
+          loose: v.number(),
+          packed: v.number(),
+          packs: v.number(),
+        }),
+      ),
+      objectDatabaseAfter: v.optional(
+        v.strictObject({
+          loose: v.number(),
+          packed: v.number(),
+          packs: v.number(),
+        }),
+      ),
+    }),
+  ),
 });
 export { nativeViewLossSchema, type NativeViewLoss } from "@reins/protocol";
 export const workspaceErrorSchema = v.union([
