@@ -23,7 +23,7 @@ const {
 } = JSON.parse(await readFile(join(base, "base-image.json"), "utf8")) as {
   image: string;
   consumerSha256: string;
-  fault?: "move" | "replace";
+  fault?: "move" | "replace" | "remove";
 };
 async function command(
   binary: string,
@@ -401,6 +401,46 @@ try {
     await delay(150);
     assert.ok((await held.stat()).size > before.held.size);
     assert.ok((await relative.stat()).size > before.relative.size);
+    if (fault === "remove") {
+      const beforeDrift = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      await writeFile(
+        join(worktree, ".reins", "workspace.json"),
+        JSON.stringify({
+          ...configuration,
+          environments: [
+            { provider: "docker", image: "reins-wrr09-unapplied:drift" },
+          ],
+        }),
+      );
+      const drift = await cli(["status", "-C", join(worktree, "src")]);
+      assert.equal(drift.status, 0);
+      assert.equal(
+        (drift.value.definition as { status: string }).status,
+        "drifted",
+      );
+      assert.equal((drift.value.runtime as { status: string }).status, "ready");
+      assert.equal(
+        (drift.value.source as { status: string }).status,
+        "verified",
+      );
+      await delay(150);
+      const afterDrift = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      assert.ok(afterDrift.held > beforeDrift.held);
+      assert.ok(afterDrift.relative > beforeDrift.relative);
+      await record("definition-drift-original-writer", {
+        originalContainer,
+        pid: writer.pid,
+        before: beforeDrift,
+        after: afterDrift,
+        status: drift.value,
+      });
+    }
     const nativeIdentity = async (path: string) => {
       const value = await stat(path, { bigint: true });
       return { dev: String(value.dev), ino: String(value.ino) };
@@ -412,9 +452,53 @@ try {
       worktree,
     );
     const moved = join(base, "moved-worktree");
-    await rename(worktree, moved);
-    const movedRoot = await nativeIdentity(moved);
-    assert.deepEqual(movedRoot, originalRoot);
+    let movedRoot: { dev: string; ino: string } | undefined;
+    let passiveStopped: boolean | undefined;
+    if (fault === "remove") {
+      const originalGitDir = await requireCommand(
+        "git",
+        ["rev-parse", "--path-format=absolute", "--git-dir"],
+        worktree,
+      );
+      await requireCommand(
+        "git",
+        ["worktree", "remove", "--force", worktree],
+        git,
+      );
+      await assert.rejects(stat(worktree), { code: "ENOENT" });
+      await assert.rejects(stat(originalGitDir), { code: "ENOENT" });
+      const removedSizes = {
+        held: (await held.stat()).size,
+        relative: (await relative.stat()).size,
+      };
+      let passiveProcess = await processState();
+      for (
+        let attempt = 0;
+        attempt < 40 && !["absent", "Z", "X"].includes(passiveProcess.state);
+        attempt++
+      ) {
+        await delay(250);
+        passiveProcess = await processState();
+      }
+      passiveStopped = ["absent", "Z", "X"].includes(passiveProcess.state);
+      await record("remove-without-caller-action", {
+        originalContainer,
+        pid: writer.pid,
+        originalRoot,
+        originalGitDir,
+        process: passiveProcess,
+        stopped: passiveStopped,
+        before: removedSizes,
+        after: {
+          held: (await held.stat()).size,
+          relative: (await relative.stat()).size,
+        },
+      });
+    } else {
+      await rename(worktree, moved);
+      movedRoot = await nativeIdentity(moved);
+      assert.deepEqual(movedRoot, originalRoot);
+    }
     let replacementRoot: { dev: string; ino: string } | undefined;
     if (fault === "replace") {
       await requireCommand("git", ["worktree", "repair", moved], git);
@@ -436,21 +520,33 @@ try {
         originalHead,
       );
     }
-    const target = fault === "replace" ? worktree : moved;
+    const target = fault === "move" ? moved : worktree;
     const expectedLoss =
       fault === "replace"
         ? { reason: "replaced" }
-        : { reason: "moved", currentRoot: moved };
+        : fault === "remove"
+          ? { reason: "removed" }
+          : { reason: "moved", currentRoot: moved };
     const rejected = await control(
-      [
-        "-C",
-        join(target, "src"),
-        "spawn",
-        "codex",
-        message,
-        "--name",
-        "must-reject",
-      ],
+      fault === "remove"
+        ? [
+            "-C",
+            join(target, "src"),
+            "send",
+            String(spawned.value.turnHandle),
+            message,
+            "--placement",
+            "active_turn",
+          ]
+        : [
+            "-C",
+            join(target, "src"),
+            "spawn",
+            "codex",
+            message,
+            "--name",
+            "must-reject",
+          ],
       base,
     );
     assert.equal(rejected.status, 65, JSON.stringify(rejected));
@@ -495,6 +591,12 @@ try {
       },
       stable,
     });
+    if (fault === "remove")
+      assert.equal(
+        passiveStopped,
+        true,
+        "Original writer must stop after actual removal without a new caller action",
+      );
     assert.equal(
       stopped,
       true,
