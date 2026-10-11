@@ -1,5 +1,13 @@
 import { createHash, randomUUID } from "node:crypto";
-import { mkdir, open, readFile, readdir, rename, rm } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  open,
+  readFile,
+  readdir,
+  rename,
+  rm,
+} from "node:fs/promises";
 import { join, resolve } from "node:path";
 
 import type { ConsumerContext } from "@reins/protocol";
@@ -9,6 +17,7 @@ import {
   publicationSchema,
   workspaceRequestSchema,
   type Publication,
+  type CopyCleanup,
   type WorkspaceMessage,
   type WorkspaceParams,
 } from "@reins/workspace-protocol";
@@ -40,13 +49,53 @@ export function openPublications(stateDirectory: string) {
         digest(payload) !== publication.sha256
       )
         throw new Error("Invalid publication");
-      return { publication, contentBase64: payload.toString("base64") };
+      return {
+        publication: { ...publication, storagePath: join(folder, "payload") },
+        contentBase64: payload.toString("base64"),
+      };
     } catch {
       throw workspaceFailure("publication_not_found");
     }
   };
   return {
     read,
+    async remove(
+      owner: ConsumerContext,
+      publicationId: string,
+    ): Promise<CopyCleanup> {
+      if (!/^pub-[a-f0-9-]{36}$/u.test(publicationId))
+        throw workspaceFailure("invalid_request");
+      const folder = join(directory(owner), publicationId);
+      let detail: string | undefined;
+      try {
+        await rm(folder, { recursive: true, force: true });
+      } catch (error) {
+        detail = String(error);
+      }
+      const presence = async (path: string) => {
+        try {
+          await lstat(path);
+          return "present" as const;
+        } catch (error) {
+          return (error as NodeJS.ErrnoException).code === "ENOENT"
+            ? ("absent" as const)
+            : ("unknown" as const);
+        }
+      };
+      const remaining = {
+        directory: await presence(folder),
+        metadata: await presence(join(folder, "record.json")),
+        payload: await presence(join(folder, "payload")),
+      };
+      return {
+        state: Object.values(remaining).every((value) => value === "absent")
+          ? "released"
+          : "failed",
+        storagePath: join(folder, "payload"),
+        remaining,
+        ...(detail === undefined ? {} : { detail }),
+      };
+    },
     observe(
       listener: (owner: ConsumerContext, publication: Publication) => void,
     ) {
@@ -76,12 +125,14 @@ export function openPublications(stateDirectory: string) {
       params: WorkspaceParams["publication.publish"],
     ): Promise<Publication> {
       const payload = Buffer.from(params.contentBase64, "base64");
+      const publicationId = `pub-${randomUUID()}`;
       const publication: Publication = {
-        publicationId: `pub-${randomUUID()}`,
+        publicationId,
         source: { cwd, path: resolve(cwd, params.path) },
         bytes: payload.length,
         sha256: digest(payload),
         state: "ready",
+        storagePath: join(directory(owner), publicationId, "payload"),
       };
       const parent = directory(owner);
       const staging = join(parent, `.pending-${publication.publicationId}`);

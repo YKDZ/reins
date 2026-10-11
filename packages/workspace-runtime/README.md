@@ -121,3 +121,12 @@ reins-workspace-manager release --cwd /absolute/worktree --session-disposition k
 ```
 
 释放沿用普通 detach 的实际停止证明与逐步续行；存活会话使 `require_none` 拒绝，`kill` 不能证明停止时也不释放归属。管理员明确解决 provider 故障后，可以重复相同 release 只续剩余步骤。返回 `released` 后，新消费者才通过正常 `workspace attach` 建立自己的沿袭；旧会话与历史仍属于原消费者，不能改名收养。管理入口不登记到普通 agent 能力、帮助或错误候选，不提供 force rebind，也不建立通用管理平台。
+
+已发布副本跨环境脱离保留；脱离后仍以原工作目录查询并显式接收。发布记录的 `storagePath` 是 Manager 上的实际固定副本位置；接收记录的 `localPath` 是消费者可使用的文件，`receiptId` 用于明确选择该次接收。同一发布可接收多次，接收不会删除发布。
+
+```sh
+reins workspace remove-publication pub-<uuid>
+reins workspace remove-receipt receipt-<uuid> --directory /absolute/receipts
+```
+
+共享客户端分别使用 `request("publication.remove", { publicationId })` 与 `removeReceipt(directory, receiptId)`。每次只清理明确选中的当前消费者副本；另一端、未选副本、原生 Git 引用／对象、活动工作树和本地历史均独立保留。结果报告 `released` 或 `failed`，并列出目录、元数据和 payload 的实际 `present`／`absent`／`unknown` 状态；失败不冒充已经释放，CLI 非零退出。调用方修正原因后可再次明确清理同一副本；重复清理已经消失的副本返回实际为空的释放结果。产品副本清理不包含平台回收或 Git GC。
