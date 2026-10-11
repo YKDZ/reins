@@ -25,13 +25,14 @@ const sessionName = "reviewer" as SessionName;
 
 function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
+  interrupt?: () => Promise<unknown>,
 ): {
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
 } {
-  const fake = createFakeSdk();
+  const fake = createFakeSdk(interrupt === undefined ? {} : { interrupt });
   const diagnostics: DriverDiagnosticFact[] = [];
   const sink: DiagnosticSink = async (input) => {
     diagnostics.push(input);
@@ -1345,6 +1346,45 @@ describe("permission 桥", () => {
 });
 
 describe("interrupt 与 kill", () => {
+  test("terminate 在原生取消完成前保持传输可用且不报告关闭", async () => {
+    let cancel!: () => void;
+    const cancellation = new Promise<void>((resolve) => {
+      cancel = resolve;
+    });
+    const { diagnostics, fake, driver } = setup(
+      "interactive",
+      () => cancellation,
+    );
+    const termination = driver.terminate(sessionId);
+    await flush();
+    expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
+      false,
+    );
+    expect(diagnostics.some((input) => input.reason === "closed")).toBe(false);
+
+    cancel();
+    await flush();
+    expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
+      true,
+    );
+    fake.controls.end();
+    await termination;
+    expect(diagnostics.some((input) => input.reason === "closed")).toBe(true);
+  });
+
+  test("原生取消失败时 terminate 拒绝且保留传输，不报告关闭", async () => {
+    const failure = new Error("native cancellation failed");
+    const { diagnostics, fake, driver } = setup("interactive", async () => {
+      throw failure;
+    });
+    await expect(driver.terminate(sessionId)).rejects.toBe(failure);
+    expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
+      false,
+    );
+    expect(diagnostics.some((input) => input.reason === "closed")).toBe(false);
+    fake.controls.end();
+  });
+
   test("精确 interrupt 不受公开原生入口支持，拒绝前不调用会话 interrupt", async () => {
     const { events, fake, driver } = setup();
     await expect(driver.interrupt(sessionId, firstTurnId)).rejects.toEqual({
@@ -1361,6 +1401,7 @@ describe("interrupt 与 kill", () => {
   test("terminate 等到底层流关闭且不伪造 turn failure", async () => {
     const { events, diagnostics, fake, driver } = setup();
     const termination = driver.terminate(sessionId);
+    await flush();
     expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
       true,
     );

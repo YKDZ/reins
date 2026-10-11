@@ -18,7 +18,11 @@ export type FakeQoderControls = {
   modelsCalls(): number;
 };
 
-export function createFakeSdk(): {
+export function createFakeSdk(
+  behavior: {
+    interrupt?: () => Promise<unknown>;
+  } = {},
+): {
   sdk: QoderSdk;
   controls: FakeQoderControls;
 } {
@@ -52,6 +56,7 @@ export function createFakeSdk(): {
         },
         interrupt: async () => {
           interruptCount += 1;
+          return await behavior.interrupt?.();
         },
       };
       return q;
