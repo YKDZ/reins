@@ -123,6 +123,15 @@ async function main() {
               request.params.bindings,
               consumer,
             );
+          case "workspace.route":
+            return runtime.route(request.params.cwd, consumer);
+          case "workspace.admit":
+            return runtime.admit(
+              request.params.cwd,
+              consumer,
+              request.params.action,
+              request.params.params,
+            );
           case "workspace.status":
             return runtime.status(request.params.cwd, consumer);
           case "workspace.detach":

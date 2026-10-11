@@ -44,9 +44,7 @@ export async function resolveWorktree(cwd: string) {
 export function fingerprint(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
-export async function workspaceHarnesses(
-  cwd: string,
-): Promise<WorkspaceHarnessCatalog> {
+async function readConfiguration(cwd: string) {
   const tree = await resolveWorktree(cwd);
   let contents: string;
   try {
@@ -65,12 +63,25 @@ export async function workspaceHarnesses(
   }
   const parsed = v.safeParse(projectConfigurationSchema, input);
   if (!parsed.success) throw workspaceFailure("configuration_invalid");
-  const configuration = parsed.output;
+  return parsed.output;
+}
+function selectEnvironment(
+  configuration: v.InferOutput<typeof projectConfigurationSchema>,
+) {
   if (configuration.environments.length === 0)
     throw workspaceFailure("environment_binding_missing");
   if (configuration.environments.length !== 1)
     throw workspaceFailure("environment_binding_ambiguous");
-  const environment = configuration.environments[0]!;
+  return configuration.environments[0]!;
+}
+export async function workspaceEnvironment(cwd: string) {
+  return selectEnvironment(await readConfiguration(cwd));
+}
+export async function workspaceHarnesses(
+  cwd: string,
+): Promise<WorkspaceHarnessCatalog> {
+  const configuration = await readConfiguration(cwd);
+  const environment = selectEnvironment(configuration);
   const refs = new Set<string>();
   const bindings = configuration.bindings.map((binding) => {
     if (refs.has(binding.ref)) throw workspaceFailure("binding_conflict");

@@ -46,13 +46,15 @@ import {
   printSpawnResult,
   printWaitResult,
 } from "./output.ts";
+import { openWorkspaceControl } from "./workspace.ts";
 
 // 握手属于"daemon 可用"判定的一部分，与 ensureDaemon 的 5s 就绪预算同源。
 const HANDSHAKE_TIMEOUT_MS = 5_000;
 
 async function withClient<T>(
-  mode: OutputMode,
+  ctx: { mode: OutputMode; contextCwd?: string },
   run: (client: ReinsClient) => Promise<T>,
+  executionCwd?: string,
 ): Promise<T> {
   // 消费者绑定由 launcher 环境显式给出；缺失或非法即在触达 daemon 前拒绝，
   // 不采用全局默认，也不把它暴露成 agent 参数。
@@ -63,10 +65,14 @@ async function withClient<T>(
   if (!consumerContext.success) {
     throw machineError({ code: "consumer_context_required" });
   }
-  const { connection } = await ensureDaemon(process.env);
-  const client = createReinsClient(connection, {
-    consumerContext: consumerContext.output,
-  });
+  const client =
+    ctx.contextCwd !== undefined || !process.env.REINS_SOCKET
+      ? await openWorkspaceControl(
+          resolve(ctx.contextCwd ?? executionCwd ?? process.cwd()),
+        )
+      : createReinsClient((await ensureDaemon(process.env)).connection, {
+          consumerContext: consumerContext.output,
+        });
   try {
     const handshake = await client.initialize(HANDSHAKE_TIMEOUT_MS);
     if ("error" in handshake) throw handshake.error;
@@ -89,8 +95,9 @@ function spawnParamsFromOptions(
   harness: string,
   messageParts: readonly string[],
   options: WorkerOptions,
+  contextCwd?: string,
 ): SpawnParams {
-  const cwd = resolve(options.cwd ?? process.cwd());
+  const cwd = resolve(options.cwd ?? contextCwd ?? process.cwd());
   let cwdIdentity: NonNullable<SpawnParams["cwdIdentity"]>;
   try {
     const directory = statSync(cwd, { bigint: true });
@@ -132,13 +139,24 @@ function spawnParamsFromOptions(
 
 async function runSpawn(ctx: CommandInvocationFor<"spawn">): Promise<void> {
   const [harness, messageParts] = ctx.args;
-  const params = spawnParamsFromOptions(harness, messageParts, ctx.options);
-  await withClient(ctx.mode, async (client) => {
-    const validation = await new CapabilityStore(client).validateSpawn(params);
-    if (validation !== null) throw validation;
-    const response = await client.request("spawn", params);
-    printSpawnResult(requireResult(response), ctx.mode);
-  });
+  const params = spawnParamsFromOptions(
+    harness,
+    messageParts,
+    ctx.options,
+    ctx.contextCwd,
+  );
+  await withClient(
+    ctx,
+    async (client) => {
+      const validation = await new CapabilityStore(client).validateSpawn(
+        params,
+      );
+      if (validation !== null) throw validation;
+      const response = await client.request("spawn", params);
+      printSpawnResult(requireResult(response), ctx.mode);
+    },
+    params.cwd,
+  );
 }
 
 async function runSend(ctx: CommandInvocationFor<"send">): Promise<void> {
@@ -163,7 +181,7 @@ async function runSend(ctx: CommandInvocationFor<"send">): Promise<void> {
     placement === "active_turn"
       ? { placement, ...decodeTurnHandle(target) }
       : { placement, sessionId: v.parse(sessionIdSchema, target) };
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const response = await client.request("send", {
       ...address,
       message: messageParts.join(" "),
@@ -175,7 +193,7 @@ async function runSend(ctx: CommandInvocationFor<"send">): Promise<void> {
 async function runWait(ctx: CommandInvocationFor<"wait">): Promise<void> {
   const [targets] = ctx.args;
   const timeoutMs = ctx.options.timeout;
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const response = await client.request("wait", {
       targets: [...targets],
       completion: ctx.options.completion,
@@ -210,7 +228,7 @@ async function runInterrupt(
       hint: "Expected a valid TurnHandle",
     });
   const address = decodeTurnHandle(target);
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const response = await client.request("interrupt", address);
     printInterruptResult(requireResult(response), ctx.mode);
   });
@@ -218,7 +236,7 @@ async function runInterrupt(
 
 async function runKill(ctx: CommandInvocationFor<"kill">): Promise<void> {
   const [sessionId] = ctx.args;
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const response = await client.request("kill", { sessionId });
     printKillResult(requireResult(response), ctx.mode);
   });
@@ -226,7 +244,7 @@ async function runKill(ctx: CommandInvocationFor<"kill">): Promise<void> {
 
 async function runList(ctx: CommandInvocationFor<"list">): Promise<void> {
   const options = ctx.options;
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const params: ListFilter = {
       ...(options.session === undefined ? {} : { sessionId: options.session }),
       ...(options.harness === undefined ? {} : { harness: options.harness }),
@@ -282,7 +300,7 @@ async function runAttachCommand(
       hint: "Expected a complete handle for the selected scope",
     });
   }
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     await runAttach(client, { params, mode: ctx.mode });
   });
 }
@@ -320,7 +338,7 @@ async function runDiagnostics(
       turnId: options.turn,
     };
   }
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const response = await client.request("diagnostics", params);
     printDiagnosticsResult(requireResult(response), ctx.mode);
   });
@@ -329,7 +347,7 @@ async function runDiagnostics(
 async function runCapabilities(
   ctx: CommandInvocationFor<"capabilities">,
 ): Promise<void> {
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const store = new CapabilityStore(client);
     printCapabilitiesResult(await store.result(), ctx.mode);
   });
@@ -345,7 +363,7 @@ async function runResolvePermission(
       : ctx.options.feedback === undefined
         ? { outcome: "deny" }
         : { outcome: "deny", feedback: ctx.options.feedback };
-  await withClient(ctx.mode, async (client) => {
+  await withClient(ctx, async (client) => {
     const response = await client.request("resolvePermission", {
       ...target,
       resolution,
@@ -381,7 +399,7 @@ export const handlers = {
         hint: "Use the RetryToken from command_outcome_unknown",
       });
     }
-    await withClient(ctx.mode, async (client) => {
+    await withClient(ctx, async (client) => {
       const response = await client.retry(token, ctx.options.params);
       const result = requireResult(response);
       {
