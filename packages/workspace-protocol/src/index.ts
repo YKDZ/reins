@@ -1,9 +1,15 @@
 import {
   consumerContextSchema,
+  nativeViewLossSchema,
   sessionIdSchema,
   machineErrorSchema,
   protocolMethodSchema,
   type ProtocolMethod,
+  commandIdSchema,
+  turnIdSchema,
+  turnCompletedSchema,
+  sessionInfoSchema,
+  type CommandId,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -74,6 +80,7 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
     "preparation_outcome_unknown",
     "runtime_resource_mismatch",
     "workspace_busy",
+    "workspace_detaching",
     "workspace_not_ready",
     "harness_not_prepared",
     "manager_disconnected",
@@ -83,17 +90,7 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
   detail: v.optional(v.string()),
   availableBindings: v.optional(v.array(v.string())),
 });
-export const nativeViewLossSchema = v.variant("reason", [
-  v.strictObject({
-    reason: v.literal("moved"),
-    currentRoot: v.string(),
-  }),
-  v.strictObject({ reason: v.literal("replaced") }),
-  v.strictObject({ reason: v.literal("removed") }),
-  v.strictObject({ reason: v.literal("split") }),
-  v.strictObject({ reason: v.literal("unreachable") }),
-]);
-export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;
+export { nativeViewLossSchema, type NativeViewLoss } from "@reins/protocol";
 export const workspaceErrorSchema = v.union([
   ordinaryWorkspaceErrorSchema,
   v.strictObject({
@@ -159,6 +156,44 @@ export const catalogSchema = v.strictObject({
   ),
 });
 export type WorkspaceHarnessCatalog = v.InferOutput<typeof catalogSchema>;
+const releaseStepSchema = v.strictObject({
+  status: v.picklist(["pending", "released", "failed"]),
+  error: v.optional(workspaceErrorSchema),
+});
+// 清理投影保留实际观察到的会话与回合结果；它不冒充尚未提供的权威历史。
+export const workspaceDetachmentSchema = v.strictObject({
+  disposition: v.picklist(["require_none", "kill"]),
+  status: v.picklist(["detaching", "failed", "released"]),
+  error: v.optional(workspaceErrorSchema),
+  sessions: v.array(
+    v.strictObject({
+      sessionId: sessionIdSchema,
+      session: v.optional(sessionInfoSchema),
+      outcome: v.picklist([
+        "unknown",
+        "confirmed",
+        "terminated_by_workspace_detach",
+      ]),
+      error: v.optional(machineErrorSchema),
+      turns: v.array(
+        v.strictObject({
+          turnId: turnIdSchema,
+          completed: v.optional(turnCompletedSchema),
+        }),
+      ),
+    }),
+  ),
+  resources: v.strictObject({
+    runtime: releaseStepSchema,
+    credentials: releaseStepSchema,
+    bindings: releaseStepSchema,
+    routing: releaseStepSchema,
+    ownership: releaseStepSchema,
+  }),
+});
+export type WorkspaceDetachment = v.InferOutput<
+  typeof workspaceDetachmentSchema
+>;
 export const preparationSchema = v.strictObject({
   cwd: v.string(),
   root: v.string(),
@@ -193,6 +228,7 @@ export const preparationSchema = v.strictObject({
         "credential_binding",
         "ready",
         "failed",
+        "released",
       ]),
       error: v.optional(workspaceErrorSchema),
     }),
@@ -213,6 +249,7 @@ export const preparationSchema = v.strictObject({
       }),
     ]),
   ),
+  detachment: v.optional(workspaceDetachmentSchema),
   history: v.strictObject({ status: v.literal("unavailable") }),
   preparation: v.strictObject({
     attempts: v.array(
@@ -313,8 +350,16 @@ export type WorkspaceParams = {
   "workspace.attach": { cwd: string; bindings: string[] };
   "workspace.status": { cwd: string };
   "workspace.route": { cwd: string };
-  "workspace.admit": { cwd: string; action: ProtocolMethod; params: unknown };
-  "workspace.detach": { cwd: string; sessionDisposition: "require_none" };
+  "workspace.admit": {
+    cwd: string;
+    action: ProtocolMethod;
+    params: unknown;
+    commandId?: CommandId;
+  };
+  "workspace.detach": {
+    cwd: string;
+    sessionDisposition: "require_none" | "kill";
+  };
 };
 export type WorkspaceResults = {
   "publication.publish": Publication;
@@ -379,6 +424,7 @@ export const workspaceRequestSchema = v.variant("method", [
       cwd: v.string(),
       action: protocolMethodSchema,
       params: v.unknown(),
+      commandId: v.optional(commandIdSchema),
     }),
   }),
   v.strictObject({
@@ -417,7 +463,7 @@ export const workspaceRequestSchema = v.variant("method", [
     method: v.literal("workspace.detach"),
     params: v.strictObject({
       cwd: v.string(),
-      sessionDisposition: v.literal("require_none"),
+      sessionDisposition: v.picklist(["require_none", "kill"]),
     }),
   }),
 ]);

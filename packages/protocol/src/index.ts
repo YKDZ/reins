@@ -2088,6 +2088,8 @@ export const errorCodeSchema = v.union([
   v.literal("session_killed"),
   v.literal("session_terminating"),
   v.literal("daemon_shutting_down"),
+  v.literal("workspace_detaching"),
+  v.literal("native_view_lost"),
   v.literal("invalid_params"),
   v.literal("permission_not_pending"),
   v.literal("permission_resolution_mismatch"),
@@ -2184,7 +2186,23 @@ const unexpectedError = <const TCode extends UnexpectedErrorCode>(
     cause: v.optional(errorCauseSchema),
     diagnosticId: v.optional(diagnosticIdSchema),
   });
+export const nativeViewLossSchema = v.variant("reason", [
+  v.strictObject({
+    reason: v.literal("moved"),
+    currentRoot: v.string(),
+  }),
+  v.strictObject({ reason: v.literal("replaced") }),
+  v.strictObject({ reason: v.literal("removed") }),
+  v.strictObject({ reason: v.literal("split") }),
+  v.strictObject({ reason: v.literal("unreachable") }),
+]);
+export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;
 export const machineErrorSchema = v.union([
+  v.strictObject({
+    code: v.literal("native_view_lost"),
+    detail: v.optional(v.string()),
+    nativeView: nativeViewLossSchema,
+  }),
   v.strictObject({
     code: v.literal("session_busy"),
     sessionId: sessionIdSchema,
@@ -2208,6 +2226,7 @@ export const machineErrorSchema = v.union([
     sessionId: sessionIdSchema,
   }),
   v.strictObject({ code: v.literal("daemon_shutting_down") }),
+  v.strictObject({ code: v.literal("workspace_detaching") }),
   v.strictObject({
     code: v.literal("permission_not_pending"),
     sessionId: sessionIdSchema,

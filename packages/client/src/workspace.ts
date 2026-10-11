@@ -165,6 +165,7 @@ export function createWorkspaceClient(
             cwd: route.cwd,
             action: parsed.method,
             params: restored,
+            commandId: parsed.commandId,
           });
           return await client.retry(token, params, timeoutMs);
         },
