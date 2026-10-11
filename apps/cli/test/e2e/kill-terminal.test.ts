@@ -189,10 +189,14 @@ test("kill commits exactly one killed turn before the session terminal", async (
   const client = await connect();
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
   expect(
-    await client.request("attach", { sessionId: target.sessionId, replay: 50 }),
+    await client.request("attach", {
+      scope: "session",
+      sessionId: target.sessionId,
+      replay: { mode: "available" },
+    }),
   ).toHaveProperty("result");
   await vi.waitFor(() =>
     expect(events.some((event) => event.type === "turn.started")).toBe(true),
@@ -263,12 +267,16 @@ test("kill stops the actual writer and its held FD while another session survive
   const client = await connect();
   let statesAtTerminal: string[] | undefined;
   client.onNotification((n) => {
-    if (n.method === "event" && n.params.type === "session.killed") {
+    if (n.method === "event" && n.params.event.type === "session.killed") {
       statesAtTerminal = [processState(pids.parent), processState(pids.writer)];
     }
   });
   expect(
-    await client.request("attach", { sessionId: target.sessionId }),
+    await client.request("attach", {
+      scope: "session",
+      sessionId: target.sessionId,
+      replay: { mode: "available" },
+    }),
   ).toHaveProperty("result");
   const killed = await cli(["kill", target.sessionId]);
   const writerState = processState(pids.writer);
@@ -348,12 +356,13 @@ test.each(["complete during kill", "complete naturally"])(
     const client = await connect();
     const events: DomainEvent[] = [];
     client.onNotification((n) => {
-      if (n.method === "event") events.push(n.params);
+      if (n.method === "event") events.push(n.params.event);
     });
     expect(
       await client.request("attach", {
+        scope: "session",
         sessionId: target.sessionId,
-        replay: 50,
+        replay: { mode: "available" },
       }),
     ).toHaveProperty("result");
     if (message === "complete naturally")
@@ -401,10 +410,14 @@ test("failed termination leaves the real writer and original turn alive for a fr
   const client = await connect();
   const events: DomainEvent[] = [];
   client.onNotification((n) => {
-    if (n.method === "event") events.push(n.params);
+    if (n.method === "event") events.push(n.params.event);
   });
   expect(
-    await client.request("attach", { sessionId: target.sessionId, replay: 50 }),
+    await client.request("attach", {
+      scope: "session",
+      sessionId: target.sessionId,
+      replay: { mode: "available" },
+    }),
   ).toHaveProperty("result");
   const failed = await cli(["kill", target.sessionId]);
   expect(failed.exitCode, failed.stdout).toBe(65);

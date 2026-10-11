@@ -143,11 +143,21 @@ test("an invalid result terminates the client with invalid_daemon_response", asy
 test("a malformed notification after a valid response preserves invalid_daemon_response", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
-  const pending = client.request("attach", { sessionId: "prompt@g1" as never });
+  const pending = client.request("attach", {
+    scope: "session",
+    sessionId: "prompt@g1" as never,
+    replay: { mode: "available" },
+  });
   pair.server.send({
     kind: "response",
     requestId: "cli1",
-    result: { sessionId: "prompt@g1", replayed: 0 },
+    result: {
+      sessionId: "prompt@g1",
+      subscriptionId: "subscription-1",
+      target: { scope: "session", sessionId: "prompt@g1" },
+      window: { oldest: null, head: null },
+      replayed: 0,
+    },
   });
   await expect(pending).resolves.toMatchObject({ kind: "response" });
   const reason = new Promise((resolve) => client.onClosed(resolve));

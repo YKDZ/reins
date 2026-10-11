@@ -88,6 +88,7 @@ describe("resolvePermission", () => {
     ]);
 
     await machine.resolvePermission({
+      turnId: ids.turn("t1"),
       sessionId,
       permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },
@@ -122,6 +123,7 @@ describe("resolvePermission", () => {
 
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId,
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "session" },
@@ -131,6 +133,7 @@ describe("resolvePermission", () => {
     );
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId,
         permissionId: ids.permission("p1"),
         resolution: { outcome: "deny", feedback: "换个命令" },
@@ -150,6 +153,7 @@ describe("resolvePermission", () => {
     request(fake, sessionId, [{ outcome: "deny", feedback: true }]);
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId,
         permissionId: ids.permission("p1"),
         resolution: { outcome: "deny" },
@@ -158,6 +162,7 @@ describe("resolvePermission", () => {
       expect.objectContaining({ code: "permission_resolution_mismatch" }),
     );
     await machine.resolvePermission({
+      turnId: ids.turn("t1"),
       sessionId,
       permissionId: ids.permission("p1"),
       resolution: { outcome: "deny", feedback: "不要用 sudo" },
@@ -184,6 +189,7 @@ describe("resolvePermission", () => {
 
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId,
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
@@ -201,6 +207,7 @@ describe("resolvePermission", () => {
 
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId: ids.session("missing@gtest"),
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
@@ -210,6 +217,7 @@ describe("resolvePermission", () => {
     await machine.kill({ sessionId: sessionId });
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId,
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
@@ -223,6 +231,7 @@ describe("resolvePermission", () => {
 
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId,
         permissionId: ids.permission("p1"),
         // @ts-expect-error 故意传缺字段的决议，验证运行时校验
@@ -263,6 +272,7 @@ describe("resolvePermission", () => {
 
     await expect(
       machine.resolvePermission({
+        turnId: ids.turn("t1"),
         sessionId,
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
@@ -289,6 +299,7 @@ describe("resolvePermission", () => {
     ]);
 
     await machine.resolvePermission({
+      turnId: ids.turn("t1"),
       sessionId,
       permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },
@@ -327,6 +338,7 @@ describe("resolvePermission", () => {
     request(fake, sessionId, [{ outcome: "allow", scope: "once" }]);
 
     await machine.resolvePermission({
+      turnId: ids.turn("t1"),
       sessionId,
       permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },

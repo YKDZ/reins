@@ -3,6 +3,37 @@
 import { appendFileSync, writeFileSync } from "node:fs";
 import { createServer } from "node:net";
 
+let eventPosition = 0;
+function encodeMessage(value) {
+  if (
+    value.kind === "notification" &&
+    value.method === "event" &&
+    value.params.sessionId !== undefined
+  )
+    value = {
+      ...value,
+      params: {
+        subscriptionId: "subscription-fixture",
+        eventId: ++eventPosition,
+        event: value.params,
+      },
+    };
+  if (
+    value.kind === "response" &&
+    value.result?.sessionId !== undefined &&
+    value.result.replayed !== undefined
+  )
+    value = {
+      ...value,
+      result: {
+        ...value.result,
+        subscriptionId: "subscription-fixture",
+        target: { scope: "turn", sessionId: "prompt@g1", turnId: "t1" },
+        window: { oldest: null, head: null },
+      },
+    };
+  return JSON.stringify(value);
+}
 const mode = process.env.REINS_FIXTURE_DAEMON_MODE ?? "invalid-envelope";
 const socketPath = process.env.REINS_SOCKET;
 const pidFile = process.env.REINS_FIXTURE_PID_FILE;
@@ -29,7 +60,7 @@ if (mode === "startup-failure") {
       message: "é".repeat(3_000),
     },
   };
-  writeFileSync(fd, `${JSON.stringify(startupFailure)}\n`);
+  writeFileSync(fd, `${encodeMessage(startupFailure)}\n`);
   process.exit(23);
 }
 
@@ -41,7 +72,7 @@ if (mode === "startup-report-drain") {
   const fd = Number(process.env.REINS_STARTUP_FD ?? "3");
   writeFileSync(
     fd,
-    `${JSON.stringify({
+    `${encodeMessage({
       v: 1,
       cause: {
         kind: "upstream",
@@ -57,7 +88,7 @@ if (mode === "startup-report-late") {
   await new Promise((resolve) => setTimeout(resolve, 1_200));
   writeFileSync(
     fd,
-    `${JSON.stringify({
+    `${encodeMessage({
       v: 1,
       cause: { kind: "upstream", message: "late complete startup report" },
     })}\n`,
@@ -85,7 +116,7 @@ if (mode === "cold-launch-barrier") {
         input = input.slice(newline + 1);
         if (request.method === "initialize") {
           socket.write(
-            `${JSON.stringify({
+            `${encodeMessage({
               kind: "response",
               requestId: request.requestId,
               result: { protocolMajorVersion: 1, daemonGeneration: "gfixture" },
@@ -94,7 +125,7 @@ if (mode === "cold-launch-barrier") {
           continue;
         }
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: { capabilities: [], failures: [] },
@@ -218,7 +249,7 @@ const server = createServer((socket) => {
       if (mode === "timeout") continue;
       if (request.method === "initialize") {
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: { protocolMajorVersion: 1, daemonGeneration: "gfixture" },
@@ -230,7 +261,7 @@ const server = createServer((socket) => {
         const body = "x".repeat(16 * 1024);
         for (let index = 0; index < 1024; index += 1) {
           socket.write(
-            `${JSON.stringify({
+            `${encodeMessage({
               kind: "notification",
               method: "event",
               params: {
@@ -245,7 +276,7 @@ const server = createServer((socket) => {
           );
         }
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: { sessionId: "prompt@g1", replayed: 1024 },
@@ -253,7 +284,7 @@ const server = createServer((socket) => {
         );
       } else if (mode === "output-error" && request.method === "capabilities") {
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: { capabilities: [], failures: [] },
@@ -264,11 +295,11 @@ const server = createServer((socket) => {
         mode === "attach-invalid-envelope"
       ) {
         socket.write(
-          `${JSON.stringify({ kind: "response", requestId: request.requestId })}\n`,
+          `${encodeMessage({ kind: "response", requestId: request.requestId })}\n`,
         );
       } else if (mode === "invalid-error" || mode === "attach-invalid-error") {
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             error: { code: "session_not_found" },
@@ -279,7 +310,7 @@ const server = createServer((socket) => {
         mode === "attach-invalid-notification"
       ) {
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "notification",
             method: "event",
             params: { type: "sdk.raw" },
@@ -290,7 +321,7 @@ const server = createServer((socket) => {
         mode === "attach-invalid-result"
       ) {
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: {},
@@ -301,14 +332,14 @@ const server = createServer((socket) => {
         request.method === "attach"
       ) {
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: { sessionId: "prompt@g1", replayed: 0 },
           })}\n`,
         );
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "notification",
             method: "event",
             params: { type: "sdk.raw" },
@@ -317,7 +348,7 @@ const server = createServer((socket) => {
       } else if (mode === "prompt-disconnect" && request.method === "attach") {
         for (const permissionId of ["p1", "p2"]) {
           socket.write(
-            `${JSON.stringify({
+            `${encodeMessage({
               kind: "notification",
               method: "event",
               params: {
@@ -335,7 +366,7 @@ const server = createServer((socket) => {
           );
         }
         socket.write(
-          `${JSON.stringify({
+          `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: { sessionId: "prompt@g1", replayed: 1 },

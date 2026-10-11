@@ -75,6 +75,39 @@ export const permissionIdSchema = identifier(
   /^[a-z0-9][a-z0-9-]*$/,
 );
 export type PermissionId = v.InferOutput<typeof permissionIdSchema>;
+export const permissionTargetSchema = v.strictObject({
+  ...turnTargetSchema.entries,
+  permissionId: permissionIdSchema,
+});
+export type PermissionTarget = v.InferOutput<typeof permissionTargetSchema>;
+export function encodePermissionHandle(target: PermissionTarget): string {
+  const body = Buffer.from(
+    JSON.stringify(v.parse(permissionTargetSchema, target)),
+  ).toString("base64url");
+  return "permission1_" + body + "." + turnHandleChecksum(body);
+}
+export function decodePermissionHandle(handle: string): PermissionTarget {
+  const match = /^permission1_([A-Za-z0-9_-]+)\.([a-f0-9]{8})$/u.exec(handle);
+  if (match === null || turnHandleChecksum(match[1]!) !== match[2])
+    throw new Error("Invalid PermissionHandle");
+  return v.parse(
+    permissionTargetSchema,
+    JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")),
+  );
+}
+export const permissionHandleSchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    try {
+      decodePermissionHandle(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
+  v.brand("PermissionHandle"),
+);
+export type PermissionHandle = v.InferOutput<typeof permissionHandleSchema>;
 export const messageIdSchema = identifier("MessageId", /^[a-z0-9][a-z0-9-]*$/);
 export type MessageId = v.InferOutput<typeof messageIdSchema>;
 export const toolCallIdSchema = identifier(
@@ -371,6 +404,7 @@ export type InterruptAck = v.InferOutput<typeof interruptAckSchema>;
 
 export const resolvePermissionParamsSchema = v.strictObject({
   sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
   permissionId: permissionIdSchema,
   resolution: permissionResolutionSchema,
 });
@@ -380,6 +414,7 @@ export type ResolvePermissionParams = v.InferOutput<
 
 export const resolvePermissionAckSchema = v.strictObject({
   sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
   permissionId: permissionIdSchema,
 });
 export type ResolvePermissionAck = v.InferOutput<
@@ -400,12 +435,40 @@ export const listFilterSchema = v.strictObject({
 });
 export type ListFilter = v.InferOutput<typeof listFilterSchema>;
 
-export const attachParamsSchema = v.strictObject({
-  sessionId: sessionIdSchema,
-  replay: v.optional(v.number()),
-  exitOn: v.optional(v.array(stopReasonSchema)),
-});
+export const subscriptionTargetSchema = v.variant("scope", [
+  v.strictObject({ scope: v.literal("session"), sessionId: sessionIdSchema }),
+  v.strictObject({ scope: v.literal("turn"), ...turnTargetSchema.entries }),
+]);
+export type SubscriptionTarget = v.InferOutput<typeof subscriptionTargetSchema>;
+export const attachParamsSchema = v.variant("scope", [
+  v.strictObject({
+    scope: v.literal("session"),
+    sessionId: sessionIdSchema,
+    replay: v.strictObject({ mode: v.picklist(["none", "available"]) }),
+  }),
+  v.strictObject({
+    scope: v.literal("turn"),
+    ...turnTargetSchema.entries,
+    replay: v.strictObject({ mode: v.picklist(["none", "available"]) }),
+  }),
+]);
 export type AttachParams = v.InferOutput<typeof attachParamsSchema>;
+export const subscriptionIdSchema = identifier(
+  "SubscriptionId",
+  /^[a-z0-9-]+$/u,
+);
+export type SubscriptionId = v.InferOutput<typeof subscriptionIdSchema>;
+export const eventIdSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(1),
+  v.brand("EventId"),
+);
+export type EventId = v.InferOutput<typeof eventIdSchema>;
+export const eventWindowSchema = v.strictObject({
+  oldest: v.nullable(eventIdSchema),
+  head: v.nullable(eventIdSchema),
+});
 
 export const killResultSchema = v.strictObject({
   sessionId: sessionIdSchema,
@@ -2256,14 +2319,25 @@ export type ProtocolResponse = v.InferOutput<typeof protocolResponseSchema>;
 
 export const attachEndedSchema = v.strictObject({
   sessionId: sessionIdSchema,
-  reason: v.union([stopReasonSchema, v.literal("session_killed")]),
+  subscriptionId: subscriptionIdSchema,
+  target: subscriptionTargetSchema,
+  lastEventId: v.nullable(eventIdSchema),
+  reason: v.union([
+    stopReasonSchema,
+    v.literal("session_killed"),
+    v.literal("closed"),
+  ]),
 });
 export type AttachEnded = v.InferOutput<typeof attachEndedSchema>;
 
 export const protocolEventNotificationSchema = v.strictObject({
   kind: v.literal("notification"),
   method: v.literal("event"),
-  params: domainEventSchema,
+  params: v.strictObject({
+    subscriptionId: subscriptionIdSchema,
+    eventId: eventIdSchema,
+    event: domainEventSchema,
+  }),
 });
 export type ProtocolEventNotification = v.InferOutput<
   typeof protocolEventNotificationSchema
@@ -2286,7 +2360,14 @@ export type ProtocolNotification = v.InferOutput<
   typeof protocolNotificationSchema
 >;
 
+export const subscriptionCloseSchema = v.strictObject({
+  kind: v.literal("control"),
+  method: v.literal("subscription.close"),
+  subscriptionId: subscriptionIdSchema,
+});
+
 export const protocolMessageSchema = v.union([
+  subscriptionCloseSchema,
   protocolRequestSchema,
   protocolResponseSchema,
   protocolNotificationSchema,
@@ -2307,6 +2388,9 @@ export type InitializeResult = v.InferOutput<typeof initializeResultSchema>;
 
 export const attachResultSchema = v.strictObject({
   sessionId: sessionIdSchema,
+  subscriptionId: subscriptionIdSchema,
+  target: subscriptionTargetSchema,
+  window: eventWindowSchema,
   replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;

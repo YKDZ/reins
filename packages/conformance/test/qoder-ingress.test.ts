@@ -127,7 +127,7 @@ async function runFixture(
     resolveEnded = resolve;
   });
   const unsubscribe = client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
     else resolveEnded(notification.params);
   });
   try {
@@ -143,8 +143,10 @@ async function runFixture(
     });
     if ("error" in spawned) throw new Error(JSON.stringify(spawned.error));
     const attached = await client.request("attach", {
+      scope: "turn",
       sessionId: spawned.result.sessionId,
-      exitOn: ["end_turn"],
+      turnId: spawned.result.turnId,
+      replay: { mode: "available" },
     });
     if ("error" in attached) throw new Error(JSON.stringify(attached.error));
     const ended = await endedPromise;
@@ -303,7 +305,7 @@ describe("Qoder ingress conformance", () => {
       fixture.facts.terminal.finalReplyHash,
     );
     expect(terminal.usage).toEqual(fixture.facts.terminal.usage);
-    expect(result.ended).toEqual({
+    expect(result.ended).toMatchObject({
       sessionId: terminal.sessionId,
       reason: "end_turn",
     });

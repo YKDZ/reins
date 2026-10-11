@@ -89,9 +89,13 @@ test("active_turn 的 ACK 与 caller 事实等待精确原生接受", async () =
   if ("error" in spawned) throw new Error("Expected spawn ACK");
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
-  await client.request("attach", { sessionId: spawned.result.sessionId });
+  await client.request("attach", {
+    scope: "session",
+    sessionId: spawned.result.sessionId,
+    replay: { mode: "available" },
+  });
   let settled = false;
   const sending = client
     .request("send", {
@@ -149,9 +153,13 @@ test("原生接受先于终态时，caller 事实仍归原回合且在终态之�
   if ("error" in spawned) throw new Error("Expected spawn ACK");
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
-  await client.request("attach", { sessionId: spawned.result.sessionId });
+  await client.request("attach", {
+    scope: "session",
+    sessionId: spawned.result.sessionId,
+    replay: { mode: "available" },
+  });
   events.length = 0;
   const sending = client.request("send", {
     placement: "active_turn",
@@ -206,9 +214,13 @@ test("idle new_turn 原子预留且等待接受，并发请求不会重复创建
   });
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
-  await client.request("attach", { sessionId: spawned.result.sessionId });
+  await client.request("attach", {
+    scope: "session",
+    sessionId: spawned.result.sessionId,
+    replay: { mode: "available" },
+  });
   events.length = 0;
   let settled = false;
   const sending = client
@@ -263,9 +275,13 @@ test("错误父级和已结束目标拒绝，消息不会流入后继回合", as
     throw new Error("Expected spawn ACKs");
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
-  await client.request("attach", { sessionId: first.result.sessionId });
+  await client.request("attach", {
+    scope: "session",
+    sessionId: first.result.sessionId,
+    replay: { mode: "available" },
+  });
   events.length = 0;
   expect(
     await client.request("send", {
@@ -331,9 +347,13 @@ test("结束先于原生拒绝时，没有 caller 事实或后继回合残留", 
   if ("error" in spawned) throw new Error("Expected spawn ACK");
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
-  await client.request("attach", { sessionId: spawned.result.sessionId });
+  await client.request("attach", {
+    scope: "session",
+    sessionId: spawned.result.sessionId,
+    replay: { mode: "available" },
+  });
   events.length = 0;
   const sending = client.request("send", {
     placement: "active_turn",
@@ -402,9 +422,14 @@ test.each(["active_turn", "new_turn"] as const)(
       });
     const events: DomainEvent[] = [];
     client.onNotification((notification) => {
-      if (notification.method === "event") events.push(notification.params);
+      if (notification.method === "event")
+        events.push(notification.params.event);
     });
-    await client.request("attach", { sessionId: spawned.result.sessionId });
+    await client.request("attach", {
+      scope: "session",
+      sessionId: spawned.result.sessionId,
+      replay: { mode: "available" },
+    });
     events.length = 0;
     const sending = client.request(
       "send",

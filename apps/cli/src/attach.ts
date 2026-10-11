@@ -1,22 +1,20 @@
 import { createInterface } from "node:readline/promises";
 
-import type { ReinsClient } from "@reins/client";
 import type {
-  AttachEnded,
+  AgentEvent,
+  AgentSubscriptionEnd,
+  ReinsClient,
+} from "@reins/client";
+import type {
   AttachParams,
-  DomainEvent,
   PermissionOption,
   PermissionResolution,
-  ProtocolNotification,
 } from "@reins/protocol";
+import { decodePermissionHandle } from "@reins/protocol";
 
-import {
-  createPrettyAttachPresenter,
-  type PrettyAttachPresenter,
-} from "./attach-presenter.ts";
 import { ExitError, EXIT_RESOURCE, inputError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
-import { printNotification } from "./output.ts";
+import { printAgentEvent } from "./output.ts";
 
 export type AttachRuntimeOptions = {
   params: AttachParams;
@@ -32,7 +30,7 @@ function optionLabel(option: PermissionOption, index: number): string {
 }
 
 type PermissionRequestedEvent = Extract<
-  DomainEvent,
+  AgentEvent,
   { type: "permission.requested" }
 >;
 
@@ -122,20 +120,12 @@ function createPromptInput(input: NodeJS.ReadableStream): PromptInput {
 async function resolveFromMenu(
   prompt: PromptInput,
   owner: string,
-  sessionId: Extract<
-    DomainEvent,
-    { type: "permission.requested" }
-  >["sessionId"],
-  permissionId: Extract<
-    DomainEvent,
-    { type: "permission.requested" }
-  >["permissionId"],
   event: PermissionRequestedEvent,
   client: ReinsClient,
   signal: AbortSignal,
 ): Promise<void> {
   process.stdout.write(
-    `Permission requested: ${event.kind} (${permissionId}) on session ${sessionId}\n`,
+    `Permission requested: ${event.kind} (${event.permissionHandle})\n`,
   );
   if (event.input !== undefined) {
     process.stdout.write(`${JSON.stringify(event.input)}\n`);
@@ -167,238 +157,104 @@ async function resolveFromMenu(
     resolution = { outcome: "deny" };
   }
   const response = await client.request("resolvePermission", {
-    sessionId,
-    permissionId,
+    ...decodePermissionHandle(event.permissionHandle),
     resolution,
   });
   if ("error" in response) throw response.error;
 }
 
-// attach：等待 attach.ended 或连接关闭；pretty 模式下在会话内处理权限决议。
+// CLI 仅负责呈现与交互；关联、去重和订阅生命期由共享 client 负责。
 export async function runAttach(
   client: ReinsClient,
   options: AttachRuntimeOptions,
-): Promise<AttachEnded> {
-  const input = options.input ?? process.stdin;
-  const ended = new Promise<AttachEnded>((resolve, reject) => {
-    let settled = false;
-    let attachReady = false;
-    let consumingPermissions = false;
-    const permissionQueue: string[] = [];
-    const pendingPermissions = new Map<string, PermissionRequestedEvent>();
-    const seenPermissions = new Set<string>();
-    let activePermission:
-      | {
-          readonly key: string;
-          readonly sessionId: PermissionRequestedEvent["sessionId"];
-          readonly turnId: PermissionRequestedEvent["turnId"];
-          readonly controller: AbortController;
-        }
-      | undefined;
-    const prompt =
-      options.mode === "pretty" ? createPromptInput(input) : undefined;
-    let pendingEnd: AttachEnded | undefined;
-    const presenter: PrettyAttachPresenter | undefined =
-      options.mode === "pretty" ? createPrettyAttachPresenter() : undefined;
-
-    // oxlint-disable-next-line unicorn/consistent-function-scoping
-    let unsubscribe = (): void => {};
-    // oxlint-disable-next-line unicorn/consistent-function-scoping
-    let unsubscribeClosed = (): void => {};
-
-    const cleanup = (): void => {
-      if (activePermission !== undefined) {
-        prompt?.deactivate(activePermission.key);
-        activePermission.controller.abort();
-      }
-      activePermission = undefined;
-      permissionQueue.length = 0;
-      pendingPermissions.clear();
-      presenter?.clear();
-      prompt?.close();
-      unsubscribe();
-      unsubscribeClosed();
-    };
-    const clearPermissionsForTurn = (
-      sessionId: PermissionRequestedEvent["sessionId"],
-      turnId: PermissionRequestedEvent["turnId"],
-    ): void => {
-      const matchingKeys = new Set<string>();
-      for (const [key, event] of pendingPermissions) {
-        if (event.sessionId === sessionId && event.turnId === turnId) {
-          matchingKeys.add(key);
-          pendingPermissions.delete(key);
-        }
-      }
-      for (let index = permissionQueue.length - 1; index >= 0; index -= 1) {
-        const key = permissionQueue[index];
-        if (key !== undefined && matchingKeys.has(key)) {
-          permissionQueue.splice(index, 1);
-        }
-      }
-      if (
-        activePermission?.sessionId === sessionId &&
-        activePermission.turnId === turnId
-      ) {
-        prompt?.deactivate(activePermission.key);
-        activePermission.controller.abort();
-        activePermission = undefined;
-      }
-    };
-    const consumePermissions = async (): Promise<void> => {
-      if (
-        consumingPermissions ||
-        settled ||
-        !attachReady ||
-        prompt === undefined
-      )
-        return;
-      consumingPermissions = true;
-      try {
-        while (!settled) {
-          const key = permissionQueue.shift();
-          if (key === undefined) return;
-          const event = pendingPermissions.get(key);
-          if (event === undefined) continue;
-          const controller = new AbortController();
-          activePermission = {
-            key,
-            sessionId: event.sessionId,
-            turnId: event.turnId,
-            controller,
-          };
-          try {
-            await resolveFromMenu(
-              prompt,
-              key,
-              event.sessionId,
-              event.permissionId,
-              event,
-              client,
-              controller.signal,
-            );
-          } finally {
-            prompt.deactivate(key);
-          }
-          if (activePermission?.key === key) activePermission = undefined;
-          pendingPermissions.delete(key);
-        }
-      } finally {
-        activePermission = undefined;
-        consumingPermissions = false;
-      }
-    };
-    unsubscribe = client.onNotification(
-      (notification: ProtocolNotification) => {
-        if (presenter === undefined) {
-          printNotification(
-            notification.method,
-            notification.params,
-            options.mode,
-          );
-        } else if (attachReady) {
-          presenter.present(notification);
-        } else {
-          presenter.bufferInitial(notification);
-        }
-        if (
-          notification.method === "event" &&
-          notification.params.type === "turn.completed"
-        ) {
-          clearPermissionsForTurn(
-            notification.params.sessionId,
-            notification.params.turnId,
-          );
-        }
-        if (notification.method === "attach.ended") {
-          if (!attachReady) {
-            pendingEnd = notification.params;
-            return;
-          }
-          settled = true;
-          cleanup();
-          resolve(notification.params);
-          return;
-        }
-        if (
-          options.mode === "pretty" &&
-          notification.method === "event" &&
-          notification.params.type === "permission.requested"
-        ) {
-          const key = `${notification.params.sessionId}:${notification.params.permissionId}`;
-          if (seenPermissions.has(key)) return;
-          seenPermissions.add(key);
-          pendingPermissions.set(key, notification.params);
-          permissionQueue.push(key);
-          void consumePermissions().catch((error: unknown) => {
-            settled = true;
-            cleanup();
-            reject(error);
-          });
-          return;
-        }
-        if (
-          options.mode === "pretty" &&
-          notification.method === "event" &&
-          notification.params.type === "permission.resolved"
-        ) {
-          const key = `${notification.params.sessionId}:${notification.params.permissionId}`;
-          pendingPermissions.delete(key);
-          const queuedIndex = permissionQueue.indexOf(key);
-          if (queuedIndex !== -1) permissionQueue.splice(queuedIndex, 1);
-          if (activePermission?.key === key) {
-            prompt?.deactivate(key);
-            activePermission.controller.abort();
-            activePermission = undefined;
-          }
-        }
-        if (options.mode === "pretty") {
-          void consumePermissions().catch((error: unknown) => {
-            settled = true;
-            cleanup();
-            reject(error);
-          });
-        }
-      },
+): Promise<AgentSubscriptionEnd> {
+  const subscription = await client.subscribe(options.params);
+  if (options.mode === "json")
+    process.stdout.write(
+      JSON.stringify({
+        type: "subscription.established",
+        ...subscription.establishment,
+      }) + "\n",
     );
-    unsubscribeClosed = client.onClosed((reason) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-      reject(reason);
-    });
-    client
-      .request("attach", options.params)
-      .then((response) => {
-        if ("error" in response) {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(response.error);
-          return;
+  const prompt =
+    options.mode === "pretty"
+      ? createPromptInput(options.input ?? process.stdin)
+      : undefined;
+  const pending = new Map<string, PermissionRequestedEvent>();
+  const queue: PermissionRequestedEvent[] = [];
+  let active:
+    | { event: PermissionRequestedEvent; controller: AbortController }
+    | undefined;
+  let consuming: Promise<void> | undefined;
+  let menuFailure: unknown;
+  const abort = () => {
+    if (active !== undefined) {
+      prompt?.deactivate(active.event.permissionHandle);
+      active.controller.abort();
+      active = undefined;
+    }
+  };
+  const consume = (): void => {
+    if (prompt === undefined || consuming !== undefined) return;
+    consuming = (async () => {
+      while (queue.length > 0) {
+        const event = queue.shift()!;
+        if (!pending.has(event.permissionHandle)) continue;
+        const controller = new AbortController();
+        active = { event, controller };
+        try {
+          await resolveFromMenu(
+            prompt,
+            event.permissionHandle,
+            event,
+            client,
+            controller.signal,
+          );
+        } finally {
+          prompt.deactivate(event.permissionHandle);
         }
-        attachReady = true;
-        presenter?.flushInitial();
-        if (pendingEnd !== undefined) {
-          settled = true;
-          const result = pendingEnd;
-          cleanup();
-          resolve(result);
-          return;
-        }
-        void consumePermissions().catch((error: unknown) => {
-          if (settled) return;
-          settled = true;
-          cleanup();
-          reject(error);
-        });
+        pending.delete(event.permissionHandle);
+        if (active?.event.permissionHandle === event.permissionHandle)
+          active = undefined;
+      }
+    })()
+      .catch((error) => {
+        menuFailure = error;
+        subscription.close();
       })
-      .catch((error: unknown) => {
-        if (settled) return;
-        settled = true;
-        cleanup();
-        reject(error);
+      .finally(() => {
+        consuming = undefined;
       });
-  });
-  return await ended;
+  };
+  try {
+    const unsubscribe = subscription.onEvent((event) => {
+      printAgentEvent(event, options.mode);
+      if (event.type === "permission.requested" && prompt !== undefined) {
+        if (!pending.has(event.permissionHandle)) {
+          pending.set(event.permissionHandle, event);
+          queue.push(event);
+        }
+        consume();
+      } else if (event.type === "permission.resolved") {
+        pending.delete(event.permissionHandle);
+        if (active?.event.permissionHandle === event.permissionHandle) abort();
+      } else if (event.type === "turn.completed") {
+        for (const [key, permission] of pending)
+          if (permission.turnHandle === event.turnHandle) pending.delete(key);
+        if (active?.event.turnHandle === event.turnHandle) abort();
+      }
+    });
+    const ended = await subscription.done;
+    unsubscribe();
+    if (menuFailure !== undefined) throw menuFailure;
+    const publicEnd = { type: "subscription.ended", ...ended };
+    if (options.mode === "json")
+      process.stdout.write(JSON.stringify(publicEnd) + "\n");
+    else process.stdout.write("[attach ended] " + ended.reason + "\n");
+    return ended;
+  } finally {
+    abort();
+    prompt?.close();
+    subscription.close();
+  }
 }

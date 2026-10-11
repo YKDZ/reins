@@ -4,6 +4,10 @@ import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
+  AttachResult,
+  SubscriptionTarget,
+  SubscriptionId,
+  EventId,
   CapabilitiesResult,
   ConsumerContext,
   DaemonDiagnosticFact,
@@ -31,6 +35,9 @@ import type {
 } from "@reins/protocol";
 import {
   isSideEffectMethod,
+  eventIdSchema,
+  subscriptionIdSchema,
+  subscriptionCloseSchema,
   machineErrorSchema,
   harnessCapabilitySchema,
   makeErrorCause,
@@ -82,10 +89,11 @@ const writeIoFailure = parseTransportFailureFact({
 
 type AttachSubscription = {
   readonly sessionId: SessionId;
-  readonly exitOn: readonly StopReason[];
-  targetTurnId?: TurnId;
+  readonly target: SubscriptionTarget;
+  readonly subscriptionId: SubscriptionId;
+  lastEventId: EventId | null;
   replaying: boolean;
-  pendingEvents: DomainEvent[];
+  pendingEvents: { event: DomainEvent; eventId: EventId }[];
   active: boolean;
   readonly connection: TransportConnection<ProtocolMessage>;
 };
@@ -156,11 +164,15 @@ export function createProtocolServerInternal(
   const eventLogLimit = options.eventLogLimit ?? DEFAULT_EVENT_LOG_LIMIT;
   const connections = new Set<TransportConnection<ProtocolMessage>>();
   const attachSubscriptions = new Set<AttachSubscription>();
+  const afterAttachAck = new Map<ProtocolRequest, () => void>();
   const cleanupByConnection = new Map<
     TransportConnection<ProtocolMessage>,
     Set<() => void>
   >();
   const eventLog = new Map<SessionId, EventHistory>();
+  const eventPositions = new WeakMap<DomainEvent, EventId>();
+  const eventHeads = new Map<SessionId, EventId>();
+  let subscriptionSequence = 0;
   const observations = new Map<SessionId, Observation>();
   const knownSessions = new Set<SessionId>();
   // initialize 握手建立的连接级消费者绑定；连接关闭即释放。
@@ -517,7 +529,7 @@ export function createProtocolServerInternal(
 
   function endAttach(
     subscription: AttachSubscription,
-    reason: StopReason | "session_killed",
+    reason: StopReason | "session_killed" | "closed",
   ): void {
     if (!subscription.active) return;
     subscription.active = false;
@@ -525,7 +537,13 @@ export function createProtocolServerInternal(
     sendSafe(subscription.connection, {
       kind: "notification",
       method: "attach.ended",
-      params: { sessionId: subscription.sessionId, reason },
+      params: {
+        sessionId: subscription.sessionId,
+        subscriptionId: subscription.subscriptionId,
+        target: subscription.target,
+        lastEventId: subscription.lastEventId,
+        reason,
+      },
     });
   }
 
@@ -537,6 +555,12 @@ export function createProtocolServerInternal(
       if (consumer !== undefined)
         consumerScope.claim(event.sessionId, consumer);
     }
+    const eventId = v.parse(
+      eventIdSchema,
+      (eventHeads.get(event.sessionId) ?? 0) + 1,
+    );
+    eventHeads.set(event.sessionId, eventId);
+    eventPositions.set(event, eventId);
     appendLog(event);
     const observation = observations.get(event.sessionId) ?? { killed: false };
     if (event.type === "turn.started") observation.activeTurnId = event.turnId;
@@ -548,8 +572,9 @@ export function createProtocolServerInternal(
     observations.set(event.sessionId, observation);
     for (const subscription of Array.from(attachSubscriptions)) {
       if (subscription.sessionId !== event.sessionId) continue;
-      if (subscription.replaying) subscription.pendingEvents.push(event);
-      else forwardToSubscription(subscription, event);
+      if (subscription.replaying)
+        subscription.pendingEvents.push({ event, eventId });
+      else forwardToSubscription(subscription, event, eventId);
     }
     scheduleIdleExit();
   }
@@ -557,19 +582,26 @@ export function createProtocolServerInternal(
   function forwardToSubscription(
     subscription: AttachSubscription,
     event: DomainEvent,
+    eventId: EventId,
   ): void {
     if (!subscription.active) return;
+    if (
+      subscription.target.scope === "turn" &&
+      (!("turnId" in event) || event.turnId !== subscription.target.turnId)
+    )
+      return;
+    subscription.lastEventId = eventId;
     sendSafe(subscription.connection, {
       kind: "notification",
       method: "event",
-      params: event,
+      params: { subscriptionId: subscription.subscriptionId, eventId, event },
     });
     if (event.type === "session.killed") {
       endAttach(subscription, "session_killed");
     } else if (
       event.type === "turn.completed" &&
-      subscription.targetTurnId === event.turnId &&
-      subscription.exitOn.includes(event.stopReason)
+      subscription.target.scope === "turn" &&
+      subscription.target.turnId === event.turnId
     ) {
       endAttach(subscription, event.stopReason);
     }
@@ -593,6 +625,17 @@ export function createProtocolServerInternal(
     connection: TransportConnection<ProtocolMessage>,
     raw: unknown,
   ): void {
+    const control = v.safeParse(subscriptionCloseSchema, raw);
+    if (control.success) {
+      for (const subscription of attachSubscriptions) {
+        if (
+          subscription.connection === connection &&
+          subscription.subscriptionId === control.output.subscriptionId
+        )
+          endAttach(subscription, "closed");
+      }
+      return;
+    }
     const parsed = v.safeParse(protocolRequestSchema, raw);
     if (!parsed.success) {
       void recordDiagnostic({
@@ -621,6 +664,9 @@ export function createProtocolServerInternal(
         requestId: request.requestId,
         ...outcome,
       });
+      const release = afterAttachAck.get(request);
+      afterAttachAck.delete(request);
+      if ("result" in outcome) release?.();
     });
   }
 
@@ -721,80 +767,88 @@ export function createProtocolServerInternal(
     return { capabilities, failures };
   }
 
-  function attach(
+  async function attach(
     connection: TransportConnection<ProtocolMessage>,
     params: AttachParams,
-  ): { sessionId: SessionId; replayed: number } {
+    request: ProtocolRequest,
+  ): Promise<AttachResult> {
     assertSessionScope(params.sessionId);
-    if (!knownSessions.has(params.sessionId)) {
+    if (!knownSessions.has(params.sessionId))
       throw {
         code: "session_not_found",
         sessionId: params.sessionId,
       } satisfies MachineError;
-    }
-    const history = eventLog.get(params.sessionId) ?? {
-      events: [],
-      openMessages: new Set<string>(),
-      safeBoundaries: [0],
-    };
-    const observation = observations.get(params.sessionId) ?? { killed: false };
-    const replayedCount =
-      params.replay === undefined
-        ? history.events.length
-        : Math.min(params.replay, history.events.length);
-    const naiveStart = history.events.length - replayedCount;
-    const replayStart = history.safeBoundaries.includes(naiveStart)
-      ? naiveStart
-      : (history.safeBoundaries.findLast((boundary) => boundary < naiveStart) ??
-        0);
-    const replayEvents = history.events.slice(replayStart);
-    const targetTurnId =
-      params.exitOn === undefined || params.exitOn.length === 0
-        ? undefined
-        : (observation.activeTurnId ?? observation.lastCompleted?.turnId);
+    if (params.scope === "turn")
+      options.machine.assertTurnTarget({
+        sessionId: params.sessionId,
+        turnId: params.turnId,
+      });
+    const target: SubscriptionTarget =
+      params.scope === "turn"
+        ? { scope: "turn", sessionId: params.sessionId, turnId: params.turnId }
+        : { scope: "session", sessionId: params.sessionId };
+    const history = eventLog.get(params.sessionId);
+    const replayEvents =
+      params.replay.mode === "none"
+        ? []
+        : (history?.events ?? []).filter(
+            (event) =>
+              target.scope === "session" ||
+              ("turnId" in event && event.turnId === target.turnId),
+          );
+    const head = eventHeads.get(params.sessionId) ?? null;
+    const first = history?.events[0];
     const subscription: AttachSubscription = {
       sessionId: params.sessionId,
-      exitOn: params.exitOn ?? [],
-      ...(targetTurnId === undefined ? {} : { targetTurnId }),
+      target,
+      subscriptionId: v.parse(
+        subscriptionIdSchema,
+        "subscription-" + ++subscriptionSequence,
+      ),
+      lastEventId: head,
       connection,
       replaying: true,
       pendingEvents: [],
       active: true,
     };
+    // 先完整验证再注册；注册后到 ACK 释放之间的事件进入同一队列。
     attachSubscriptions.add(subscription);
+    let terminal: StopReason | undefined;
     try {
       testing.beforeAttachReplay?.(params.sessionId);
+      if (target.scope === "turn") {
+        const snapshot = await options.machine.wait({
+          targets: [{ sessionId: target.sessionId, turnId: target.turnId }],
+          completion: "all",
+          timeoutMs: 0,
+        });
+        terminal = snapshot.completed[0]?.stopReason;
+      }
     } catch (error) {
       subscription.active = false;
       attachSubscriptions.delete(subscription);
-      subscription.pendingEvents.length = 0;
       throw error;
     }
-    // 回放先于响应，保证事件顺序与"响应确认 attach 建立"之间无交叉。
-    for (const event of replayEvents) {
-      sendSafe(connection, {
-        kind: "notification",
-        method: "event",
-        params: event,
-      });
-    }
-    subscription.replaying = false;
-    for (const event of subscription.pendingEvents.splice(0)) {
-      forwardToSubscription(subscription, event);
-      if (!subscription.active) break;
-    }
-    const lastTurn = observation.lastCompleted;
-    if (
-      lastTurn !== undefined &&
-      subscription.targetTurnId === lastTurn.turnId &&
-      subscription.exitOn.includes(lastTurn.stopReason)
-    ) {
-      endAttach(subscription, lastTurn.stopReason);
-    } else if (observation.killed) {
-      endAttach(subscription, "session_killed");
-    }
+    afterAttachAck.set(request, () => {
+      if (!subscription.active) return;
+      for (const event of replayEvents)
+        forwardToSubscription(subscription, event, eventPositions.get(event)!);
+      subscription.replaying = false;
+      for (const { event, eventId } of subscription.pendingEvents.splice(0))
+        forwardToSubscription(subscription, event, eventId);
+      if (!subscription.active) return;
+      if (terminal !== undefined) endAttach(subscription, terminal);
+      else if (observations.get(params.sessionId)?.killed)
+        endAttach(subscription, "session_killed");
+    });
     return {
       sessionId: params.sessionId,
+      subscriptionId: subscription.subscriptionId,
+      target,
+      window: {
+        oldest: first === undefined ? null : eventPositions.get(first)!,
+        head,
+      },
       replayed: replayEvents.length,
     };
   }
@@ -907,7 +961,7 @@ export function createProtocolServerInternal(
             );
       }
       case "attach":
-        return attach(connection, request.params as AttachParams);
+        return attach(connection, request.params as AttachParams, request);
       case "resolvePermission": {
         const params = request.params as ResolvePermissionParams;
         assertSessionScope(params.sessionId);
@@ -915,6 +969,7 @@ export function createProtocolServerInternal(
         return {
           sessionId: params.sessionId,
           permissionId: params.permissionId,
+          turnId: params.turnId,
         };
       }
       case "diagnostics":
@@ -990,6 +1045,7 @@ export function createProtocolServerInternal(
     consumerBindings.delete(connection);
     for (const subscription of Array.from(attachSubscriptions)) {
       if (subscription.connection === connection) {
+        subscription.active = false;
         attachSubscriptions.delete(subscription);
       }
     }
