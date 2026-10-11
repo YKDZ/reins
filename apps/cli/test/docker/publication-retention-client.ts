@@ -20,7 +20,12 @@ const task = JSON.parse(process.argv[2]!) as {
 };
 const manager = createWorkspaceClient(
   await createUnixSocketClient<WorkspaceMessage>(task.socket),
-  { consumerContext: v.parse(consumerContextSchema, "reins-wrr26-owner-a") },
+  {
+    consumerContext: v.parse(
+      consumerContextSchema,
+      process.env.REINS_CONSUMER_CONTEXT,
+    ),
+  },
 );
 await manager.initialize();
 if (task.failedReceipt) {
