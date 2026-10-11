@@ -9,7 +9,8 @@
             "protocol",
             "transport",
             "workspace-protocol",
-            "library"
+            "library",
+            "workspace-source"
           ]
         }
       },
@@ -91,7 +92,8 @@
             "workspace-runtime",
             "workspace-protocol",
             "transport",
-            "library"
+            "library",
+            "workspace-source"
           ]
         }
       },
@@ -110,6 +112,11 @@
             "transport",
             "library"
           ]
+        }
+      },
+      "workspace-source": {
+        "dependencies": {
+          "allow": ["workspace-protocol", "protocol", "library"]
         }
       }
     }
