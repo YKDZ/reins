@@ -459,6 +459,8 @@ try {
   ).find((name) => /^[a-f0-9-]{36}$/u.test(name));
   assert.ok(attachment);
   const directory = join(env.REINS_WORKSPACE_MANAGER_STATE_DIR, attachment);
+  await mkdir(join(directory, "home"), { recursive: true, mode: 0o700 });
+  await writeFile(join(directory, "home", "valuable"), "keep private home");
   capacityDirectory = join(directory, "material-qoder");
   await mkdir(capacityDirectory, { recursive: true });
   await inNamespace([
@@ -501,6 +503,14 @@ try {
     capacity: await capacity(),
     product: failed,
   });
+  assert.equal(
+    await readFile(join(directory, "home", "valuable"), "utf8"),
+    "keep private home",
+  );
+  assert.equal(
+    await readFile(join(worktree, "value.txt"), "utf8"),
+    "caller value\n",
+  );
   assert.deepEqual(failed.runtime, {
     status: "failed",
     error: { code: "capacity_exhausted" },
@@ -524,7 +534,7 @@ try {
     originalContainer,
     "node",
     "-e",
-    "const fs=require('node:fs');fs.writeFileSync('/opt/reins/harnesses/codex/value','keep completed material');fs.writeFileSync(process.env.HOME+'/valuable','keep private home')",
+    "const fs=require('node:fs');if(fs.readFileSync(process.env.HOME+'/valuable','utf8')!=='keep private home')process.exit(1);fs.writeFileSync('/opt/reins/harnesses/codex/value','keep completed material')",
   ]);
   await inNamespace(["mount", "-o", "remount,size=16m", capacityDirectory]);
   const enlarged = await capacity();
