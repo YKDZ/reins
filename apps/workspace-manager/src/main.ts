@@ -27,7 +27,8 @@ import * as v from "valibot";
 
 async function main() {
   if (process.argv.length > 2) {
-    if (process.argv[2] !== "history-delete")
+    const action = process.argv[2];
+    if (!["history-delete", "inspect", "recover", "release"].includes(action!))
       throw new Error("Unknown Workspace Manager administration command");
     const { values } = parseArgs({
       args: process.argv.slice(3),
@@ -35,17 +36,64 @@ async function main() {
         "consumer-context": { type: "string" },
         cwd: { type: "string" },
         "all-worktrees": { type: "boolean" },
+        "session-disposition": { type: "string" },
       },
     });
-    const owner = v.parse(consumerContextSchema, values["consumer-context"]);
-    if ((values.cwd !== undefined) === (values["all-worktrees"] === true))
+    if (
+      action === "history-delete" &&
+      (values.cwd !== undefined) === (values["all-worktrees"] === true)
+    )
       throw new Error("Specify either --cwd or --all-worktrees");
+    if (
+      action !== "history-delete" &&
+      (values.cwd === undefined ||
+        values["all-worktrees"] !== undefined ||
+        values["consumer-context"] !== undefined)
+    )
+      throw new Error("Specify --cwd for attachment administration");
+    const disposition = values["session-disposition"];
+    if (
+      action === "release"
+        ? disposition !== "kill" && disposition !== "require_none"
+        : disposition !== undefined
+    )
+      throw new Error(
+        "Release requires --session-disposition require_none or kill",
+      );
     const stateDirectory = process.env.REINS_WORKSPACE_MANAGER_STATE_DIR;
     if (stateDirectory === undefined)
       throw new Error("REINS_WORKSPACE_MANAGER_STATE_DIR is required");
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     const release = await lockfile.lock(stateDirectory);
     try {
+      if (action !== "history-delete") {
+        const runtime = await openWorkspaceRuntime({ stateDirectory });
+        try {
+          const inspected = await runtime.inspectAttachment(values.cwd!);
+          if (action === "recover" && inspected.ownership !== "attached")
+            throw workspaceFailure("attachment_not_found");
+          const result =
+            action === "release"
+              ? await runtime.detach(
+                  values.cwd!,
+                  inspected.consumerContext,
+                  disposition as "kill" | "require_none",
+                )
+              : action === "recover"
+                ? {
+                    ...inspected,
+                    binding: {
+                      REINS_CONSUMER_CONTEXT: inspected.consumerContext,
+                    },
+                  }
+                : inspected;
+          console.log(JSON.stringify(result));
+        } finally {
+          await runtime.close();
+        }
+        return;
+      }
+      const owner = v.parse(consumerContextSchema, values["consumer-context"]);
       console.log(
         JSON.stringify(
           await deleteWorkspaceHistory({
@@ -325,6 +373,11 @@ function normalizeError(error: unknown): WorkspaceError {
   return parsed.success ? parsed.output : workspaceFailure("provider_failed");
 }
 void main().catch((error: unknown) => {
-  console.error("Workspace Manager failed to start", error);
+  console.error(
+    process.argv.length > 2
+      ? "Workspace Manager administration failed"
+      : "Workspace Manager failed to start",
+    error,
+  );
   process.exitCode = 1;
 });
