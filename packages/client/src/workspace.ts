@@ -25,6 +25,7 @@ import {
   parseRetryToken,
   type ReinsClient,
 } from "./index.ts";
+import { receivePublication, listReceipts } from "./receipts.ts";
 
 export function createWorkspaceClient(
   connection: TransportConnection<WorkspaceMessage>,
@@ -114,6 +115,18 @@ export function createWorkspaceClient(
         consumerContext: options.consumerContext,
       }),
     request,
+    async receivePublication(
+      publicationId: string,
+      destination: { directory: string; activeRoot: string },
+    ) {
+      return receivePublication(
+        options.consumerContext,
+        await request("publication.read", { publicationId }),
+        destination,
+      );
+    },
+    receipts: (directory: string) =>
+      listReceipts(options.consumerContext, directory),
     async control(
       context: string | { workspaceHandle: WorkspaceHandle },
     ): Promise<ReinsClient> {

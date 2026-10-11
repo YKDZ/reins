@@ -35,6 +35,9 @@ export function registerWorkspaceCommands(program: Command): void {
   const invoke = async <M extends WorkspaceMethod>(
     method: M,
     input: WorkspaceParams[M] | (() => Promise<WorkspaceParams[M]>),
+    operation?: (
+      client: ReturnType<typeof createWorkspaceClient>,
+    ) => Promise<unknown>,
   ) => {
     try {
       const params = typeof input === "function" ? await input() : input;
@@ -59,7 +62,10 @@ export function registerWorkspaceCommands(program: Command): void {
       );
       try {
         await client.initialize();
-        let result = await client.request(method, params);
+        let result =
+          operation === undefined
+            ? await client.request(method, params)
+            : await operation(client);
         let preparation: ManagedWorkspaceInfo | undefined;
         // CLI 等待被受理的准备；handoff 的目标 cwd 来自物化结果。
         if (method === "workspace.attach" || method === "workspace.handoff") {
@@ -103,6 +109,44 @@ export function registerWorkspaceCommands(program: Command): void {
       throw new ExitError(1, "workspace_failed");
     }
   };
+  workspace
+    .command("publications")
+    .description("Query files explicitly published from this worktree")
+    .option("-C <path>", "native directory context")
+    .action((options: { C?: string }) =>
+      invoke("publication.list", { cwd: nativeCwd(options.C) }),
+    );
+  workspace
+    .command("receive")
+    .description(
+      "Explicitly receive one fixed publication outside the active tree",
+    )
+    .argument("<publication>")
+    .requiredOption("--directory <path>", "local receipt directory")
+    .requiredOption("--active-root <path>", "active Git worktree root")
+    .action(
+      (
+        publicationId: string,
+        options: { directory: string; activeRoot: string },
+      ) =>
+        invoke("publication.read", { publicationId }, (client) =>
+          client.receivePublication(publicationId, {
+            directory: resolve(options.directory),
+            activeRoot: resolve(options.activeRoot),
+          }),
+        ),
+    );
+  workspace
+    .command("receipts")
+    .description(
+      "List this consumer's received files, sources and actual locations",
+    )
+    .requiredOption("--directory <path>", "local receipt directory")
+    .action((options: { directory: string }) =>
+      invoke("publication.list", { cwd: nativeCwd() }, (client) =>
+        client.receipts(resolve(options.directory)),
+      ),
+    );
   workspace
     .command("handoff")
     .description(

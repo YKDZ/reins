@@ -167,6 +167,7 @@ const bundle = await rolldown({
   cwd: repository,
   input: {
     reins: "apps/cli/src/cli.ts",
+    "reins-publisher": "apps/cli/src/publisher-cli.ts",
     "reins-daemon": "packages/daemon/src/main.ts",
     "reins-workspace-manager": "apps/workspace-manager/src/main.ts",
   },
@@ -192,6 +193,7 @@ verifyBundle(
 );
 for (const name of [
   "reins.js",
+  "reins-publisher.js",
   "reins-daemon.js",
   "reins-workspace-manager.js",
 ] as const) {

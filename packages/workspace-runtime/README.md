@@ -61,3 +61,22 @@ Manager 正常停止时先关闭新请求受理，等待已受理请求和准备
 daemon 与容器重启是不同的部署动作。重新进入工作区时，Manager 实际核对原容器身份、原生工作树及 Git 元数据、执行目录、已选择绑定的本地 runtime 入口与 daemon 控制连接；已取得的共享客户端也不能凭旧准备事实放行新 worker。入口失效时先明确失败，调用方修正后显式重复原 `attach` 才继续验证，成功材料保持原样。正常重启后的旧会话及回合引用失效；原 worker 的停止事实与无法取得的旧业务结果分别表达。调用方用完整新消息和新名称显式 `spawn` 替代会话，复用代码与环境，不继承旧模型上下文，也不自动重放旧任务。厂商凭据刷新及具体原生控制的支持范围仍按各自真实组合验收。
 
 正式发行包包含 sibling `reins-workspace-manager`。默认状态位于 `$XDG_STATE_HOME/reins/workspace-manager`（未设置时为 `$HOME/.local/state/reins/workspace-manager`）。部署与测试可显式设置 `REINS_WORKSPACE_MANAGER_BIN`、`REINS_WORKSPACE_MANAGER_SOCKET` 和 `REINS_WORKSPACE_MANAGER_STATE_DIR`。开发 launcher 为当前 checkout/build 隔离这些路径。Docker 连接与公开镜像拉取使用 launcher 的现有 Docker 配置，产品不改用户配置。
+
+工作区部署还需提供同一发行包的 `/opt/reins/dist/reins-publisher.js`。runtime 的 `PATH` 绑定专用 `reins` 入口，只注册发布能力；帮助、错误候选和 publisher socket 的受理来自同一部署能力集合。该入口不能启动 Manager 或创建环境，不通过容器探测或角色选项切换职责。worker 自行选择普通文件或整理好的成果包后执行：
+
+```sh
+reins publish -- selected-file.tar
+reins publish -- --option-like-name.txt
+```
+
+发布入口读取选定文件，将完整字节交给 Manager；Manager 在 runtime 之外的持久目录提交固定副本后返回 `ready`、独立发布标识、源工作目录、源路径、大小和摘要。后续修改或删除原路径不改副本，同路径的多次发布可以分别选择。没有自动扫描、发布提示词、成果齐全或任务完成判断。
+
+消费者查询当前工作目录来源的发布，再显式接收到自己指定的活动树外接收区：
+
+```sh
+reins workspace publications -C /absolute/worktree
+reins workspace receive pub-<uuid> --directory /absolute/receipts --active-root /absolute/worktree
+reins workspace receipts --directory /absolute/receipts
+```
+
+共享客户端提供相同的 `publication.list` 查询、`receivePublication` 和 `receipts`。接收提交本地可用文件后才返回 `arrived`、来源、大小及实际 `localPath`；失败返回 `receipt_failed`，保留已成功发布的副本。发布和接收查询均限 launcher 绑定的消费者，跨消费者发布标识按不存在处理。本链可直接用于原生工作树附着，无需源码交接。回合完成、回复中的路径和发布成功都不会自动接收文件。
