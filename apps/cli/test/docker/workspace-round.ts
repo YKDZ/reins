@@ -97,7 +97,7 @@ await writeFile(
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nconst fs=require("node:fs"),path=require("node:path");const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
+  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
   { mode: 0o755 },
 );
 // 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
@@ -141,6 +141,23 @@ await requireCommand(process.execPath, [
   join(payload, "opt", "reins", "dist", "reins.js"),
   "--version",
 ]);
+await requireCommand(process.execPath, [
+  join(payload, "opt", "reins", "dist", "reins.js"),
+  "list",
+  "--help",
+]);
+const preflight = join(base, "fixture-preflight");
+await mkdir(join(preflight, "src"), { recursive: true });
+await mkdir(join(preflight, ".reins"));
+await writeFile(join(preflight, ".reins", "allow-version"), "fixture check\n");
+assert.equal(
+  await requireCommand(
+    join(payload, "opt", "reins", "harnesses", "codex", "bin", "codex"),
+    ["--version"],
+    join(preflight, "src"),
+  ),
+  "codex-cli 0.149.0",
+);
 await writeFile(
   join(context, "Dockerfile"),
   `FROM ${nodeImage}\nCOPY image-context/payload /\nENV REINS_ADAPTERS_MODULE=/opt/reins/codex-adapter.ts\n`,
