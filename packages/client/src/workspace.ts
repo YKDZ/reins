@@ -47,7 +47,8 @@ export function createWorkspaceClient(
     const requestId = `workspace${++sequence}`;
     return new Promise((resolve, reject) => {
       // detach 等待实际释放完成；普通短请求保留传输预算，显式期限仍由调用方决定。
-      const budget = timeoutMs ?? (method === "workspace.detach" ? null : 30_000);
+      const budget =
+        timeoutMs ?? (method === "workspace.detach" ? null : 30_000);
       const timer =
         budget === null
           ? null
