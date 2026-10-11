@@ -8,6 +8,7 @@ import {
   rename,
   rm,
   stat,
+  writeFile,
 } from "node:fs/promises";
 import { basename, isAbsolute, join, relative } from "node:path";
 import { promisify } from "node:util";
@@ -44,6 +45,7 @@ import {
   workspaceEnvironment,
   workspaceHarnesses,
 } from "./index.ts";
+import { openPublications, servePublisher } from "./publications.ts";
 import {
   hasQoderAuthBinding,
   projectQoderAuth,
@@ -143,6 +145,11 @@ export async function openWorkspaceRuntime(options: {
   qoderAuthBindings?: QoderAuthBindings;
 }) {
   const root = options.stateDirectory;
+  const publications = openPublications(root);
+  const publishers = new Map<
+    string,
+    Awaited<ReturnType<typeof servePublisher>>
+  >();
   await mkdir(root, { recursive: true, mode: 0o700 });
   const records: RecordState[] = [];
   for (const entry of await readdir(root, { withFileTypes: true })) {
@@ -195,6 +202,24 @@ export async function openWorkspaceRuntime(options: {
       root,
       `c-${Buffer.from(basename(record.directory).replaceAll("-", ""), "hex").toString("base64url")}`,
     );
+  const publisher = async (record: RecordState) => {
+    if (publishers.has(record.directory)) return;
+    const control = controlDirectory(record);
+    await mkdir(join(control, "bin"), { recursive: true, mode: 0o700 });
+    await writeFile(
+      join(control, "bin/reins"),
+      '#!/bin/sh\nexec node /opt/reins/dist/reins-publisher.js "$@"\n',
+      { mode: 0o755 },
+    );
+    publishers.set(
+      record.directory,
+      await servePublisher(join(control, "f.sock"), (params) =>
+        publications.publish(record.owner, record.tree.cwd, params),
+      ),
+    );
+  };
+  for (const record of records)
+    if (record.info.runtime.status !== "released") await publisher(record);
   const preparing = new Set<string>();
   const executions = new Map<string, Promise<void>>();
   // 单个 Manager 对受理与发布串行化，Docker 准备在锁外进行，status 始终可观察。
@@ -575,6 +600,7 @@ export async function openWorkspaceRuntime(options: {
     let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
     try {
       await mkdir(control, { recursive: true, mode: 0o700 });
+      await publisher(record);
       await mkdir(home, { recursive: true, mode: 0o700 });
       const paths = [
         ...new Set([
@@ -622,9 +648,13 @@ export async function openWorkspaceRuntime(options: {
           "--env",
           `REINS_SOCKET=${join(control, "r.sock")}`,
           "--env",
+          `REINS_PUBLICATION_SOCKET=${join(control, "f.sock")}`,
+          "--env",
+          `REINS_CONSUMER_CONTEXT=${record.owner}`,
+          "--env",
           `REINS_STATE_DIR=${join(control, "state")}`,
           "--env",
-          "PATH=/opt/reins/harnesses/codex/bin:/opt/reins/harnesses/qoder/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
+          `PATH=${join(control, "bin")}:/opt/reins/harnesses/codex/bin:/opt/reins/harnesses/qoder/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin`,
           "--entrypoint",
           "node",
           record.info.environment.image,
@@ -862,6 +892,7 @@ export async function openWorkspaceRuntime(options: {
   }, 1000);
   monitor.unref();
   return {
+    publications,
     hasAttachments: () =>
       records.some((record) => record.info.runtime.status !== "released"),
     async attach(cwd: string, bindingRefs: string[], owner: ConsumerContext) {
@@ -1033,6 +1064,10 @@ export async function openWorkspaceRuntime(options: {
     async close() {
       clearInterval(monitor);
       await Promise.all(executions.values());
+      await Promise.all(
+        [...publishers.values()].map((server) => server.close()),
+      );
+
       await Promise.allSettled(observations.values());
       await Promise.allSettled(stopTasks.values());
       for (const client of clients.values()) client.close();

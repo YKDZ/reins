@@ -42,6 +42,9 @@ export type RuntimeDefinition = v.InferOutput<typeof runtimeDefinitionSchema>;
 export type HarnessBinding = v.InferOutput<typeof harnessBindingSchema>;
 const ordinaryWorkspaceErrorSchema = v.strictObject({
   code: v.picklist([
+    "publication_failed",
+    "publication_not_found",
+    "receipt_failed",
     "consumer_context_required",
     "consumer_context_conflict",
     "initialization_required",
@@ -251,7 +254,40 @@ export const sourceHandoffSchema = v.strictObject({
   subdirectory: v.string(),
   bindings: v.pipe(v.array(v.string()), v.minLength(1)),
 });
+export const PUBLISHER_CAPABILITIES = [
+  {
+    name: "publish",
+    method: "publication.publish",
+    description: "Save an explicitly selected file as a fixed publication",
+  },
+] as const;
+export const publicationIdSchema = v.pipe(
+  v.string(),
+  v.regex(/^pub-[a-f0-9-]{36}$/u),
+);
+export const publicationSchema = v.strictObject({
+  publicationId: publicationIdSchema,
+  source: v.strictObject({
+    cwd: v.string(),
+    path: v.string(),
+  }),
+  bytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
+  state: v.literal("ready"),
+});
+export type Publication = v.InferOutput<typeof publicationSchema>;
+export const publicationPayloadSchema = v.strictObject({
+  publication: publicationSchema,
+  contentBase64: v.string(),
+});
+export const publishParamsSchema = v.strictObject({
+  path: v.string(),
+  contentBase64: v.string(),
+});
 export const workspaceMethods = [
+  "publication.publish",
+  "publication.list",
+  "publication.read",
   "workspace.handoff",
   "workspace.locate",
   "initialize",
@@ -264,6 +300,9 @@ export const workspaceMethods = [
 ] as const;
 export type WorkspaceMethod = (typeof workspaceMethods)[number];
 export type WorkspaceParams = {
+  "publication.publish": v.InferOutput<typeof publishParamsSchema>;
+  "publication.list": { cwd: string };
+  "publication.read": { publicationId: string };
   "workspace.handoff": v.InferOutput<typeof sourceHandoffSchema>;
   "workspace.locate": { workspaceHandle: WorkspaceHandle };
   initialize: {
@@ -278,6 +317,9 @@ export type WorkspaceParams = {
   "workspace.detach": { cwd: string; sessionDisposition: "require_none" };
 };
 export type WorkspaceResults = {
+  "publication.publish": Publication;
+  "publication.list": Publication[];
+  "publication.read": v.InferOutput<typeof publicationPayloadSchema>;
   "workspace.handoff": {
     workspaceHandle: WorkspaceHandle;
     workspace: ManagedWorkspaceInfo;
@@ -293,6 +335,24 @@ export type WorkspaceResults = {
 };
 const pathParamsSchema = v.strictObject({ cwd: v.string() });
 export const workspaceRequestSchema = v.variant("method", [
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("publication.publish"),
+    params: publishParamsSchema,
+  }),
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("publication.list"),
+    params: v.strictObject({ cwd: v.string() }),
+  }),
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("publication.read"),
+    params: v.strictObject({ publicationId: publicationIdSchema }),
+  }),
   v.strictObject({
     kind: v.literal("request"),
     requestId: v.string(),
@@ -377,6 +437,9 @@ export const workspaceResponseSchema = v.union([
 export type WorkspaceResponse = v.InferOutput<typeof workspaceResponseSchema>;
 export type WorkspaceMessage = WorkspaceRequest | WorkspaceResponse;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
+  if (method === "publication.publish") return publicationSchema;
+  if (method === "publication.list") return v.array(publicationSchema);
+  if (method === "publication.read") return publicationPayloadSchema;
   return method === "workspace.handoff"
     ? v.strictObject({
         workspaceHandle: workspaceHandleSchema,
