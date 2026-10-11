@@ -33,7 +33,7 @@ import {
   type ReinsClient,
   type AgentEvent,
 } from "./index.ts";
-import { receivePublication, listReceipts } from "./receipts.ts";
+import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
 import { createEventProjector } from "./subscription.ts";
 
 export function projectWorkspaceHistory(history: WorkspaceHistory) {
@@ -183,6 +183,8 @@ export function createWorkspaceClient(
     },
     receipts: (directory: string) =>
       listReceipts(options.consumerContext, directory),
+    removeReceipt: (directory: string, receiptId: string) =>
+      removeReceipt(options.consumerContext, directory, receiptId),
     async history(params: WorkspaceParams["workspace.history"]) {
       return projectWorkspaceHistory(
         await request("workspace.history", params),

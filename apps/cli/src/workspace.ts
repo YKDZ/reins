@@ -102,6 +102,13 @@ export function registerWorkspaceCommands(program: Command): void {
         );
         if (preparation?.runtime.status === "failed")
           throw new ExitError(1, "workspace_failed");
+        if (
+          result !== null &&
+          typeof result === "object" &&
+          "state" in result &&
+          result.state === "failed"
+        )
+          throw new ExitError(1, "copy_cleanup_failed");
       } finally {
         client.close();
       }
@@ -175,6 +182,27 @@ export function registerWorkspaceCommands(program: Command): void {
     .action((options: { directory: string }) =>
       invoke("publication.list", { cwd: nativeCwd() }, (client) =>
         client.receipts(resolve(options.directory)),
+      ),
+    );
+  workspace
+    .command("remove-publication")
+    .description(
+      "Explicitly remove one published copy without removing receipts",
+    )
+    .argument("<publication>")
+    .action((publicationId: string) =>
+      invoke("publication.remove", { publicationId }),
+    );
+  workspace
+    .command("remove-receipt")
+    .description(
+      "Explicitly remove one local receipt without removing its publication",
+    )
+    .argument("<receipt>")
+    .requiredOption("--directory <path>", "local receipt directory")
+    .action((receiptId: string, options: { directory: string }) =>
+      invoke("publication.list", { cwd: nativeCwd() }, (client) =>
+        client.removeReceipt(resolve(options.directory), receiptId),
       ),
     );
   workspace

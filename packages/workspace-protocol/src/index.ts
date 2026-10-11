@@ -353,8 +353,20 @@ export const publicationSchema = v.strictObject({
   bytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
   sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
   state: v.literal("ready"),
+  storagePath: v.optional(v.string()),
 });
 export type Publication = v.InferOutput<typeof publicationSchema>;
+export const copyCleanupSchema = v.strictObject({
+  state: v.picklist(["released", "failed"]),
+  storagePath: v.string(),
+  remaining: v.strictObject({
+    directory: v.picklist(["present", "absent", "unknown"]),
+    metadata: v.picklist(["present", "absent", "unknown"]),
+    payload: v.picklist(["present", "absent", "unknown"]),
+  }),
+  detail: v.optional(v.string()),
+});
+export type CopyCleanup = v.InferOutput<typeof copyCleanupSchema>;
 export const publicationPayloadSchema = v.strictObject({
   publication: publicationSchema,
   contentBase64: v.string(),
@@ -369,6 +381,7 @@ export const workspaceMethods = [
   "publication.unobserve",
   "publication.list",
   "publication.read",
+  "publication.remove",
   "workspace.history",
   "workspace.handoff",
   "workspace.locate",
@@ -387,6 +400,7 @@ export type WorkspaceParams = {
   "publication.unobserve": { observationId: string };
   "publication.list": { cwd: string };
   "publication.read": { publicationId: string };
+  "publication.remove": { publicationId: string };
   "workspace.history": { cwd: string; allWorktrees?: boolean };
   "workspace.handoff": v.InferOutput<typeof sourceHandoffSchema>;
   "workspace.locate": { workspaceHandle: WorkspaceHandle };
@@ -435,6 +449,7 @@ export type WorkspaceResults = {
   "publication.unobserve": null;
   "publication.list": Publication[];
   "publication.read": v.InferOutput<typeof publicationPayloadSchema>;
+  "publication.remove": CopyCleanup;
   "workspace.history": v.InferOutput<typeof workspaceHistorySchema>;
   "workspace.handoff": {
     workspaceHandle: WorkspaceHandle;
@@ -479,6 +494,12 @@ export const workspaceRequestSchema = v.variant("method", [
     kind: v.literal("request"),
     requestId: v.string(),
     method: v.literal("publication.read"),
+    params: v.strictObject({ publicationId: publicationIdSchema }),
+  }),
+  v.strictObject({
+    kind: v.literal("request"),
+    requestId: v.string(),
+    method: v.literal("publication.remove"),
     params: v.strictObject({ publicationId: publicationIdSchema }),
   }),
   v.strictObject({
@@ -589,6 +610,7 @@ export type WorkspaceMessage =
   | WorkspaceResponse
   | WorkspaceNotification;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
+  if (method === "publication.remove") return copyCleanupSchema;
   if (method === "workspace.history") return workspaceHistorySchema;
   if (method === "publication.publish") return publicationSchema;
   if (method === "publication.list" || method === "publication.observe")
