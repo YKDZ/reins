@@ -702,7 +702,50 @@ try {
           originalContainer,
           "node",
           "-e",
-          'const net=require("node:net"),socket=process.env.REINS_SOCKET;(async()=>{for(let i=0;i<1600;i++){const ok=await new Promise(r=>{const c=net.createConnection(socket);c.once("connect",()=>{c.end();r(true)});c.once("error",()=>r(false))});if(ok){console.log("daemon socket ready");return}await new Promise(r=>setTimeout(r,25))}throw new Error("daemon socket did not return")})().catch(e=>{console.error(e);process.exitCode=1})',
+          String.raw`
+const fs = require("node:fs");
+const net = require("node:net");
+const path = require("node:path");
+const stateDirectory = process.env.REINS_STATE_DIR || (process.env.XDG_STATE_HOME
+  ? path.join(process.env.XDG_STATE_HOME, "reins")
+  : path.join(process.env.HOME || "/root", ".local", "state", "reins"));
+const leasePath = path.join(stateDirectory, "diagnostics", "writer-lease.lock");
+const socket = process.env.REINS_SOCKET;
+const samples = [];
+(async () => {
+  const startedAt = Date.now();
+  for (let attempt = 0; attempt < 160; attempt++) {
+    const sample = { elapsedMs: Date.now() - startedAt };
+    try {
+      const lease = fs.statSync(leasePath);
+      sample.lease = { mtimeMs: lease.mtimeMs, ageMs: Date.now() - lease.mtimeMs };
+    } catch (error) {
+      sample.lease = { error: error.code || error.message };
+    }
+    try {
+      sample.daemon = JSON.parse(fs.readFileSync("/tmp/reins-daemon-process.json", "utf8"));
+    } catch (error) {
+      sample.daemon = { error: error.code || error.message };
+    }
+    if (attempt % 8 === 0) samples.push(sample);
+    const ready = await new Promise((resolve) => {
+      const connection = net.createConnection(socket);
+      connection.once("connect", () => { connection.end(); resolve(true); });
+      connection.once("error", () => resolve(false));
+    });
+    if (ready) {
+      console.log(JSON.stringify({ ready, elapsedMs: Date.now() - startedAt, samples }));
+      return;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 250));
+  }
+  console.log(JSON.stringify({ ready: false, elapsedMs: Date.now() - startedAt, samples }));
+  process.exitCode = 1;
+})().catch((error) => {
+  console.error(error);
+  process.exitCode = 1;
+});
+`,
         ]);
         await record("daemon-restart-socket-probe", socketProbe);
         assert.equal(socketProbe.status, 0, JSON.stringify(socketProbe));
