@@ -829,7 +829,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(JSON.parse(result.stdout), result.stdout).toMatchObject({
       code: "unsupported_feature",
     });
     const sessions = await runCli(["list", "--name", "no-capture"], env);

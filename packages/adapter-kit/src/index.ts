@@ -6,6 +6,8 @@ export {
 } from "./harness-session.ts";
 export {
   AlreadyDiagnosedError,
+  acceptDiagnostic,
+  withinDiagnosticBudget,
   isAlreadyDiagnosedError,
   noopDiagnosticSink,
   type AdapterDiagnosticSink,

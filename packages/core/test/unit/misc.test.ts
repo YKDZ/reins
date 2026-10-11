@@ -110,6 +110,7 @@ describe("权限与事件", () => {
       sessionId: id,
       turnId: ids.turn("t1"),
       stopReason: "failed",
+      failure: { failureCategory: "unclassified", retryDisposition: "unknown" },
       finalReply: "构建失败",
       usage: {},
     });
@@ -133,6 +134,10 @@ describe("权限与事件", () => {
           sessionId: id,
           turnId: ids.turn("t1"),
           stopReason: "failed",
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          },
           finalReply: "构建失败",
           usage: {},
         },

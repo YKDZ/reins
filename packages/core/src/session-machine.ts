@@ -355,13 +355,8 @@ export function createSessionMachine(options: {
         break;
       case "turn.completed":
         if (session !== undefined) {
-          session.turns.push({
-            sessionId: event.sessionId,
-            turnId: event.turnId,
-            stopReason: event.stopReason,
-            finalReply: event.finalReply,
-            usage: event.usage,
-          });
+          const { type: _type, ...completed } = event;
+          session.turns.push(completed);
           session.state = "idle";
           session.currentTurnId = null;
           session.activeTurn = null;

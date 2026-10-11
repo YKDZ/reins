@@ -1,3 +1,4 @@
+import { withinDiagnosticBudget } from "@reins/adapter-kit";
 import type {
   DiagnosticId,
   DiagnosticInput,
@@ -67,9 +68,11 @@ export function orderDiagnosticsAcceptance(
 
   const recordNow: RecordDiagnostic = (input) => {
     const consumer = consumerScope.ownerForFact(input);
-    return consumer === undefined
-      ? runtime.record(input)
-      : runtime.record(input, consumer);
+    return withinDiagnosticBudget(() =>
+      consumer === undefined
+        ? runtime.record(input)
+        : runtime.record(input, consumer),
+    );
   };
 
   return {
@@ -80,18 +83,22 @@ export function orderDiagnosticsAcceptance(
       // 归属在接纳点按请求因果确定，队列把 operation 延后也不改变所有权。
       const consumer = consumerScope.ownerForFact(acceptedInput);
       return enqueue(() =>
-        consumer === undefined
-          ? runtime.record(acceptedInput)
-          : runtime.record(acceptedInput, consumer),
+        withinDiagnosticBudget(() =>
+          consumer === undefined
+            ? runtime.record(acceptedInput)
+            : runtime.record(acceptedInput, consumer),
+        ),
       );
     },
     query(params: DiagnosticsParams): Promise<DiagnosticsResult> {
       const acceptedParams = structuredClone(params);
       const scope = consumerScope.current();
       return enqueue(() =>
-        scope === undefined
-          ? runtime.query(acceptedParams)
-          : runtime.query(acceptedParams, scope),
+        withinDiagnosticBudget(() =>
+          scope === undefined
+            ? runtime.query(acceptedParams)
+            : runtime.query(acceptedParams, scope),
+        ),
       );
     },
     runCausal(operation) {

@@ -74,6 +74,7 @@ export function createCodexDriver(deps: {
     let workerExitedUnexpectedly = false;
     let activeTurnId: string | null = null;
     let ended = false;
+    let runPromise: Promise<void> | undefined;
     let turnOverrides: { readonly model?: string; readonly effort?: string } =
       {};
     const nativeTurns = new Map<TurnId, Promise<string>>();
@@ -140,6 +141,7 @@ export function createCodexDriver(deps: {
     async function run(): Promise<void> {
       if (transport === null || session === null) return;
       let readFailed = false;
+      let evidence: Parameters<HarnessSession["failActiveTurn"]>[1];
       try {
         for await (const message of transport.messages) {
           if (message.kind === "notification") {
@@ -157,7 +159,7 @@ export function createCodexDriver(deps: {
               message.params.turn.id !== activeTurnId
             )
               continue;
-            const events = mapNotification(session, message);
+            const events = await mapNotification(session, message);
             for (const event of events) {
               if (event.type === "turn.completed") {
                 activeTurnId = null;
@@ -172,17 +174,17 @@ export function createCodexDriver(deps: {
       } catch (error) {
         if (!ended) {
           readFailed = true;
-          void session.diagnostic({
+          evidence = {
             kind: "stream_failure",
             operation: "receive_worker_stream",
             reason: "read_error",
             message: makeTextEvidence(String(error)),
-          });
+          };
         }
       }
       if (!readFailed && !ended) {
         workerExitedUnexpectedly = true;
-        await session.diagnostic({
+        evidence = {
           kind: "lifecycle",
           operation: "worker",
           reason: "exited_unexpectedly",
@@ -191,9 +193,31 @@ export function createCodexDriver(deps: {
               ? "worker stream ended unexpectedly while idle"
               : "worker stream ended before turn completion",
           ),
-        });
+        };
       }
-      if (!ended) session.failActiveTurn();
+      if (!ended) {
+        // new_turn 的原生受理若先失败，它并未产生可提交的运行中回合。
+        const pendingTurn = session.turnId;
+        if (pendingTurn !== null && activeTurnId === null) {
+          try {
+            await nativeTurns.get(pendingTurn);
+          } catch {
+            /* deliver/start 负责该请求拒绝。 */
+          }
+          if (ended) return;
+        }
+        if (session.turnId === null) {
+          if (evidence !== undefined) await session.diagnostic(evidence);
+        } else {
+          await session.failActiveTurn(
+            {
+              failureCategory: "runtime_unavailable",
+              retryDisposition: "external_state_change",
+            },
+            evidence,
+          );
+        }
+      }
     }
 
     const driver: WorkerDriver = {
@@ -271,18 +295,24 @@ export function createCodexDriver(deps: {
             resolveInitial(await startTurn(spec.message));
           } catch (error) {
             rejectInitial(error);
-            if (session !== null && !isAlreadyDiagnosedError(error)) {
-              void session.diagnostic({
-                kind: "request_failure",
-                operation: "spawn",
-                stage: startingTurn ? "start_turn" : "start_session",
-                reason: "upstream_error",
-                message: makeTextEvidence(String(error)),
-              });
+            if (!ended && session !== null) {
+              runPromise = session.failActiveTurn(
+                undefined,
+                isAlreadyDiagnosedError(error)
+                  ? undefined
+                  : {
+                      kind: "request_failure",
+                      operation: "spawn",
+                      stage: startingTurn ? "start_turn" : "start_session",
+                      reason: "upstream_error",
+                      message: makeTextEvidence(String(error)),
+                    },
+              );
+              await runPromise;
             }
-            session?.failActiveTurn();
           }
-          await run();
+          runPromise = run();
+          await runPromise;
         })();
       },
       async deliver(sessionId, turnId, message, placement) {
@@ -418,6 +448,8 @@ export function createCodexDriver(deps: {
         let closeFailure: unknown;
         try {
           await closingTransport?.close();
+          // 已收到的终态先完成有界证据接受；成功停止不能把它抢成 killed。
+          await runPromise;
         } catch (error) {
           closeFailure = error;
         }
