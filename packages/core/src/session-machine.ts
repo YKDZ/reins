@@ -1161,7 +1161,7 @@ export function createSessionMachine(options: {
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
       }
-      const { sessionId, permissionId, resolution } = parsed.output;
+      const { sessionId, turnId, permissionId, resolution } = parsed.output;
       const session = sessions.get(sessionId);
       if (session === undefined) {
         throw machineError({ code: "session_not_found", sessionId });
@@ -1178,6 +1178,11 @@ export function createSessionMachine(options: {
           permissionId,
         });
       }
+      if (pending.turnId !== turnId)
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
       const inMenu = v.safeParse(
         permissionResolutionSchemaFor(pending.options),
         resolution,

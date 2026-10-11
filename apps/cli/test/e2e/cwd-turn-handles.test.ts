@@ -138,10 +138,14 @@ test("local CLI projects its cwd into an already running daemon and the worker r
   const client = await connectClient();
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params);
+    if (notification.method === "event") events.push(notification.params.event);
   });
   expect(
-    await client.request("attach", { sessionId: target.sessionId, replay: 10 }),
+    await client.request("attach", {
+      scope: "session",
+      sessionId: target.sessionId,
+      replay: { mode: "available" },
+    }),
   ).toHaveProperty("result");
   await vi.waitFor(() =>
     expect(events).toContainEqual(

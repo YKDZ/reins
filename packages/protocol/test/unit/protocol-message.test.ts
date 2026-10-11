@@ -98,12 +98,22 @@ describe("协议 envelope", () => {
     ok(protocolNotificationSchema, {
       kind: "notification",
       method: "event",
-      params: { type: "turn.started", sessionId: "reviewer@g7", turnId: "t1" },
+      params: {
+        subscriptionId: "subscription-1",
+        eventId: 1,
+        event: { type: "turn.started", sessionId: "reviewer@g7", turnId: "t1" },
+      },
     });
     ok(protocolNotificationSchema, {
       kind: "notification",
       method: "attach.ended",
-      params: { sessionId: "reviewer@g7", reason: "end_turn" },
+      params: {
+        subscriptionId: "subscription-1",
+        target: { scope: "session", sessionId: "reviewer@g7" },
+        lastEventId: null,
+        sessionId: "reviewer@g7",
+        reason: "end_turn",
+      },
     });
     bad(protocolNotificationSchema, {
       kind: "notification",
@@ -132,7 +142,13 @@ describe("协议 envelope", () => {
     ok(protocolMessageSchema, {
       kind: "notification",
       method: "attach.ended",
-      params: { sessionId: "reviewer@g7", reason: "cancelled" },
+      params: {
+        subscriptionId: "subscription-1",
+        target: { scope: "session", sessionId: "reviewer@g7" },
+        lastEventId: null,
+        sessionId: "reviewer@g7",
+        reason: "cancelled",
+      },
     });
     bad(protocolMessageSchema, { kind: "request" });
   });
@@ -187,10 +203,12 @@ describe("per-method 参数与结果 schema", () => {
     bad(protocolParamsSchemaFor("list"), { state: "nope" });
     ok(protocolParamsSchemaFor("attach"), {
       sessionId: "reviewer@g7",
-      exitOn: ["end_turn"],
+      scope: "session",
+      replay: { mode: "none" },
     });
     ok(protocolParamsSchemaFor("resolvePermission"), {
       sessionId: "reviewer@g7",
+      turnId: "t1",
       permissionId: "p1",
       resolution: { outcome: "allow", scope: "once" },
     });
@@ -269,10 +287,16 @@ describe("per-method 参数与结果 schema", () => {
     ]);
     ok(protocolResultSchemaFor("attach"), {
       sessionId: "reviewer@g7",
+      subscriptionId: "subscription-1",
+      target: { scope: "session", sessionId: "reviewer@g7" },
+      window: { oldest: null, head: null },
       replayed: 0,
     });
     bad(protocolResultSchemaFor("attach"), {
       sessionId: "reviewer@g7",
+      subscriptionId: "subscription-1",
+      target: { scope: "session", sessionId: "reviewer@g7" },
+      window: { oldest: null, head: null },
       replayed: 0,
       replayPrefixes: [
         {
@@ -285,6 +309,7 @@ describe("per-method 参数与结果 schema", () => {
     });
     ok(protocolResultSchemaFor("resolvePermission"), {
       sessionId: "reviewer@g7",
+      turnId: "t1",
       permissionId: "p1",
     });
     bad(protocolResultSchemaFor("resolvePermission"), {});
@@ -364,8 +389,17 @@ describe("错误码扩展", () => {
 
 describe("attach.ended 载荷", () => {
   test("reason 只能是终态或 session_killed", () => {
-    ok(attachEndedSchema, { sessionId: "reviewer@g7", reason: "end_turn" });
     ok(attachEndedSchema, {
+      subscriptionId: "subscription-1",
+      target: { scope: "session", sessionId: "reviewer@g7" },
+      lastEventId: null,
+      sessionId: "reviewer@g7",
+      reason: "end_turn",
+    });
+    ok(attachEndedSchema, {
+      subscriptionId: "subscription-1",
+      target: { scope: "session", sessionId: "reviewer@g7" },
+      lastEventId: null,
       sessionId: "reviewer@g7",
       reason: "session_killed",
     });

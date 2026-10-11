@@ -18,6 +18,7 @@ import type {
 } from "@reins/protocol";
 import {
   consumerContextSchema,
+  encodePermissionHandle,
   decodeTurnHandle,
   turnHandleSchema,
   sessionIdSchema,
@@ -241,14 +242,29 @@ async function runList(ctx: CommandInvocationFor<"list">): Promise<void> {
 async function runAttachCommand(
   ctx: CommandInvocationFor<"attach">,
 ): Promise<void> {
-  const [sessionId] = ctx.args;
-  const params: AttachParams = {
-    sessionId,
-    ...(ctx.options.replay === undefined ? {} : { replay: ctx.options.replay }),
-    ...(ctx.options.exitOn === undefined
-      ? {}
-      : { exitOn: [...ctx.options.exitOn] }),
-  };
+  const [target] = ctx.args;
+  let params: AttachParams;
+  try {
+    params =
+      ctx.options.scope === "turn"
+        ? {
+            scope: "turn",
+            ...decodeTurnHandle(target),
+            replay: { mode: ctx.options.replay },
+          }
+        : {
+            scope: "session",
+            sessionId: v.parse(sessionIdSchema, target),
+            replay: { mode: ctx.options.replay },
+          };
+  } catch {
+    throw usageError({
+      issue: "invalid_value",
+      field: "target",
+      value: target,
+      hint: "Expected a complete handle for the selected scope",
+    });
+  }
   await withClient(ctx.mode, async (client) => {
     await runAttach(client, { params, mode: ctx.mode });
   });
@@ -305,7 +321,7 @@ async function runCapabilities(
 async function runResolvePermission(
   ctx: CommandInvocationFor<"resolve-permission">,
 ): Promise<void> {
-  const [sessionId, permissionId] = ctx.args;
+  const [target] = ctx.args;
   const resolution: PermissionResolution =
     ctx.options.outcome === "allow"
       ? { outcome: "allow", scope: ctx.options.scope ?? "once" }
@@ -314,11 +330,18 @@ async function runResolvePermission(
         : { outcome: "deny", feedback: ctx.options.feedback };
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("resolvePermission", {
-      sessionId,
-      permissionId,
+      ...target,
       resolution,
     });
-    printResolvePermissionAck(requireResult(response), ctx.mode);
+    requireResult(response);
+    if (ctx.mode === "json")
+      process.stdout.write(
+        JSON.stringify({
+          permissionHandle: encodePermissionHandle(target),
+          status: "resolved",
+        }) + "\n",
+      );
+    else process.stdout.write("Permission resolved\n");
   });
 }
 

@@ -213,15 +213,18 @@ describe("授权模式与决议命令", () => {
   test("resolvePermission 参数必须携带完整决议", () => {
     ok(resolvePermissionParamsSchema, {
       sessionId: "reviewer@g7",
+      turnId: "t1",
       permissionId: "p1",
       resolution: { outcome: "allow", scope: "once" },
     });
     bad(resolvePermissionParamsSchema, {
       sessionId: "reviewer@g7",
+      turnId: "t1",
       permissionId: "p1",
     });
     bad(resolvePermissionParamsSchema, {
       sessionId: "reviewer@g7",
+      turnId: "t1",
       permissionId: "p1",
       resolution: { outcome: "allow" },
     });

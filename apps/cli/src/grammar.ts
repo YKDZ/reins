@@ -327,9 +327,9 @@ function domainMessage(error: MachineError): string {
         ? "Internal error"
         : error.cause.message;
     case "permission_not_pending":
-      return `Permission request is no longer pending${"permissionId" in error ? `: ${error.permissionId}` : ""}`;
+      return "Permission request is no longer pending";
     case "permission_resolution_mismatch":
-      return `Resolution is not allowed by the request menu${"permissionId" in error ? `: ${error.permissionId}` : ""}`;
+      return "Resolution is not allowed by the request menu";
     case "diagnostic_not_found":
       return `Diagnostic not found${"diagnosticId" in error ? `: ${error.diagnosticId}` : ""}`;
     case "session_name_conflict":
