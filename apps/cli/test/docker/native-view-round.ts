@@ -411,7 +411,7 @@ try {
         JSON.stringify({
           ...configuration,
           environments: [
-            { provider: "docker", image: "reins-wrr09-unapplied:drift" },
+            { provider: "docker", image: `sha256:${"0".repeat(64)}` },
           ],
         }),
       );
