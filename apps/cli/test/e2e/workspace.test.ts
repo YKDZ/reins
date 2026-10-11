@@ -177,6 +177,72 @@ test("discovers only explicitly configured Codex login bindings without reading 
   }
 });
 
+test("discovers only explicitly configured QoderCN login bindings without reading secrets or calling a model", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-wrr14-catalog-"));
+  try {
+    await run("git", ["init", "--quiet"], directory);
+    await mkdir(join(directory, ".reins"));
+    await writeFile(
+      join(directory, ".reins", "workspace.json"),
+      JSON.stringify({
+        environments: [{ provider: "docker", image }],
+        runtimes: [{ harness: "qoder", version: "1.1.23", image }],
+        bindings: [
+          { ref: "selected", harness: "qoder", credentialBindingRef: "login" },
+          { ref: "unknown", harness: "qoder", credentialBindingRef: "other" },
+          { ref: "omitted", harness: "qoder" },
+        ],
+      }),
+    );
+    // 故意不存在：发现目录只解析部署关联，不读取凭据或启动厂商进程。
+    const source = join(directory, "not-present-auth.json");
+    const result = await run(
+      process.execPath,
+      [
+        "--conditions=source",
+        join(repository, "apps/cli/src/cli.ts"),
+        "workspace",
+        "harnesses",
+        "-C",
+        directory,
+      ],
+      directory,
+      {
+        REINS_CONSUMER_CONTEXT: "reins-wrr14-catalog",
+        REINS_WORKSPACE_MANAGER_SOCKET: join(directory, "manager.sock"),
+        REINS_WORKSPACE_MANAGER_STATE_DIR: join(directory, "state"),
+        REINS_WORKSPACE_MANAGER_BIN: join(
+          repository,
+          "apps/workspace-manager/src/main.ts",
+        ),
+        REINS_QODER_AUTH_BINDINGS: JSON.stringify({
+          login: {
+            userFile: source,
+            machineIdFile: join(directory, "machine_id"),
+          },
+        }),
+      },
+    );
+    expect(result.status, result.stderr).toBe(0);
+    expect(JSON.parse(result.stdout).bindings).toMatchObject([
+      {
+        ref: "selected",
+        compatibility: "supported",
+        credential: { kind: "bound", ref: "login" },
+      },
+      { ref: "unknown", compatibility: "credential_binding_unavailable" },
+      {
+        ref: "omitted",
+        compatibility: "supported",
+        credential: { kind: "omitted" },
+      },
+    ]);
+    expect(result.stdout).not.toContain(source);
+  } finally {
+    await rm(directory, { recursive: true, force: true });
+  }
+});
+
 test.each([
   ["missing environment", { environments: [] }, "environment_binding_missing"],
   ["missing runtime", { runtimes: [] }, "runtime_definition_missing"],

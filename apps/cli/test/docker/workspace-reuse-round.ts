@@ -133,6 +133,20 @@ await writeFile(
   await readFile(join(context, "codex")),
   { mode: 0o755 },
 );
+const qoderMaterial = join(payload, "opt/reins/harnesses/qoder");
+await mkdir(join(qoderMaterial, "bin"), { recursive: true });
+await mkdir(join(qoderMaterial, "worker"));
+const qoderVersion =
+  'import fs from "node:fs";const path="../.reins/fixture-qoder-version";console.log(fs.existsSync(path)?fs.readFileSync(path,"utf8").trim():"1.1.23");\n';
+await writeFile(
+  join(qoderMaterial, "bin/qoderclicn"),
+  "#!/usr/bin/env node\n" + qoderVersion,
+  { mode: 0o755 },
+);
+await writeFile(
+  join(qoderMaterial, "worker/qoder-worker-runtime.obf.mjs"),
+  qoderVersion.replace("fixture-qoder-version", "fixture-qoder-worker-version"),
+);
 // 在昂贵镜像提交前实际执行发行 CLI，验证夹具闭包的本地入口。
 await requireCommand(process.execPath, [
   join(payload, "opt", "reins", "dist", "reins.js"),
@@ -268,6 +282,16 @@ const env = {
   REINS_WORKSPACE_MANAGER_SOCKET: join(base, "manager.sock"),
   REINS_WORKSPACE_MANAGER_STATE_DIR: managerState,
   REINS_WORKSPACE_RESOURCE_PREFIX: "reins-wrr08-runtime",
+  REINS_QODER_AUTH_BINDINGS: JSON.stringify({
+    login: {
+      userFile: join(base, "selected-qoder-user"),
+      machineIdFile: join(base, "selected-qoder-machine"),
+    },
+    broken: {
+      userFile: join(base, "empty-qoder-user"),
+      machineIdFile: join(base, "selected-qoder-machine"),
+    },
+  }),
   REINS_CODEX_AUTH_BINDINGS: JSON.stringify({
     login: join(base, "selected-auth.json"),
     broken: join(base, "broken-auth.json"),
@@ -287,6 +311,15 @@ await writeFile(
   }),
 );
 await writeFile(join(base, "broken-auth.json"), "not a login document");
+await writeFile(
+  join(base, "selected-qoder-user"),
+  "fixture-encrypted-native-user",
+);
+await writeFile(
+  join(base, "selected-qoder-machine"),
+  "fixture-native-machine-id",
+);
+await writeFile(join(base, "empty-qoder-user"), "");
 const cli = async (args: string[], overrides: NodeJS.ProcessEnv = {}) => {
   const result = await command(
     process.execPath,
@@ -634,6 +667,125 @@ try {
       "require_none",
     ]);
     assert.equal(detached.status, 0, JSON.stringify(detached));
+  }
+  for (const scenario of [
+    { name: "selected", credential: "login", expected: "ready" },
+    { name: "omitted", credential: undefined, expected: "ready" },
+    {
+      name: "unknown",
+      credential: "missing",
+      expected: "credential_binding_unavailable",
+    },
+    {
+      name: "empty",
+      credential: "broken",
+      expected: "credential_binding_unavailable",
+    },
+    {
+      name: "wrong-worker",
+      credential: "login",
+      expected: "runtime_entry_invalid",
+    },
+  ]) {
+    const root = join(base, "qoder-" + scenario.name),
+      cwd = join(root, "src");
+    await mkdir(cwd, { recursive: true });
+    await requireCommand("git", ["init", "--quiet"], root);
+    await mkdir(join(root, ".reins"));
+    await writeFile(
+      join(root, ".reins/workspace.json"),
+      JSON.stringify({
+        environments: configuration.environments,
+        runtimes: [
+          { harness: "qoder", version: "1.1.23", image: runtimeImage },
+        ],
+        bindings: [
+          {
+            ref: "qoder",
+            harness: "qoder",
+            ...(scenario.credential === undefined
+              ? {}
+              : { credentialBindingRef: scenario.credential }),
+          },
+        ],
+      }),
+    );
+    if (scenario.name === "wrong-worker")
+      await writeFile(
+        join(root, ".reins/fixture-qoder-worker-version"),
+        "1.1.22",
+      );
+    assert.equal(
+      (await cli(["attach", "-C", cwd, "--binding", "qoder"])).status,
+      0,
+    );
+    for (;;) {
+      const observed = await cli(["status", "-C", cwd]);
+      const runtime = observed.value.runtime as {
+        status: string;
+        error?: { code: string };
+      };
+      if (runtime.status === "preparing") {
+        await delay(100);
+        continue;
+      }
+      if (scenario.expected === "ready") {
+        assert.equal(runtime.status, "ready", JSON.stringify(observed));
+        const attached = (
+          await requireCommand("docker", [
+            "ps",
+            "-q",
+            "--filter",
+            "label=reins.workspace.managed=true",
+          ])
+        )
+          .split("\n")
+          .filter((id) => id !== container);
+        assert.equal(attached.length, 1);
+        const checked = await requireCommand("docker", [
+          "exec",
+          attached[0]!,
+          "node",
+          "-e",
+          scenario.name === "selected"
+            ? "const fs=require('node:fs'),p=process.env.QODERCN_CONFIG_DIR+'/.auth';if(JSON.stringify(fs.readdirSync(p).sort())!=='[\"machine_id\",\"user\"]'||fs.readFileSync(p+'/user','utf8')!=='fixture-encrypted-native-user'||fs.readFileSync(p+'/machine_id','utf8')!=='fixture-native-machine-id'||(fs.statSync(p+'/user').mode&511)!==384||(fs.statSync(p+'/machine_id').mode&511)!==384)process.exit(1);fs.writeFileSync(process.env.HOME+'/probe','writable');fs.unlinkSync(process.env.HOME+'/probe');console.log('native login only; private home writable')"
+            : "const fs=require('node:fs');if(fs.existsSync(process.env.QODERCN_CONFIG_DIR+'/.auth/user')||fs.existsSync(process.env.QODERCN_CONFIG_DIR+'/.auth/machine_id'))process.exit(1);console.log('omitted login stays omitted')",
+        ]);
+        await record("qoder-" + scenario.name, checked);
+      } else {
+        assert.equal(runtime.status, "failed");
+        assert.equal(
+          runtime.error?.code,
+          scenario.expected,
+          JSON.stringify(observed),
+        );
+        const rejected = await control(
+          [
+            "spawn",
+            "qoder",
+            "caller task",
+            "--name",
+            "rejected-" + scenario.name,
+          ],
+          cwd,
+        );
+        assert.equal(rejected.status, 65);
+        assert.equal(rejected.value.code, "workspace_not_ready");
+      }
+      break;
+    }
+    assert.equal(
+      (
+        await cli([
+          "detach",
+          "-C",
+          cwd,
+          "--session-disposition",
+          "require_none",
+        ])
+      ).status,
+      0,
+    );
   }
   if (independentUse) {
     const deployment = {

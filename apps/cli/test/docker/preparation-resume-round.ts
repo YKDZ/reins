@@ -171,6 +171,15 @@ await writeFile(
   join(payload, "opt", "reins", "harnesses", "codex", "value"),
   "initial installed material",
 );
+await mkdir(join(payload, "opt/reins/harnesses/qoder/worker"));
+await writeFile(
+  join(
+    payload,
+    "opt/reins/harnesses/qoder/worker/qoder-worker-runtime.obf.mjs",
+  ),
+  'import fs from "node:fs";import path from "node:path";console.log(fs.existsSync(path.resolve("../.reins/qoder-valid"))?"0.1.0":"0.0.0");\n',
+);
+
 // 在昂贵镜像提交前实际执行发行 CLI，验证夹具闭包的本地入口。
 await requireCommand(process.execPath, [
   join(payload, "opt", "reins", "dist", "reins.js"),
