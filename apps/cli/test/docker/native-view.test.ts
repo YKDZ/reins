@@ -42,6 +42,10 @@ test(`stops the original writer after native view loss: ${fault}`, async () => {
       join(repository, "apps/cli/test/docker/native-view-adapter.ts"),
       "native-view-adapter.ts",
     ],
+    [
+      join(repository, "apps/cli/test/docker/restart-supervisor.ts"),
+      "restart-supervisor.ts",
+    ],
   ] as const;
   const fingerprints: { name: string; sha256: string }[] = [];
   await copyFile(

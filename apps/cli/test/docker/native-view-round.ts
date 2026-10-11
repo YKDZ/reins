@@ -3,6 +3,7 @@ import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   appendFile,
+  copyFile,
   mkdir,
   open,
   readFile,
@@ -25,6 +26,9 @@ const {
   consumerSha256: string;
   fault?: "move" | "replace" | "remove" | "split" | "session-cwd-replace";
 };
+const expectUndetected =
+  process.env.REINS_WRR09_EXPECT_UNDETECTED === "1" &&
+  fault === "session-cwd-replace";
 async function command(
   binary: string,
   args: string[],
@@ -166,6 +170,29 @@ assert.equal(
   ),
   "codex-cli 0.149.0",
 );
+if (fault === "session-cwd-replace" && !expectUndetected) {
+  const daemon = join(payload, "opt", "reins", "dist", "reins-daemon.js");
+  const originalDaemon = join(
+    payload,
+    "opt",
+    "reins",
+    "dist",
+    "reins-daemon-original.js",
+  );
+  await copyFile(daemon, originalDaemon);
+  await rm(daemon);
+  await copyFile(join(base, "restart-supervisor.ts"), daemon);
+  await record("supervisedDaemonPayload", {
+    originalSha256: createHash("sha256")
+      .update(await readFile(originalDaemon))
+      .digest("hex"),
+    supervisorSha256: createHash("sha256")
+      .update(await readFile(daemon))
+      .digest("hex"),
+    meaning:
+      "Test supervisor restarts original distribution daemon bytes after SIGKILL; it does not stop orphaned sessions",
+  });
+}
 await writeFile(
   join(context, "Dockerfile"),
   `FROM ${nodeImage}\nCOPY image-context/payload /\nENV REINS_ADAPTERS_MODULE=/opt/reins/native-view-adapter.ts\n`,
@@ -322,6 +349,7 @@ const control = async (args: string[], cwd = join(worktree, "src")) => {
 };
 let splitHelper: string | undefined;
 let splitMounted = false;
+let orphanWriter: { container: string; pid: string } | undefined;
 const splitEnter = [
   "nsenter",
   "--target",
@@ -330,6 +358,35 @@ const splitEnter = [
   "--root=/proc/1/root",
   "--wd=/",
 ];
+const cleanupOrphanWriter = async () => {
+  if (orphanWriter === undefined) return;
+  const { container, pid } = orphanWriter;
+  const result = await command(
+    "docker",
+    [
+      "exec",
+      "-w",
+      "/",
+      container,
+      "node",
+      "-e",
+      "const fs=require('node:fs'),pid=Number(process.argv[1]),read=()=>{try{const value=fs.readFileSync('/proc/'+pid+'/stat','utf8');return value.slice(value.lastIndexOf(')')+2).split(' ')[0]}catch(e){if(e.code==='ENOENT')return 'absent';throw e}};try{process.kill(pid,'SIGTERM')}catch(e){if(e.code!=='ESRCH')throw e};(async()=>{let state=read();for(let i=0;i<80&&!['absent','Z','X'].includes(state);i++){await new Promise(r=>setTimeout(r,25));state=read()}console.log(JSON.stringify({pid,state}));if(!['absent','Z','X'].includes(state))process.exitCode=1})().catch(e=>{console.error(e);process.exitCode=1})",
+      pid,
+    ],
+    base,
+  );
+  await record("fixture-orphan-writer-cleanup", result);
+  if (result.status !== 0) {
+    const running = await command(
+      "docker",
+      ["inspect", "--format", "{{.State.Running}}", container],
+      base,
+    );
+    await record("fixture-orphan-container-state", running);
+    assert.equal(running.stdout, "false", JSON.stringify({ result, running }));
+  }
+  orphanWriter = undefined;
+};
 try {
   const attachmentCwd =
     fault === "session-cwd-replace" ? worktree : join(worktree, "src");
@@ -412,6 +469,8 @@ try {
     "{{.Id}}",
     containers[0]!,
   ]);
+  if (fault === "session-cwd-replace" && !expectUndetected)
+    orphanWriter = { container: originalContainer, pid: String(writer.pid) };
   const processState = async (attempts = 0, pid = writer.pid) =>
     JSON.parse(
       await requireCommand("docker", [
@@ -481,6 +540,85 @@ try {
             (await relative.stat()).size - afterKillGrowth.relative,
         },
       });
+      if (fault === "session-cwd-replace" && !expectUndetected) {
+        const daemonProcess = async () =>
+          JSON.parse(
+            await requireCommand("docker", [
+              "exec",
+              originalContainer,
+              "cat",
+              "/tmp/reins-daemon-process.json",
+            ]),
+          ) as { pid: number; startedAt: string };
+        const oldDaemon = await daemonProcess();
+        await record("daemon-before-ungraceful-restart", oldDaemon);
+        await requireCommand("docker", [
+          "exec",
+          originalContainer,
+          "node",
+          "-e",
+          "process.kill(Number(process.argv[1]), 'SIGKILL')",
+          String(oldDaemon.pid),
+        ]);
+        const stoppedDaemon = await processState(40, oldDaemon.pid);
+        assert.ok(["absent", "Z", "X"].includes(stoppedDaemon.state));
+        let newDaemon = oldDaemon;
+        for (let attempt = 0; attempt < 200; attempt++) {
+          await delay(25);
+          newDaemon = await daemonProcess();
+          if (
+            newDaemon.pid !== oldDaemon.pid &&
+            newDaemon.startedAt !== oldDaemon.startedAt
+          )
+            break;
+        }
+        assert.notEqual(newDaemon.pid, oldDaemon.pid);
+        assert.notEqual(newDaemon.startedAt, oldDaemon.startedAt);
+        await requireCommand("docker", [
+          "exec",
+          originalContainer,
+          "node",
+          "-e",
+          'const net=require("node:net"),socket=process.env.REINS_SOCKET;(async()=>{for(let i=0;i<400;i++){const ok=await new Promise(r=>{const c=net.createConnection(socket);c.once("connect",()=>{c.end();r(true)});c.once("error",()=>r(false))});if(ok){console.log("daemon socket ready");return}await new Promise(r=>setTimeout(r,25))}throw new Error("daemon socket did not return")})().catch(e=>{console.error(e);process.exitCode=1})',
+        ]);
+        const restarted = await cli(["status", "-C", join(worktree, "src")]);
+        assert.equal(restarted.status, 0, JSON.stringify(restarted));
+        assert.equal(
+          (restarted.value.runtime as { status: string }).status,
+          "ready",
+        );
+        assert.equal(
+          (restarted.value.source as { status: string }).status,
+          "verified",
+        );
+        assert.deepEqual((await control(["list"])).value, []);
+        const survivingProcess = await processState(0);
+        assert.ok(!["absent", "Z", "X"].includes(survivingProcess.state));
+        const beforeRestartGrowth = {
+          held: (await held.stat()).size,
+          relative: (await relative.stat()).size,
+        };
+        await delay(150);
+        const afterRestartGrowth = {
+          held: (await held.stat()).size,
+          relative: (await relative.stat()).size,
+        };
+        assert.ok(afterRestartGrowth.held > beforeRestartGrowth.held);
+        assert.ok(afterRestartGrowth.relative > beforeRestartGrowth.relative);
+        await record("daemon-restart-keeps-original-writer", {
+          oldDaemon,
+          stoppedDaemon,
+          newDaemon,
+          emptyNewGenerationList: true,
+          source: restarted.value.source,
+          originalWriter: survivingProcess,
+          growth: {
+            held: afterRestartGrowth.held - beforeRestartGrowth.held,
+            relative:
+              afterRestartGrowth.relative - beforeRestartGrowth.relative,
+          },
+        });
+      }
     }
     if (fault === "remove") {
       const beforeDrift = {
@@ -710,9 +848,6 @@ try {
             : fault === "split"
               ? { reason: "split" }
               : { reason: "moved", currentRoot: moved };
-    const expectUndetected =
-      process.env.REINS_WRR09_EXPECT_UNDETECTED === "1" &&
-      fault === "session-cwd-replace";
     const attempted = await control(
       fault === "remove"
         ? [
@@ -785,16 +920,35 @@ try {
         held: (await held.stat()).size,
         relative: (await relative.stat()).size,
       };
-      const originalProcess = await processState(40);
+      const unknownAfterRestart =
+        fault === "session-cwd-replace" && !expectUndetected;
+      const originalProcess = await processState(unknownAfterRestart ? 0 : 40);
       const stopped = ["absent", "Z", "X"].includes(originalProcess.state);
-      const stoppedSizes = {
+      const sizesAfterDetection = {
         held: (await held.stat()).size,
         relative: (await relative.stat()).size,
       };
-      await delay(1000);
-      const stable =
-        stoppedSizes.held === (await held.stat()).size &&
-        stoppedSizes.relative === (await relative.stat()).size;
+      let stable: boolean | undefined;
+      let continued: { heldGrowth: number; relativeGrowth: number } | undefined;
+      if (unknownAfterRestart) {
+        assert.ok(!stopped);
+        await delay(150);
+        const current = {
+          held: (await held.stat()).size,
+          relative: (await relative.stat()).size,
+        };
+        continued = {
+          heldGrowth: current.held - sizesAfterDetection.held,
+          relativeGrowth: current.relative - sizesAfterDetection.relative,
+        };
+        assert.ok(continued.heldGrowth > 0);
+        assert.ok(continued.relativeGrowth > 0);
+      } else {
+        await delay(1000);
+        stable =
+          sizesAfterDetection.held === (await held.stat()).size &&
+          sizesAfterDetection.relative === (await relative.stat()).size;
+      }
       await record(`${fault}-original-writer`, {
         originalRoot,
         movedRoot,
@@ -808,11 +962,9 @@ try {
         spawn: spawned.value,
         rejection: rejected.value,
         before: detected,
-        after: {
-          held: (await held.stat()).size,
-          relative: (await relative.stat()).size,
-        },
+        after: sizesAfterDetection,
         stable,
+        continued,
       });
       if (fault === "remove")
         assert.equal(
@@ -820,35 +972,82 @@ try {
           true,
           "Original writer must stop after actual removal without a new caller action",
         );
-      assert.equal(
-        stopped,
-        true,
-        "Original writer process must stop after native view loss is detected",
-      );
-      assert.equal(
-        stable,
-        true,
-        "Original held-FD and cwd-relative writer must stop after native view loss is detected",
-      );
+      if (unknownAfterRestart) {
+        assert.equal(
+          stopped,
+          false,
+          "The replacement daemon cannot prove the old writer stopped",
+        );
+      } else {
+        assert.equal(
+          stopped,
+          true,
+          "Original writer process must stop after native view loss is detected",
+        );
+        assert.equal(
+          stable,
+          true,
+          "Original held-FD and cwd-relative writer must stop after native view loss is detected",
+        );
+      }
       assert.equal(rejected.value.code, "native_view_lost");
       assert.deepEqual(rejected.value.nativeView, expectedLoss);
-      const lost = await cli(["status", "-C", join(target, "src")]);
-      assert.equal(lost.status, 0);
+      let lost: Awaited<ReturnType<typeof cli>> | undefined;
+      for (let attempt = 0; attempt < 40; attempt++) {
+        lost = await cli(["status", "-C", join(target, "src")]);
+        assert.equal(lost.status, 0);
+        const source = lost.value.source as {
+          termination?: { status: string };
+        };
+        if (source.termination?.status !== "stopping") break;
+        await delay(25);
+      }
+      assert.ok(lost);
       const source = lost.value.source as {
         status: string;
         error: { code: string; nativeView: unknown };
-        termination: { status: string; via: string; sessions: unknown[] };
+        termination: {
+          status: string;
+          via?: string;
+          sessions: { sessionId: string; outcome: string }[];
+        };
       };
       assert.equal(source.status, "failed");
       assert.equal(source.error.code, "native_view_lost");
       assert.deepEqual(source.error.nativeView, expectedLoss);
-      assert.deepEqual(source.termination, {
-        status: "stopped",
-        via: "harness",
-        sessions: [
-          { sessionId: spawned.value.sessionId, outcome: "confirmed" },
-        ],
-      });
+      assert.equal(
+        source.termination.status,
+        unknownAfterRestart ? "unknown" : "stopped",
+      );
+      if (!unknownAfterRestart) assert.equal(source.termination.via, "harness");
+      assert.deepEqual(
+        source.termination.sessions.toSorted((left, right) =>
+          left.sessionId.localeCompare(right.sessionId),
+        ),
+        unknownAfterRestart
+          ? [
+              {
+                sessionId: String(spawned.value.sessionId),
+                outcome: "unknown",
+              },
+            ]
+          : [
+              {
+                sessionId: String(spawned.value.sessionId),
+                outcome: "confirmed",
+              },
+              ...(secondarySpawned === undefined
+                ? []
+                : [
+                    {
+                      sessionId: String(secondarySpawned.value.sessionId),
+                      outcome: "confirmed",
+                    },
+                  ]),
+            ].toSorted((left, right) =>
+              left.sessionId.localeCompare(right.sessionId),
+            ),
+      );
       const terminal = await control(
         [
           "-C",
@@ -862,11 +1061,16 @@ try {
         ],
         base,
       );
-      assert.equal(terminal.status, 3, JSON.stringify(terminal));
-      assert.equal(
-        (terminal.value.completed as { stopReason: string }[])[0]!.stopReason,
-        "killed",
-      );
+      if (unknownAfterRestart) {
+        assert.equal(terminal.status, 65, JSON.stringify(terminal));
+        assert.equal(terminal.value.code, "session_not_found");
+      } else {
+        assert.equal(terminal.status, 3, JSON.stringify(terminal));
+        assert.equal(
+          (terminal.value.completed as { stopReason: string }[])[0]!.stopReason,
+          "killed",
+        );
+      }
       if (fault === "replace") {
         for (const name of ["held.txt", "relative.txt", "writer.json"])
           await assert.rejects(readFile(join(worktree, "src", name)), {
@@ -877,7 +1081,14 @@ try {
           "native worktree\n",
         );
       }
-      await record("original-stop-facts", { source, terminal: terminal.value });
+      await record("original-stop-facts", {
+        source,
+        terminal: terminal.value,
+        outcome: unknownAfterRestart
+          ? "daemon cannot prove the orphaned writer stopped"
+          : "original session kill confirmed",
+      });
+      if (unknownAfterRestart) await cleanupOrphanWriter();
     }
   } finally {
     await held.close();
@@ -885,6 +1096,7 @@ try {
   }
   await record("result", "passed");
 } finally {
+  await cleanupOrphanWriter();
   if (splitHelper !== undefined) {
     if (splitMounted) {
       const unmount = await command("docker", [

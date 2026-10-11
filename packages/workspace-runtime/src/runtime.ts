@@ -86,12 +86,16 @@ import {
 const execute = promisify(execFile);
 type Tree = Awaited<ReturnType<typeof resolveWorktree>>;
 type NativeIdentity = { path: string; dev: string; ino: string };
-type SessionCwd = NativeIdentity & { sessionId: string };
+type SessionCwd = NativeIdentity & { sessionId: SessionInfo["sessionId"] };
 type PendingSpawn = {
   sessionName: string;
   cwd: string;
   identity: NativeIdentity;
   daemonGeneration?: DaemonGeneration;
+};
+type NativeLossAssessment = {
+  loss: NativeViewLoss;
+  observation: string;
 };
 type RecordState = {
   owner: ConsumerContext;
@@ -110,7 +114,7 @@ type RecordState = {
   completed?: TurnCompleted[];
   sessionCwds?: SessionCwd[];
   pendingSpawns?: Record<string, PendingSpawn>;
-  sessionCwdConflicts?: string[];
+  sessionCwdConflicts?: SessionInfo["sessionId"][];
   commands?: Record<
     string,
     { fingerprint: string; pending: boolean; target?: TurnTarget }
@@ -446,13 +450,19 @@ export async function openWorkspaceRuntime(options: {
       matching.find(active) ?? (includeReleased ? matching.at(-1) : undefined)
     );
   };
-  const markSessionCwdConflict = (record: RecordState, sessionId: string) => {
+  const markSessionCwdConflict = (
+    record: RecordState,
+    sessionId: SessionInfo["sessionId"],
+  ) => {
     record.sessionCwdConflicts ??= [];
     if (record.sessionCwdConflicts.includes(sessionId)) return false;
     record.sessionCwdConflicts.push(sessionId);
     return true;
   };
-  const clearSessionCwd = (record: RecordState, sessionId: string) => {
+  const clearSessionCwd = (
+    record: RecordState,
+    sessionId: SessionInfo["sessionId"],
+  ) => {
     const beforeCwds = record.sessionCwds?.length ?? 0;
     const beforeConflicts = record.sessionCwdConflicts?.length ?? 0;
     record.sessionCwds = (record.sessionCwds ?? []).filter(
@@ -466,9 +476,23 @@ export async function openWorkspaceRuntime(options: {
       beforeConflicts !== record.sessionCwdConflicts.length
     );
   };
+  const nativeObservationSignature = (record: RecordState) =>
+    JSON.stringify({
+      identities: record.identities,
+      sessionCwds: record.sessionCwds ?? [],
+      pendingSpawns: Object.entries(record.pendingSpawns ?? {}).sort(
+        ([left], [right]) => left.localeCompare(right),
+      ),
+      sessionCwdConflicts: record.sessionCwdConflicts ?? [],
+    });
+  const assessNativeLoss = (
+    record: RecordState,
+    loss: NativeViewLoss,
+    observation = nativeObservationSignature(record),
+  ): NativeLossAssessment => ({ loss, observation });
   const saveSessionCwd = (
     record: RecordState,
-    sessionId: string,
+    sessionId: SessionInfo["sessionId"],
     saved: NativeIdentity,
   ) => {
     record.sessionCwds ??= [];
@@ -603,10 +627,11 @@ export async function openWorkspaceRuntime(options: {
   };
   const nativeLoss = async (
     record: RecordState,
-  ): Promise<NativeViewLoss | undefined> => {
+  ): Promise<NativeLossAssessment | undefined> => {
     await reconcileSessionCwds(record);
+    const observation = nativeObservationSignature(record);
     if ((record.sessionCwdConflicts?.length ?? 0) !== 0)
-      return { reason: "unreachable" };
+      return assessNativeLoss(record, { reason: "unreachable" }, observation);
     const pendingIdentities = Object.values(record.pendingSpawns ?? {}).map(
       (pending) => pending.identity,
     );
@@ -625,16 +650,25 @@ export async function openWorkspaceRuntime(options: {
             await stat(record.tree.gitDir);
           } catch (gitError) {
             if ((gitError as NodeJS.ErrnoException).code === "ENOENT")
-              return { reason: "removed" };
+              return assessNativeLoss(
+                record,
+                { reason: "removed" },
+                observation,
+              );
             throw gitError;
           }
         }
-        return { reason: "unreachable" };
+        return assessNativeLoss(record, { reason: "unreachable" }, observation);
       }
       if (current.dev !== saved.dev || current.ino !== saved.ino)
-        return {
-          reason: saved.path === record.tree.root ? "replaced" : "unreachable",
-        };
+        return assessNativeLoss(
+          record,
+          {
+            reason:
+              saved.path === record.tree.root ? "replaced" : "unreachable",
+          },
+          observation,
+        );
     }
     try {
       const tree = await resolveWorktree(record.tree.cwd);
@@ -643,9 +677,9 @@ export async function openWorkspaceRuntime(options: {
         tree.gitDir !== record.tree.gitDir ||
         tree.commonDir !== record.tree.commonDir
       )
-        return { reason: "unreachable" };
+        return assessNativeLoss(record, { reason: "unreachable" }, observation);
     } catch {
-      return { reason: "unreachable" };
+      return assessNativeLoss(record, { reason: "unreachable" }, observation);
     }
     if (
       record.environmentStage === "started" &&
@@ -680,13 +714,14 @@ export async function openWorkspaceRuntime(options: {
       if (record === undefined) throw error;
       if (record.owner !== owner)
         throw workspaceFailure("attachment_not_found");
-      const loss = await nativeLoss(record);
+      const assessment = await nativeLoss(record);
       if (
-        loss === undefined &&
+        assessment === undefined &&
         record.info.source.error?.code !== "native_view_lost"
       )
         throw error;
-      if (loss !== undefined) await invalidate(record, loss);
+      if (assessment !== undefined)
+        await invalidate(record, assessment.loss, assessment.observation);
       tree = { ...record.tree, cwd };
     }
     if (record === undefined) throw workspaceFailure("attachment_not_found");
@@ -707,9 +742,9 @@ export async function openWorkspaceRuntime(options: {
       return { record, tree };
     }
     if (record.detach !== undefined || !observe) return { record, tree };
-    const loss = await nativeLoss(record);
-    if (loss !== undefined && record.detach === undefined)
-      await invalidate(record, loss);
+    const assessment = await nativeLoss(record);
+    if (assessment !== undefined && record.detach === undefined)
+      await invalidate(record, assessment.loss, assessment.observation);
     if (!allowInvalid && record.info.source.error?.code === "native_view_lost")
       throw record.info.source.error;
     return { record, tree };
@@ -1116,10 +1151,12 @@ export async function openWorkspaceRuntime(options: {
   };
   const stopWorkers = async (record: RecordState) => {
     const sessions: NativeViewTermination["sessions"] = [];
+    let listedIds: Set<SessionInfo["sessionId"]> | undefined;
     try {
       const client = await connect(record);
       const listed = await client.request("list", {});
       if ("error" in listed) throw listed.error;
+      listedIds = new Set(listed.result.map((session) => session.sessionId));
       for (const session of listed.result) {
         if (session.state === "killed") {
           sessions.push({ sessionId: session.sessionId, outcome: "confirmed" });
@@ -1150,11 +1187,20 @@ export async function openWorkspaceRuntime(options: {
           });
         }
       }
-      record.info.source.termination = sessions.every(
-        (item) => item.outcome === "confirmed",
-      )
-        ? { status: "stopped", via: "harness", sessions }
-        : { status: "unknown", sessions };
+      const knownSessionIds = new Set([
+        ...(record.sessionCwds ?? []).map((saved) => saved.sessionId),
+        ...(record.sessionCwdConflicts ?? []),
+      ]);
+      for (const sessionId of knownSessionIds)
+        if (!listedIds.has(sessionId))
+          sessions.push({ sessionId, outcome: "unknown" });
+      const unresolvedSpawns =
+        Object.keys(record.pendingSpawns ?? {}).length > 0;
+      record.info.source.termination =
+        !unresolvedSpawns &&
+        sessions.every((item) => item.outcome === "confirmed")
+          ? { status: "stopped", via: "harness", sessions }
+          : { status: "unknown", sessions };
     } catch (error) {
       const failure = machineFailure(error);
       record.info.source.termination = {
@@ -1168,8 +1214,14 @@ export async function openWorkspaceRuntime(options: {
   const invalidate = async (
     record: RecordState,
     nativeView: NativeViewLoss,
+    observation?: string,
   ): Promise<WorkspaceError> => {
     const error: WorkspaceError = { code: "native_view_lost", nativeView };
+    if (
+      observation !== undefined &&
+      observation !== nativeObservationSignature(record)
+    )
+      return error;
     if (record.info.source.error?.code !== "native_view_lost") {
       // 先关闭准入并持久化，再通过原 daemon 收束原会话；不重建环境或改投目录。
       record.info.source = {
@@ -1221,9 +1273,10 @@ export async function openWorkspaceRuntime(options: {
   };
   const runtimeLoss = async (
     record: RecordState,
-  ): Promise<NativeViewLoss | undefined> => {
+  ): Promise<NativeLossAssessment | undefined> => {
     const container = await inspectContainer(record);
     if (!container.State.Running) return undefined;
+    const observation = nativeObservationSignature(record);
     const watchedIdentities = [
       ...record.identities,
       ...(record.sessionCwds ?? []).map(({ path, dev, ino }) => ({
@@ -1252,16 +1305,20 @@ export async function openWorkspaceRuntime(options: {
       actual.identities !== undefined &&
       JSON.stringify(actual.identities) !== JSON.stringify(watchedIdentities)
     )
-      return { reason: "split" };
+      return assessNativeLoss(record, { reason: "split" }, observation);
     if (actual.error !== undefined)
-      return { reason: actual.error === "ENOENT" ? "split" : "unreachable" };
+      return assessNativeLoss(
+        record,
+        { reason: actual.error === "ENOENT" ? "split" : "unreachable" },
+        observation,
+      );
     if (
       actual.tree.cwd !== record.tree.cwd ||
       actual.tree.root !== record.tree.root ||
       actual.tree.gitDir !== record.tree.gitDir ||
       actual.tree.commonDir !== record.tree.commonDir
     )
-      return { reason: "split" };
+      return assessNativeLoss(record, { reason: "split" }, observation);
     return undefined;
   };
   const validateBinding = async (
@@ -1666,9 +1723,10 @@ export async function openWorkspaceRuntime(options: {
       )
         continue;
       const observation = (async () => {
-        const loss = await nativeLoss(record);
+        const assessment = await nativeLoss(record);
         if (record.detach !== undefined) return;
-        if (loss !== undefined) await invalidate(record, loss);
+        if (assessment !== undefined)
+          await invalidate(record, assessment.loss, assessment.observation);
         else if (record.info.source.error?.code === "native_view_lost")
           await invalidate(record, record.info.source.error.nativeView);
       })();
