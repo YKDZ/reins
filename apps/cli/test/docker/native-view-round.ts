@@ -567,20 +567,36 @@ try {
           ino: String(originalCwd.ino),
         });
       }
+      const runtime = JSON.parse(
+        await requireCommand("docker", [
+          "inspect",
+          "--format",
+          "{{json .}}",
+          originalContainer,
+        ]),
+      ) as {
+        Id: string;
+        RestartCount: number;
+        State: { Running: boolean };
+        HostConfig: { Privileged: boolean; PidMode: string };
+      };
+      assert.equal(runtime.Id, originalContainer);
+      assert.equal(runtime.RestartCount, 0);
+      assert.equal(runtime.State.Running, true);
+      assert.equal(runtime.HostConfig.Privileged, false);
       await record("split-original-runtime", {
         originalContainer,
         pid: writer.pid,
         outerRoot,
         otherRoot,
         inner,
-        inspect: JSON.parse(
-          await requireCommand("docker", [
-            "inspect",
-            "--format",
-            "{{json .}}",
-            originalContainer,
-          ]),
-        ),
+        runtime: {
+          id: runtime.Id,
+          restartCount: runtime.RestartCount,
+          running: runtime.State.Running,
+          privileged: runtime.HostConfig.Privileged,
+          pidMode: runtime.HostConfig.PidMode,
+        },
       });
     } else {
       await rename(worktree, moved);
