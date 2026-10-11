@@ -43,6 +43,7 @@ type RecordState = {
   intent: string[];
   directory: string;
   container: string;
+  environmentStage?: "pending" | "creating" | "created";
   info: ManagedWorkspaceInfo;
 };
 async function identity(path: string): Promise<NativeIdentity> {
@@ -131,6 +132,30 @@ export async function openWorkspaceRuntime(options: {
       throw workspaceFailure("provider_failed");
     }
   }
+  for (const record of records) {
+    record.info.preparation ??= {
+      attempts: [
+        {
+          status:
+            record.info.runtime.status === "released"
+              ? "ready"
+              : record.info.runtime.status,
+          ...(record.info.runtime.error === undefined
+            ? {}
+            : { error: record.info.runtime.error }),
+        },
+      ],
+    };
+    if (record.info.runtime.status === "preparing") {
+      const error = workspaceFailure("preparation_interrupted");
+      record.info.runtime = { status: "failed", error };
+      Object.assign(record.info.preparation.attempts.at(-1)!, {
+        status: "failed",
+        error,
+      });
+      await persist(record);
+    }
+  }
   const clients = new Map<string, ReinsClient>();
   // 保留完整 UUID 身份，用紧凑目录避开 Unix socket 的路径长度上限。
   const controlDirectory = (record: RecordState) =>
@@ -139,6 +164,7 @@ export async function openWorkspaceRuntime(options: {
       `c-${Buffer.from(basename(record.directory).replaceAll("-", ""), "hex").toString("base64url")}`,
     );
   const preparing = new Set<string>();
+  const executions = new Map<string, Promise<void>>();
   // 单个 Manager 对受理与发布串行化，Docker 准备在锁外进行，status 始终可观察。
   let serial = Promise.resolve();
   const exclusive = <T>(action: () => Promise<T>): Promise<T> => {
@@ -241,6 +267,8 @@ export async function openWorkspaceRuntime(options: {
           home,
         ]),
       ];
+      record.environmentStage = "creating";
+      await persist(record);
       await docker([
         "create",
         "--name",
@@ -275,6 +303,8 @@ export async function openWorkspaceRuntime(options: {
         record.info.environment.image,
         "/opt/reins/dist/reins-daemon.js",
       ]);
+      record.environmentStage = "created";
+      await persist(record);
       await docker(["start", record.container]);
       // 使用容器自己的 Node 与 Git 验证本地真实入口和直接 bind 身份，不传输源码。
       const actual = JSON.parse(
@@ -380,9 +410,14 @@ export async function openWorkspaceRuntime(options: {
         }
       }
       record.info.runtime = { status: "ready" };
+      record.info.preparation.attempts.at(-1)!.status = "ready";
     } catch (error) {
       const failure = normalize(error);
       record.info.runtime = { status: "failed", error: failure };
+      Object.assign(record.info.preparation.attempts.at(-1)!, {
+        status: "failed",
+        error: failure,
+      });
       if (failure.code === "native_view_mismatch")
         record.info.source = { status: "failed", error: failure };
       const active = record.info.harnesses.find(
@@ -394,8 +429,8 @@ export async function openWorkspaceRuntime(options: {
       }
       throw failure;
     } finally {
-      preparing.delete(record.directory);
       await persist(record);
+      preparing.delete(record.directory);
     }
   };
   return {
@@ -431,6 +466,19 @@ export async function openWorkspaceRuntime(options: {
           await find(cwd, owner);
           if (JSON.stringify(existing.intent) !== JSON.stringify(intent))
             throw workspaceFailure("attachment_intent_conflict");
+          if (existing.info.runtime.status === "failed")
+            await executions.get(existing.directory);
+          if (
+            !preparing.has(existing.directory) &&
+            existing.info.runtime.status === "failed" &&
+            existing.environmentStage === "pending"
+          ) {
+            existing.info.runtime = { status: "preparing" };
+            existing.info.preparation.attempts.push({ status: "preparing" });
+            await persist(existing);
+            preparing.add(existing.directory);
+            return { record: existing, created: true };
+          }
           return { record: existing, created: false };
         }
         const identities = await Promise.all(
@@ -451,6 +499,7 @@ export async function openWorkspaceRuntime(options: {
           identities,
           intent,
           directory,
+          environmentStage: "pending",
           container: `${options.resourcePrefix ?? "reins-workspace"}-${randomUUID()}`,
           info: {
             cwd: tree.cwd,
@@ -464,6 +513,7 @@ export async function openWorkspaceRuntime(options: {
               stage: "pending",
             })),
             history: { status: "unavailable" },
+            preparation: { attempts: [{ status: "preparing" }] },
           },
         };
         await persist(record);
@@ -473,7 +523,9 @@ export async function openWorkspaceRuntime(options: {
       });
       if (created) {
         // 受理只等待事实持久化；长时间 Docker 准备通过 status 观察，不占用短连接。
-        void prepare(record).catch(() => {});
+        const execution = prepare(record).catch(() => {});
+        executions.set(record.directory, execution);
+        void execution.finally(() => executions.delete(record.directory));
       } else if (record.info.runtime.status !== "preparing") {
         const current = await status(cwd, owner);
         if (current.runtime.status === "failed")

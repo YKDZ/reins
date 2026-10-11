@@ -58,6 +58,7 @@ export const workspaceErrorSchema = v.strictObject({
     "runtime_entry_invalid",
     "credential_binding_unavailable",
     "provider_failed",
+    "preparation_interrupted",
     "workspace_busy",
     "manager_disconnected",
     "manager_timeout",
@@ -133,6 +134,14 @@ export const preparationSchema = v.strictObject({
   environment: environmentDefinitionSchema,
   environmentFingerprint: v.string(),
   history: v.strictObject({ status: v.literal("unavailable") }),
+  preparation: v.strictObject({
+    attempts: v.array(
+      v.strictObject({
+        status: v.picklist(["preparing", "ready", "failed"]),
+        error: v.optional(workspaceErrorSchema),
+      }),
+    ),
+  }),
 });
 export type ManagedWorkspaceInfo = v.InferOutput<typeof preparationSchema>;
 export const workspaceMethods = [
