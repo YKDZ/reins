@@ -744,19 +744,22 @@ describe("daemon 协议面（缝 C）", () => {
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
     fake.controls.completeTurn("end_turn", "ok");
-    const waited = await requester("wait", {targets: [{sessionId,turnId: "t1"}],completion: "all",
+    const waited = await requester("wait", {
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(resultOf(waited)).toEqual({
-      status: "satisfied",pending: [],
+      status: "satisfied",
+      pending: [],
       completed: [
-          {
-            sessionId,
-            turnId: "t1",
-            stopReason: "end_turn",
-            finalReply: "ok",
-            usage: undefined,
-          },
+        {
+          sessionId,
+          turnId: "t1",
+          stopReason: "end_turn",
+          finalReply: "ok",
+          usage: undefined,
+        },
       ],
     });
   });
@@ -899,11 +902,15 @@ describe("daemon 协议面（缝 C）", () => {
     ]);
     expect(fake.calls.interrupted).toEqual([sessionId]);
     fake.controls.completeTurn("cancelled", null);
-    const waited = await requester("wait", {targets: [{sessionId,turnId: "t1"}],completion: "all",
+    const waited = await requester("wait", {
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(resultOf(waited)).toMatchObject({
-      status: "satisfied",pending: [],completed: [{sessionId,turnId: "t1",stopReason: "cancelled"}],
+      status: "satisfied",
+      pending: [],
+      completed: [{ sessionId, turnId: "t1", stopReason: "cancelled" }],
     });
   });
 
@@ -928,15 +935,22 @@ describe("daemon 协议面（缝 C）", () => {
     expect(resultOf(killed)).toEqual({ sessionId, status: "killed" });
     expect(fake.calls.terminated).toEqual([sessionId]);
 
-    const waited = await requester("wait", {targets: [{sessionId,turnId: "t1"}],completion: "all",
+    const waited = await requester("wait", {
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(resultOf(waited)).toEqual({
-      status: "satisfied",pending: [],completed: [{sessionId,turnId: "t1",stopReason: "end_turn",finalReply: "done"}],
+      status: "satisfied",
+      pending: [],
+      completed: [
+        { sessionId, turnId: "t1", stopReason: "end_turn", finalReply: "done" },
+      ],
     });
 
     const missing = await requester("wait", {
-      targets: [{sessionId: "missing@gdaemontest",turnId: "t1"}],completion: "all",
+      targets: [{ sessionId: "missing@gdaemontest", turnId: "t1" }],
+      completion: "all",
       timeoutMs: 1000,
     });
     expect(missing).toMatchObject({
@@ -2245,7 +2259,11 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     expect(sent).toMatchObject({ error: { code: "session_not_found" } });
     expect(fake.calls.delivered).toEqual([]);
 
-    const waited = await beta("wait", {targets: [{sessionId,turnId: "t1"}],completion: "all", timeoutMs: 1000 });
+    const waited = await beta("wait", {
+      targets: [{ sessionId, turnId: "t1" }],
+      completion: "all",
+      timeoutMs: 1000,
+    });
     expect(waited).toMatchObject({ error: { code: "session_not_found" } });
 
     const interrupted = await beta("interrupt", { ids: [sessionId] });

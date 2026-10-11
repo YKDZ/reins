@@ -116,7 +116,14 @@ test("local CLI projects its cwd into an already running daemon and the worker r
     cwd: callerCwd,
     turnHandle: expect.stringMatching(/^[a-z0-9@/.-]+$/u),
   });
-  const waited = await cli(["wait", ack.turnHandle, "--completion", "all", "--timeout", "5000"]);
+  const waited = await cli([
+    "wait",
+    ack.turnHandle,
+    "--completion",
+    "all",
+    "--timeout",
+    "5000",
+  ]);
   expect(waited.exitCode, waited.stderr).toBe(0);
   const waitResult = JSON.parse(waited.stdout) as {
     completed: { finalReply: string }[];
@@ -178,7 +185,16 @@ test("local CLI projects its cwd into an already running daemon and the worker r
   };
   expect(explicitAck.cwd).toBe(daemonCwd);
   const explicitWait = JSON.parse(
-    (await cli(["wait", explicitAck.turnHandle, "--completion", "all", "--timeout", "5000"])).stdout,
+    (
+      await cli([
+        "wait",
+        explicitAck.turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "5000",
+      ])
+    ).stdout,
   ) as { completed: { finalReply: string }[] };
   expect(JSON.parse(explicitWait.completed[0]!.finalReply)).toEqual({
     cwd: daemonCwd,
@@ -278,7 +294,16 @@ test("session snapshots keep the exact active or completed turn without stale ac
   expect(pretty.stdout).toContain(ack.turnHandle);
   await writeFile(join(callerCwd, "release"), "finish");
   expect(
-    (await cli(["wait", ack.turnHandle, "--completion", "all", "--timeout", "5000"])).exitCode,
+    (
+      await cli([
+        "wait",
+        ack.turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "5000",
+      ])
+    ).exitCode,
   ).toBe(0);
   const idle = JSON.parse((await cli(["list"])).stdout) as Record<
     string,
@@ -336,7 +361,16 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
   });
   await writeFile(join(callerCwd, "release"), "released");
   expect(
-    (await cli(["wait", initial.sessionId, "--timeout", "5000"])).exitCode,
+    (
+      await cli([
+        "wait",
+        initial.turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "5000",
+      ])
+    ).exitCode,
   ).toBe(0);
   const ended = await cli([
     "send",

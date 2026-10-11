@@ -332,10 +332,16 @@ export const sendAckSchema = v.strictObject({
 export type SendAck = v.InferOutput<typeof sendAckSchema>;
 
 export const waitParamsSchema = v.strictObject({
-  targets: v.pipe(v.array(turnTargetSchema), v.minLength(1), v.check(
-    (targets) => new Set(targets.map((target) => JSON.stringify(target))).size === targets.length,
-    "Duplicate turn target",
-  )),
+  targets: v.pipe(
+    v.array(turnTargetSchema),
+    v.minLength(1),
+    v.check(
+      (targets) =>
+        new Set(targets.map((target) => `${target.sessionId}/${target.turnId}`))
+          .size === targets.length,
+      "Duplicate turn target",
+    ),
+  ),
   completion: v.picklist(["any", "all"]),
   timeoutMs: v.optional(v.pipe(v.number(), v.finite(), v.minValue(0))),
 });

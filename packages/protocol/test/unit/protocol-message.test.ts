@@ -166,7 +166,8 @@ describe("per-method 参数与结果 schema", () => {
     });
     bad(protocolParamsSchemaFor("send"), { sessionId: "reviewer@g7" });
     ok(protocolParamsSchemaFor("wait"), {
-      targets: [{sessionId: "reviewer@g7",turnId: "t1"}],completion: "all",
+      targets: [{ sessionId: "reviewer@g7", turnId: "t1" }],
+      completion: "all",
       timeoutMs: 100,
     });
     ok(protocolParamsSchemaFor("interrupt"), { ids: ["reviewer@g7"] });
@@ -210,7 +211,8 @@ describe("per-method 参数与结果 schema", () => {
     });
     ok(protocolResultSchemaFor("wait"), {
       status: "timeout",
-      completed: [],pending: [{sessionId: "reviewer@g7",turnId: "t1"}],
+      completed: [],
+      pending: [{ sessionId: "reviewer@g7", turnId: "t1" }],
     });
     ok(protocolResultSchemaFor("interrupt"), [
       { sessionId: "reviewer@g7", status: "requested", turnId: "t1" },

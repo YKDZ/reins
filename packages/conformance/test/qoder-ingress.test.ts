@@ -149,7 +149,10 @@ async function runFixture(
     if ("error" in attached) throw new Error(JSON.stringify(attached.error));
     const ended = await endedPromise;
     const waited = await client.request("wait", {
-      targets: [{sessionId: spawned.result.sessionId,turnId: spawned.result.turnId}],completion: "all",
+      targets: [
+        { sessionId: spawned.result.sessionId, turnId: spawned.result.turnId },
+      ],
+      completion: "all",
     });
     if ("error" in waited) throw new Error(JSON.stringify(waited.error));
     const diagnostics = await client.request("diagnostics", {
@@ -305,8 +308,15 @@ describe("Qoder ingress conformance", () => {
       reason: "end_turn",
     });
     expect(result.waited).toMatchObject({
-      status: "satisfied", pending: [],
-      completed: [{sessionId: terminal.sessionId,turnId: terminal.turnId,stopReason: terminal.stopReason}],
+      status: "satisfied",
+      pending: [],
+      completed: [
+        {
+          sessionId: terminal.sessionId,
+          turnId: terminal.turnId,
+          stopReason: terminal.stopReason,
+        },
+      ],
     });
     const waitedTurn = result.waited.completed[0];
     expect(waitedTurn?.finalReply === terminal.finalReply).toBe(true);

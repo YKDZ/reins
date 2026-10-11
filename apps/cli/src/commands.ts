@@ -176,15 +176,22 @@ async function runWait(ctx: CommandInvocationFor<"wait">): Promise<void> {
   const timeoutMs = ctx.options.timeout;
   await withClient(ctx.mode, async (client) => {
     const response = await client.request("wait", {
-      targets: [...targets], completion: ctx.options.completion,
+      targets: [...targets],
+      completion: ctx.options.completion,
       ...(timeoutMs === undefined ? {} : { timeoutMs }),
     });
     const result = requireResult(response);
     printWaitResult(result, ctx.mode);
-    const exitCode = result.status === "timeout" ? EXIT_TIMEOUT
-      : result.completed.some((turn) => turn.stopReason === "failed") ? 1
-      : result.completed.some((turn) => turn.stopReason === "killed") ? 3
-      : result.completed.some((turn) => turn.stopReason === "cancelled") ? 2 : 0;
+    const exitCode =
+      result.status === "timeout"
+        ? EXIT_TIMEOUT
+        : result.completed.some((turn) => turn.stopReason === "failed")
+          ? 1
+          : result.completed.some((turn) => turn.stopReason === "killed")
+            ? 3
+            : result.completed.some((turn) => turn.stopReason === "cancelled")
+              ? 2
+              : 0;
     if (exitCode !== 0) throw new ExitError(exitCode);
   });
 }

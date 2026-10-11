@@ -11,7 +11,6 @@
 //   evidence-dir：调用方明确提供的外部证据目录。临时安装、socket、state 与子进程
 //              全部由本入口拥有并在结束前回收；证据不随回收消失。
 import { createHash } from "node:crypto";
-import {encodeTurnHandle,decodeTurnHandle,type TurnTarget} from "@reins/protocol";
 import {
   copyFileSync,
   cpSync,
@@ -26,6 +25,8 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, relative, resolve } from "node:path";
+
+import { decodeTurnHandle } from "@reins/protocol";
 
 import {
   isCleanStop,
@@ -643,8 +644,13 @@ async function runWorkerRound(
 
   const waitFirstOutput = await runCli(context, "wait-first", [
     "wait",
-    requiredString(readJsonRecord("spawn output",spawnProvidedOutput),"turnHandle","spawn output"),
-    "--completion", "all",
+    requiredString(
+      readJsonRecord("spawn output", spawnProvidedOutput),
+      "turnHandle",
+      "spawn output",
+    ),
+    "--completion",
+    "all",
     "--timeout",
     "10000",
   ]);
@@ -654,22 +660,21 @@ async function runWorkerRound(
     "send",
     providedSessionId,
     scenario.followUpMessage,
+    "--placement",
+    "new_turn",
   ]);
   const ack = readJsonRecord("send ack", sendOutput);
   if (requiredString(ack, "sessionId", "send ack") !== providedSessionId) {
     throw new Error(`Send ack referenced another session: ${sendOutput}`);
   }
-  const ackTurnId = requiredString(ack, "turnId", "send ack");
-  const ackMessageId = requiredString(ack, "messageId", "send ack");
-  if (requiredString(ack, "deliveryPoint", "send ack") !== "new_turn") {
-    throw new Error(
-      `Follow-up on an idle session was not delivered as a new turn: ${sendOutput}`,
-    );
-  }
+  const ackTurnHandle = requiredString(ack, "turnHandle", "send ack");
+  const ackTurnId = decodeTurnHandle(ackTurnHandle).turnId;
 
   const waitSecondOutput = await runCli(context, "wait-second", [
     "wait",
-    providedSessionId,
+    ackTurnHandle,
+    "--completion",
+    "all",
     "--timeout",
     "10000",
   ]);
@@ -759,9 +764,9 @@ async function runWorkerRound(
           `Follow-up message event lost the authored input: ${JSON.stringify(event)}`,
         );
       }
-      if (requiredString(event, "messageId", "domain event") !== ackMessageId) {
+      if (requiredString(event, "turnId", "domain event") !== ackTurnId) {
         throw new Error(
-          `Message event id diverged from the ack: ${JSON.stringify(event)}`,
+          `Message event turn diverged from the ack: ${JSON.stringify(event)}`,
         );
       }
       continue;
@@ -827,8 +832,13 @@ async function runWorkerRound(
   );
   const waitOmittedOutput = await runCli(context, "wait-omitted", [
     "wait",
-    requiredString(readJsonRecord("spawn output",spawnOmittedOutput),"turnHandle","spawn output"),
-    "--completion", "all",
+    requiredString(
+      readJsonRecord("spawn output", spawnOmittedOutput),
+      "turnHandle",
+      "spawn output",
+    ),
+    "--completion",
+    "all",
     "--timeout",
     "10000",
   ]);
@@ -899,17 +909,14 @@ async function runWorkerRound(
     );
   }
 
-  const killOutput = await runCli(context, "kill-sessions", [
-    "kill",
-    providedSessionId,
-    omittedSessionId,
-  ]);
-  const killed = readJsonArray(killOutput);
-  if (
-    killed.length !== 2 ||
-    !killed.every((entry) => isRecord(entry) && entry.status === "killed")
-  ) {
-    throw new Error(`Sessions were not killed as reported: ${killOutput}`);
+  for (const sessionId of [providedSessionId, omittedSessionId]) {
+    const killOutput = await runCli(context, "kill-" + sessionId, [
+      "kill",
+      sessionId,
+    ]);
+    const killed = readJsonRecord("kill output", killOutput);
+    if (killed.sessionId !== sessionId || killed.status !== "killed")
+      throw new Error(`Session was not killed as reported: ${killOutput}`);
   }
   // terminate 由产品 kill 路径在发布 session.killed 之前 await，因此必须重读日志：
   // kill 之前的快照不含 terminate，用旧快照断言会把真实执行误判成缺失。
@@ -926,7 +933,7 @@ async function runWorkerRound(
     );
   }
 
-  recorder.record("worker_round", { status: "passed", ackMessageId });
+  recorder.record("worker_round", { status: "passed", ackTurnHandle });
 
   // 产品清理与场景执行是不同事实：守护进程正常停止、socket 与锁消失单独留证。
   const handle = owned.daemon;
@@ -955,12 +962,18 @@ function assertCompletedTurn(
   sessionId: string,
 ): { readonly turnId: string; readonly stopReason: string } {
   const result = readJsonRecord("wait result", output);
-  if (result.status !== "satisfied") throw new Error(`Wait did not complete: ${output}`);
-  if (!Array.isArray(result.completed) || result.completed.length !== 1) throw new Error(`Wait result is unexpected: ${output}`);
+  if (result.status !== "satisfied")
+    throw new Error(`Wait did not complete: ${output}`);
+  if (!Array.isArray(result.completed) || result.completed.length !== 1)
+    throw new Error(`Wait result is unexpected: ${output}`);
   const turn = result.completed[0];
-  if (!isRecord(turn)) throw new Error(`Wait entry is not completed: ${output}`);
-  const target = decodeTurnHandle(requiredString(turn,"turnHandle","wait turn"));
-  if (target.sessionId !== sessionId) throw new Error(`Wait entry belongs to another session: ${output}`);
+  if (!isRecord(turn))
+    throw new Error(`Wait entry is not completed: ${output}`);
+  const target = decodeTurnHandle(
+    requiredString(turn, "turnHandle", "wait turn"),
+  );
+  if (target.sessionId !== sessionId)
+    throw new Error(`Wait entry belongs to another session: ${output}`);
   if (
     turn.stopReason !== "end_turn" ||
     turn.finalReply !== scenario.finalReply

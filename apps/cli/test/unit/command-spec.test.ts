@@ -1,4 +1,4 @@
-import {encodeTurnHandle} from "@reins/protocol";
+import { encodeTurnHandle } from "@reins/protocol";
 import { expect, test } from "vitest";
 
 import { parseCommandInvocation } from "../../src/command-spec.ts";
@@ -44,21 +44,33 @@ test("direct invocation parsing rejects a missing required option", () => {
 test("wait parsing preserves the omitted infinite budget and decodes complete turn targets", () => {
   const invocation = parseCommandInvocation(
     "wait",
-    [[encodeTurnHandle({sessionId: "prompt@g1" as never,turnId: "t1" as never})]],
-    {completion: "all"},
+    [
+      [
+        encodeTurnHandle({
+          sessionId: "prompt@g1" as never,
+          turnId: "t1" as never,
+        }),
+      ],
+    ],
+    { completion: "all" },
     "json",
   );
   expect(invocation.options).not.toHaveProperty("timeout");
   expect(invocation).toMatchObject({
     command: "wait",
-    args: [[{sessionId: "prompt@g1",turnId: "t1"}]],
+    args: [[{ sessionId: "prompt@g1", turnId: "t1" }]],
     options: { completion: "all" },
   });
 });
 
 test("direct invocation parsing validates variadic fields as arrays", () => {
   expect(() =>
-    parseCommandInvocation("wait", ["prompt@g1"], {}, "json"),
+    parseCommandInvocation(
+      "wait",
+      ["prompt@g1"],
+      { completion: "all" },
+      "json",
+    ),
   ).toThrowError(
     expect.objectContaining({
       code: "usage_error",

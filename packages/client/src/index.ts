@@ -43,6 +43,7 @@ export type ReinsClientOptions = {
 
 export type ReinsClient = {
   initialize(timeoutMs?: number): Promise<ProtocolResponseFor<"initialize">>;
+  // wait 只使用 params.timeoutMs 领域预算；其余请求使用此处的传输预算。
   request<M extends ProtocolMethod>(
     method: M,
     params: ProtocolParams<M>,
@@ -253,15 +254,20 @@ export function createReinsClient(
         action();
       };
       // wait 的观察预算由 daemon 的领域计时器拥有，传输断连仍独立报错。
-      const timer = method === "wait" ? null : setTimeout(() => {
-        settle(() =>
-          reject(
-            commandId === undefined
-              ? new Error(JSON.stringify(clientMachineError("daemon_timeout")))
-              : unknown("timeout"),
-          ),
-        );
-      }, timeoutMs);
+      const timer =
+        method === "wait"
+          ? null
+          : setTimeout(() => {
+              settle(() =>
+                reject(
+                  commandId === undefined
+                    ? new Error(
+                        JSON.stringify(clientMachineError("daemon_timeout")),
+                      )
+                    : unknown("timeout"),
+                ),
+              );
+            }, timeoutMs);
       pending.set(requestId, {
         ...(commandId === undefined ? {} : { unknown }),
         resolve: (response) => {

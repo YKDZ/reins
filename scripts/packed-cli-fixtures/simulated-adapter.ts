@@ -75,7 +75,7 @@ const simulatedDriverFactory: AdapterDriverFactory = ({ emit }) => {
       record({ operation: "start", spec });
       complete(spec.sessionId, spec.turnId);
     },
-    deliver(sessionId, turnId, message) {
+    async deliver(sessionId, turnId, message) {
       record({ operation: "deliver", sessionId, turnId, message });
       complete(sessionId, turnId);
     },

@@ -96,7 +96,10 @@ describe("回合生命周期", () => {
     });
     const id = await spawnBusy(machine);
 
-    const waiting = machine.wait({ targets: [{sessionId: id,turnId: ids.turn("t1")}],completion: "all" });
+    const waiting = machine.wait({
+      targets: [{ sessionId: id, turnId: ids.turn("t1") }],
+      completion: "all",
+    });
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
@@ -107,15 +110,16 @@ describe("回合生命周期", () => {
     });
 
     await expect(waiting).resolves.toEqual({
-      status: "satisfied", pending: [],
+      status: "satisfied",
+      pending: [],
       completed: [
-          {
-            sessionId: id,
-            turnId: ids.turn("t1"),
-            stopReason: "end_turn",
-            finalReply: "完成",
-            usage: { durationMs: 1200 },
-          },
+        {
+          sessionId: id,
+          turnId: ids.turn("t1"),
+          stopReason: "end_turn",
+          finalReply: "完成",
+          usage: { durationMs: 1200 },
+        },
       ],
     });
   });

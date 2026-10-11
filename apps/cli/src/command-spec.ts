@@ -226,11 +226,18 @@ const commandSpecData = [
       },
     ],
     options: [
-      { name: "completion", flags: "--completion <mode>", required: true, description: "completion condition", kind: { type: "enum", values: ["any", "all"] } },
+      {
+        name: "completion",
+        flags: "--completion <mode>",
+        required: true,
+        description: "completion condition",
+        kind: { type: "enum", values: ["any", "all"] },
+      },
       {
         name: "timeout",
         flags: "--timeout <ms>",
-        description: "observation timeout in milliseconds; 0 queries immediately, omitted waits indefinitely",
+        description:
+          "observation timeout in milliseconds; 0 queries immediately, omitted waits indefinitely",
         kind: {
           type: "number",
           min: 0,
@@ -530,28 +537,28 @@ type ParsedValue<K extends ValueKind> = K extends { readonly type: "text" }
       ? SessionId
       : K extends { readonly type: "turnHandle" }
         ? TurnTarget
-      : K extends { readonly type: "turnId" }
-        ? TurnId
-        : K extends { readonly type: "permissionId" }
-          ? PermissionId
-          : K extends { readonly type: "diagnosticId" }
-            ? DiagnosticId
-            : K extends { readonly type: "time" }
-              ? string
-              : K extends { readonly type: "boolean" }
-                ? boolean
-                : K extends {
-                      readonly type: "enum";
-                      readonly values: readonly (infer E extends string)[];
-                    }
-                  ? E
-                  : K extends { readonly type: "number" }
-                    ? number
-                    : K extends { readonly type: "jsonObject" }
-                      ? Record<string, unknown>
-                      : K extends { readonly type: "dynamic" }
-                        ? string
-                        : never;
+        : K extends { readonly type: "turnId" }
+          ? TurnId
+          : K extends { readonly type: "permissionId" }
+            ? PermissionId
+            : K extends { readonly type: "diagnosticId" }
+              ? DiagnosticId
+              : K extends { readonly type: "time" }
+                ? string
+                : K extends { readonly type: "boolean" }
+                  ? boolean
+                  : K extends {
+                        readonly type: "enum";
+                        readonly values: readonly (infer E extends string)[];
+                      }
+                    ? E
+                    : K extends { readonly type: "number" }
+                      ? number
+                      : K extends { readonly type: "jsonObject" }
+                        ? Record<string, unknown>
+                        : K extends { readonly type: "dynamic" }
+                          ? string
+                          : never;
 
 type FieldValue<F extends CommandArg | CommandOption> = F extends {
   readonly variadic: true;
@@ -1043,8 +1050,16 @@ function validateValue(
         });
       return;
     case "turnHandle":
-      if (typeof value !== "string" || !v.safeParse(turnHandleSchema, value).success)
-        throw usageError({ issue: "invalid_value", field, value: String(value), hint: kind.hint });
+      if (
+        typeof value !== "string" ||
+        !v.safeParse(turnHandleSchema, value).success
+      )
+        throw usageError({
+          issue: "invalid_value",
+          field,
+          value: String(value),
+          hint: kind.hint,
+        });
       return;
     case "turnId":
       if (

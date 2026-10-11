@@ -811,32 +811,57 @@ export function createSessionMachine(options: {
     if (!parsed.success) throw invalidParamsError(parsed.issues);
     const session = sessions.get(parsed.output.sessionId);
     if (session === undefined)
-      throw machineError({ code: "session_not_found", sessionId: parsed.output.sessionId });
-    if (session.currentTurnId !== parsed.output.turnId &&
-        !session.turns.some((turn) => turn.turnId === parsed.output.turnId)) {
-      throw machineError({ code: "invalid_params", issues: [{ issue: "invalid_value", path: "turnId" }] });
+      throw machineError({
+        code: "session_not_found",
+        sessionId: parsed.output.sessionId,
+      });
+    if (
+      session.currentTurnId !== parsed.output.turnId &&
+      !session.turns.some((turn) => turn.turnId === parsed.output.turnId)
+    ) {
+      throw machineError({
+        code: "invalid_params",
+        issues: [{ issue: "invalid_value", path: "turnId" }],
+      });
     }
   }
 
-  function collectOutcomes(targets: readonly TurnTarget[]): Pick<WaitResult, "completed" | "pending"> {
+  function collectOutcomes(
+    targets: readonly TurnTarget[],
+  ): Pick<WaitResult, "completed" | "pending"> {
     const completed: TurnCompleted[] = [];
     const pending: TurnTarget[] = [];
     for (const target of targets) {
-      const turn = sessions.get(target.sessionId)?.turns.find((turn) => turn.turnId === target.turnId);
+      const turn = sessions
+        .get(target.sessionId)
+        ?.turns.find((turn) => turn.turnId === target.turnId);
       if (turn === undefined) pending.push(target);
       else completed.push(turn);
     }
     return { completed, pending };
   }
 
-  function isSatisfied(snapshot: Pick<WaitResult, "completed" | "pending">, completion: WaitParams["completion"]): boolean {
-    return completion === "any" ? snapshot.completed.length > 0 : snapshot.pending.length === 0;
+  function isSatisfied(
+    snapshot: Pick<WaitResult, "completed" | "pending">,
+    completion: WaitParams["completion"],
+  ): boolean {
+    return completion === "any"
+      ? snapshot.completed.length > 0
+      : snapshot.pending.length === 0;
   }
 
   function settleWaiters(): void {
-    for (const waiter of [...waiters]) {
+    const satisfied: {
+      waiter: (typeof waiters)[number];
+      snapshot: Pick<WaitResult, "completed" | "pending">;
+    }[] = [];
+    for (const waiter of waiters) {
       const snapshot = collectOutcomes(waiter.targets);
-      if (!isSatisfied(snapshot, waiter.completion)) continue;
+      if (isSatisfied(snapshot, waiter.completion)) {
+        satisfied.push({ waiter, snapshot });
+      }
+    }
+    for (const { waiter, snapshot } of satisfied) {
       if (waiter.timer !== null) clearTimeout(waiter.timer);
       waiters.splice(waiters.indexOf(waiter), 1);
       waiter.resolve({ status: "satisfied", ...snapshot });
@@ -1063,15 +1088,34 @@ export function createSessionMachine(options: {
       const { targets, completion, timeoutMs } = parsed.output;
       for (const target of targets) assertTurnTarget(target);
       const immediate = collectOutcomes(targets);
-      if (isSatisfied(immediate, completion)) return { status: "satisfied", ...immediate };
+      if (isSatisfied(immediate, completion))
+        return { status: "satisfied", ...immediate };
       if (timeoutMs === 0) return { status: "timeout", ...immediate };
       return await new Promise<WaitResult>((resolve) => {
-        const timer = timeoutMs === undefined ? null : setTimeout(() => {
-          const index = waiters.findIndex((waiter) => waiter.resolve === resolve);
-          if (index !== -1) waiters.splice(index, 1);
+        const waiter: (typeof waiters)[number] = {
+          targets,
+          completion,
+          resolve,
+          timer: null,
+        };
+        const deadline =
+          timeoutMs === undefined ? undefined : performance.now() + timeoutMs;
+        function observeDeadline(): void {
+          if (deadline === undefined) return;
+          const remaining = deadline - performance.now();
+          if (remaining > 0) {
+            // Node 超过单次计时上限会钳为 1ms；分段只观察同一个单调截止点。
+            waiter.timer = setTimeout(
+              observeDeadline,
+              Math.min(remaining, 2_147_483_647),
+            );
+            return;
+          }
+          waiters.splice(waiters.indexOf(waiter), 1);
           resolve({ status: "timeout", ...collectOutcomes(targets) });
-        }, timeoutMs);
-        waiters.push({ targets, completion, resolve, timer });
+        }
+        waiters.push(waiter);
+        observeDeadline();
       });
     },
     async interrupt(params) {
