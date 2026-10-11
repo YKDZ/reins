@@ -1393,6 +1393,63 @@ export async function openWorkspaceRuntime(options: {
   return {
     publications,
     hasAttachments: () => records.some(active),
+    // 独立管理程序在同一 state lease 下调用；不登记到 agent 协议。
+    async inspectAttachment(cwd: string) {
+      const record = await locate(await resolveWorktree(cwd), true);
+      if (record === undefined) throw workspaceFailure("attachment_not_found");
+      const runtime = await (async () => {
+        try {
+          const ids = await docker([
+            "container",
+            "ls",
+            "-a",
+            "--no-trunc",
+            "--filter",
+            record.containerId === undefined
+              ? "name=^/" + record.container + "$"
+              : "id=" + record.containerId,
+            "--format",
+            "{{.ID}}",
+          ]);
+          if (ids === "") return { status: "absent" as const };
+          const inspected = await inspectContainer(record);
+          return {
+            status: "present" as const,
+            containerId: ids,
+            running: inspected.State.Running,
+          };
+        } catch {
+          return {
+            status: "unknown" as const,
+            error: workspaceFailure("provider_failed"),
+          };
+        }
+      })();
+      const sessions = await (async () => {
+        if (runtime.status === "absent")
+          return { status: "unavailable" as const };
+        try {
+          const response = await (await connect(record)).request("list", {});
+          if ("error" in response) throw response.error;
+          return { status: "available" as const, sessions: response.result };
+        } catch {
+          return {
+            status: "unknown" as const,
+            error: workspaceFailure("runtime_entry_invalid"),
+          };
+        }
+      })();
+      return {
+        consumerContext: record.owner,
+        ownership: active(record)
+          ? ("attached" as const)
+          : ("released" as const),
+        attachment: { ...record.info, history: await historyHealth(record) },
+        runtime,
+        sessions,
+        history: await this.history(cwd, record.owner),
+      };
+    },
     async history(
       cwd: string,
       owner: ConsumerContext,

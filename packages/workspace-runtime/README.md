@@ -102,3 +102,22 @@ REINS_WORKSPACE_MANAGER_STATE_DIR=/absolute/manager-state \
 关闭、结束或断开观察会移除对应的成果观察；没有等待或订阅时不承诺后台唤起。断连及通知丢失后，`workspace publications` 仍可查询固定副本，显式 `workspace receive` 才产生本地 `arrived` 事实。任务失败不删除发布，成果通知不证明任务完成或成果齐全。
 
 成果查询失败时，已确定的 `wait` 结果与订阅结束事实仍返回，并以独立的 `publicationError` 报告发现失败；不把失败投影为空成果，也不改写任务终态。
+
+丢失消费者绑定时，先停止同一状态目录的 Manager，再使用同一独占 lease 的必要管理入口检查原 attachment、真实容器存在状态、daemon 会话和保留历史：
+
+```sh
+export REINS_WORKSPACE_MANAGER_STATE_DIR=/absolute/manager-state
+reins-workspace-manager inspect --cwd /absolute/worktree
+reins-workspace-manager recover --cwd /absolute/worktree
+```
+
+`recover` 返回原消费者的 `binding.REINS_CONSUMER_CONTEXT`，供原 launcher／client binding 明确恢复使用；它不改所有权、不创建会话，也不声称恢复已丢失的 harness 对话。检查结果分别报告实际 runtime 与会话的可观察状态，无法取得时保持 `unknown`，不会把查询失败当成资源不存在。Manager 仍占用 lease 时，管理命令拒绝并行写入；停止 Manager、短命 CLI 或 launcher 退出均不释放 attachment。
+
+确实需要新消费者时，先明确释放原 attachment：
+
+```sh
+reins-workspace-manager release --cwd /absolute/worktree --session-disposition require_none
+reins-workspace-manager release --cwd /absolute/worktree --session-disposition kill
+```
+
+释放沿用普通 detach 的实际停止证明与逐步续行；存活会话使 `require_none` 拒绝，`kill` 不能证明停止时也不释放归属。管理员明确解决 provider 故障后，可以重复相同 release 只续剩余步骤。返回 `released` 后，新消费者才通过正常 `workspace attach` 建立自己的沿袭；旧会话与历史仍属于原消费者，不能改名收养。管理入口不登记到普通 agent 能力、帮助或错误候选，不提供 force rebind，也不建立通用管理平台。
