@@ -97,7 +97,7 @@ await writeFile(
 );
 await writeFile(
   join(context, "codex"),
-  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve("../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
+  '#!/usr/bin/env node\nimport fs from "node:fs";import path from "node:path";const timer=setInterval(()=>{if(fs.existsSync(path.resolve(process.cwd()==="/"?fs.readlinkSync("/proc/1/cwd"):process.cwd(),"../.reins/allow-version"))){clearInterval(timer);console.log("codex-cli 0.149.0")}},25);\n',
   { mode: 0o755 },
 );
 // 硬链接组装同文件系统内的夹具 payload，避免重复复制消费者依赖及逐 COPY 层提交。
@@ -292,10 +292,7 @@ try {
   );
   const attached = await attachment;
   assert.equal(attached.status, 0, JSON.stringify(attached));
-  assert.equal(
-    (attached.value.runtime as { status: string }).status,
-    "preparing",
-  );
+  assert.equal((attached.value.runtime as { status: string }).status, "ready");
   await waitForRuntime("ready");
   assert.equal(attached.value.cwd, join(worktree, "src"));
   const forbidden = await cli(["status", "-C", worktree], {
@@ -468,11 +465,8 @@ try {
     "--binding",
     "code",
   ]);
-  assert.equal(mismatch.status, 0);
-  assert.equal(
-    (mismatch.value.runtime as { status: string }).status,
-    "preparing",
-  );
+  assert.equal(mismatch.status, 1);
+  assert.equal((mismatch.value.runtime as { status: string }).status, "failed");
   const preparationFailure = await waitForRuntime("failed");
   assert.equal(preparationFailure.error?.code, "runtime_entry_invalid");
   const failed = await cli(["status", "-C", worktree]);

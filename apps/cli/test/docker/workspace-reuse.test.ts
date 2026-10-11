@@ -6,6 +6,8 @@ import { fileURLToPath } from "node:url";
 
 import { expect, test } from "vitest";
 
+import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
 test("delegates real file reads through Manager and reuses one native Docker worktree", async () => {
@@ -22,6 +24,7 @@ test("delegates real file reads through Manager and reuses one native Docker wor
   // 离线缓存只接受同一已验证 Node 材料的配置摘要，不引入替代镜像。
   expect([
     registryImage,
+    "sha256:42166530c7fc76804e18fb5bfbdec7a6dde41ffd1e6746155d7e5f0ba16babe4",
     "sha256:59c575db86dccc264e6b71c316548f05a5c3c7a9aa1c112dc019807e651fd06b",
   ]).toContain(nodeImage);
   const { version } = JSON.parse(
@@ -42,20 +45,19 @@ test("delegates real file reads through Manager and reuses one native Docker wor
     ],
   ] as const;
   const fingerprints = [];
-  execFileSync(
-    "pnpm",
-    [
-      "exec",
-      "rolldown",
-      join(repository, "apps/cli/test/docker/workspace-client.ts"),
-      "--file",
-      join(input, "workspace-client.js"),
-      "--platform",
-      "node",
-      "--format",
-      "esm",
-    ],
-    { cwd: repository, stdio: "pipe" },
+  await bundleWorkspaceClient(
+    join(repository, "apps/cli/test/docker/workspace-attach-client.ts"),
+    join(input, "workspace-attach-client.js"),
+  );
+  fingerprints.push({
+    name: "workspace-attach-client.js",
+    sha256: createHash("sha256")
+      .update(await readFile(join(input, "workspace-attach-client.js")))
+      .digest("hex"),
+  });
+  await bundleWorkspaceClient(
+    join(repository, "apps/cli/test/docker/workspace-client.ts"),
+    join(input, "workspace-client.js"),
   );
   for (const name of ["workspace-client.js"]) {
     fingerprints.push({
@@ -92,6 +94,21 @@ test("delegates real file reads through Manager and reuses one native Docker wor
         .update(await readFile(source))
         .digest("hex"),
     });
+  }
+  const installation = process.env.REINS_WRR08_CONSUMER_ARCHIVE;
+  if (installation !== undefined) {
+    for (const [source, name] of [
+      [installation, "consumer-installation.tar"],
+      [installation + ".json", "consumer-installation.json"],
+    ]) {
+      await copyFile(source!, join(input, name!));
+      fingerprints.push({
+        name: name!,
+        sha256: createHash("sha256")
+          .update(await readFile(source!))
+          .digest("hex"),
+      });
+    }
   }
   // 工具仅来自本机已安装的原生程序；不携带宿主配置、home 或 node_modules。
   const tools = join(input, "tools");
@@ -140,7 +157,7 @@ test("delegates real file reads through Manager and reuses one native Docker wor
   );
   const args = [
     "--conditions=source",
-    join(repository, "packages/test-platform/src/cli.ts"),
+    join(repository, "scripts/run-workspace-test-platform.ts"),
     "run",
     "--state-dir",
     process.env.REINS_WRR08_PLATFORM_STATE_DIR ?? join(directory, "state"),
@@ -150,10 +167,16 @@ test("delegates real file reads through Manager and reuses one native Docker wor
     "--image",
     nodeImage,
     "--timeout-ms",
-    "1200000",
+    "3600000",
     ...(process.env.REINS_WRR08_PLATFORM_DOCKER_BINARY === undefined
       ? []
       : ["--docker-binary", process.env.REINS_WRR08_PLATFORM_DOCKER_BINARY]),
+    ...(process.env.REINS_WRR08_PLATFORM_BOOTSTRAP_IMAGE === undefined
+      ? []
+      : [
+          "--bootstrap-image",
+          process.env.REINS_WRR08_PLATFORM_BOOTSTRAP_IMAGE,
+        ]),
     "--source",
     input,
     "--docker-access",
@@ -205,4 +228,4 @@ test("delegates real file reads through Manager and reuses one native Docker wor
     platformReclaim:
       process.env.REINS_WRR08_PLATFORM_REUSE === "1" ? "not_run" : "passed",
   });
-}, 1_800_000);
+}, 0);

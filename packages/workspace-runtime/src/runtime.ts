@@ -74,6 +74,7 @@ type RecordState = {
   tree: Tree;
   identities: NativeIdentity[];
   intent: string[];
+  bindingIntent: string;
   directory: string;
   container: string;
   environmentStage?: "pending" | "creating" | "created" | "started";
@@ -177,6 +178,41 @@ export async function openWorkspaceRuntime(options: {
   codexAuthBindings?: CodexAuthBindings;
   qoderAuthBindings?: QoderAuthBindings;
 }) {
+  // 绑定意图只保存不可逆摘要；原生来源路径与内容均不进入领域事实。
+  const bindingIntent = (
+    bindings: Pick<
+      ManagedWorkspaceInfo["harnesses"][number],
+      "ref" | "harness" | "credential"
+    >[],
+  ) =>
+    fingerprint(
+      bindings
+        .toSorted((left, right) => left.ref.localeCompare(right.ref))
+        .map((binding) => {
+          const credential = binding.credential;
+          const codex = options.codexAuthBindings ?? {};
+          const qoder = options.qoderAuthBindings ?? {};
+          const source =
+            credential.kind === "omitted"
+              ? undefined
+              : binding.harness === "codex"
+                ? Object.hasOwn(codex, credential.ref)
+                  ? { authFile: codex[credential.ref] }
+                  : undefined
+                : Object.hasOwn(qoder, credential.ref)
+                  ? {
+                      userFile: qoder[credential.ref]!.userFile,
+                      machineIdFile: qoder[credential.ref]!.machineIdFile,
+                    }
+                  : undefined;
+          return {
+            ref: binding.ref,
+            harness: binding.harness,
+            credential,
+            source,
+          };
+        }),
+    );
   const root = options.stateDirectory;
   await mkdir(root, { recursive: true, mode: 0o700 });
   const records: RecordState[] = [];
@@ -817,31 +853,51 @@ export async function openWorkspaceRuntime(options: {
     if (!version.split(/\s+/u).includes(binding.runtime.version))
       throw workspaceFailure("runtime_entry_invalid");
   };
+  const hasReadyBinding = (record: RecordState) =>
+    record.environmentStage === "started" &&
+    (record.info.runtime.status === "ready" ||
+      record.info.runtime.status === "failed") &&
+    record.info.harnesses.some((binding) => binding.stage === "ready");
   const status = async (cwd: string, owner: ConsumerContext) => {
     const { record, tree } = await find(cwd, owner, true);
-    if (record.info.runtime.status === "ready" && record.detach === undefined) {
-      let active: ManagedWorkspaceInfo["harnesses"][number] | undefined;
+    if (
+      record.detach === undefined &&
+      (record.info.runtime.status === "ready" ||
+        (record.info.runtime.status === "failed" && hasReadyBinding(record)))
+    ) {
+      let failure: WorkspaceError | undefined;
       try {
         if (!(await inspectContainer(record)).State.Running)
           throw workspaceFailure("runtime_resource_mismatch");
         for (const binding of record.info.harnesses) {
-          active = binding;
-          await validateBinding(record, binding);
+          if (binding.stage !== "ready") continue;
+          try {
+            await validateBinding(record, binding);
+          } catch (error) {
+            if (record.detach !== undefined) break;
+            const bindingFailure = normalize(error);
+            binding.stage = "failed";
+            binding.error = bindingFailure;
+            failure ??= bindingFailure;
+          }
         }
-        active = undefined;
         const client = await connect(record);
         const list = await client.request("list", {});
         if ("error" in list) throw workspaceFailure("runtime_entry_invalid");
       } catch (error) {
         if (record.detach === undefined) {
-          const failure = normalize(error);
-          record.info.runtime = { status: "failed", error: failure };
-          if (active !== undefined) {
-            active.stage = "failed";
-            active.error = failure;
+          failure = normalize(error);
+          // 共享容器或 daemon 失效时，所有绑定都无法继续提供执行者。
+          for (const binding of record.info.harnesses) {
+            if (binding.stage !== "ready") continue;
+            binding.stage = "failed";
+            binding.error = failure;
           }
-          await persist(record);
         }
+      }
+      if (failure !== undefined && record.detach === undefined) {
+        record.info.runtime = { status: "failed", error: failure };
+        await persist(record);
       }
     }
     const attached = record.info.environment;
@@ -982,126 +1038,136 @@ export async function openWorkspaceRuntime(options: {
         }
       }
       record.bindingStages ??= {};
+      let bindingFailure: WorkspaceError | undefined;
       for (const binding of record.info.harnesses) {
         active = binding;
-        const checkpoint = record.bindingStages[binding.ref] ?? "pending";
-        if (checkpoint === "ready") {
-          await validateBinding(record, binding);
-          binding.stage = "ready";
-          delete binding.error;
-          await persist(record);
-          continue;
-        }
-        if (checkpoint === "installing")
-          throw workspaceFailure("preparation_outcome_unknown");
-        delete binding.error;
-        if (checkpoint === "pending") {
-          binding.stage = "runtime_install";
-          await persist(record);
-          await ensureImage(binding.runtime.image);
-          record.bindingStages[binding.ref] = "installing";
-          await persist(record);
-          const material = `${record.container}-material-${binding.harness}`;
-          let materialCreated = false;
-          try {
-            await docker([
-              "create",
-              "--name",
-              material,
-              "--label",
-              `reins.workspace.owner=${fingerprint(root)}`,
-              "--entrypoint",
-              "node",
-              binding.runtime.image,
-              "--version",
-            ]);
-            materialCreated = true;
-            const archive = join(
-              record.directory,
-              `material-${binding.harness}`,
-            );
-            await mkdir(archive, { recursive: true, mode: 0o700 });
-            try {
-              await execute(
-                "docker",
-                [
-                  "cp",
-                  `${material}:/opt/reins/harnesses/${binding.harness}/.`,
-                  archive,
-                ],
-                { maxBuffer: 8 * 1024 * 1024 },
-              );
-            } catch (error) {
-              const stderr = (error as { stderr?: unknown }).stderr;
-              // 仅本地接收目录的原生写入容量失败已知未触及运行容器，可显式重做接收。
-              if (
-                typeof stderr === "string" &&
-                stderr.trim().startsWith(`write ${archive}/`) &&
-                stderr.trim().endsWith(": no space left on device") &&
-                !stderr.trim().includes("\n")
-              ) {
-                record.bindingStages[binding.ref] = "pending";
-                throw workspaceFailure("capacity_exhausted");
-              }
-              throw workspaceFailure("provider_failed");
-            }
-            await docker([
-              "exec",
-              record.container,
-              "mkdir",
-              "-p",
-              `/opt/reins/harnesses/${binding.harness}`,
-            ]);
-            await docker([
-              "cp",
-              `${archive}/.`,
-              `${record.container}:/opt/reins/harnesses/${binding.harness}`,
-            ]);
-          } finally {
-            if (materialCreated) await docker(["rm", "-f", material]);
+        try {
+          const checkpoint = record.bindingStages[binding.ref] ?? "pending";
+          if (checkpoint === "ready") {
+            await validateBinding(record, binding);
+            binding.stage = "ready";
+            delete binding.error;
+            await persist(record);
+            continue;
           }
-          record.bindingStages[binding.ref] = "installed";
+          if (checkpoint === "installing")
+            throw workspaceFailure("preparation_outcome_unknown");
+          delete binding.error;
+          if (checkpoint === "pending") {
+            binding.stage = "runtime_install";
+            await persist(record);
+            await ensureImage(binding.runtime.image);
+            record.bindingStages[binding.ref] = "installing";
+            await persist(record);
+            const material = `${record.container}-material-${binding.harness}`;
+            let materialCreated = false;
+            try {
+              await docker([
+                "create",
+                "--name",
+                material,
+                "--label",
+                `reins.workspace.owner=${fingerprint(root)}`,
+                "--entrypoint",
+                "node",
+                binding.runtime.image,
+                "--version",
+              ]);
+              materialCreated = true;
+              const archive = join(
+                record.directory,
+                `material-${binding.harness}`,
+              );
+              await mkdir(archive, { recursive: true, mode: 0o700 });
+              try {
+                await execute(
+                  "docker",
+                  [
+                    "cp",
+                    `${material}:/opt/reins/harnesses/${binding.harness}/.`,
+                    archive,
+                  ],
+                  { maxBuffer: 8 * 1024 * 1024 },
+                );
+              } catch (error) {
+                const stderr = (error as { stderr?: unknown }).stderr;
+                // 仅本地接收目录的原生写入容量失败已知未触及运行容器，可显式重做接收。
+                if (
+                  typeof stderr === "string" &&
+                  stderr.trim().startsWith(`write ${archive}/`) &&
+                  stderr.trim().endsWith(": no space left on device") &&
+                  !stderr.trim().includes("\n")
+                ) {
+                  record.bindingStages[binding.ref] = "pending";
+                  throw workspaceFailure("capacity_exhausted");
+                }
+                throw workspaceFailure("provider_failed");
+              }
+              await docker([
+                "exec",
+                record.container,
+                "mkdir",
+                "-p",
+                `/opt/reins/harnesses/${binding.harness}`,
+              ]);
+              await docker([
+                "cp",
+                `${archive}/.`,
+                `${record.container}:/opt/reins/harnesses/${binding.harness}`,
+              ]);
+            } finally {
+              if (materialCreated) await docker(["rm", "-f", material]);
+            }
+            record.bindingStages[binding.ref] = "installed";
+            await persist(record);
+          }
+          binding.stage = "runtime_validate";
           await persist(record);
-        }
-        binding.stage = "runtime_validate";
-        await persist(record);
-        await validateBinding(record, binding);
-        record.bindingStages[binding.ref] = "validated";
-        binding.stage = "credential_binding";
-        await persist(record);
-        if (binding.credential.kind === "bound") {
-          const bindings = options.codexAuthBindings ?? {};
-          if (
-            hasQoderAuthBinding(
-              options.qoderAuthBindings ?? {},
-              binding.harness,
-              binding.runtime.version,
-              binding.credential.ref,
-            )
-          ) {
-            await projectQoderAuth(
-              options.qoderAuthBindings ?? {},
-              binding.credential.ref,
-              home,
-            );
-          } else {
+          await validateBinding(record, binding);
+          record.bindingStages[binding.ref] = "validated";
+          binding.stage = "credential_binding";
+          await persist(record);
+          if (binding.credential.kind === "bound") {
+            const bindings = options.codexAuthBindings ?? {};
             if (
-              !hasCodexAuthBinding(
-                bindings,
+              hasQoderAuthBinding(
+                options.qoderAuthBindings ?? {},
                 binding.harness,
                 binding.runtime.version,
                 binding.credential.ref,
               )
-            )
-              throw workspaceFailure("credential_binding_unavailable");
-            await projectCodexAuth(bindings, binding.credential.ref, home);
+            ) {
+              await projectQoderAuth(
+                options.qoderAuthBindings ?? {},
+                binding.credential.ref,
+                home,
+              );
+            } else {
+              if (
+                !hasCodexAuthBinding(
+                  bindings,
+                  binding.harness,
+                  binding.runtime.version,
+                  binding.credential.ref,
+                )
+              )
+                throw workspaceFailure("credential_binding_unavailable");
+              await projectCodexAuth(bindings, binding.credential.ref, home);
+            }
           }
+          record.bindingStages[binding.ref] = "ready";
+          binding.stage = "ready";
+          await persist(record);
+        } catch (error) {
+          const failure = normalize(error);
+          bindingFailure ??= failure;
+          binding.stage = "failed";
+          binding.error = failure;
+          await persist(record);
         }
-        record.bindingStages[binding.ref] = "ready";
-        binding.stage = "ready";
-        await persist(record);
       }
       active = undefined;
+      if (bindingFailure !== undefined) throw bindingFailure;
       record.info.runtime = { status: "ready" };
       record.info.preparation.attempts.at(-1)!.status = "ready";
     } catch (error) {
@@ -1174,6 +1240,22 @@ export async function openWorkspaceRuntime(options: {
           await find(cwd, owner);
           if (JSON.stringify(existing.intent) !== JSON.stringify(intent))
             throw workspaceFailure("attachment_intent_conflict");
+          const current = await workspaceHarnesses(
+            cwd,
+            options.codexAuthBindings,
+            options.qoderAuthBindings,
+          );
+          const selected = intent.map((ref) =>
+            current.bindings.find((binding) => binding.ref === ref),
+          );
+          if (
+            selected.some((binding) => binding === undefined) ||
+            existing.bindingIntent !==
+              bindingIntent(
+                selected as NonNullable<(typeof selected)[number]>[],
+              )
+          )
+            throw workspaceFailure("attachment_intent_conflict");
           if (existing.info.runtime.status === "failed")
             await executions.get(existing.directory);
           if (
@@ -1224,6 +1306,7 @@ export async function openWorkspaceRuntime(options: {
           tree,
           identities,
           intent,
+          bindingIntent: bindingIntent(selected),
           directory,
           environmentStage: "pending",
           container: `${options.resourcePrefix ?? "reins-workspace"}-${randomUUID()}`,
@@ -1262,10 +1345,10 @@ export async function openWorkspaceRuntime(options: {
     },
     status,
     async route(cwd: string, owner: ConsumerContext) {
-      const current = await status(cwd, owner);
-      if (current.runtime.status !== "ready")
-        throw workspaceFailure("workspace_not_ready");
+      await status(cwd, owner);
       const { record, tree } = await find(cwd, owner, true);
+      if (!hasReadyBinding(record))
+        throw workspaceFailure("workspace_not_ready");
       return {
         cwd: tree.cwd,
         socket: await routedSocket(record),
@@ -1290,15 +1373,17 @@ export async function openWorkspaceRuntime(options: {
         throw workspaceFailure("workspace_detaching");
       if (
         ["spawn", "send", "resolvePermission"].includes(action) &&
-        record.info.source.error?.code === "native_view_lost"
+        record.info.source.error !== undefined
       )
         throw record.info.source.error;
       if (action === "spawn") {
         const current = await status(cwd, owner);
-        if (current.runtime.status === "failed")
+        if (record.info.source.error !== undefined)
+          throw record.info.source.error;
+        if (current.runtime.status === "failed" && !hasReadyBinding(record))
           throw current.runtime.error ?? workspaceFailure("provider_failed");
       }
-      if (record.info.runtime.status !== "ready")
+      if (!hasReadyBinding(record))
         throw workspaceFailure("workspace_not_ready");
       if (action === "spawn") {
         const supplied = v.safeParse(spawnParamsSchema, params);
