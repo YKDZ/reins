@@ -1264,6 +1264,157 @@ async function smokePackedCli(
       "The SDK did not expose the daemon's changed-parameter conflict",
     );
 
+  const sendIntentPath = join(directDirectory, "accepted-send.json");
+  const deliveredBeforePrepare = readJsonLines(adapterObservations).filter(
+    ({ type }) => type === "message_delivered",
+  ).length;
+  const preparedSend = await runSdkControl("prepare-send", "sdk-prepare-send", {
+    REINS_TARGET_TURN: recoveredSpawnResult.turnHandle as string,
+  });
+  if (preparedSend.prepared !== true || typeof preparedSend.intent !== "string")
+    throw new Error("The installed SDK did not prepare a send credential");
+  writeFileSync(sendIntentPath, preparedSend.intent, "utf8");
+  const persistedSendIntent = readFileSync(sendIntentPath, "utf8");
+  if (
+    readJsonLines(adapterObservations).filter(
+      ({ type }) => type === "message_delivered",
+    ).length !== deliveredBeforePrepare
+  )
+    throw new Error("Preparing the SDK send operation delivered a message");
+  const sendProxyPath = join(directDirectory, "send-ack-proxy.sock");
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: sendProxyPath,
+    targetPath: directSocket,
+    method: "send",
+  });
+  const sendUnknown = await runSdkControl("send-drop", "sdk-send-drop-ack", {
+    REINS_SOCKET: owned.acknowledgementProxy.socketPath,
+    REINS_OPERATION_INTENT_JSON: persistedSendIntent,
+  });
+  const sendAcknowledgement =
+    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+  await owned.acknowledgementProxy.close();
+  owned.acknowledgementProxy = undefined;
+  if (
+    sendUnknown.code !== "command_outcome_unknown" ||
+    sendUnknown.stage !== "operation" ||
+    sendAcknowledgement.method !== "send" ||
+    !isRecord(sendAcknowledgement.result) ||
+    sendAcknowledgement.result.sessionId !==
+      spawnAcknowledgement.result.sessionId ||
+    sendAcknowledgement.result.turnId !== spawnAcknowledgement.result.turnId
+  )
+    throw new Error("The SDK send response-loss scenario missed its real ACK");
+  const recoveredSend = await runSdkControl(
+    "send-recover",
+    "sdk-send-recover",
+    { REINS_OPERATION_INTENT_JSON: persistedSendIntent },
+  );
+  if (
+    !isRecord(recoveredSend.result) ||
+    recoveredSend.result.sessionHandle !== recoveredSpawnResult.sessionHandle ||
+    recoveredSend.result.turnHandle !== recoveredSpawnResult.turnHandle ||
+    recoveredSend.result.deliveryPoint !== "active_turn"
+  )
+    throw new Error("The SDK did not recover the exact active-turn send");
+  const sendConflict = await runSdkControl(
+    "send-conflict",
+    "sdk-send-conflict",
+    { REINS_OPERATION_INTENT_JSON: persistedSendIntent },
+  );
+  if (sendConflict.code !== "command_id_conflict")
+    throw new Error("The SDK did not expose the changed send conflict");
+  const deliveredMessages = readJsonLines(adapterObservations).filter(
+    ({ type }) => type === "message_delivered",
+  );
+  if (
+    deliveredMessages.length !== deliveredBeforePrepare + 1 ||
+    deliveredMessages[0]?.sessionId !== spawnAcknowledgement.result.sessionId ||
+    deliveredMessages[0]?.turnId !== spawnAcknowledgement.result.turnId ||
+    deliveredMessages[0]?.message !== "  exact delivered note\nkeep spacing  "
+  )
+    throw new Error("Recovering the send duplicated or changed its delivery");
+
+  const interruptIntentPath = join(directDirectory, "accepted-interrupt.json");
+  const interruptedBeforePrepare = readJsonLines(adapterObservations).filter(
+    ({ type }) => type === "interrupt_requested",
+  ).length;
+  const preparedInterrupt = await runSdkControl(
+    "prepare-interrupt",
+    "sdk-prepare-interrupt",
+    { REINS_TARGET_TURN: recoveredSpawnResult.turnHandle as string },
+  );
+  if (
+    preparedInterrupt.prepared !== true ||
+    typeof preparedInterrupt.intent !== "string"
+  )
+    throw new Error(
+      "The installed SDK did not prepare an interrupt credential",
+    );
+  writeFileSync(interruptIntentPath, preparedInterrupt.intent, "utf8");
+  const persistedInterruptIntent = readFileSync(interruptIntentPath, "utf8");
+  if (
+    readJsonLines(adapterObservations).filter(
+      ({ type }) => type === "interrupt_requested",
+    ).length !== interruptedBeforePrepare
+  )
+    throw new Error("Preparing the SDK interrupt operation stopped the worker");
+  const interruptProxyPath = join(directDirectory, "interrupt-ack-proxy.sock");
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: interruptProxyPath,
+    targetPath: directSocket,
+    method: "interrupt",
+  });
+  const interruptUnknown = await runSdkControl(
+    "interrupt-drop",
+    "sdk-interrupt-drop-ack",
+    {
+      REINS_SOCKET: owned.acknowledgementProxy.socketPath,
+      REINS_OPERATION_INTENT_JSON: persistedInterruptIntent,
+    },
+  );
+  const interruptAcknowledgement =
+    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+  await owned.acknowledgementProxy.close();
+  owned.acknowledgementProxy = undefined;
+  if (
+    interruptUnknown.code !== "command_outcome_unknown" ||
+    interruptUnknown.stage !== "operation" ||
+    interruptAcknowledgement.method !== "interrupt" ||
+    !isRecord(interruptAcknowledgement.result) ||
+    interruptAcknowledgement.result.sessionId !==
+      spawnAcknowledgement.result.sessionId ||
+    interruptAcknowledgement.result.turnId !==
+      spawnAcknowledgement.result.turnId
+  )
+    throw new Error(
+      "The SDK interrupt response-loss scenario missed its real ACK",
+    );
+  const recoveredInterrupt = await runSdkControl(
+    "interrupt-recover",
+    "sdk-interrupt-recover",
+    { REINS_OPERATION_INTENT_JSON: persistedInterruptIntent },
+  );
+  if (
+    !isRecord(recoveredInterrupt.result) ||
+    recoveredInterrupt.result.turnHandle !== recoveredSpawnResult.turnHandle ||
+    recoveredInterrupt.result.status !== "accepted" ||
+    !isRecord(recoveredInterrupt.observed) ||
+    recoveredInterrupt.observed.status !== "timeout" ||
+    !Array.isArray(recoveredInterrupt.observed.pending) ||
+    recoveredInterrupt.observed.pending[0] !== recoveredSpawnResult.turnHandle
+  )
+    throw new Error("The SDK confused interrupt acceptance with completion");
+  const interruptRequests = readJsonLines(adapterObservations).filter(
+    ({ type }) => type === "interrupt_requested",
+  );
+  if (
+    interruptRequests.length !== interruptedBeforePrepare + 1 ||
+    interruptRequests[0]?.sessionId !== spawnAcknowledgement.result.sessionId ||
+    interruptRequests[0]?.turnId !== spawnAcknowledgement.result.turnId
+  )
+    throw new Error("Recovering the interrupt repeated or changed its target");
+
   const killIntentPath = join(directDirectory, "accepted-kill.json");
   const preparedKill = await runSdkControl("prepare-kill", "sdk-prepare-kill", {
     REINS_TARGET_SESSION: recoveredSpawnResult.sessionHandle as string,
@@ -1482,13 +1633,57 @@ async function smokePackedCli(
   )
     throw new Error("The joined kill returned before real cleanup finished");
   const activityAtAcknowledgement = readJsonLines(workerActivity);
+  const descriptorCounts = Object.fromEntries(
+    ["worker", "descendant"].map((role) => [
+      role,
+      {
+        opened: activityAtAcknowledgement.filter(
+          (fact) => fact.type === "opened" && fact.role === role,
+        ).length,
+        closed: activityAtAcknowledgement.filter(
+          (fact) => fact.type === "closed" && fact.role === role,
+        ).length,
+        pids: [
+          ...new Set(
+            activityAtAcknowledgement
+              .filter((fact) => fact.role === role)
+              .map((fact) => fact.pid)
+              .filter((pid): pid is number => typeof pid === "number"),
+          ),
+        ],
+      },
+    ]),
+  );
+  const isPidRunning = (pid: number): boolean => {
+    try {
+      process.kill(pid, 0);
+      return true;
+    } catch (error) {
+      return !(isRecord(error) && error.code === "ESRCH");
+    }
+  };
+  recorder.record("worker_cleanup_at_kill_acknowledgement", {
+    descriptorCounts,
+    workerPid: workerReady.workerPid,
+    workerRunning: isPidRunning(workerReady.workerPid),
+    descendantPid: workerReady.descendantPid,
+    descendantRunning: isPidRunning(workerReady.descendantPid),
+    terminateFinished: cleanupFactsAtRecovery.filter(
+      (fact) =>
+        fact.type === "terminate_finished" &&
+        fact.sessionId === recoveredSpawnResult.sessionHandle,
+    ),
+  });
   for (const role of ["worker", "descendant"]) {
     if (
       activityAtAcknowledgement.filter(
         (fact) => fact.type === "closed" && fact.role === role,
       ).length !== 1
-    )
-      throw new Error(`The ${role} descriptor was still open at kill recovery`);
+    ) {
+      throw new Error(
+        `The ${role} descriptor was not closed exactly once at kill recovery: ${JSON.stringify(descriptorCounts)}`,
+      );
+    }
   }
   assertProcessStopped("The recovered worker process", workerReady.workerPid);
   assertProcessStopped(
@@ -1540,6 +1735,16 @@ async function smokePackedCli(
       REINS_OPERATION_INTENT_JSON: persistedSpawnIntent,
     },
   );
+  const staleSend = await runSdkControl(
+    "send-stale",
+    "sdk-send-stale-generation",
+    { REINS_OPERATION_INTENT_JSON: persistedSendIntent },
+  );
+  const staleInterrupt = await runSdkControl(
+    "interrupt-stale",
+    "sdk-interrupt-stale-generation",
+    { REINS_OPERATION_INTENT_JSON: persistedInterruptIntent },
+  );
   const staleHandle = await runSdkControl(
     "handle-stale",
     "sdk-stale-session-handle",
@@ -1547,6 +1752,8 @@ async function smokePackedCli(
   );
   if (
     staleSpawn.code !== "stale_command_id" ||
+    staleSend.code !== "stale_command_id" ||
+    staleInterrupt.code !== "stale_command_id" ||
     staleSpawn.daemonGeneration === generationBeforeRestart ||
     staleHandle.status !== "not_found" ||
     staleHandle.sessionHandle !== recoveredSpawnResult.sessionHandle ||
@@ -1563,6 +1770,14 @@ async function smokePackedCli(
     spawnAcknowledgement: spawnAcknowledgement.result,
     spawnResult: recoveredSpawnResult,
     spawnConflict: spawnConflict.code,
+    sendAcknowledgement,
+    sendResult: recoveredSend.result,
+    sendConflict: sendConflict.code,
+    sendDeliveryCount: deliveredMessages.length,
+    interruptAcknowledgement,
+    interruptResult: recoveredInterrupt.result,
+    interruptPending: recoveredInterrupt.observed,
+    interruptRequestCount: interruptRequests.length,
     capabilityQueriesBeforeRecovery,
     capabilityQueriesAfterRecovery,
     capabilityQueriesAfterNewCredential,
@@ -1575,6 +1790,8 @@ async function smokePackedCli(
     workerPids: [workerReady.workerPid, workerReady.descendantPid],
     descriptorsClosed: ["worker", "descendant"],
     staleCredential: staleSpawn.code,
+    staleSend: staleSend.code,
+    staleInterrupt: staleInterrupt.code,
     staleHandle: staleHandle.status,
   });
 
@@ -2195,7 +2412,9 @@ async function smokePackedCli(
     "prepareOperation",
   );
   if (typeof replacementCredential.credential !== "string")
-    throw new Error("The installed CLI omitted the replacement spawn credential");
+    throw new Error(
+      "The installed CLI omitted the replacement spawn credential",
+    );
   const replacementSpawnLog = join(
     logsDirectory,
     "installed-cli-replacement-spawn.log",
@@ -2359,6 +2578,367 @@ async function smokePackedCli(
     requireSuccess(label, result, join(logsDirectory, `${label}.log`));
     return result;
   };
+
+  // 冻结安装的 SDK 与 CLI 分别创建新回合；两个新回合由可控门闩反向完成，
+  // 再验证 any/all 保留调用者给出的句柄顺序，timeout=0 也不会取消工作。
+  const orderedTurnsDirectory = join(killedListDirectory, "ordered-turns");
+  mkdirSync(orderedTurnsDirectory);
+  const sdkTurnGate = join(orderedTurnsDirectory, "release-sdk-turn");
+  const cliTurnGate = join(orderedTurnsDirectory, "release-cli-turn");
+  owned.releaseGates.push(sdkTurnGate, cliTurnGate);
+  const spawnAndComplete = async (
+    sessionName: string,
+  ): Promise<{ sessionHandle: string; turnHandle: string }> => {
+    const credentialOutput = await runInstalledCli(
+      ["prepare-operation", "spawn"],
+      `ordered-${sessionName}-prepare-spawn`,
+      killedListEnv,
+    );
+    const credentialData = readDataEnvelope(
+      `ordered ${sessionName} spawn credential`,
+      credentialOutput.stdout,
+      "prepareOperation",
+    );
+    if (typeof credentialData.credential !== "string")
+      throw new Error(`The installed CLI omitted ${sessionName} spawn intent`);
+    const intentPath = join(orderedTurnsDirectory, `${sessionName}-spawn.json`);
+    const input = {
+      name: sessionName,
+      harness: "simulated",
+      message: JSON.stringify({ reply: `${sessionName} initial turn` }),
+      cwd: historyWorkspace,
+    };
+    writeFileSync(
+      intentPath,
+      JSON.stringify({
+        operation: "spawn",
+        credential: credentialData.credential,
+        input,
+      }),
+      "utf8",
+    );
+    const persisted = readJsonRecord(
+      `persisted ${sessionName} spawn intent`,
+      readFileSync(intentPath, "utf8"),
+    );
+    if (!isRecord(persisted.input))
+      throw new Error(`The ${sessionName} spawn intent was not persisted`);
+    const spawned = await runInstalledCli(
+      [
+        "spawn",
+        "--operation",
+        persisted.credential as string,
+        "--name",
+        persisted.input.name as string,
+        "--harness",
+        persisted.input.harness as string,
+        "--message",
+        persisted.input.message as string,
+        "--cwd",
+        persisted.input.cwd as string,
+      ],
+      `ordered-${sessionName}-spawn`,
+      killedListEnv,
+    );
+    const spawnData = readDataEnvelope(
+      `ordered ${sessionName} spawn`,
+      spawned.stdout,
+      "spawn",
+    );
+    if (
+      typeof spawnData.sessionHandle !== "string" ||
+      typeof spawnData.turnHandle !== "string"
+    )
+      throw new Error(`The installed CLI omitted ${sessionName} exact handles`);
+    const initialWait = await runInstalledCli(
+      [
+        "wait",
+        spawnData.turnHandle,
+        "--completion",
+        "all",
+        "--timeout",
+        "5000",
+      ],
+      `ordered-${sessionName}-initial-wait`,
+      killedListEnv,
+    );
+    const waitEnvelope = readJsonRecord(
+      `ordered ${sessionName} initial wait`,
+      initialWait.stdout,
+    );
+    if (
+      !isRecord(waitEnvelope.data) ||
+      !isRecord(waitEnvelope.data.result) ||
+      waitEnvelope.data.result.status !== "satisfied"
+    )
+      throw new Error(`The ${sessionName} initial turn did not complete`);
+    return {
+      sessionHandle: spawnData.sessionHandle,
+      turnHandle: spawnData.turnHandle,
+    };
+  };
+  const sdkBaseTurn = await spawnAndComplete("packed-sdk-ordered");
+  const cliBaseTurn = await spawnAndComplete("packed-cli-ordered");
+  const sdkNewTurnMessage = JSON.stringify({
+    completionGate: sdkTurnGate,
+    reply: "SDK new turn completed last",
+  });
+  const sdkPreparedNewTurn = await runSdkControl(
+    "prepare-new-turn",
+    "installed-sdk-prepare-new-turn",
+    {
+      ...killedListEnv,
+      REINS_TARGET_SESSION: sdkBaseTurn.sessionHandle,
+      REINS_NEW_TURN_MESSAGE: sdkNewTurnMessage,
+    },
+  );
+  if (
+    sdkPreparedNewTurn.prepared !== true ||
+    typeof sdkPreparedNewTurn.intent !== "string"
+  )
+    throw new Error("The installed SDK did not prepare a new-turn intent");
+  const sdkNewTurnIntentPath = join(orderedTurnsDirectory, "sdk-send.json");
+  writeFileSync(sdkNewTurnIntentPath, sdkPreparedNewTurn.intent, "utf8");
+  const sdkNewTurnIntent = readFileSync(sdkNewTurnIntentPath, "utf8");
+  const sdkNewTurnOutput = await runSdkControl(
+    "send-new-turn",
+    "installed-sdk-send-new-turn",
+    { ...killedListEnv, REINS_OPERATION_INTENT_JSON: sdkNewTurnIntent },
+  );
+  if (
+    !isRecord(sdkNewTurnOutput.result) ||
+    sdkNewTurnOutput.result.sessionHandle !== sdkBaseTurn.sessionHandle ||
+    sdkNewTurnOutput.result.deliveryPoint !== "new_turn" ||
+    typeof sdkNewTurnOutput.result.turnHandle !== "string"
+  )
+    throw new Error("The installed SDK did not return the exact new turn");
+  const sdkTurnHandle = sdkNewTurnOutput.result.turnHandle;
+
+  const cliNewTurnMessage = JSON.stringify({
+    completionGate: cliTurnGate,
+    reply: "CLI new turn completed first",
+  });
+  const cliNewTurnCredentialOutput = await runInstalledCli(
+    ["prepare-operation", "send"],
+    "installed-cli-prepare-new-turn",
+    killedListEnv,
+  );
+  const cliNewTurnCredential = readDataEnvelope(
+    "installed CLI new-turn credential",
+    cliNewTurnCredentialOutput.stdout,
+    "prepareOperation",
+  );
+  if (typeof cliNewTurnCredential.credential !== "string")
+    throw new Error("The installed CLI did not prepare a new-turn credential");
+  const cliNewTurnIntentPath = join(orderedTurnsDirectory, "cli-send.json");
+  writeFileSync(
+    cliNewTurnIntentPath,
+    JSON.stringify({
+      operation: "send",
+      credential: cliNewTurnCredential.credential,
+      sessionHandle: cliBaseTurn.sessionHandle,
+      placement: "new_turn",
+      message: cliNewTurnMessage,
+    }),
+    "utf8",
+  );
+  const cliNewTurnIntent = readJsonRecord(
+    "persisted CLI new-turn intent",
+    readFileSync(cliNewTurnIntentPath, "utf8"),
+  );
+  const cliNewTurnOutput = await runInstalledCli(
+    [
+      "send",
+      cliNewTurnIntent.sessionHandle as string,
+      "--placement",
+      cliNewTurnIntent.placement as string,
+      "--message",
+      cliNewTurnIntent.message as string,
+      "--operation",
+      cliNewTurnIntent.credential as string,
+    ],
+    "installed-cli-send-new-turn",
+    killedListEnv,
+  );
+  const cliNewTurnData = readDataEnvelope(
+    "installed CLI new-turn result",
+    cliNewTurnOutput.stdout,
+    "send",
+  );
+  if (
+    cliNewTurnData.sessionHandle !== cliBaseTurn.sessionHandle ||
+    typeof cliNewTurnData.turnHandle !== "string" ||
+    JSON.stringify(Object.keys(cliNewTurnData).sort()) !==
+      JSON.stringify(["sessionHandle", "turnHandle"])
+  )
+    throw new Error(
+      "The installed CLI did not return only its exact new-turn handles",
+    );
+  const cliTurnHandle = cliNewTurnData.turnHandle;
+  const orderedTurnHandles = [sdkTurnHandle, cliTurnHandle];
+
+  const assertSdkOrderedWait = (
+    label: string,
+    value: Record<string, unknown>,
+    status: "timeout" | "satisfied",
+    completed: string[],
+    pending: string[],
+  ): void => {
+    const result = value.result;
+    if (
+      !isRecord(result) ||
+      result.status !== status ||
+      !Array.isArray(result.completed) ||
+      !Array.isArray(result.pending) ||
+      JSON.stringify(
+        result.completed.map((item) =>
+          isRecord(item) && typeof item.turnHandle === "string"
+            ? item.turnHandle
+            : "",
+        ),
+      ) !== JSON.stringify(completed) ||
+      JSON.stringify(result.pending) !== JSON.stringify(pending)
+    )
+      throw new Error(`The installed SDK ${label} wait changed target order`);
+  };
+  const assertCliOrderedWait = (
+    label: string,
+    result: CommandResult,
+    expectedExit: number,
+    status: "timeout" | "satisfied",
+    completed: string[],
+    pending: string[],
+  ): void => {
+    const envelope = readJsonRecord(label, result.stdout);
+    const waitResult = envelope.data;
+    if (
+      result.status !== expectedExit ||
+      !isRecord(waitResult) ||
+      !isRecord(waitResult.result) ||
+      waitResult.result.status !== status ||
+      !Array.isArray(waitResult.result.completed) ||
+      !Array.isArray(waitResult.result.pending) ||
+      JSON.stringify(
+        waitResult.result.completed.map((item) =>
+          isRecord(item) && typeof item.turnHandle === "string"
+            ? item.turnHandle
+            : "",
+        ),
+      ) !== JSON.stringify(completed) ||
+      JSON.stringify(
+        waitResult.result.pending.map((item) =>
+          isRecord(item) && typeof item.turnHandle === "string"
+            ? item.turnHandle
+            : "",
+        ),
+      ) !== JSON.stringify(pending)
+    )
+      throw new Error(`The installed CLI ${label} wait changed target order`);
+  };
+
+  const sdkWaitTargetsEnv = {
+    ...killedListEnv,
+    REINS_TARGET_TURNS: JSON.stringify(orderedTurnHandles),
+  };
+  const sdkTimedOutWait = await runSdkControl(
+    "wait-ordered",
+    "installed-sdk-ordered-any-timeout",
+    {
+      ...sdkWaitTargetsEnv,
+      REINS_WAIT_COMPLETION: "any",
+      REINS_WAIT_TIMEOUT_MS: "0",
+    },
+  );
+  assertSdkOrderedWait(
+    "timed-out any",
+    sdkTimedOutWait,
+    "timeout",
+    [],
+    orderedTurnHandles,
+  );
+  const cliTimedOutWait = await runInstalledCliResult(
+    ["wait", ...orderedTurnHandles, "--completion", "any", "--timeout", "0"],
+    "installed-cli-ordered-any-timeout",
+    killedListEnv,
+  );
+  assertCliOrderedWait(
+    "timed-out any",
+    cliTimedOutWait,
+    4,
+    "timeout",
+    [],
+    orderedTurnHandles,
+  );
+
+  writeFileSync(cliTurnGate, "release CLI turn first", "utf8");
+  owned.releaseGates = owned.releaseGates.filter(
+    (gate) => gate !== cliTurnGate,
+  );
+  const sdkAnyWait = await runSdkControl(
+    "wait-ordered",
+    "installed-sdk-ordered-any-completed",
+    {
+      ...sdkWaitTargetsEnv,
+      REINS_WAIT_COMPLETION: "any",
+      REINS_WAIT_TIMEOUT_MS: "5000",
+    },
+  );
+  assertSdkOrderedWait(
+    "any",
+    sdkAnyWait,
+    "satisfied",
+    [cliTurnHandle],
+    [sdkTurnHandle],
+  );
+  const cliAnyWait = await runInstalledCliResult(
+    ["wait", ...orderedTurnHandles, "--completion", "any", "--timeout", "5000"],
+    "installed-cli-ordered-any-completed",
+    killedListEnv,
+  );
+  assertCliOrderedWait(
+    "any",
+    cliAnyWait,
+    0,
+    "satisfied",
+    [cliTurnHandle],
+    [sdkTurnHandle],
+  );
+
+  writeFileSync(sdkTurnGate, "release SDK turn second", "utf8");
+  owned.releaseGates = owned.releaseGates.filter(
+    (gate) => gate !== sdkTurnGate,
+  );
+  const sdkAllWait = await runSdkControl(
+    "wait-ordered",
+    "installed-sdk-ordered-all",
+    {
+      ...sdkWaitTargetsEnv,
+      REINS_WAIT_COMPLETION: "all",
+      REINS_WAIT_TIMEOUT_MS: "5000",
+    },
+  );
+  assertSdkOrderedWait("all", sdkAllWait, "satisfied", orderedTurnHandles, []);
+  const cliAllWait = await runInstalledCli(
+    ["wait", ...orderedTurnHandles, "--completion", "all", "--timeout", "5000"],
+    "installed-cli-ordered-all",
+    killedListEnv,
+  );
+  assertCliOrderedWait(
+    "all",
+    cliAllWait,
+    0,
+    "satisfied",
+    orderedTurnHandles,
+    [],
+  );
+  recorder.record("installed_sdk_cli_new_turn_and_ordered_wait", {
+    sdkNewTurn: sdkNewTurnOutput.result,
+    cliNewTurn: cliNewTurnData,
+    timedOutPending: orderedTurnHandles,
+    anyCompletedFirst: cliTurnHandle,
+    allCompletedInRequestedOrder: orderedTurnHandles,
+    persistedIntentPaths: [sdkNewTurnIntentPath, cliNewTurnIntentPath],
+  });
 
   const cliPreparedSpawnOutput = await runInstalledCli(
     ["prepare-operation", "spawn"],
@@ -2537,6 +3117,265 @@ async function smokePackedCli(
     cliListData.sessions[0].activeTurn !== cliSpawnData.turnHandle
   )
     throw new Error("The installed CLI did not list its exact active turn");
+
+  const cliPreparedSendOutput = await runInstalledCli(
+    ["prepare-operation", "send"],
+    "installed-cli-prepare-send",
+  );
+  const cliPreparedSendData = readDataEnvelope(
+    "installed CLI prepare send",
+    cliPreparedSendOutput.stdout,
+    "prepareOperation",
+  );
+  if (
+    cliPreparedSendData.operation !== "send" ||
+    typeof cliPreparedSendData.credential !== "string"
+  )
+    throw new Error("The installed CLI did not prepare a send credential");
+  const cliSendMessage = "  installed CLI send\nkeep spacing  ";
+  const cliSendIntentPath = join(controlCliDirectory, "accepted-send.json");
+  writeFileSync(
+    cliSendIntentPath,
+    JSON.stringify({
+      operation: "send",
+      credential: cliPreparedSendData.credential,
+      turnHandle: cliSpawnData.turnHandle,
+      message: cliSendMessage,
+    }),
+    "utf8",
+  );
+  const cliSendIntent = readJsonRecord(
+    "persisted CLI send operation",
+    readFileSync(cliSendIntentPath, "utf8"),
+  );
+  const cliSendArgs = [
+    "send",
+    cliSendIntent.turnHandle as string,
+    "--placement",
+    "active_turn",
+    "--message",
+    cliSendIntent.message as string,
+    "--operation",
+    cliSendIntent.credential as string,
+  ];
+  const cliSendProxyPath = join(controlCliDirectory, "send-ack-proxy.sock");
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: cliSendProxyPath,
+    targetPath: controlCliSocket,
+    method: "send",
+  });
+  const lostCliSend = await runInstalledCliResult(
+    cliSendArgs,
+    "installed-cli-send-drop-ack",
+    { ...controlCliEnv, REINS_SOCKET: owned.acknowledgementProxy.socketPath },
+  );
+  const cliSendAcknowledgement =
+    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+  await owned.acknowledgementProxy.close();
+  owned.acknowledgementProxy = undefined;
+  const lostCliSendData = readFailureEnvelope(
+    "installed CLI send response loss",
+    lostCliSend,
+    "send",
+    "operationFailed",
+  );
+  if (
+    lostCliSend.status !== 70 ||
+    !isRecord(lostCliSendData.failure) ||
+    lostCliSendData.failure.code !== "command_outcome_unknown" ||
+    !isRecord(lostCliSendData.failure.facts) ||
+    lostCliSendData.failure.facts.operation !== "send" ||
+    cliSendAcknowledgement.method !== "send" ||
+    !isRecord(cliSendAcknowledgement.result) ||
+    cliSendAcknowledgement.result.sessionId !== cliSpawnData.sessionHandle ||
+    cliSendAcknowledgement.result.turnId !==
+      (cliSpawnData.turnHandle as string).split("/")[1]?.split(".")[0] ||
+    `${lostCliSend.stdout}${lostCliSend.stderr}`.includes(cliSendMessage)
+  )
+    throw new Error(
+      "The installed CLI did not report send response loss without exposing its input",
+    );
+  const recoveredCliSendOutput = await runInstalledCli(
+    cliSendArgs,
+    "installed-cli-send-recover",
+  );
+  const recoveredCliSend = readDataEnvelope(
+    "installed CLI send recovery",
+    recoveredCliSendOutput.stdout,
+    "send",
+  );
+  if (
+    recoveredCliSend.sessionHandle !== cliSpawnData.sessionHandle ||
+    recoveredCliSend.turnHandle !== cliSpawnData.turnHandle ||
+    JSON.stringify(Object.keys(recoveredCliSend).sort()) !==
+      JSON.stringify(["sessionHandle", "turnHandle"]) ||
+    typeof cliSendAcknowledgement.result.messageId !== "string"
+  )
+    throw new Error(
+      "The installed CLI did not recover only the exact send handles",
+    );
+  const conflictingCliSend = await runInstalledCliResult(
+    [
+      ...cliSendArgs.slice(0, 5),
+      `${cliSendMessage} changed`,
+      ...cliSendArgs.slice(6),
+    ],
+    "installed-cli-send-conflict",
+  );
+  const conflictingCliSendData = readFailureEnvelope(
+    "installed CLI send conflict",
+    conflictingCliSend,
+    "send",
+    "operationFailed",
+  );
+  if (
+    conflictingCliSend.status !== 70 ||
+    !isRecord(conflictingCliSendData.failure) ||
+    conflictingCliSendData.failure.code !== "command_id_conflict"
+  )
+    throw new Error("The installed CLI did not preserve the send conflict");
+  const cliDeliveredMessages = readJsonLines(controlCliObservations).filter(
+    ({ type }) => type === "message_delivered",
+  );
+  if (
+    cliDeliveredMessages.length !== 1 ||
+    cliDeliveredMessages[0]?.sessionId !== cliSpawnData.sessionHandle ||
+    cliDeliveredMessages[0]?.message !== cliSendMessage
+  )
+    throw new Error(
+      "The installed CLI replayed or changed the delivered message",
+    );
+
+  const cliPreparedInterruptOutput = await runInstalledCli(
+    ["prepare-operation", "interrupt"],
+    "installed-cli-prepare-interrupt",
+  );
+  const cliPreparedInterruptData = readDataEnvelope(
+    "installed CLI prepare interrupt",
+    cliPreparedInterruptOutput.stdout,
+    "prepareOperation",
+  );
+  if (
+    cliPreparedInterruptData.operation !== "interrupt" ||
+    typeof cliPreparedInterruptData.credential !== "string"
+  )
+    throw new Error(
+      "The installed CLI did not prepare an interrupt credential",
+    );
+  const cliInterruptIntentPath = join(
+    controlCliDirectory,
+    "accepted-interrupt.json",
+  );
+  writeFileSync(
+    cliInterruptIntentPath,
+    JSON.stringify({
+      operation: "interrupt",
+      credential: cliPreparedInterruptData.credential,
+      turnHandle: cliSpawnData.turnHandle,
+    }),
+    "utf8",
+  );
+  const cliInterruptIntent = readJsonRecord(
+    "persisted CLI interrupt operation",
+    readFileSync(cliInterruptIntentPath, "utf8"),
+  );
+  const cliInterruptArgs = [
+    "interrupt",
+    cliInterruptIntent.turnHandle as string,
+    "--operation",
+    cliInterruptIntent.credential as string,
+  ];
+  const cliInterruptProxyPath = join(
+    controlCliDirectory,
+    "interrupt-ack-proxy.sock",
+  );
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: cliInterruptProxyPath,
+    targetPath: controlCliSocket,
+    method: "interrupt",
+  });
+  const lostCliInterrupt = await runInstalledCliResult(
+    cliInterruptArgs,
+    "installed-cli-interrupt-drop-ack",
+    {
+      ...controlCliEnv,
+      REINS_SOCKET: owned.acknowledgementProxy.socketPath,
+    },
+  );
+  const cliInterruptAcknowledgement =
+    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+  await owned.acknowledgementProxy.close();
+  owned.acknowledgementProxy = undefined;
+  const lostCliInterruptData = readFailureEnvelope(
+    "installed CLI interrupt response loss",
+    lostCliInterrupt,
+    "interrupt",
+    "operationFailed",
+  );
+  if (
+    lostCliInterrupt.status !== 70 ||
+    !isRecord(lostCliInterruptData.failure) ||
+    lostCliInterruptData.failure.code !== "command_outcome_unknown" ||
+    !isRecord(lostCliInterruptData.failure.facts) ||
+    lostCliInterruptData.failure.facts.operation !== "interrupt" ||
+    cliInterruptAcknowledgement.method !== "interrupt" ||
+    !isRecord(cliInterruptAcknowledgement.result) ||
+    cliInterruptAcknowledgement.result.sessionId !== cliSpawnData.sessionHandle
+  )
+    throw new Error(
+      "The installed CLI did not preserve typed interrupt response loss",
+    );
+  const recoveredCliInterruptOutput = await runInstalledCli(
+    cliInterruptArgs,
+    "installed-cli-interrupt-recover",
+  );
+  const recoveredCliInterrupt = readDataEnvelope(
+    "installed CLI interrupt recovery",
+    recoveredCliInterruptOutput.stdout,
+    "interrupt",
+  );
+  if (
+    recoveredCliInterrupt.turnHandle !== cliSpawnData.turnHandle ||
+    recoveredCliInterrupt.status !== "accepted"
+  )
+    throw new Error("The installed CLI did not recover interrupt acceptance");
+  const cliInterruptWait = await runInstalledCliResult(
+    [
+      "wait",
+      cliSpawnData.turnHandle as string,
+      "--completion",
+      "all",
+      "--timeout",
+      "0",
+    ],
+    "installed-cli-interrupt-remains-pending",
+  );
+  const cliInterruptWaitEnvelope = readJsonRecord(
+    "installed CLI wait after accepted interrupt",
+    cliInterruptWait.stdout,
+  );
+  if (
+    cliInterruptWait.status !== 4 ||
+    !isRecord(cliInterruptWaitEnvelope.data) ||
+    !isRecord(cliInterruptWaitEnvelope.data.result) ||
+    cliInterruptWaitEnvelope.data.result.status !== "timeout" ||
+    !Array.isArray(cliInterruptWaitEnvelope.data.result.pending) ||
+    !isRecord(cliInterruptWaitEnvelope.data.result.pending[0]) ||
+    cliInterruptWaitEnvelope.data.result.pending[0].turnHandle !==
+      cliSpawnData.turnHandle
+  )
+    throw new Error("The installed CLI treated interrupt ACK as completion");
+  const cliInterruptRequests = readJsonLines(controlCliObservations).filter(
+    ({ type }) => type === "interrupt_requested",
+  );
+  if (
+    cliInterruptRequests.length !== 1 ||
+    cliInterruptRequests[0]?.sessionId !== cliSpawnData.sessionHandle ||
+    cliInterruptRequests[0]?.turnId !==
+      (cliSpawnData.turnHandle as string).split("/")[1]?.split(".")[0]
+  )
+    throw new Error("The installed CLI replayed or retargeted the interrupt");
+
   const disconnectedSdk = await runSdkControl(
     "disconnect-first-fact",
     "installed-sdk-disconnect-first-fact",
@@ -2850,10 +3689,36 @@ async function smokePackedCli(
     "spawn",
     "operationFailed",
   );
+  const staleCliSend = await runInstalledCliResult(
+    cliSendArgs,
+    "installed-cli-stale-send-credential",
+  );
+  const staleCliSendData = readFailureEnvelope(
+    "installed CLI stale send credential",
+    staleCliSend,
+    "send",
+    "operationFailed",
+  );
+  const staleCliInterrupt = await runInstalledCliResult(
+    cliInterruptArgs,
+    "installed-cli-stale-interrupt-credential",
+  );
+  const staleCliInterruptData = readFailureEnvelope(
+    "installed CLI stale interrupt credential",
+    staleCliInterrupt,
+    "interrupt",
+    "operationFailed",
+  );
   if (
     staleCliSpawn.status !== 70 ||
     !isRecord(staleCliSpawnData.failure) ||
     staleCliSpawnData.failure.code !== "stale_command_id" ||
+    staleCliSend.status !== 70 ||
+    !isRecord(staleCliSendData.failure) ||
+    staleCliSendData.failure.code !== "stale_command_id" ||
+    staleCliInterrupt.status !== 70 ||
+    !isRecord(staleCliInterruptData.failure) ||
+    staleCliInterruptData.failure.code !== "stale_command_id" ||
     readJsonLines(controlCliObservations).filter(
       ({ type }) => type === "worker_started",
     ).length !== 1
@@ -2868,6 +3733,18 @@ async function smokePackedCli(
     droppedAcknowledgement: cliSpawnAcknowledgement,
     recovered: cliSpawnData,
     staleGeneration: staleCliSpawnData.failure,
+    sendResponseLoss: lostCliSendData.failure,
+    sendAcknowledgement: cliSendAcknowledgement,
+    sendRecovered: recoveredCliSend,
+    sendConflict: conflictingCliSendData.failure,
+    sendDeliveryCount: cliDeliveredMessages.length,
+    interruptResponseLoss: lostCliInterruptData.failure,
+    interruptAcknowledgement: cliInterruptAcknowledgement,
+    interruptRecovered: recoveredCliInterrupt,
+    interruptPending: cliInterruptWaitEnvelope.data.result,
+    interruptRequestCount: cliInterruptRequests.length,
+    staleSend: staleCliSendData.failure,
+    staleInterrupt: staleCliInterruptData.failure,
     workerStartCount: 1,
   });
   recorder.record("frozen_consumer_cli_session_control", {

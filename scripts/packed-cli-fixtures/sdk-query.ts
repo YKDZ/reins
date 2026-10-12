@@ -45,6 +45,10 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.operation;
     case "session_name_conflict":
       return failure.facts.sessionName;
+    case "session_busy":
+      return failure.facts.sessionHandle;
+    case "turn_not_active":
+      return failure.facts.turnHandle;
     case "unsupported_feature":
       return failure.facts.feature;
     case "event_cursor_expired":

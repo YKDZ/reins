@@ -15,8 +15,11 @@ import {
   ReinsSdkError,
   createPresentationProjector,
   type CapabilitiesResult,
+  type InterruptResult,
   type OperationCredential,
   type OperationKind,
+  type SendInput,
+  type SendResult,
   type SpawnInput,
   type AgentFact,
   type AgentPresentation,
@@ -26,11 +29,13 @@ import {
   type SessionFilter,
   type SessionInfo,
   type SessionHandle,
+  type WaitResult,
   type TurnHandle,
   type ResumeCursor,
 } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 
+import { harnessFailureMessage } from "./harness-failure.ts";
 import { standardSchema } from "./standard-schema.ts";
 
 export type ReinsCliDependencies = {
@@ -85,7 +90,8 @@ const harnessCapabilitySchema = v.strictObject({
 
 const capabilityFailureSchema = v.strictObject({
   harness: v.string(),
-  ...harnessFailureSchema.entries,
+  failure: harnessFailureSchema,
+  message: v.string(),
   diagnosticId: v.optional(v.string()),
 });
 
@@ -134,7 +140,7 @@ const sessionListSchema = v.strictObject({
 });
 
 const preparedOperationSchema = v.strictObject({
-  operation: v.picklist(["spawn", "kill"]),
+  operation: v.picklist(["spawn", "send", "interrupt", "kill"]),
   credential: v.string(),
 });
 const spawnResultSchema = v.strictObject({
@@ -145,6 +151,37 @@ const spawnResultSchema = v.strictObject({
 const killResultSchema = v.strictObject({
   sessionHandle: v.string(),
   status: v.picklist(["killed", "not_found"]),
+});
+const sendResultSchema = v.strictObject({
+  sessionHandle: v.string(),
+  turnHandle: v.string(),
+});
+const waitCompletedFields = {
+  turnHandle: v.string(),
+  finalReply: v.nullable(v.string()),
+  usage: v.optional(v.record(v.string(), v.unknown())),
+  diagnosticId: v.optional(v.string()),
+};
+const waitCompletedSchema = v.union([
+  v.strictObject({
+    ...waitCompletedFields,
+    stopReason: v.literal("failed"),
+    failure: harnessFailureSchema,
+    message: v.string(),
+  }),
+  v.strictObject({
+    ...waitCompletedFields,
+    stopReason: v.picklist(["end_turn", "cancelled", "killed"]),
+  }),
+]);
+const waitResultSchema = v.strictObject({
+  status: v.picklist(["satisfied", "timeout"]),
+  completed: v.array(waitCompletedSchema),
+  pending: v.array(v.strictObject({ turnHandle: v.string() })),
+});
+const interruptResultSchema = v.strictObject({
+  turnHandle: v.string(),
+  status: v.literal("accepted"),
 });
 
 const sdkFailureSchema = v.strictObject({
@@ -263,7 +300,20 @@ function createCli(version: string) {
           try {
             connection = await dependencies.connect();
             const result: CapabilitiesResult = await connection.capabilities();
-            return outcome.data.result(result);
+            return outcome.data.result({
+              capabilities: result.capabilities,
+              failures: result.failures.map(
+                ({ harness, diagnosticId, ...failure }) => ({
+                  harness,
+                  failure,
+                  ...(diagnosticId === undefined ? {} : { diagnosticId }),
+                  message: harnessFailureMessage(
+                    failure,
+                    diagnosticId as Parameters<typeof harnessFailureMessage>[1],
+                  ),
+                }),
+              ),
+            });
           } catch (error) {
             if (error instanceof ReinsSdkError)
               return outcome.failure.queryFailed({ failure: error.failure });
@@ -282,11 +332,14 @@ function createCli(version: string) {
         fields: {
           operation: {
             kind: "positional",
-            description: "Operation to prepare: spawn or kill.",
+            description:
+              "Operation to prepare: spawn, send, interrupt or kill.",
           },
         },
         input: standardSchema(
-          v.object({ operation: v.picklist(["spawn", "kill"]) }),
+          v.object({
+            operation: v.picklist(["spawn", "send", "interrupt", "kill"]),
+          }),
         ),
         success: {
           kind: "data",
@@ -633,6 +686,287 @@ function createCli(version: string) {
           }
         },
       }),
+      ...define.command("send")({
+        kind: "command",
+        parent: "reins",
+        name: "send",
+        description: "Send a message to an explicitly selected turn.",
+        fields: {
+          target: {
+            kind: "positional",
+            description:
+              "Session handle for new_turn or turn handle for active_turn.",
+          },
+          placement: {
+            kind: "valueOption",
+            longOption: "--placement",
+            description: "Explicitly choose active_turn or new_turn.",
+          },
+          message: {
+            kind: "valueOption",
+            longOption: "--message",
+            description: "The exact message text to deliver.",
+          },
+          operation: {
+            kind: "valueOption",
+            longOption: "--operation",
+            description: "Credential returned by prepare-operation send.",
+          },
+        },
+        input: standardSchema(
+          v.object({
+            target: v.string(),
+            placement: v.picklist(["active_turn", "new_turn"]),
+            message: v.string(),
+            operation: v.string(),
+          }),
+        ),
+        success: {
+          kind: "data",
+          variants: {
+            result: {
+              description: "The exact turn that accepted the message.",
+              exitCode: 0,
+              schema: standardSchema(sendResultSchema),
+              text: ({ turnHandle }) =>
+                text.line(`Message delivered to ${turnHandle}`),
+            },
+          },
+        },
+        failures: {
+          operationFailed: {
+            description: "The message could not be delivered or recovered.",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) => text.line(`Send failed: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const sendInput: SendInput =
+              input.placement === "active_turn"
+                ? {
+                    placement: "active_turn",
+                    turnHandle: input.target as TurnHandle,
+                    message: input.message,
+                  }
+                : {
+                    placement: "new_turn",
+                    sessionHandle: input.target as SessionHandle,
+                    message: input.message,
+                  };
+            const result: SendResult = await connection.send(
+              sendInput,
+              input.operation as OperationCredential<"send">,
+            );
+            return outcome.data.result({
+              sessionHandle: result.sessionHandle,
+              turnHandle: result.turnHandle,
+            });
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.operationFailed({
+                failure: error.failure,
+              });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
+      ...define.command("wait")({
+        kind: "command",
+        parent: "reins",
+        name: "wait",
+        description:
+          "Wait for an exact set of turns using any or all completion.",
+        fields: {
+          targets: {
+            kind: "variadicPositional",
+            description: "One or more exact turn handles.",
+          },
+          completion: {
+            kind: "valueOption",
+            longOption: "--completion",
+            description: "Return when any or all targets are complete.",
+          },
+          timeout: {
+            kind: "valueOption",
+            longOption: "--timeout",
+            description:
+              "Observation budget in milliseconds; omitted waits indefinitely.",
+          },
+        },
+        input: standardSchema(
+          v.object({
+            targets: v.array(v.string()),
+            completion: v.picklist(["any", "all"]),
+            timeout: v.optional(
+              v.pipe(
+                v.string(),
+                v.check(
+                  (value) =>
+                    Number.isFinite(Number(value)) && Number(value) >= 0,
+                ),
+              ),
+            ),
+          }),
+          ["check"],
+        ),
+        success: {
+          kind: "data",
+          variants: {
+            completed: {
+              description: "All requested turns completed.",
+              exitCode: 0,
+              schema: standardSchema(
+                v.strictObject({ result: waitResultSchema }),
+              ),
+              text: ({ result }) => renderWaitText(result),
+            },
+            failed: {
+              description: "A turn completed with a Harness failure.",
+              exitCode: 1,
+              schema: standardSchema(
+                v.strictObject({ result: waitResultSchema }),
+              ),
+              text: ({ result }) => renderWaitText(result),
+            },
+            cancelled: {
+              description: "A turn completed after cancellation.",
+              exitCode: 2,
+              schema: standardSchema(
+                v.strictObject({ result: waitResultSchema }),
+              ),
+              text: ({ result }) => renderWaitText(result),
+            },
+            killed: {
+              description: "A turn completed after its session was killed.",
+              exitCode: 3,
+              schema: standardSchema(
+                v.strictObject({ result: waitResultSchema }),
+              ),
+              text: ({ result }) => renderWaitText(result),
+            },
+            timeout: {
+              description: "The observation budget ended with pending turns.",
+              exitCode: 4,
+              schema: standardSchema(
+                v.strictObject({ result: waitResultSchema }),
+              ),
+              text: ({ result }) => renderWaitText(result),
+            },
+          },
+        },
+        failures: {
+          queryFailed: {
+            description: "The wait request could not be completed.",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) => text.line(`Wait failed: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const result = await connection.wait({
+              targets: input.targets as TurnHandle[],
+              completion: input.completion,
+              ...(input.timeout === undefined
+                ? {}
+                : { timeoutMs: Number(input.timeout) }),
+            });
+            const output = projectWaitResult(result);
+            if (result.status === "timeout")
+              return outcome.data.timeout({ result: output });
+            if (result.completed.some((turn) => turn.stopReason === "failed"))
+              return outcome.data.failed({ result: output });
+            if (result.completed.some((turn) => turn.stopReason === "killed"))
+              return outcome.data.killed({ result: output });
+            if (
+              result.completed.some((turn) => turn.stopReason === "cancelled")
+            )
+              return outcome.data.cancelled({ result: output });
+            return outcome.data.completed({ result: output });
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.queryFailed({ failure: error.failure });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
+      ...define.command("interrupt")({
+        kind: "command",
+        parent: "reins",
+        name: "interrupt",
+        description: "Request interruption of one exact turn.",
+        fields: {
+          target: {
+            kind: "positional",
+            description: "Exact turn handle to interrupt.",
+          },
+          operation: {
+            kind: "valueOption",
+            longOption: "--operation",
+            description: "Credential returned by prepare-operation interrupt.",
+          },
+        },
+        input: standardSchema(
+          v.object({ target: v.string(), operation: v.string() }),
+        ),
+        success: {
+          kind: "data",
+          variants: {
+            result: {
+              description: "The interruption request was accepted.",
+              exitCode: 0,
+              schema: standardSchema(interruptResultSchema),
+              text: ({ turnHandle }) =>
+                text.line(`Stop request accepted: ${turnHandle}`),
+            },
+          },
+        },
+        failures: {
+          operationFailed: {
+            description:
+              "The interruption request could not be delivered or recovered.",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) =>
+              text.line(`Interrupt failed: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const result: InterruptResult = await connection.interrupt(
+              { turnHandle: input.target as TurnHandle },
+              input.operation as OperationCredential<"interrupt">,
+            );
+            return outcome.data.result(result);
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.operationFailed({
+                failure: error.failure,
+              });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
       ...define.command("attach")({
         kind: "command",
         parent: "reins",
@@ -808,6 +1142,41 @@ export async function main(runtime: CliRuntime): Promise<number> {
       return 0;
     throw error;
   }
+}
+
+function projectWaitResult(
+  result: WaitResult,
+): v.InferOutput<typeof waitResultSchema> {
+  return {
+    status: result.status,
+    completed: result.completed.map((turn) =>
+      turn.stopReason === "failed"
+        ? {
+            ...turn,
+            message: harnessFailureMessage(
+              turn.failure,
+              turn.diagnosticId as Parameters<typeof harnessFailureMessage>[1],
+            ),
+          }
+        : turn,
+    ),
+    pending: result.pending.map((turnHandle) => ({ turnHandle })),
+  };
+}
+
+function renderWaitText(result: v.InferOutput<typeof waitResultSchema>) {
+  const lines: string[] = [];
+  if (result.status === "timeout")
+    lines.push("Timed out waiting for turn completion");
+  for (const turn of result.completed) {
+    lines.push(`Turn completed: ${turn.stopReason} (${turn.turnHandle})`);
+    if (turn.stopReason === "failed") lines.push(turn.message);
+    if (turn.finalReply !== null) lines.push(turn.finalReply);
+  }
+  for (const turn of result.pending) lines.push(`Pending: ${turn.turnHandle}`);
+  const [first, ...rest] = lines;
+  if (first === undefined) return text.line("No turn facts returned");
+  return text.lines([first, ...rest]);
 }
 
 function renderPresentation(presentation: AgentPresentation): string {
