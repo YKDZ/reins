@@ -6,6 +6,7 @@
 // 全部类型输入均为 type-only import：Node 24 类型擦除后运行期不解析 workspace 包，
 // 因此该文件可作为验收输入组成员被独立复制执行。
 import { appendFileSync, mkdirSync } from "node:fs";
+import { access } from "node:fs/promises";
 import { dirname } from "node:path";
 
 import type { HarnessAdapter } from "@reins/daemon";
@@ -13,6 +14,7 @@ import type {
   AdapterDriverFactory,
   DomainEvent,
   HarnessCapability,
+  MessageId,
   SessionId,
   TurnId,
   WorkerDriver,
@@ -52,32 +54,74 @@ function record(observation: Record<string, unknown>): void {
 }
 
 // 回合结束事件保持正式 DomainEvent 形状：turnId 只来自 core 交下来的本次回合。
-function completedTurn(sessionId: SessionId, turnId: TurnId): DomainEvent {
+function completedTurn(
+  sessionId: SessionId,
+  turnId: TurnId,
+  finalReply = simulatedFinalReply,
+): DomainEvent {
   return {
     type: "turn.completed",
     sessionId,
     turnId,
     stopReason: "end_turn",
-    finalReply: simulatedFinalReply,
+    finalReply,
   };
 }
 
 const simulatedDriverFactory: AdapterDriverFactory = ({ emit }) => {
-  function complete(sessionId: SessionId, turnId: TurnId): void {
-    queueMicrotask(() => {
-      emit(completedTurn(sessionId, turnId));
-    });
+  function complete(
+    sessionId: SessionId,
+    turnId: TurnId,
+    message: string,
+  ): void {
+    let task: { gate?: string; messages?: number; reply?: string } = {};
+    try {
+      const parsed: unknown = JSON.parse(message);
+      if (typeof parsed === "object" && parsed !== null) {
+        const value = parsed as Record<string, unknown>;
+        task = {
+          ...(typeof value.gate === "string" ? { gate: value.gate } : {}),
+          ...(typeof value.messages === "number"
+            ? { messages: value.messages }
+            : {}),
+          ...(typeof value.reply === "string" ? { reply: value.reply } : {}),
+        };
+      }
+    } catch {
+      // 普通固定输入不含 fixture 控制字段。
+    }
+    void (async () => {
+      while (
+        task.gate !== undefined &&
+        !(await access(task.gate).then(
+          () => true,
+          () => false,
+        ))
+      )
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      for (let index = 0; index < (task.messages ?? 0); index += 1) {
+        emit({
+          type: "message",
+          sessionId,
+          turnId,
+          messageId: `history-${index}` as MessageId,
+          role: "worker",
+          content: `message ${index}`,
+        });
+      }
+      emit(completedTurn(sessionId, turnId, task.reply));
+    })();
   }
 
   const driver: WorkerDriver = {
     start(spec: WorkerSpec) {
       // 原样记录收到的 spec：JSON 保留可选键的缺失，不用空字符串替代省略。
       record({ operation: "start", spec });
-      complete(spec.sessionId, spec.turnId);
+      complete(spec.sessionId, spec.turnId, spec.message);
     },
     async deliver(sessionId, turnId, message) {
       record({ operation: "deliver", sessionId, turnId, message });
-      complete(sessionId, turnId);
+      complete(sessionId, turnId, message);
     },
     async interrupt(sessionId) {
       throw new Error(

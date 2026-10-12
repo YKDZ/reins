@@ -1573,6 +1573,167 @@ async function smokePackedCli(
       `Session fixture returned unexpected output: ${seedSession.stdout}`,
     );
   }
+  const historyWorkspace = join(killedListDirectory, "history-workspace");
+  mkdirSync(historyWorkspace);
+  const historyWindowLog = join(
+    logsDirectory,
+    "sdk-fact-window-and-expired-cursor.log",
+  );
+  const historyWindow = await runSdkControl(
+    "replay-window",
+    "sdk-fact-window-and-expired-cursor",
+    {
+      ...killedListEnv,
+      REINS_WORKER_CWD: historyWorkspace,
+      REINS_HISTORY_GATE: join(killedListDirectory, "release-history"),
+    },
+  );
+  if (
+    typeof historyWindow.sessionHandle !== "string" ||
+    typeof historyWindow.turnHandle !== "string" ||
+    typeof historyWindow.staleCursor !== "string" ||
+    historyWindow.retainedMessages !== 999 ||
+    historyWindow.factCount !== 1000 ||
+    !isRecord(historyWindow.window) ||
+    historyWindow.window.truncated !== true ||
+    typeof historyWindow.window.oldest !== "number" ||
+    historyWindow.window.oldest <= 1 ||
+    typeof historyWindow.window.head !== "number" ||
+    !isRecord(historyWindow.expired) ||
+    historyWindow.expired.code !== "event_cursor_expired" ||
+    !isRecord(historyWindow.expired.facts) ||
+    historyWindow.expired.facts.oldest !== historyWindow.window.oldest ||
+    historyWindow.expired.facts.head !== historyWindow.window.head
+  )
+    throw new Error(
+      "The installed SDK omitted its truncated event window or expired cursor facts",
+    );
+  const installedCli = join(
+    applicationConsumerDirectory,
+    "node_modules",
+    ".bin",
+    "reins",
+  );
+  const availableAttachLog = join(
+    logsDirectory,
+    "installed-cli-truncated-attach.log",
+  );
+  const availableAttach = toCommandResult(
+    await runLoggedCommand({
+      command: installedCli,
+      args: [
+        "attach",
+        historyWindow.turnHandle as string,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      logPath: availableAttachLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  requireSuccess(
+    "installed CLI attach to a truncated history window",
+    availableAttach,
+    availableAttachLog,
+  );
+  const availableFrames = readJsonLineRecords(
+    "installed CLI truncated attach",
+    availableAttach.stdout,
+  );
+  const availableEstablishment = availableFrames.find(
+    (frame) => frame.kind === "record" && frame.variant === "established",
+  );
+  const availableCliFacts = availableFrames
+    .filter((frame) => frame.kind === "record" && frame.variant === "fact")
+    .map((frame) => {
+      if (!isRecord(frame.data) || !isRecord(frame.data.fact))
+        throw new Error("The installed CLI emitted a malformed replay fact");
+      return frame.data.fact;
+    });
+  if (
+    !isRecord(availableEstablishment?.data) ||
+    !isRecord(availableEstablishment.data.establishment) ||
+    !isRecord(availableEstablishment.data.establishment.window) ||
+    availableEstablishment.data.establishment.window.truncated !== true ||
+    availableEstablishment.data.establishment.window.oldest !==
+      historyWindow.window.oldest ||
+    availableEstablishment.data.establishment.window.head !==
+      historyWindow.window.head ||
+    availableEstablishment.data.establishment.replayed !== 1000 ||
+    availableCliFacts.length !== 1000 ||
+    availableCliFacts.at(-1)?.type !== "turn.completed"
+  )
+    throw new Error(
+      "The installed CLI did not expose the bounded replay window",
+    );
+
+  const expiredAttachLog = join(
+    logsDirectory,
+    "installed-cli-expired-cursor.log",
+  );
+  const expiredAttach = toCommandResult(
+    await runLoggedCommand({
+      command: installedCli,
+      args: [
+        "attach",
+        historyWindow.turnHandle as string,
+        "--scope",
+        "turn",
+        "--replay",
+        "after",
+        "--cursor",
+        historyWindow.staleCursor as string,
+      ],
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      logPath: expiredAttachLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  if (expiredAttach.status !== 70)
+    throw new Error(
+      `The installed CLI accepted an expired cursor with exit ${expiredAttach.status}`,
+    );
+  const expiredFrames = readJsonLineRecords(
+    "installed CLI expired cursor",
+    `${expiredAttach.stdout}${expiredAttach.stderr}`,
+  );
+  const expiredStream = expiredFrames[0];
+  const expiredFailure = expiredFrames[1];
+  if (
+    expiredFrames.length !== 2 ||
+    expiredStream?.kind !== "stream" ||
+    expiredStream.command !== "attach" ||
+    expiredFailure?.kind !== "failure" ||
+    expiredFailure.command !== "attach" ||
+    expiredFailure.variant !== "attachFailed" ||
+    !isRecord(expiredFailure.data)
+  )
+    throw new Error(
+      "The installed CLI expired cursor did not return its stream header and typed failure",
+    );
+  const expiredData = expiredFailure.data;
+  if (
+    !isRecord(expiredData.failure) ||
+    expiredData.failure.code !== "event_cursor_expired" ||
+    !isRecord(expiredData.failure.facts) ||
+    expiredData.failure.facts.oldest !== historyWindow.window.oldest ||
+    expiredData.failure.facts.head !== historyWindow.window.head
+  )
+    throw new Error("The installed CLI omitted typed expired cursor facts");
+  recorder.record("installed_sdk_cli_fact_window_and_expiry", {
+    sdk: historyWindow,
+    cliWindow: availableEstablishment.data.establishment.window,
+    cliReplayedFacts: availableCliFacts.length,
+    cliExpiredCursor: expiredData.failure,
+    sdkLogPath: historyWindowLog,
+    cliAvailableLogPath: availableAttachLog,
+    cliExpiredLogPath: expiredAttachLog,
+  });
   const killedListQueryLog = join(logsDirectory, "sdk-killed-list-query.log");
   const killedListQuery = toCommandResult(
     await runLoggedCommand({
@@ -1799,6 +1960,33 @@ async function smokePackedCli(
     cliListData.sessions[0].activeTurn !== cliSpawnData.turnHandle
   )
     throw new Error("The installed CLI did not list its exact active turn");
+  const disconnectedSdk = await runSdkControl(
+    "disconnect-first-fact",
+    "installed-sdk-disconnect-first-fact",
+    {
+      ...controlCliEnv,
+      REINS_TARGET_SESSION: cliSpawnData.sessionHandle as string,
+    },
+  );
+  if (
+    typeof disconnectedSdk.checkpoint !== "string" ||
+    disconnectedSdk.code !== "daemon_disconnected" ||
+    disconnectedSdk.cursorMatchesDeliveredFact !== true
+  )
+    throw new Error(
+      "The installed SDK did not preserve the last delivered fact cursor on disconnect",
+    );
+  assertProcessRunning("The disconnected SDK worker", cliWorkerReady.workerPid);
+  assertProcessRunning(
+    "The disconnected SDK descendant",
+    cliWorkerReady.descendantPid,
+  );
+  if (
+    readJsonLines(controlCliObservations).some(
+      ({ type }) => type === "terminate_called",
+    )
+  )
+    throw new Error("Closing the installed SDK observer killed its session");
   const cliPreparedKillOutput = await runInstalledCli(
     ["prepare-operation", "kill"],
     "installed-cli-prepare-kill",
@@ -1878,6 +2066,7 @@ async function smokePackedCli(
     {
       ...controlCliEnv,
       REINS_TARGET_SESSION: cliSpawnData.sessionHandle as string,
+      REINS_RESUME_CURSOR: disconnectedSdk.checkpoint,
     },
   );
   if (
@@ -1886,6 +2075,7 @@ async function smokePackedCli(
     sdkFactReplay.facts.length < 2 ||
     sdkFactReplay.replayed !== sdkFactReplay.facts.length - 1 ||
     sdkFactReplay.checkpointWasDelivered !== true ||
+    sdkFactReplay.resumedAfterDisconnect !== true ||
     typeof sdkFactReplay.endReason !== "string"
   )
     throw new Error("The installed SDK did not establish exact fact replay");
@@ -1966,6 +2156,8 @@ async function smokePackedCli(
     factCount: cliFacts.length,
     factIds: cliFacts.map((fact) => fact.factId),
     replayedAfterCheckpoint: sdkFactReplay.replayed,
+    disconnectedCheckpoint: disconnectedSdk.checkpoint,
+    disconnectCode: disconnectedSdk.code,
     endReason: sdkFactReplay.endReason,
     structuredAttachRecords: cliAttachFrames.length,
     textAttachBytes: Buffer.byteLength(cliTextAttach.stdout),
