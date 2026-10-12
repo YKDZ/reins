@@ -4471,7 +4471,7 @@ async function smokePackedCli(
     feedbackInterrupted.stdout.includes(
       "Permission response prepared (not executed):",
     ) ||
-    feedbackInterrupted.stdout.includes("[attach ended]") ||
+    !feedbackInterrupted.stdout.includes("[attach ended] closed") ||
     feedbackInterrupted.stdout.includes("[turn completed]") ||
     feedbackInterruptedSessionState.state !== "busy" ||
     feedbackInterruptedCalls.length !== 0
@@ -4580,7 +4580,7 @@ async function smokePackedCli(
     interrupted.signal !== null ||
     interrupted.stderr !== "" ||
     !interrupted.stdout.includes("Permission requested: file_access") ||
-    interrupted.stdout.includes("[attach ended]") ||
+    !interrupted.stdout.includes("[attach ended] closed") ||
     interrupted.stdout.includes("[turn completed]") ||
     interruptedSessionState.state !== "busy" ||
     interruptedResolutionCalls.length !== 0

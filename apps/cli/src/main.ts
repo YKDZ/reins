@@ -1510,7 +1510,7 @@ function createCli(version: string) {
                 for (const presentation of project(fact))
                   yield outcome.record.presentation({ presentation });
                 if (fact.type === "permission.requested") {
-                  if (interrupted) return outcome.streamSuccess();
+                  if (interrupted) continue;
                   if (subscriptionEnded) continue;
                   if (fact.options.length === 0)
                     return outcome.failure.permissionChoiceInvalid({
@@ -1566,7 +1566,6 @@ function createCli(version: string) {
                 }
               }
             }
-            if (interrupted) return outcome.streamSuccess();
             const end = await subscription.done;
             yield outcome.record.ended({ end });
             return outcome.streamSuccess();

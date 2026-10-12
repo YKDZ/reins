@@ -1295,7 +1295,7 @@ describe("CLI 进程边界（缝 D）", () => {
         `${attached.stdout.join("")}\n${attached.stderr.join("")}`,
       ).toBe(0);
       expect(Date.now() - started).toBeLessThan(1_500);
-      expect(attached.stdout.join("")).not.toContain("[attach ended]");
+      expect(attached.stdout.join("")).toContain("[attach ended] closed");
       expect(attached.stdout.join("")).not.toContain("[turn completed]");
       expect(await pathExists(requestsFile)).toBe(false);
       const listed = await runCli(["list", "--session", sessionHandle], env);

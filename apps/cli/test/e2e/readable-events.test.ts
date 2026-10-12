@@ -1098,9 +1098,10 @@ test("CLI preserves delivered facts and reports daemon disconnect in structured 
       "--output-format",
       "text",
     ],
-    { env: f.env, cwd: f.callerCwd, stdio: ["ignore", "pipe", "pipe"] },
+    { env: f.env, cwd: f.callerCwd, stdio: ["pipe", "pipe", "pipe"] },
   );
   cleanup.push(async () => {
+    textChild.stdin?.destroy();
     if (textChild.exitCode === null && textChild.signalCode === null) {
       textChild.kill("SIGTERM");
       await new Promise<void>((resolve) =>
