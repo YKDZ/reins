@@ -1,7 +1,7 @@
 // 正式发行包的 npm 干净安装 smoke：安装兼容性与既有业务场景断言留在本入口，
 // 环境准备之外的一切进程生命周期（启动、就绪、超时、停止、完整日志）走
 // scripts/packed-cli-fixtures 的窄共享接缝，供后续 Docker 正式包 smoke 复用。
-import { spawn } from "node:child_process";
+import { spawn, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -1662,6 +1662,10 @@ async function smokePackedCli(
     REINS_ADAPTERS_MODULE: simulatedAdaptersModule,
     REINS_CONSUMER_CONTEXT: "packed-killed-list-check",
     REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_SIMULATED_OBSERVATION_LOG: join(
+      killedListDirectory,
+      "adapter-observations.ndjson",
+    ),
   };
   owned.directDaemon = await startDaemon({
     label: "killed-list packed daemon",
@@ -1896,6 +1900,390 @@ async function smokePackedCli(
       `Installed SDK omitted the killed turn summary: ${killedListQuery.stdout}`,
     );
   }
+
+  const interruptedAttachGate = join(
+    killedListDirectory,
+    "release-interrupted-attach-events",
+  );
+  const interruptedAttachCompletionGate = join(
+    killedListDirectory,
+    "complete-interrupted-attach-turn",
+  );
+  const interruptedAttachMessages = 5_000;
+  const interruptedAttachCredentialLog = join(
+    logsDirectory,
+    "installed-cli-backpressure-prepare-spawn.log",
+  );
+  const interruptedAttachCredentialResult = toCommandResult(
+    await runLoggedCommand({
+      command: installedCli,
+      args: ["prepare-operation", "spawn"],
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      logPath: interruptedAttachCredentialLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  requireSuccess(
+    "installed CLI prepare spawn for backpressure observation",
+    interruptedAttachCredentialResult,
+    interruptedAttachCredentialLog,
+  );
+  const interruptedAttachCredential = readDataEnvelope(
+    "installed CLI backpressure spawn credential",
+    interruptedAttachCredentialResult.stdout,
+    "prepareOperation",
+  );
+  if (typeof interruptedAttachCredential.credential !== "string")
+    throw new Error("The installed CLI omitted its spawn credential");
+  const interruptedAttachSpawnLog = join(
+    logsDirectory,
+    "installed-cli-backpressure-spawn.log",
+  );
+  const interruptedAttachSpawnResult = toCommandResult(
+    await runLoggedCommand({
+      command: installedCli,
+      args: [
+        "spawn",
+        "--operation",
+        interruptedAttachCredential.credential,
+        "--name",
+        "sigint-backpressure-session",
+        "--harness",
+        "simulated",
+        "--message",
+        JSON.stringify({
+          gate: interruptedAttachGate,
+          completionGate: interruptedAttachCompletionGate,
+          messages: interruptedAttachMessages,
+          reply: "completed after observer cancellation",
+        }),
+        "--cwd",
+        historyWorkspace,
+      ],
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      logPath: interruptedAttachSpawnLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  requireSuccess(
+    "installed CLI spawn for backpressure observation",
+    interruptedAttachSpawnResult,
+    interruptedAttachSpawnLog,
+  );
+  const interruptedAttachSpawn = readDataEnvelope(
+    "installed CLI backpressure spawn",
+    interruptedAttachSpawnResult.stdout,
+    "spawn",
+  );
+  if (
+    typeof interruptedAttachSpawn.sessionHandle !== "string" ||
+    typeof interruptedAttachSpawn.turnHandle !== "string"
+  )
+    throw new Error("The installed CLI omitted backpressure session handles");
+  const interruptedSessionHandle = interruptedAttachSpawn.sessionHandle;
+  const interruptedTurnHandle = interruptedAttachSpawn.turnHandle;
+
+  const interruptedAttachLog = join(
+    logsDirectory,
+    "installed-cli-sigint-backpressure.log",
+  );
+  const interruptedAttachChild: ChildProcess = spawn(
+    installedCli,
+    ["attach", interruptedTurnHandle, "--scope", "turn", "--replay", "none"],
+    {
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const interruptedAttachStdout: string[] = [];
+  const interruptedAttachStderr: string[] = [];
+  let startupOutput = "";
+  let established = false;
+  let resolveEstablished!: () => void;
+  let rejectEstablished!: (error: Error) => void;
+  const establishedPromise = new Promise<void>((resolve, reject) => {
+    resolveEstablished = resolve;
+    rejectEstablished = reject;
+  });
+  let resolveInterruptedAttachClose!: () => void;
+  const interruptedAttachClosed = new Promise<void>((resolve) => {
+    resolveInterruptedAttachClose = resolve;
+  });
+  interruptedAttachChild.once("close", resolveInterruptedAttachClose);
+  interruptedAttachChild.stdout?.setEncoding("utf8");
+  interruptedAttachChild.stdout?.on("data", (chunk: string) => {
+    interruptedAttachStdout.push(chunk);
+    if (established) return;
+    startupOutput += chunk;
+    for (const line of startupOutput.split("\n")) {
+      if (line === "") continue;
+      const frame: unknown = JSON.parse(line);
+      if (
+        isRecord(frame) &&
+        frame.kind === "record" &&
+        frame.variant === "established"
+      ) {
+        established = true;
+        interruptedAttachChild.stdout?.pause();
+        resolveEstablished();
+        return;
+      }
+    }
+  });
+  interruptedAttachChild.stderr?.setEncoding("utf8");
+  interruptedAttachChild.stderr?.on("data", (chunk: string) =>
+    interruptedAttachStderr.push(chunk),
+  );
+  interruptedAttachChild.once("error", (error) => {
+    if (!established) rejectEstablished(error);
+  });
+  interruptedAttachChild.once("exit", (code, signal) => {
+    if (!established)
+      rejectEstablished(
+        new Error(
+          `Installed CLI exited before attach establishment: code=${code} signal=${signal}`,
+        ),
+      );
+  });
+  const establishedTimeout = setTimeout(
+    () =>
+      rejectEstablished(new Error("Installed CLI attach did not establish")),
+    10_000,
+  );
+  try {
+    await establishedPromise;
+    clearTimeout(establishedTimeout);
+    writeFileSync(interruptedAttachGate, "release", "utf8");
+    const emitted = await waitForFact(
+      "the packed adapter's backpressure facts",
+      () => readJsonLines(killedListEnv.REINS_SIMULATED_OBSERVATION_LOG!),
+      (fact) =>
+        fact.type === "events_emitted" &&
+        fact.sessionId === interruptedSessionHandle &&
+        fact.messages === interruptedAttachMessages,
+      30_000,
+    );
+    if (emitted.messages !== interruptedAttachMessages)
+      throw new Error("The packed adapter emitted an incomplete fact batch");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    if (
+      interruptedAttachChild.exitCode !== null ||
+      interruptedAttachChild.signalCode !== null
+    )
+      throw new Error("Installed CLI exited before the SIGINT cancellation");
+    if (!interruptedAttachChild.kill("SIGINT"))
+      throw new Error("Could not send SIGINT to the installed CLI process");
+    const exitDeadline = Date.now() + 10_000;
+    while (
+      interruptedAttachChild.exitCode === null &&
+      interruptedAttachChild.signalCode === null
+    ) {
+      if (Date.now() >= exitDeadline)
+        throw new Error(
+          "Installed CLI stayed open after SIGINT while its output pipe was unread",
+        );
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    if (
+      interruptedAttachChild.exitCode !== 0 ||
+      interruptedAttachChild.signalCode !== null
+    )
+      throw new Error(
+        `Installed CLI did not exit cleanly after SIGINT: code=${interruptedAttachChild.exitCode} signal=${interruptedAttachChild.signalCode}`,
+      );
+    interruptedAttachChild.stdout?.resume();
+    await interruptedAttachClosed;
+    const interruptedAttachErrors = interruptedAttachStderr.join("");
+    if (interruptedAttachErrors !== "")
+      throw new Error(
+        `Installed CLI reported an error while handling SIGINT: ${interruptedAttachErrors}`,
+      );
+
+    const queryInterruptedSession = async (
+      label: string,
+    ): Promise<Record<string, unknown>> => {
+      const logPath = join(logsDirectory, `${label}.log`);
+      const result = toCommandResult(
+        await runLoggedCommand({
+          command: installedCli,
+          args: ["list", "--session", interruptedSessionHandle],
+          cwd: applicationConsumerDirectory,
+          env: killedListEnv,
+          logPath,
+          timeoutMs: 30_000,
+        }),
+      );
+      requireSuccess(label, result, logPath);
+      const data = readDataEnvelope(label, result.stdout, "list");
+      if (!Array.isArray(data.sessions) || !isRecord(data.sessions[0]))
+        throw new Error(`${label} omitted the observed session`);
+      return data.sessions[0];
+    };
+    const liveAfterInterrupt = await queryInterruptedSession(
+      "installed-cli-list-after-sigint",
+    );
+    if (
+      liveAfterInterrupt.sessionHandle !== interruptedSessionHandle ||
+      liveAfterInterrupt.state !== "busy" ||
+      liveAfterInterrupt.activeTurn !== interruptedTurnHandle
+    )
+      throw new Error("Cancelling installed CLI attach stopped the live turn");
+    writeFileSync(interruptedAttachCompletionGate, "release", "utf8");
+    let completedAfterInterrupt = false;
+    const completionDeadline = Date.now() + 15_000;
+    while (!completedAfterInterrupt) {
+      const session = await queryInterruptedSession(
+        `installed-cli-list-after-completion-${Date.now()}`,
+      );
+      completedAfterInterrupt = session.state === "idle";
+      if (completedAfterInterrupt) break;
+      if (Date.now() >= completionDeadline)
+        throw new Error(
+          "The session did not complete after releasing its fixture gate",
+        );
+      await new Promise<void>((resolve) => setTimeout(resolve, 25));
+    }
+    recorder.record("installed_cli_sigint_during_backpressure", {
+      attachLogPath: interruptedAttachLog,
+      exitCode: interruptedAttachChild.exitCode,
+      signal: interruptedAttachChild.signalCode,
+      eventsEmitted: emitted.messages,
+      busyAfterInterrupt: liveAfterInterrupt.state === "busy",
+      completedAfterFixtureRelease: completedAfterInterrupt,
+      stderr: interruptedAttachErrors,
+    });
+  } finally {
+    clearTimeout(establishedTimeout);
+    if (
+      interruptedAttachChild.exitCode === null &&
+      interruptedAttachChild.signalCode === null
+    )
+      interruptedAttachChild.kill("SIGKILL");
+    interruptedAttachChild.stdout?.resume();
+    await interruptedAttachClosed;
+    writeFileSync(
+      interruptedAttachLog,
+      `stdout:\n${interruptedAttachStdout.join("")}\nstderr:\n${interruptedAttachStderr.join("")}`,
+      "utf8",
+    );
+  }
+  const replacementCredentialLog = join(
+    logsDirectory,
+    "installed-cli-replacement-prepare-spawn.log",
+  );
+  const replacementCredentialResult = toCommandResult(
+    await runLoggedCommand({
+      command: installedCli,
+      args: ["prepare-operation", "spawn"],
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      logPath: replacementCredentialLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  requireSuccess(
+    "installed CLI prepare spawn for replacement presentation",
+    replacementCredentialResult,
+    replacementCredentialLog,
+  );
+  const replacementCredential = readDataEnvelope(
+    "installed CLI replacement spawn credential",
+    replacementCredentialResult.stdout,
+    "prepareOperation",
+  );
+  if (typeof replacementCredential.credential !== "string")
+    throw new Error("The installed CLI omitted the replacement spawn credential");
+  const replacementSpawnLog = join(
+    logsDirectory,
+    "installed-cli-replacement-spawn.log",
+  );
+  const replacementSpawnResult = toCommandResult(
+    await runLoggedCommand({
+      command: installedCli,
+      args: [
+        "spawn",
+        "--operation",
+        replacementCredential.credential,
+        "--name",
+        "replacement-presentation-session",
+        "--harness",
+        "simulated",
+        "--message",
+        JSON.stringify({
+          replacement: { draft: "draft", corrected: "corrected" },
+          reply: "corrected",
+        }),
+        "--cwd",
+        historyWorkspace,
+      ],
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      logPath: replacementSpawnLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  requireSuccess(
+    "installed CLI spawn for replacement presentation",
+    replacementSpawnResult,
+    replacementSpawnLog,
+  );
+  const replacementSpawn = readDataEnvelope(
+    "installed CLI replacement spawn",
+    replacementSpawnResult.stdout,
+    "spawn",
+  );
+  if (typeof replacementSpawn.turnHandle !== "string")
+    throw new Error("The installed CLI omitted the replacement turn handle");
+  const replacementTextLog = join(
+    logsDirectory,
+    "installed-cli-replacement-attach-text.log",
+  );
+  const replacementTextResult = toCommandResult(
+    await runLoggedCommand({
+      command: installedCli,
+      args: [
+        "attach",
+        replacementSpawn.turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+        "--output-format",
+        "text",
+      ],
+      cwd: applicationConsumerDirectory,
+      env: killedListEnv,
+      logPath: replacementTextLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  requireSuccess(
+    "installed CLI text attach for a corrected message",
+    replacementTextResult,
+    replacementTextLog,
+  );
+  if (
+    !replacementTextResult.stdout.includes("worker: draft") ||
+    !replacementTextResult.stdout.includes(
+      "[message updated] worker: corrected",
+    ) ||
+    replacementTextResult.stdout.includes("draftcorrected")
+  )
+    throw new Error(
+      "The installed CLI appended a corrected snapshot instead of replacing its draft",
+    );
+  recorder.record("installed_cli_replacement_presentation", {
+    turnHandle: replacementSpawn.turnHandle,
+    draftVisible: replacementTextResult.stdout.includes("worker: draft"),
+    replacementVisible: replacementTextResult.stdout.includes(
+      "[message updated] worker: corrected",
+    ),
+    appendedDraft: replacementTextResult.stdout.includes("draftcorrected"),
+    logPath: replacementTextLog,
+  });
   const killedListDaemon = owned.directDaemon;
   const killedListStop = await stopDaemon(killedListDaemon, 5_000);
   owned.directDaemon = undefined;

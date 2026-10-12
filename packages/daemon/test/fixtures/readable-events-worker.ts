@@ -15,10 +15,13 @@ async function run(input: {
   const { sessionId, turnId } = input;
   const task = JSON.parse(input.message) as {
     gate: string;
+    completionGate?: string;
     reply: string;
+    callerMessage?: string;
     permission?: boolean;
     messages?: number;
     deltas?: number;
+    replacement?: { draft: string; corrected: string };
     resolutionFile?: string;
     stopReason?: string;
   };
@@ -32,6 +35,13 @@ async function run(input: {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   const emit = (event: object): void =>
     output({ kind: "event", event: { sessionId, turnId, ...event } });
+  if (task.callerMessage !== undefined)
+    emit({
+      type: "message",
+      messageId: "caller-message",
+      role: "caller",
+      content: task.callerMessage,
+    });
   for (let index = 0; index < (task.deltas ?? 0); index += 1)
     emit({ type: "text.delta", messageId: "unclosed", delta: "x" });
   for (let index = 0; index < (task.messages ?? 0); index += 1)
@@ -41,14 +51,28 @@ async function run(input: {
       role: "worker",
       content: "message " + index,
     });
-  emit({ type: "text.delta", messageId: "reply", delta: "hello " });
-  emit({ type: "text.delta", messageId: "reply", delta: "world" });
-  emit({
-    type: "message",
-    messageId: "reply",
-    role: "worker",
-    content: "hello world",
-  });
+  if (task.replacement !== undefined) {
+    emit({
+      type: "text.delta",
+      messageId: "reply",
+      delta: task.replacement.draft,
+    });
+    emit({
+      type: "message",
+      messageId: "reply",
+      role: "worker",
+      content: task.replacement.corrected,
+    });
+  } else {
+    emit({ type: "text.delta", messageId: "reply", delta: "hello " });
+    emit({ type: "text.delta", messageId: "reply", delta: "world" });
+    emit({
+      type: "message",
+      messageId: "reply",
+      role: "worker",
+      content: "hello world",
+    });
+  }
   emit({ type: "tool.requested", toolCallId: "read-1", name: "read-file" });
   emit({
     type: "tool.completed",
@@ -75,6 +99,14 @@ async function run(input: {
     if (task.resolutionFile !== undefined)
       await writeFile(task.resolutionFile, JSON.stringify(decision));
   }
+  while (
+    task.completionGate !== undefined &&
+    !(await access(task.completionGate).then(
+      () => true,
+      () => false,
+    ))
+  )
+    await new Promise<void>((resolve) => setTimeout(resolve, 10));
   emit({
     type: "turn.completed",
     stopReason: task.stopReason ?? "end_turn",

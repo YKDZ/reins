@@ -36,6 +36,7 @@ import { standardSchema } from "./standard-schema.ts";
 export type ReinsCliDependencies = {
   readonly connect: () => Promise<ReinsConnection>;
   readonly outputFormat: OutputFormat;
+  readonly cancelOutput: () => void;
 };
 
 type ReinsCliRuntimeDependencies = Pick<ReinsCliDependencies, "connect">;
@@ -44,6 +45,7 @@ export type CliRuntime = {
   readonly argv: readonly string[];
   readonly version: string;
   readonly write: WriteCliOutput;
+  readonly cancelOutput: () => void;
   readonly dependencies: ReinsCliRuntimeDependencies;
 };
 
@@ -739,7 +741,11 @@ function createCli(version: string) {
           try {
             connection = await dependencies.connect();
             subscription = await connection.attach(target, replay);
-            interrupt = () => subscription?.close();
+            interrupt = () => {
+              subscription?.close();
+              connection?.close();
+              dependencies.cancelOutput();
+            };
             process.once("SIGINT", interrupt);
             yield outcome.record.established({
               establishment: subscription.establishment,
@@ -774,17 +780,26 @@ function createCli(version: string) {
 
 export async function main(runtime: CliRuntime): Promise<number> {
   const contract = createCli(runtime.version);
+  let interrupted = false;
   try {
     const invocation = parseCliInvocation(contract, runtime.argv.slice(2));
     const outputFormat =
       invocation.kind === "parsed" ? invocation.outputFormat : "structured";
     const termination = await executeCli(contract, {
       invocation,
-      dependencies: { ...runtime.dependencies, outputFormat },
+      dependencies: {
+        ...runtime.dependencies,
+        outputFormat,
+        cancelOutput() {
+          interrupted = true;
+          runtime.cancelOutput();
+        },
+      },
       write: runtime.write,
     });
     return termination.exitCode;
   } catch (error) {
+    if (interrupted) return 0;
     if (
       error instanceof CliWriteError &&
       error.destination === "stdout" &&
@@ -797,7 +812,12 @@ export async function main(runtime: CliRuntime): Promise<number> {
 
 function renderPresentation(presentation: AgentPresentation): string {
   if (presentation.type === "text") {
-    const prefix = presentation.start ? `${presentation.role}: ` : "";
+    const prefix =
+      presentation.operation === "replace"
+        ? `\n[message updated] ${presentation.role}: `
+        : presentation.start
+          ? `${presentation.role}: `
+          : "";
     const suffix =
       presentation.complete && !presentation.content.endsWith("\n") ? "\n" : "";
     return `${prefix}${presentation.content}${suffix}` || " ";
