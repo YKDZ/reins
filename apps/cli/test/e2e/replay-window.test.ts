@@ -8,12 +8,11 @@ import { createReinsClient } from "@reins/client";
 import {
   consumerContextSchema,
   decodeTurnHandle,
-  decodeResumeCursor,
-  encodeResumeCursor,
-  daemonGenerationSchema,
+  encodeTurnHandle,
   type ProtocolMessage,
 } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
+import { connect as connectSdk, ReinsSdkError } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -104,366 +103,475 @@ async function fixture(rich = true) {
     expect(await client.initialize()).toHaveProperty("result");
     return client;
   }
-  return { root, runtime, daemonCwd, callerCwd, env, cli, client, daemon };
+  async function sdk(consumerContext = env.REINS_CONSUMER_CONTEXT) {
+    const connection = await connectSdk({
+      socketPath: env.REINS_SOCKET,
+      consumerContext,
+    });
+    cleanup.push(async () => connection.close());
+    return connection;
+  }
+  async function spawnSession(sessionName: string, message: string) {
+    const connection = await sdk();
+    return connection.spawn(
+      { sessionName, harness: "codex", message, cwd: callerCwd },
+      connection.prepareOperation("spawn"),
+    );
+  }
+  return {
+    root,
+    runtime,
+    daemonCwd,
+    callerCwd,
+    env,
+    cli,
+    client,
+    sdk,
+    spawnSession,
+    daemon,
+  };
 }
 
-test("available exposes a truncated bounded window and ends the exact completed turn", async () => {
+test("public SDK resumes exactly after the last delivered fact on disconnect", async () => {
   const f = await fixture();
-  const gate = join(f.root, "release");
+  const gate = join(f.root, "sdk-disconnect-release");
+  const control = await f.client();
+  const spawned = await f.spawnSession(
+    "sdk-disconnect",
+    JSON.stringify({ gate, reply: "resumed", messages: 4 }),
+  );
+  const sessionHandle = spawned.sessionHandle;
+  const turnHandle = spawned.turnHandle;
+  const target = { scope: "session" as const, sessionHandle };
+  const observer = await f.sdk();
+  const live = await observer.attach(target, { mode: "none" });
+  const firstPromise = live.next();
   await writeFile(gate, "release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "done", messages: 1005 }),
-    "--name",
-    "window",
-  ]);
-  expect(spawned.exitCode, spawned.stdout + spawned.stderr).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await f.client();
-  await client.request("wait", { targets: [target], completion: "all" });
-  const subscription = await client.subscribe({
-    scope: "turn",
-    ...target,
-    replay: { mode: "available" },
+  const first = await firstPromise;
+  expect(first.done).toBe(false);
+  expect(first.value?.type).toBe("message");
+  const deliveredCheckpoint = live.checkpoint;
+  observer.close();
+  let disconnected: unknown;
+  try {
+    await live.done;
+  } catch (error) {
+    disconnected = error;
+  }
+  expect(disconnected).toBeInstanceOf(ReinsSdkError);
+  expect(disconnected).toMatchObject({
+    failure: {
+      code: "daemon_disconnected",
+      facts: { resumeCursor: deliveredCheckpoint },
+    },
   });
-  const events: import("@reins/client").AgentEvent[] = [];
-  subscription.onEvent((event) => events.push(event));
-  expect(subscription.establishment.window).toMatchObject({
+
+  const recovery = await f.sdk();
+  const resumed = await recovery.attach(target, {
+    mode: "after",
+    cursor: deliveredCheckpoint,
+  });
+  const resumedFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of resumed) {
+    resumedFacts.push(fact);
+    if (fact.type === "turn.completed") break;
+  }
+  expect(await resumed.done).toMatchObject({ reason: "closed" });
+  expect(resumedFacts.at(-1)?.type).toBe("turn.completed");
+
+  const full = await recovery.attach(target, { mode: "available" });
+  const fullFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of full) {
+    fullFacts.push(fact);
+    if (fact.type === "turn.completed") break;
+  }
+  expect(await full.done).toMatchObject({ reason: "closed" });
+  const firstIndex = fullFacts.findIndex(
+    (fact) => fact.factId === first.value?.factId,
+  );
+  expect(firstIndex).toBeGreaterThanOrEqual(0);
+  expect([first.value, ...resumedFacts]).toEqual(fullFacts.slice(firstIndex));
+
+  expect(
+    await control.request("wait", {
+      targets: [decodeTurnHandle(turnHandle)],
+      completion: "all",
+    }),
+  ).toMatchObject({ result: { completed: [{ finalReply: "resumed" }] } });
+});
+
+test("public SDK exposes a truncated window and types an expired cursor", async () => {
+  const f = await fixture();
+  const gate = join(f.root, "sdk-window-release");
+  const control = await f.client();
+  const spawned = await f.spawnSession(
+    "sdk-window",
+    JSON.stringify({ gate, reply: "bounded", messages: 1005 }),
+  );
+  const turnHandle = spawned.turnHandle;
+  const target = { scope: "turn" as const, turnHandle };
+  const observer = await f.sdk();
+  const before = await observer.attach(target, { mode: "none" });
+  const staleCursor = before.checkpoint;
+  before.close();
+  expect(await before.done).toMatchObject({ reason: "closed" });
+
+  await writeFile(gate, "release");
+  await control.request("wait", {
+    targets: [decodeTurnHandle(turnHandle)],
+    completion: "all",
+  });
+  const available = await observer.attach(target, { mode: "available" });
+  expect(available.establishment.window).toMatchObject({
     truncated: true,
     oldest: expect.any(Number),
     head: expect.any(Number),
   });
-  expect(subscription.establishment.window.oldest).toBeGreaterThan(1);
-  expect(events.length).toBeLessThanOrEqual(1000);
-  expect(await subscription.done).toMatchObject({ reason: "end_turn" });
+  expect(available.establishment.window.oldest).toBeGreaterThan(1);
+  const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of available) facts.push(fact);
+  expect(await available.done).toMatchObject({ reason: "end_turn" });
+  expect(facts.length).toBeLessThanOrEqual(1000);
+
+  await expect(
+    observer.attach(target, { mode: "after", cursor: staleCursor }),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "event_cursor_expired",
+      facts: {
+        oldest: available.establishment.window.oldest,
+        head: available.establishment.window.head,
+      },
+    },
+  });
 });
 
-test("a disconnected observer resumes after its last event without replaying business actions", async () => {
+test("session replay resumes exactly after a turn and CLI replays the second turn", async () => {
   const f = await fixture();
-  const gate = join(f.root, "release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "first" }),
-    "--name",
+  const firstGate = join(f.root, "first-release");
+  const secondGate = join(f.root, "second-release");
+  const spawned = await f.spawnSession(
     "resume",
-  ]);
-  expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await f.client();
-  const subscription = await client.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "none" },
-  });
-  const first: Exclude<
-    import("@reins/client").AgentEvent,
-    { type: "publication.ready" }
-  >[] = [];
-  subscription.onEvent((event) => {
-    if (event.type !== "publication.ready") first.push(event);
-  });
-  await writeFile(gate, "release");
-  await vi.waitFor(() => expect(first.at(-1)?.type).toBe("turn.completed"));
-  const failure = subscription.done.catch((error) => JSON.parse(error.message));
-  client.close();
-  const disconnected = await failure;
-  expect(disconnected).toMatchObject({
-    code: "daemon_disconnected",
-    resumeCursor: expect.stringMatching(/^resume1_/),
-  });
-  const next = await f.cli([
-    "send",
-    target.sessionId,
-    JSON.stringify({ gate, reply: "second" }),
-    "--placement",
-    "new_turn",
-  ]);
-  expect(next.exitCode, next.stdout).toBe(0);
-  const secondTarget = decodeTurnHandle(JSON.parse(next.stdout).turnHandle);
-  const observer = await f.client();
-  await observer.request("wait", {
-    targets: [secondTarget],
-    completion: "all",
-  });
-  const recovered = await observer.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "after", cursor: disconnected.resumeCursor },
-  } as never);
-  const events: Exclude<
-    import("@reins/client").AgentEvent,
-    { type: "publication.ready" }
-  >[] = [];
-  recovered.onEvent((event) => {
-    if (event.type !== "publication.ready") events.push(event);
-  });
-  await vi.waitFor(() => expect(events.at(-1)?.type).toBe("turn.completed"));
-  const ids = events.map((event) => event.eventId);
-  expect(ids[0]).toBe(first.at(-1)!.eventId + 1);
-  expect(ids.at(-1)).toBe(recovered.establishment.window.head);
-  expect(ids).toEqual(
-    Array.from(
-      { length: ids.length },
-      (_, index) => first.at(-1)!.eventId + index + 1,
-    ),
+    JSON.stringify({ gate: firstGate, reply: "first" }),
   );
+  const sessionId = decodeTurnHandle(spawned.turnHandle).sessionId;
+  const target = {
+    scope: "session" as const,
+    sessionHandle: spawned.sessionHandle,
+  };
+  const control = await f.client();
+  const observer = await f.sdk();
+  const firstSubscription = await observer.attach(target, { mode: "none" });
+  const firstFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  const firstTurnEnd = (async () => {
+    for (;;) {
+      const item = await firstSubscription.next();
+      if (item.done) throw new Error("The session ended unexpectedly");
+      firstFacts.push(item.value);
+      if (
+        item.value.type === "turn.completed" &&
+        item.value.turnHandle === spawned.turnHandle
+      )
+        return;
+    }
+  })();
+  await writeFile(firstGate, "release");
+  await firstTurnEnd;
+  const resumeCursor = firstSubscription.checkpoint;
+  const failed = firstSubscription.done.catch((error: unknown) => error);
+  observer.close();
+  const disconnect = await failed;
+  expect(disconnect).toMatchObject({
+    failure: {
+      code: "daemon_disconnected",
+      facts: { resumeCursor },
+    },
+  });
+  expect(await control.request("list", { sessionId })).toMatchObject({
+    result: [expect.objectContaining({ state: "idle" })],
+  });
+
+  const sent = await control.request("send", {
+    placement: "new_turn",
+    sessionId,
+    message: JSON.stringify({ gate: secondGate, reply: "second" }),
+  });
+  if ("error" in sent) throw new Error(sent.error.code);
+  const secondTurnHandle = encodeTurnHandle({
+    sessionId: sent.result.sessionId,
+    turnId: sent.result.turnId,
+  }) as unknown as import("@ykdz/reins-sdk").TurnHandle;
+  const secondTarget = { scope: "turn" as const, turnHandle: secondTurnHandle };
+  const secondObserver = await f.sdk();
+  const secondLive = await secondObserver.attach(secondTarget, {
+    mode: "none",
+  });
+  const secondCheckpoint = secondLive.checkpoint;
+  const secondFactsPromise = (async () => {
+    const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+    for await (const fact of secondLive) facts.push(fact);
+    return facts;
+  })();
+  await writeFile(secondGate, "release");
+  const secondFacts = await secondFactsPromise;
+  expect(await secondLive.done).toMatchObject({ reason: "end_turn" });
+
+  const recovery = await f.sdk();
+  const resumed = await recovery.attach(target, {
+    mode: "after",
+    cursor: resumeCursor,
+  });
+  const resumedFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of resumed) {
+    resumedFacts.push(fact);
+    if (fact.type === "turn.completed" && fact.turnHandle === secondTurnHandle)
+      break;
+  }
+  expect(await resumed.done).toMatchObject({ reason: "closed" });
   expect(
-    events.filter((event) => event.type === "turn.completed"),
+    resumedFacts.filter((fact) => fact.type === "turn.completed"),
   ).toHaveLength(1);
-  recovered.close();
-  expect(await recovered.done).toMatchObject({ reason: "closed" });
-  expect(
-    await observer.request("wait", {
-      targets: [secondTarget],
-      completion: "all",
-      timeoutMs: 0,
-    }),
-  ).toMatchObject({ result: { completed: [{ finalReply: "second" }] } });
-  expect((await f.cli(["kill", target.sessionId])).exitCode).toBe(0);
+  const full = await recovery.attach(target, { mode: "available" });
+  const fullFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of full) {
+    fullFacts.push(fact);
+    if (fact.type === "turn.completed" && fact.turnHandle === secondTurnHandle)
+      break;
+  }
+  expect(await full.done).toMatchObject({ reason: "closed" });
+  const firstTerminal = fullFacts.findIndex(
+    (fact) =>
+      fact.type === "turn.completed" && fact.turnHandle === spawned.turnHandle,
+  );
+  expect(firstTerminal).toBeGreaterThanOrEqual(0);
+  expect(resumedFacts).toEqual(fullFacts.slice(firstTerminal + 1));
+
   const replay = await f.cli([
     "attach",
-    target.sessionId,
+    secondTurnHandle,
     "--scope",
-    "session",
+    "turn",
     "--replay",
     "after",
     "--cursor",
-    disconnected.resumeCursor,
+    secondCheckpoint,
   ]);
   expect(replay.exitCode, replay.stdout + replay.stderr).toBe(0);
   const records = replay.stdout
     .trim()
     .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(
-    records.filter((event) => event.type === "turn.completed"),
-  ).toHaveLength(1);
-  expect(records.at(-1)).toMatchObject({
-    type: "subscription.ended",
-    reason: "session_killed",
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const cliFacts = records
+    .filter((record) => record.kind === "record" && record.variant === "fact")
+    .map((record) => (record.data as { fact: Record<string, unknown> }).fact);
+  expect(cliFacts.map((fact) => fact.factId)).toEqual(
+    secondFacts.map((fact) => fact.factId),
+  );
+  expect(records.at(-2)).toMatchObject({
+    kind: "record",
+    variant: "ended",
+    data: { end: { reason: "end_turn" } },
   });
 });
 
 test("available remains bounded during an unfinished text stream", async () => {
   const f = await fixture();
   const gate = join(f.root, "release");
-  await writeFile(gate, "release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "done", deltas: 1005, permission: true }),
-    "--name",
+  const spawned = await f.spawnSession(
     "unfinished",
-  ]);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await f.client();
-  // 授权保持该流未终止；available回放后再读到授权证明之前delta已经全部到达。
-  const subscription = await client.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "available" },
-  });
-  const events: import("@reins/client").AgentEvent[] = [];
-  subscription.onEvent((event) => events.push(event));
-  await vi.waitFor(() =>
-    expect(events.some((event) => event.type === "permission.requested")).toBe(
-      true,
-    ),
+    JSON.stringify({ gate, reply: "done", deltas: 1005, permission: true }),
   );
-  subscription.close();
-  await subscription.done;
-  const bounded = await client.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "available" },
+  const observer = await f.sdk();
+  const target = {
+    scope: "session" as const,
+    sessionHandle: spawned.sessionHandle,
+  };
+  const live = await observer.attach(target, { mode: "none" });
+  const permissionReached = (async () => {
+    for await (const fact of live)
+      if (fact.type === "permission.requested") return fact;
+    throw new Error("The permission request was not emitted");
+  })();
+  await writeFile(gate, "release");
+  expect(await permissionReached).toMatchObject({
+    type: "permission.requested",
   });
-  expect(bounded.establishment.replayed).toBeLessThanOrEqual(1000);
-  expect(bounded.establishment.window.truncated).toBe(true);
-  bounded.close();
-  await bounded.done;
+  live.close();
+  expect(await live.done).toMatchObject({ reason: "closed" });
+
+  const subscription = await observer.attach(target, { mode: "available" });
+  expect(subscription.establishment.replayed).toBeLessThanOrEqual(1000);
+  expect(subscription.establishment.window.truncated).toBe(true);
+  const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of subscription) {
+    facts.push(fact);
+    if (fact.type === "permission.requested") break;
+  }
+  expect(facts.some((fact) => fact.type === "permission.requested")).toBe(true);
+  expect(facts.some((fact) => fact.type === "turn.completed")).toBe(false);
+  subscription.close();
+  expect(await subscription.done).toMatchObject({ reason: "closed" });
 });
 
-test("expired cursors reject before establishment or events and never fall back to available", async () => {
+test("SDK and CLI reject an expired cursor while preserving exact window boundaries", async () => {
   const f = await fixture();
-  const gate = join(f.root, "release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "first" }),
-    "--name",
+  const firstGate = join(f.root, "first-release");
+  const secondGate = join(f.root, "second-release");
+  const spawned = await f.spawnSession(
     "expired",
-  ]);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await f.client();
-  const sub = await client.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "none" },
+    JSON.stringify({ gate: firstGate, reply: "first" }),
+  );
+  const sessionId = decodeTurnHandle(spawned.turnHandle).sessionId;
+  const target = {
+    scope: "session" as const,
+    sessionHandle: spawned.sessionHandle,
+  };
+  const control = await f.client();
+  const observer = await f.sdk();
+  const initial = await observer.attach(target, { mode: "none" });
+  const staleCursor = initial.checkpoint;
+  initial.close();
+  await initial.done;
+  await writeFile(firstGate, "release");
+  await control.request("wait", {
+    targets: [decodeTurnHandle(spawned.turnHandle)],
+    completion: "all",
   });
-  const events: import("@reins/client").AgentEvent[] = [];
-  sub.onEvent((event) => events.push(event));
-  await writeFile(gate, "release");
-  await vi.waitFor(() => expect(events.at(-1)?.type).toBe("turn.completed"));
-  const failure = sub.done.catch((error) => JSON.parse(error.message));
-  client.close();
-  const { resumeCursor } = await failure;
-  const next = await f.cli([
-    "send",
-    target.sessionId,
-    JSON.stringify({ gate, reply: "second", messages: 1005 }),
-    "--placement",
-    "new_turn",
-  ]);
-  const nextTarget = decodeTurnHandle(JSON.parse(next.stdout).turnHandle);
-  const observer = await f.client();
-  await observer.request("wait", { targets: [nextTarget], completion: "all" });
-  const wire: unknown[] = [];
-  observer.onNotification((event) => wire.push(event));
-  const rejected = await observer.request("attach", {
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "after", cursor: resumeCursor },
+  const sent = await control.request("send", {
+    placement: "new_turn",
+    sessionId,
+    message: JSON.stringify({
+      gate: secondGate,
+      reply: "second",
+      messages: 1005,
+    }),
   });
-  expect(rejected).toMatchObject({
-    error: {
+  if ("error" in sent) throw new Error(sent.error.code);
+  const secondTurnHandle = encodeTurnHandle({
+    sessionId: sent.result.sessionId,
+    turnId: sent.result.turnId,
+  }) as unknown as import("@ykdz/reins-sdk").TurnHandle;
+  await writeFile(secondGate, "release");
+  await control.request("wait", {
+    targets: [decodeTurnHandle(secondTurnHandle)],
+    completion: "all",
+  });
+
+  await expect(
+    observer.attach(target, { mode: "after", cursor: staleCursor }),
+  ).rejects.toMatchObject({
+    failure: {
       code: "event_cursor_expired",
-      oldest: expect.any(Number),
-      head: expect.any(Number),
+      facts: { oldest: expect.any(Number), head: expect.any(Number) },
     },
   });
-  expect(wire).toEqual([]);
-  if (!("error" in rejected) || rejected.error.code !== "event_cursor_expired")
-    throw new Error("Missing cursor expiry");
-  const position = decodeResumeCursor(resumeCursor);
-  const oldest = rejected.error.oldest!;
-  const boundary = await observer.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: {
-      mode: "after",
-      cursor: encodeResumeCursor({ ...position, eventId: oldest }),
-    },
+  const available = await observer.attach(target, { mode: "available" });
+  expect(available.establishment.window).toMatchObject({
+    truncated: true,
+    oldest: expect.any(Number),
+    head: expect.any(Number),
   });
-  expect(boundary.establishment.replayed).toBe(999);
-  boundary.close();
-  await boundary.done;
-  const head = await observer.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: {
-      mode: "after",
-      cursor: encodeResumeCursor({
-        ...position,
-        eventId: rejected.error.head!,
-      }),
-    },
+  expect(available.establishment.replayed).toBe(1000);
+  const availableFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  let oldestCursor: import("@ykdz/reins-sdk").ResumeCursor | undefined;
+  for (;;) {
+    const item = await available.next();
+    if (item.done) break;
+    availableFacts.push(item.value);
+    if (oldestCursor === undefined) oldestCursor = available.checkpoint;
+    if (
+      item.value.type === "turn.completed" &&
+      item.value.turnHandle === secondTurnHandle
+    )
+      break;
+  }
+  const headCursor = available.checkpoint;
+  available.close();
+  expect(await available.done).toMatchObject({ reason: "closed" });
+  expect(availableFacts).toHaveLength(1000);
+  expect(availableFacts.at(-1)?.type).toBe("turn.completed");
+  if (oldestCursor === undefined)
+    throw new Error("The replay window was empty");
+  const afterOldest = await observer.attach(target, {
+    mode: "after",
+    cursor: oldestCursor,
   });
-  expect(head.establishment.replayed).toBe(0);
-  head.close();
-  await head.done;
+  expect(afterOldest.establishment.replayed).toBe(999);
+  afterOldest.close();
+  await afterOldest.done;
+  const afterHead = await observer.attach(target, {
+    mode: "after",
+    cursor: headCursor,
+  });
+  expect(afterHead.establishment.replayed).toBe(0);
+  afterHead.close();
+  await afterHead.done;
+
   const cli = await f.cli([
     "attach",
-    target.sessionId,
+    spawned.sessionHandle,
     "--scope",
     "session",
     "--replay",
     "after",
     "--cursor",
-    resumeCursor,
+    staleCursor,
   ]);
-  expect(cli.exitCode, cli.stdout).toBe(65);
-  expect(cli.stdout.trim().split("\n")).toHaveLength(1);
-  expect(JSON.parse(cli.stdout)).toMatchObject({
-    code: "event_cursor_expired",
-    oldest: expect.any(Number),
-    head: expect.any(Number),
+  expect(cli.exitCode, cli.stdout + cli.stderr).toBe(70);
+  const cliFailure = cli.stderr
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(cliFailure.at(-1)).toMatchObject({
+    kind: "failure",
+    command: "attach",
+    variant: "attachFailed",
+    data: { failure: { code: "event_cursor_expired" } },
   });
-  const available = await f.cli([
+  const availableCli = await f.cli([
     "attach",
-    JSON.parse(next.stdout).turnHandle,
+    secondTurnHandle,
     "--scope",
     "turn",
     "--replay",
     "available",
-    "--pretty",
+    "--output-format",
+    "text",
   ]);
-  expect(available.exitCode, available.stdout).toBe(0);
-  expect(available.stdout).toContain("(truncated)");
+  expect(availableCli.exitCode, availableCli.stdout).toBe(0);
+  expect(availableCli.stdout).toContain("(truncated)");
 });
 
-test("a cursor is confined to its exact scope and daemon generation", async () => {
+test("SDK cursors remain bound to their exact scope and session", async () => {
   const f = await fixture();
   const gate = join(f.root, "release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "first" }),
-    "--name",
+  const first = await f.spawnSession(
     "bound",
-  ]);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await f.client();
-  const sub = await client.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "none" },
-  });
-  const failure = sub.done.catch((error) => JSON.parse(error.message));
-  client.close();
-  const { resumeCursor } = await failure;
-  const observer = await f.client();
-  const wire: unknown[] = [];
-  observer.onNotification((event) => wire.push(event));
-  expect(
-    await observer.request("attach", {
-      scope: "turn",
-      ...target,
-      replay: { mode: "after", cursor: resumeCursor },
-    }),
-  ).toMatchObject({ error: { code: "invalid_params" } });
-  const other = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "other" }),
-    "--name",
+    JSON.stringify({ gate, reply: "first" }),
+  );
+  const firstSession = {
+    scope: "session" as const,
+    sessionHandle: first.sessionHandle,
+  };
+  const observer = await f.sdk();
+  const source = await observer.attach(firstSession, { mode: "none" });
+  const cursor = source.checkpoint;
+  source.close();
+  await source.done;
+  await expect(
+    observer.attach(
+      { scope: "turn", turnHandle: first.turnHandle },
+      { mode: "after", cursor },
+    ),
+  ).rejects.toMatchObject({ failure: { code: "invalid_params" } });
+  const other = await f.spawnSession(
     "other",
-  ]);
-  const otherTarget = decodeTurnHandle(JSON.parse(other.stdout).turnHandle);
-  expect(
-    await observer.request("attach", {
-      scope: "session",
-      sessionId: otherTarget.sessionId,
-      replay: { mode: "after", cursor: resumeCursor },
-    }),
-  ).toMatchObject({ error: { code: "invalid_params" } });
-  const position = decodeResumeCursor(resumeCursor);
-  const stale = encodeResumeCursor({
-    ...position,
-    daemonGeneration: v.parse(daemonGenerationSchema, "othergeneration"),
-  });
-  expect(
-    await observer.request("attach", {
-      scope: "session",
-      sessionId: target.sessionId,
-      replay: { mode: "after", cursor: stale },
-    }),
-  ).toMatchObject({ error: { code: "invalid_params" } });
-  expect(wire).toEqual([]);
-  for (const args of [
-    ["--replay", "after"],
-    ["--replay", "none", "--cursor", resumeCursor],
-    ["--replay", "after", "--cursor", "resume1_invalid"],
-  ]) {
-    const invalid = await f.cli([
-      "attach",
-      target.sessionId,
-      "--scope",
-      "session",
-      ...args,
-    ]);
-    expect(invalid.exitCode, invalid.stdout).toBe(64);
-    expect(invalid.stdout.trim().split("\n")).toHaveLength(1);
-  }
+    JSON.stringify({ gate, reply: "other" }),
+  );
+  await expect(
+    observer.attach(
+      { scope: "session", sessionHandle: other.sessionHandle },
+      { mode: "after", cursor },
+    ),
+  ).rejects.toMatchObject({ failure: { code: "invalid_params" } });
 });

@@ -1,10 +1,12 @@
 import {
-  createEventProjector,
+  createAgentFact,
+  createPresentationProjector,
   projectSubscriptionTarget,
   type AgentSubscriptionEnd,
-  type AgentSubscription,
   type AgentEvent,
   type Subscribe,
+  type SubscribeFacts,
+  type FactSubscription,
 } from "./subscription.ts";
 export type {
   AgentSubscription,
@@ -13,12 +15,16 @@ export type {
   AgentSubscriptionEnd,
   AgentTarget,
 } from "./subscription.ts";
+export { createPresentationProjector };
 import { randomUUID } from "node:crypto";
 
 import type {
   ConsumerContext,
   CommandId,
   DaemonGeneration,
+  DomainEvent,
+  EventId,
+  ResumeCursor,
   SideEffectMethod,
   MachineError,
   ProtocolMessage,
@@ -73,11 +79,31 @@ export type ReinsClient = {
     params: unknown,
     timeoutMs?: number,
   ): Promise<ProtocolResponseFor<SideEffectMethod>>;
+  prepareOperation(method: SideEffectMethod): string;
+  executeOperation<M extends SideEffectMethod>(
+    method: M,
+    params: ProtocolParams<M>,
+    token: string,
+    timeoutMs?: number,
+  ): Promise<ProtocolResponseFor<M>>;
   onNotification(listener: NotificationListener): () => void;
   onClosed(listener: (reason: MachineError) => void): () => void;
   subscribe: Subscribe;
+  subscribeFacts: SubscribeFacts;
   close(): void;
 };
+
+export class AgentSubscriptionError extends Error {
+  readonly failure: MachineError;
+  readonly resumeCursor?: ResumeCursor;
+
+  constructor(failure: MachineError, resumeCursor?: ResumeCursor) {
+    super(failure.code);
+    this.name = "AgentSubscriptionError";
+    this.failure = failure;
+    if (resumeCursor !== undefined) this.resumeCursor = resumeCursor;
+  }
+}
 
 // 仅保留原目标的目录事实；敏感任务文本、模型输入与授权反馈由调用方重带。
 const spawnContextSchema = v.strictObject({
@@ -139,6 +165,19 @@ export class ReinsClientError extends Error {
   }
 }
 
+export class OperationCredentialError extends Error {
+  constructor() {
+    super("Invalid operation credential");
+    this.name = "OperationCredentialError";
+  }
+}
+
+function createAbortError(): Error {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 type ClientMachineErrorCode =
   | "invalid_daemon_response"
   | "daemon_disconnected"
@@ -164,6 +203,10 @@ export function createReinsClient(
       unknown?: (cause: CommandOutcomeUnknown["cause"]) => Error;
     }
   >();
+  const cancelledResponses = new Map<
+    string,
+    (response: ProtocolResponse) => void
+  >();
   const listeners = new Set<NotificationListener>();
   const closedListeners = new Set<(reason: MachineError) => void>();
   let closed = false;
@@ -182,6 +225,7 @@ export function createReinsClient(
         ) ?? error,
       );
     pending.clear();
+    cancelledResponses.clear();
     for (const listener of Array.from(closedListeners)) listener(reason);
   };
   const unsubscribe = connection.onEvent((event) => {
@@ -191,8 +235,17 @@ export function createReinsClient(
       if (response.success) {
         const responseMessage = response.output;
         const entry = pending.get(responseMessage.requestId);
-        if (entry === undefined) return;
-        entry.resolve(responseMessage);
+        if (entry !== undefined) {
+          entry.resolve(responseMessage);
+          return;
+        }
+        const closeCancelled = cancelledResponses.get(
+          responseMessage.requestId,
+        );
+        if (closeCancelled !== undefined) {
+          cancelledResponses.delete(responseMessage.requestId);
+          closeCancelled(responseMessage);
+        }
         return;
       }
       const notification = v.safeParse(protocolNotificationSchema, message);
@@ -213,7 +266,11 @@ export function createReinsClient(
     params: ProtocolParams<M>,
     timeoutMs = 30_000,
     originalId?: CommandId,
+    originalRetryToken?: string,
+    signal?: AbortSignal,
+    onCancelledResponse?: (response: ProtocolResponse) => void,
   ): Promise<ProtocolResponseFor<M>> => {
+    if (signal?.aborted) return Promise.reject(createAbortError());
     if (closed) {
       return Promise.reject(
         new ReinsClientError(clientMachineError("daemon_disconnected")),
@@ -251,16 +308,17 @@ export function createReinsClient(
         daemonGeneration: commandId?.split(":")[0],
       };
       const retryToken =
+        originalRetryToken ??
         "retry1_" +
-        Buffer.from(
-          JSON.stringify({
-            ...identity,
-            ...(spawnContext?.success &&
-            Object.keys(spawnContext.output).length > 0
-              ? { spawnContext: spawnContext.output }
-              : {}),
-          }),
-        ).toString("base64url");
+          Buffer.from(
+            JSON.stringify({
+              ...identity,
+              ...(spawnContext?.success &&
+              Object.keys(spawnContext.output).length > 0
+                ? { spawnContext: spawnContext.output }
+                : {}),
+            }),
+          ).toString("base64url");
       return new ReinsClientError(
         v.parse(commandOutcomeUnknownSchema, {
           code: "command_outcome_unknown",
@@ -277,10 +335,13 @@ export function createReinsClient(
     const requestId = v.parse(requestIdSchema, `cli${seq}`);
     return new Promise<ProtocolResponseFor<M>>((resolve, reject) => {
       let settled = false;
+      let abortListener: (() => void) | undefined;
       const settle = (action: () => void): void => {
         if (settled) return;
         settled = true;
         if (timer !== null) clearTimeout(timer);
+        if (abortListener !== undefined)
+          signal?.removeEventListener("abort", abortListener);
         pending.delete(requestId);
         action();
       };
@@ -297,6 +358,14 @@ export function createReinsClient(
                 ),
               );
             }, timeoutMs);
+      if (signal !== undefined) {
+        abortListener = () => {
+          if (settled) return;
+          if (onCancelledResponse !== undefined)
+            cancelledResponses.set(requestId, onCancelledResponse);
+          settle(() => reject(createAbortError()));
+        };
+      }
       pending.set(requestId, {
         ...(commandId === undefined ? {} : { unknown }),
         resolve: (response) => {
@@ -321,6 +390,13 @@ export function createReinsClient(
         },
         reject: (error) => settle(() => reject(error)),
       });
+      if (signal !== undefined && abortListener !== undefined) {
+        signal.addEventListener("abort", abortListener, { once: true });
+        if (signal.aborted) {
+          abortListener();
+          return;
+        }
+      }
       try {
         connection.send({
           kind: "request",
@@ -335,13 +411,30 @@ export function createReinsClient(
     });
   };
 
-  const subscribe: Subscribe = async (params) => {
-    const queued: AgentEvent[] = [];
+  type RawEvent = { event: DomainEvent; eventId: EventId };
+  type RawSubscription = AsyncIterableIterator<RawEvent> & {
+    readonly establishment: NonNullable<ProtocolResult<"attach">>;
+    readonly done: Promise<AgentSubscriptionEnd>;
+    readonly checkpoint: ResumeCursor;
+    readonly permissionResolutionsBeforeReady: ReadonlySet<string>;
+    readonly turnCompletionsBeforeReady: ReadonlySet<string>;
+    close(): void;
+  };
+
+  const subscribeRaw = async (
+    params: ProtocolParams<"attach">,
+    signal?: AbortSignal,
+  ) => {
+    const queued: RawEvent[] = [];
     const initial: ProtocolNotification[] = [];
-    const eventListeners = new Set<(event: AgentEvent) => void>();
     let establishment: ProtocolResult<"attach"> | undefined;
     let ended = false;
-    let lastPosition = 0;
+    let localClose = false;
+    let lastDeliveredPosition = 0;
+    const permissionResolutionsBeforeReady = new Set<string>();
+    const turnCompletionsBeforeReady = new Set<string>();
+    let failure: Error | undefined;
+    const waiters: Array<() => void> = [];
     let resolveDone!: (end: AgentSubscriptionEnd) => void;
     let rejectDone!: (error: Error) => void;
     const done = new Promise<AgentSubscriptionEnd>((resolve, reject) => {
@@ -349,34 +442,29 @@ export function createReinsClient(
       rejectDone = reject;
     });
     void done.catch(() => undefined);
-    const project = createEventProjector();
     const wake = () => {
-      if (eventListeners.size === 0) return;
-      for (const event of queued.splice(0))
-        for (const listener of Array.from(eventListeners)) listener(event);
+      for (const resume of waiters.splice(0)) resume();
     };
     const cleanup = () => {
       listeners.delete(receive);
       closedListeners.delete(disconnect);
     };
+    const cursorAt = (position: number): ResumeCursor =>
+      encodeResumeCursor({
+        target: establishment!.target,
+        daemonGeneration: generation!,
+        eventId: position,
+      });
     const disconnect = (reason: MachineError) => {
       if (ended) return;
       ended = true;
-      const failure = new Error(
-        JSON.stringify({
-          ...reason,
-          ...(reason.code === "daemon_disconnected" &&
+      failure = new AgentSubscriptionError(
+        reason,
+        reason.code === "daemon_disconnected" &&
           establishment !== undefined &&
           generation !== undefined
-            ? {
-                resumeCursor: encodeResumeCursor({
-                  target: establishment.target,
-                  daemonGeneration: generation,
-                  eventId: lastPosition,
-                }),
-              }
-            : {}),
-        }),
+          ? cursorAt(lastDeliveredPosition)
+          : undefined,
       );
       cleanup();
       rejectDone(failure);
@@ -393,70 +481,132 @@ export function createReinsClient(
       )
         return;
       if (notification.method === "event") {
-        lastPosition = notification.params.eventId;
-        for (const projected of project(notification.params.event)) {
-          const event = { ...projected, eventId: notification.params.eventId };
-          if (
-            event.type === "permission.resolved" ||
-            event.type === "turn.completed"
-          ) {
-            for (let index = queued.length - 1; index >= 0; index -= 1) {
-              const previous = queued[index];
-              if (
-                previous?.type === "permission.requested" &&
-                (event.type === "permission.resolved"
-                  ? previous.permissionHandle === event.permissionHandle
-                  : previous.turnHandle === event.turnHandle)
-              )
-                queued.splice(index, 1);
-            }
-          }
-          queued.push(event);
-        }
+        queued.push({
+          event: notification.params.event,
+          eventId: notification.params.eventId,
+        });
       } else {
         ended = true;
         cleanup();
-        resolveDone({
+        const end = {
           target: projectSubscriptionTarget(notification.params.target),
           reason: notification.params.reason,
           lastEventId: notification.params.lastEventId,
-        });
+        };
+        resolveDone(end);
       }
       wake();
     };
     listeners.add(receive);
     closedListeners.add(disconnect);
     try {
-      const response = await request("attach", params);
-      if ("error" in response) throw new Error(JSON.stringify(response.error));
+      const response = await request(
+        "attach",
+        params,
+        30_000,
+        undefined,
+        undefined,
+        signal,
+        (lateResponse) => {
+          if ("error" in lateResponse) return;
+          const parsed = v.safeParse(
+            protocolResultSchemaFor("attach"),
+            lateResponse.result,
+          );
+          if (!parsed.success) {
+            terminate(clientMachineError("invalid_daemon_response"));
+            return;
+          }
+          try {
+            connection.send({
+              kind: "control",
+              method: "subscription.close",
+              subscriptionId: parsed.output.subscriptionId,
+            });
+          } catch {
+            terminate(clientMachineError("daemon_disconnected"));
+          }
+        },
+      );
+      if (signal?.aborted) {
+        if (!("error" in response)) {
+          try {
+            connection.send({
+              kind: "control",
+              method: "subscription.close",
+              subscriptionId: response.result.subscriptionId,
+            });
+          } catch {
+            terminate(clientMachineError("daemon_disconnected"));
+          }
+        }
+        throw createAbortError();
+      }
+      if ("error" in response) throw new ReinsClientError(response.error);
       establishment = response.result;
-      lastPosition =
+      lastDeliveredPosition =
         params.replay.mode === "after"
           ? decodeResumeCursor(params.replay.cursor).eventId
           : params.replay.mode === "none"
             ? (establishment.window.head ?? 0)
             : (establishment.window.oldest ?? 1) - 1;
-      for (const notification of initial.splice(0)) receive(notification);
+      const beforeReady = initial.splice(0);
+      for (const notification of beforeReady) {
+        if (notification.method !== "event") continue;
+        if (notification.params.event.type === "permission.resolved")
+          permissionResolutionsBeforeReady.add(
+            notification.params.event.permissionId,
+          );
+        if (notification.params.event.type === "turn.completed")
+          turnCompletionsBeforeReady.add(notification.params.event.turnId);
+      }
+      for (const notification of beforeReady) receive(notification);
     } catch (error) {
       cleanup();
       throw error;
     }
-    const subscription: AgentSubscription = {
-      establishment: {
-        target: projectSubscriptionTarget(establishment.target),
-        window: establishment.window,
-        replayed: establishment.replayed,
-      },
+    const raw: RawSubscription = {
+      establishment,
       done,
-      onEvent(listener) {
-        eventListeners.add(listener);
-        wake();
-        return () => {
-          eventListeners.delete(listener);
-        };
+      permissionResolutionsBeforeReady,
+      turnCompletionsBeforeReady,
+      get checkpoint() {
+        return cursorAt(lastDeliveredPosition);
+      },
+      async next() {
+        while (queued.length === 0 && !ended && !localClose)
+          await new Promise<void>((resolve) => waiters.push(resolve));
+        if (queued.length > 0) {
+          const value = queued.shift()!;
+          lastDeliveredPosition = value.eventId;
+          return { value, done: false };
+        }
+        if (failure instanceof AgentSubscriptionError) {
+          throw new AgentSubscriptionError(
+            failure.failure,
+            failure.resumeCursor === undefined
+              ? undefined
+              : cursorAt(lastDeliveredPosition),
+          );
+        }
+        if (failure !== undefined) throw failure;
+        return { value: undefined, done: true };
+      },
+      async return() {
+        raw.close();
+        return { value: undefined, done: true };
+      },
+      async throw(error?: unknown) {
+        raw.close();
+        throw error;
+      },
+      [Symbol.asyncIterator]() {
+        return raw;
       },
       close() {
-        if (ended) return;
+        if (ended || localClose) return;
+        localClose = true;
+        queued.length = 0;
         try {
           connection.send({
             kind: "control",
@@ -465,10 +615,164 @@ export function createReinsClient(
           });
         } catch {
           terminate(clientMachineError("daemon_disconnected"));
+          return;
         }
+        ended = true;
+        cleanup();
+        const end = {
+          target: projectSubscriptionTarget(establishment.target),
+          reason: "closed" as const,
+          lastEventId:
+            lastDeliveredPosition === 0
+              ? null
+              : (lastDeliveredPosition as EventId),
+        };
+        resolveDone(end);
+        wake();
+      },
+    };
+    return raw;
+  };
+
+  const subscribeFacts: SubscribeFacts = async (params, signal) => {
+    if (signal?.aborted) throw createAbortError();
+    const raw = await subscribeRaw(params, signal);
+    const factDone = raw.done.then(({ target, reason }) => ({
+      target,
+      reason,
+    }));
+    let finished = false;
+    const abort = () => raw.close();
+    if (signal !== undefined) {
+      if (signal.aborted) raw.close();
+      else signal.addEventListener("abort", abort, { once: true });
+      void factDone.then(
+        () => signal.removeEventListener("abort", abort),
+        () => signal.removeEventListener("abort", abort),
+      );
+    }
+    const subscription: FactSubscription = {
+      establishment: {
+        target: projectSubscriptionTarget(raw.establishment.target),
+        window: raw.establishment.window,
+        replayed: raw.establishment.replayed,
+      },
+      done: factDone,
+      get checkpoint() {
+        return raw.checkpoint;
+      },
+      async next() {
+        if (finished) return { value: undefined, done: true };
+        const result = await raw.next();
+        if (result.done) {
+          finished = true;
+          return { value: undefined, done: true };
+        }
+        if (generation === undefined)
+          throw new AgentSubscriptionError(
+            clientMachineError("invalid_daemon_response"),
+          );
+        return {
+          value: createAgentFact(
+            result.value.event,
+            result.value.eventId,
+            generation,
+          ),
+          done: false,
+        };
+      },
+      async return() {
+        finished = true;
+        raw.close();
+        return { value: undefined, done: true };
+      },
+      async throw(error?: unknown) {
+        finished = true;
+        raw.close();
+        throw error;
+      },
+      [Symbol.asyncIterator]() {
+        return subscription;
+      },
+      close() {
+        finished = true;
+        raw.close();
       },
     };
     return subscription;
+  };
+
+  const subscribe: Subscribe = async (params) => {
+    const raw = await subscribeRaw(params);
+    const queued: AgentEvent[] = [];
+    const eventListeners = new Set<(event: AgentEvent) => void>();
+    const project = createPresentationProjector();
+    let started = false;
+    const wake = () => {
+      if (eventListeners.size === 0) return;
+      for (const event of queued.splice(0))
+        for (const listener of Array.from(eventListeners)) listener(event);
+    };
+    const emit = (event: AgentEvent) => {
+      if (
+        event.type === "permission.resolved" ||
+        event.type === "turn.completed"
+      ) {
+        for (let index = queued.length - 1; index >= 0; index -= 1) {
+          const previous = queued[index];
+          if (
+            previous?.type === "permission.requested" &&
+            (event.type === "permission.resolved"
+              ? previous.permissionHandle === event.permissionHandle
+              : previous.turnHandle === event.turnHandle)
+          )
+            queued.splice(index, 1);
+        }
+      }
+      queued.push(event);
+      wake();
+    };
+    const pump = async () => {
+      if (started) return;
+      started = true;
+      try {
+        for await (const item of raw) {
+          if (generation === undefined) break;
+          if (
+            item.event.type === "permission.requested" &&
+            (raw.permissionResolutionsBeforeReady.has(
+              item.event.permissionId,
+            ) ||
+              raw.turnCompletionsBeforeReady.has(item.event.turnId))
+          )
+            continue;
+          const fact = createAgentFact(item.event, item.eventId, generation);
+          for (const event of project(fact))
+            emit({ ...event, eventId: item.eventId });
+        }
+      } catch {
+        // 原有推送式消费者通过 done 观察订阅错误。
+      }
+    };
+    return {
+      establishment: {
+        target: projectSubscriptionTarget(raw.establishment.target),
+        window: raw.establishment.window,
+        replayed: raw.establishment.replayed,
+      },
+      done: raw.done,
+      onEvent(listener) {
+        eventListeners.add(listener);
+        wake();
+        void pump();
+        return () => {
+          eventListeners.delete(listener);
+        };
+      },
+      close() {
+        raw.close();
+      },
+    };
   };
 
   return {
@@ -484,6 +788,7 @@ export function createReinsClient(
     },
     request,
     subscribe,
+    subscribeFacts,
     retry(token, params, timeoutMs) {
       const identity = parseRetryToken(token);
       const restored =
@@ -499,6 +804,26 @@ export function createReinsClient(
         timeoutMs,
         identity.commandId,
       );
+    },
+    prepareOperation(method) {
+      if (generation === undefined)
+        throw new ReinsClientError({ code: "protocol_error" });
+      const identity = {
+        method,
+        commandId: v.parse(commandIdSchema, generation + ":" + randomUUID()),
+        daemonGeneration: generation,
+      };
+      return `retry1_${Buffer.from(JSON.stringify(identity)).toString("base64url")}`;
+    },
+    executeOperation(method, params, token, timeoutMs) {
+      let identity: ReturnType<typeof parseRetryToken>;
+      try {
+        identity = parseRetryToken(token);
+      } catch {
+        throw new OperationCredentialError();
+      }
+      if (identity.method !== method) throw new OperationCredentialError();
+      return request(method, params, timeoutMs, identity.commandId, token);
     },
     onNotification(listener) {
       listeners.add(listener);

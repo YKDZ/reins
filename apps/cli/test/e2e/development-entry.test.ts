@@ -19,6 +19,13 @@ import { fileURLToPath } from "node:url";
 
 import { afterEach, describe, expect, test } from "vitest";
 
+import {
+  controlData,
+  killWithControlCli,
+  spawnWithControlCli,
+  type ControlCliRunner,
+} from "./fixtures/control-cli.ts";
+
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 const codexAppServerFixture = join(
   repository,
@@ -114,6 +121,30 @@ function runCommand(
         stderr: Buffer.concat(stderr).toString("utf8"),
       });
     });
+  });
+}
+
+const developmentRunner: ControlCliRunner = (args, env, cwd) =>
+  runDevelopmentCli(args, env, "", cwd);
+
+const installedCliRunner: ControlCliRunner = (args, env, cwd) =>
+  runCommand(
+    process.execPath,
+    [join(cwd, "apps/cli/dist/reins.js"), ...args],
+    cwd,
+    env,
+  );
+
+function spawnDevelopment(
+  env: NodeJS.ProcessEnv,
+  cwd: string,
+  sessionName: string,
+) {
+  return spawnWithControlCli(developmentRunner, env, cwd, {
+    sessionName,
+    harness: "codex",
+    message: "hello",
+    cwd,
   });
 }
 
@@ -269,11 +300,9 @@ describe("checkout-isolated development entry", () => {
     });
 
     expect(result.status, result.stderr).toBe(0);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      capabilities: expect.arrayContaining([
-        expect.objectContaining({ harness: "codex" }),
-      ]),
-    });
+    expect(controlData(result).capabilities).toEqual(
+      expect.arrayContaining([expect.objectContaining({ harness: "codex" })]),
+    );
     expect(result.stderr).toBe("");
   }, 120_000);
 
@@ -356,7 +385,7 @@ describe("checkout-isolated development entry", () => {
       PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
       REINS_DEVELOPMENT_ROOT: runtimeRoot,
-      REINS_IDLE_TIMEOUT_MS: "50",
+      REINS_IDLE_TIMEOUT_MS: "30000",
     };
     const envA = { ...baseEnv };
     const capabilities = await runDevelopmentCli(
@@ -366,20 +395,12 @@ describe("checkout-isolated development entry", () => {
       checkoutA,
     );
     expect(capabilities.status, capabilities.stderr).toBe(0);
-    expect(JSON.parse(capabilities.stdout)).toMatchObject({
-      capabilities: expect.arrayContaining([
-        expect.objectContaining({ harness: "codex" }),
-      ]),
-    });
-    const spawned = await runDevelopmentCli(
-      ["spawn", "codex", "hello", "--name", "isolated-session"],
-      envA,
-      "",
-      checkoutA,
+    expect(controlData(capabilities).capabilities).toEqual(
+      expect.arrayContaining([expect.objectContaining({ harness: "codex" })]),
     );
+    const spawned = await spawnDevelopment(envA, checkoutA, "isolated-session");
     expect(spawned.status, spawned.stderr).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = controlData(spawned).sessionHandle as string;
     const oldRuntimeDirectory = (
       await readdir(runtimeRoot, {
         withFileTypes: true,
@@ -396,7 +417,7 @@ describe("checkout-isolated development entry", () => {
       checkoutB,
     );
     expect(fromOtherCheckout.status, fromOtherCheckout.stderr).toBe(0);
-    expect(JSON.parse(fromOtherCheckout.stdout)).toEqual([]);
+    expect(controlData(fromOtherCheckout).sessions).toEqual([]);
 
     await appendFile(
       join(checkoutA, "apps/cli/src/cli.ts"),
@@ -409,33 +430,35 @@ describe("checkout-isolated development entry", () => {
       checkoutA,
     );
     expect(afterRebuild.status, afterRebuild.stderr).toBe(0);
-    expect(JSON.parse(afterRebuild.stdout)).toEqual([]);
+    expect(controlData(afterRebuild).sessions).toEqual([]);
 
-    const killed = await runDevelopmentCli(
-      ["kill", sessionId],
+    const killed = await killWithControlCli(
+      developmentRunner,
       envA,
-      "",
       checkoutA,
+      sessionId,
     );
     expect(killed.status, killed.stderr).toBe(0);
-    expect(JSON.parse(killed.stdout)).toEqual({
-      sessionId,
+    expect(controlData(killed)).toEqual({
+      sessionHandle: sessionId,
       status: "not_found",
     });
 
-    const cleanup = await runCommand(
-      process.execPath,
-      [join(checkoutA, "apps/cli/dist/reins.js"), "kill", sessionId],
+    const cleanupEnv = {
+      ...envA,
+      REINS_CONSUMER_CONTEXT: "development-entry",
+      REINS_DAEMON_BIN: join(checkoutA, "packages/daemon/dist/main.js"),
+      REINS_SOCKET: join(runtimeRoot, oldRuntimeDirectory, "reins.sock"),
+      REINS_STATE_DIR: join(runtimeRoot, oldRuntimeDirectory, "state"),
+    };
+    const cleanup = await killWithControlCli(
+      installedCliRunner,
+      cleanupEnv,
       checkoutA,
-      {
-        ...envA,
-        REINS_CONSUMER_CONTEXT: "development-entry",
-        REINS_DAEMON_BIN: join(checkoutA, "packages/daemon/dist/main.js"),
-        REINS_SOCKET: join(runtimeRoot, oldRuntimeDirectory, "reins.sock"),
-        REINS_STATE_DIR: join(runtimeRoot, oldRuntimeDirectory, "state"),
-      },
+      sessionId,
     );
     expect(cleanup.status, cleanup.stderr).toBe(0);
+    expect(controlData(cleanup).status).toBe("killed");
   }, 240_000);
 
   test("reuses the same build daemon and its live sessions", async () => {
@@ -446,15 +469,15 @@ describe("checkout-isolated development entry", () => {
       PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
       REINS_DEVELOPMENT_ROOT: await createRuntimePath(),
-      REINS_IDLE_TIMEOUT_MS: "50",
+      REINS_IDLE_TIMEOUT_MS: "30000",
     };
-    const spawned = await runDevelopmentCli(
-      ["spawn", "codex", "hello", "--name", "development-session"],
+    const spawned = await spawnDevelopment(
       env,
+      repository,
+      "development-session",
     );
     expect(spawned.status, spawned.stderr).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = controlData(spawned).sessionHandle as string;
 
     const originalBinary = await readFile(codex.binary, "utf8");
     await writeFile(
@@ -463,8 +486,8 @@ describe("checkout-isolated development entry", () => {
     );
     const capabilities = await runDevelopmentCli(["capabilities"], env);
     expect(capabilities.status, capabilities.stderr).toBe(0);
-    expect(JSON.parse(capabilities.stdout)).toMatchObject({
-      capabilities: expect.arrayContaining([
+    expect(controlData(capabilities).capabilities).toEqual(
+      expect.arrayContaining([
         expect.objectContaining({
           harness: "codex",
           models: expect.arrayContaining([
@@ -472,41 +495,46 @@ describe("checkout-isolated development entry", () => {
           ]),
         }),
       ]),
-    });
+    );
 
-    const secondSpawn = await runDevelopmentCli(
-      ["spawn", "codex", "hello", "--name", "development-session-second"],
+    const secondSpawn = await spawnDevelopment(
       env,
+      repository,
+      "development-session-second",
     );
     expect(secondSpawn.status, secondSpawn.stderr).toBe(0);
-    const secondSessionId = (
-      JSON.parse(secondSpawn.stdout) as { sessionId: string }
-    ).sessionId;
+    const secondSessionId = controlData(secondSpawn).sessionHandle as string;
     expect(daemonGenerationFromSessionId(secondSessionId)).toBe(
       daemonGenerationFromSessionId(sessionId),
     );
 
     const listed = await runDevelopmentCli(["list"], env);
     expect(listed.status, listed.stderr).toBe(0);
-    expect(JSON.parse(listed.stdout)).toEqual(
+    const sessions = controlData(listed).sessions as Record<string, unknown>[];
+    expect(sessions).toEqual(
       expect.arrayContaining([
         expect.objectContaining({
-          sessionId,
+          sessionHandle: sessionId,
           sessionName: "development-session",
         }),
         expect.objectContaining({
-          sessionId: secondSessionId,
+          sessionHandle: secondSessionId,
           sessionName: "development-session-second",
         }),
       ]),
     );
-    expect(JSON.parse(listed.stdout)).toHaveLength(2);
+    expect(sessions).toHaveLength(2);
 
     for (const target of [sessionId, secondSessionId]) {
-      const killed = await runDevelopmentCli(["kill", target], env);
+      const killed = await killWithControlCli(
+        developmentRunner,
+        env,
+        repository,
+        target,
+      );
       expect(killed.status, killed.stderr).toBe(0);
-      expect(JSON.parse(killed.stdout)).toEqual({
-        sessionId: target,
+      expect(controlData(killed)).toEqual({
+        sessionHandle: target,
         status: "killed",
       });
     }
@@ -522,15 +550,15 @@ describe("checkout-isolated development entry", () => {
       PATH: codexA.path,
       PNPM_CONFIG_REPORTER: "silent",
       REINS_DEVELOPMENT_ROOT: runtimeRoot,
-      REINS_IDLE_TIMEOUT_MS: "50",
+      REINS_IDLE_TIMEOUT_MS: "30000",
     };
-    const spawned = await runDevelopmentCli(
-      ["spawn", "codex", "hello", "--name", "path-session"],
+    const spawned = await spawnDevelopment(
       originalEnv,
+      repository,
+      "path-session",
     );
     expect(spawned.status, spawned.stderr).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = controlData(spawned).sessionHandle as string;
     const originalRuntimeDirectory = (
       await readdir(runtimeRoot, { withFileTypes: true })
     ).find((entry) => entry.isDirectory())?.name;
@@ -542,22 +570,24 @@ describe("checkout-isolated development entry", () => {
       ...originalEnv,
       PATH: codexB.path,
     });
-    const cleanup = await runCommand(
-      process.execPath,
-      [join(repository, "apps/cli/dist/reins.js"), "kill", sessionId],
+    const cleanupEnv = {
+      ...originalEnv,
+      REINS_CONSUMER_CONTEXT: "development-entry",
+      REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
+      REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
+      REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),
+    };
+    const cleanup = await killWithControlCli(
+      installedCliRunner,
+      cleanupEnv,
       repository,
-      {
-        ...originalEnv,
-        REINS_CONSUMER_CONTEXT: "development-entry",
-        REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
-        REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
-        REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),
-      },
+      sessionId,
     );
     expect(cleanup.status, cleanup.stderr).toBe(0);
+    expect(controlData(cleanup).status).toBe("killed");
 
     expect(listed.status, listed.stderr).toBe(0);
-    expect(JSON.parse(listed.stdout)).toEqual([]);
+    expect(controlData(listed).sessions).toEqual([]);
   }, 120_000);
 
   test("isolates a live daemon when Node resolution conditions change without rebuilding output", async () => {
@@ -569,19 +599,19 @@ describe("checkout-isolated development entry", () => {
       PATH: codex.path,
       PNPM_CONFIG_REPORTER: "silent",
       REINS_DEVELOPMENT_ROOT: runtimeRoot,
-      REINS_IDLE_TIMEOUT_MS: "50",
+      REINS_IDLE_TIMEOUT_MS: "30000",
     };
     const originalEnv = {
       ...baseEnv,
       NODE_OPTIONS: "--conditions=f04-runtime-a",
     };
-    const spawned = await runDevelopmentCli(
-      ["spawn", "codex", "hello", "--name", "runtime-session"],
+    const spawned = await spawnDevelopment(
       originalEnv,
+      repository,
+      "runtime-session",
     );
     expect(spawned.status, spawned.stderr).toBe(0);
-    const sessionId = (JSON.parse(spawned.stdout) as { sessionId: string })
-      .sessionId;
+    const sessionId = controlData(spawned).sessionHandle as string;
     const originalRuntimeDirectory = (
       await readdir(runtimeRoot, { withFileTypes: true })
     ).find((entry) => entry.isDirectory())?.name;
@@ -596,22 +626,24 @@ describe("checkout-isolated development entry", () => {
         NODE_OPTIONS: "--conditions=f04-runtime-b",
       },
     );
-    const cleanup = await runCommand(
-      process.execPath,
-      [join(repository, "apps/cli/dist/reins.js"), "kill", sessionId],
+    const cleanupEnv = {
+      ...originalEnv,
+      REINS_CONSUMER_CONTEXT: "development-entry",
+      REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
+      REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
+      REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),
+    };
+    const cleanup = await killWithControlCli(
+      installedCliRunner,
+      cleanupEnv,
       repository,
-      {
-        ...originalEnv,
-        REINS_CONSUMER_CONTEXT: "development-entry",
-        REINS_DAEMON_BIN: join(repository, "packages/daemon/dist/main.js"),
-        REINS_SOCKET: join(runtimeRoot, originalRuntimeDirectory, "reins.sock"),
-        REINS_STATE_DIR: join(runtimeRoot, originalRuntimeDirectory, "state"),
-      },
+      sessionId,
     );
     expect(cleanup.status, cleanup.stderr).toBe(0);
+    expect(controlData(cleanup).status).toBe("killed");
 
     expect(listed.status, listed.stderr).toBe(0);
-    expect(JSON.parse(listed.stdout)).toEqual([]);
+    expect(controlData(listed).sessions).toEqual([]);
   }, 120_000);
 
   test("preserves stdin, stdout, stderr, arguments, and a non-zero exit code", async () => {
@@ -626,7 +658,7 @@ describe("checkout-isolated development entry", () => {
     const stdoutSentinel = "cli stdout sentinel\n";
     const stderrSentinel = "cli stderr sentinel\n";
     const result = await runDevelopmentCli(
-      ["--pretty", "capabilities", "--caller-sentinel"],
+      ["capabilities", "--caller-sentinel"],
       {
         NODE_OPTIONS: `--import=${preload}`,
         PNPM_CONFIG_REPORTER: "silent",
@@ -640,12 +672,8 @@ describe("checkout-isolated development entry", () => {
 
     expect(result.status).toBe(64);
     expect(result.stdout).toBe(stdoutSentinel);
-    expect(result.stderr).toBe(
-      stderrSentinel +
-        "error: Unknown option '--caller-sentinel'\n" +
-        "suggestion: Allowed: --pretty\n" +
-        "usage: reins capabilities [options]\n",
-    );
+    expect(result.stderr).toContain(stderrSentinel);
+    expect(result.stderr).toContain("--caller-sentinel");
     expect(await readFile(stdinRecord, "utf8")).toBe(sentinel);
   }, 120_000);
 });

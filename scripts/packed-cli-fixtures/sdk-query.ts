@@ -41,8 +41,20 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.diagnosticId ?? failure.facts.cause?.kind ?? "";
     case "unknown_harness":
       return failure.facts.availableHarnesses.join(",");
+    case "command_outcome_unknown":
+      return failure.facts.operation;
+    case "session_name_conflict":
+      return failure.facts.sessionName;
+    case "unsupported_feature":
+      return failure.facts.feature;
+    case "event_cursor_expired":
+      return `${failure.facts.oldest ?? "empty"}:${failure.facts.head ?? "empty"}`;
     case "method_not_found":
       return failure.facts.method;
+    case "command_id_conflict":
+    case "stale_command_id":
+    case "operation_credential_invalid":
+      return failure.code;
     case "unexpected_failure":
       return failure.facts.remoteCode ?? "";
     case "consumer_context_required":

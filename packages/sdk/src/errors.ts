@@ -1,6 +1,10 @@
 import type { ReinsFailure } from "./contracts.ts";
 
-export type ReinsSdkErrorStage = "connect" | "handshake" | "query";
+export type ReinsSdkErrorStage =
+  | "connect"
+  | "handshake"
+  | "query"
+  | "operation";
 
 export class ReinsSdkError extends Error {
   readonly failure: ReinsFailure;

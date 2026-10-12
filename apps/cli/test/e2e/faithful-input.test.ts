@@ -23,6 +23,13 @@ import { createUnixSocketClient } from "@reins/transport";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
+import {
+  controlData,
+  spawnWithControlCli,
+  type ControlCliRunner,
+  type ControlSpawnInput,
+} from "./fixtures/control-cli.ts";
+
 const repo = fileURLToPath(new URL("../../../../", import.meta.url));
 const cliBin = join(repo, "apps/cli/dist/reins.js");
 const daemonBin = join(repo, "packages/daemon/dist/main.js");
@@ -73,9 +80,13 @@ async function fixture() {
       daemon.kill("SIGTERM");
     });
   });
-  async function cli(args: string[], cwd = callerCwd) {
+  async function cli(
+    args: readonly string[],
+    cwd = callerCwd,
+    commandEnv: NodeJS.ProcessEnv = env,
+  ) {
     const child = spawn(process.execPath, [cliBin, ...args], {
-      env,
+      env: commandEnv,
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -88,11 +99,16 @@ async function fixture() {
     );
     return { exitCode, stdout: stdout.join(""), stderr: stderr.join("") };
   }
+  const runControlCli: ControlCliRunner = (args, commandEnv, cwd) =>
+    cli(args, cwd, commandEnv);
+  const spawnControl = (input: ControlSpawnInput) =>
+    spawnWithControlCli(runControlCli, env, callerCwd, input);
   await vi.waitFor(async () => {
     expect(daemon.exitCode, errors.join("")).toBeNull();
     await access(env.REINS_SOCKET);
     const result = await cli(["list"]);
     expect(result.exitCode, result.stderr + errors.join("")).toBe(0);
+    expect(controlData(result).sessions).toEqual([]);
   });
   async function client(consumerContext = env.REINS_CONSUMER_CONTEXT) {
     const connection = await createUnixSocketClient<ProtocolMessage>(
@@ -105,20 +121,26 @@ async function fixture() {
     expect(await client.initialize()).toHaveProperty("result");
     return client;
   }
-  return { root, runtime, daemonCwd, callerCwd, env, cli, client };
+  return {
+    root,
+    runtime,
+    daemonCwd,
+    callerCwd,
+    env,
+    cli,
+    client,
+    spawnControl,
+  };
 }
 
 test("explicit unsupported Codex sandbox rejects before any native worker starts", async () => {
-  const { env, cli } = await fixture();
-  const result = await cli([
-    "spawn",
-    "codex",
-    "caller-only-message",
-    "--name",
-    "unsupported",
-    "--sandbox",
-    "unmapped-policy",
-  ]);
+  const { env, cli, spawnControl } = await fixture();
+  const result = await spawnControl({
+    sessionName: "unsupported",
+    harness: "codex",
+    message: "caller-only-message",
+    sandbox: "unmapped-policy",
+  });
   if (result.exitCode === 0)
     await vi.waitFor(async () =>
       expect(await readFile(env.REINS_W05_NATIVE_LOG, "utf8")).toContain(
@@ -133,25 +155,21 @@ test("explicit unsupported Codex sandbox rejects before any native worker starts
     exitCode: result.exitCode,
     nativeStarted,
     stdout: result.stdout,
-  }).toMatchObject({ exitCode: 65, nativeStarted: false });
-  expect(JSON.parse(result.stdout)).toMatchObject({
+  }).toMatchObject({ exitCode: 70, nativeStarted: false });
+  expect(controlData(result).failure).toMatchObject({
     code: "unsupported_feature",
-    feature: "sandbox",
   });
-  expect(JSON.parse((await cli(["list"])).stdout)).toEqual([]);
+  expect(controlData(await cli(["list"])).sessions).toEqual([]);
 });
 
 test("explicit unsupported Qoder effort rejects before SDK query or initial message", async () => {
-  const { env, cli } = await fixture();
-  const result = await cli([
-    "spawn",
-    "qoder",
-    "caller-only-message",
-    "--name",
-    "unsupported",
-    "--reasoning",
-    "high",
-  ]);
+  const { env, cli, spawnControl } = await fixture();
+  const result = await spawnControl({
+    sessionName: "unsupported",
+    harness: "qoder",
+    message: "caller-only-message",
+    reasoning: "high",
+  });
   if (result.exitCode === 0)
     await vi.waitFor(async () =>
       expect(await readFile(env.REINS_W05_NATIVE_LOG, "utf8")).toContain(
@@ -166,27 +184,23 @@ test("explicit unsupported Qoder effort rejects before SDK query or initial mess
     exitCode: result.exitCode,
     nativeStarted,
     stdout: result.stdout,
-  }).toMatchObject({ exitCode: 65, nativeStarted: false });
-  expect(JSON.parse(result.stdout)).toMatchObject({
+  }).toMatchObject({ exitCode: 70, nativeStarted: false });
+  expect(controlData(result).failure).toMatchObject({
     code: "unsupported_feature",
-    feature: "reasoning",
   });
-  expect(JSON.parse((await cli(["list"])).stdout)).toEqual([]);
+  expect(controlData(await cli(["list"])).sessions).toEqual([]);
 });
 
 test("Codex approval advertises only native decisions that can be faithfully answered", async () => {
-  const { env, cli, client: connectClient } = await fixture();
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "permission",
-    "--name",
-    "permission",
-    "--authorization-mode",
-    "interactive",
-  ]);
+  const { env, client: connectClient, spawnControl } = await fixture();
+  const spawned = await spawnControl({
+    sessionName: "permission",
+    harness: "codex",
+    message: "permission",
+    authorizationMode: "interactive",
+  });
   expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+  const target = decodeTurnHandle(controlData(spawned).turnHandle as string);
   const client = await connectClient();
   const events: DomainEvent[] = [];
   client.onNotification((n) => {
@@ -239,16 +253,13 @@ test("Codex approval advertises only native decisions that can be faithfully ans
 });
 
 test("an approval with only unrepresentable Codex decisions is explicitly refused", async () => {
-  const { env, cli } = await fixture();
-  const result = await cli([
-    "spawn",
-    "codex",
-    "cancel-only",
-    "--name",
-    "cancel",
-    "--authorization-mode",
-    "interactive",
-  ]);
+  const { env, spawnControl } = await fixture();
+  const result = await spawnControl({
+    sessionName: "cancel",
+    harness: "codex",
+    message: "cancel-only",
+    authorizationMode: "interactive",
+  });
   expect(result.exitCode, result.stdout).toBe(0);
   await vi.waitFor(async () =>
     expect(await readFile(env.REINS_W05_NATIVE_LOG, "utf8")).toContain(
@@ -277,14 +288,12 @@ async function nativeLog(path: string): Promise<
 test.each(["codex", "qoder"])(
   "%s keeps omitted fields absent and faithfully passes explicit supported inputs",
   async (harness) => {
-    const { env, cli } = await fixture();
-    const omitted = await cli([
-      "spawn",
+    const { env, spawnControl } = await fixture();
+    const omitted = await spawnControl({
+      sessionName: "omitted",
       harness,
-      "  caller-only message  ",
-      "--name",
-      "omitted",
-    ]);
+      message: "  caller-only message  ",
+    });
     expect(omitted.exitCode, omitted.stdout).toBe(0);
     await vi.waitFor(async () =>
       expect(
@@ -322,18 +331,14 @@ test.each(["codex", "qoder"])(
       ).toMatchObject({ message: { content: "  caller-only message  " } });
     }
     for (const mode of ["interactive", "allow-all"]) {
-      const explicit = await cli([
-        "spawn",
+      const explicit = await spawnControl({
+        sessionName: mode,
         harness,
-        "explicit message",
-        "--name",
-        mode,
-        "--model",
-        "fixture-model",
-        ...(harness === "codex" ? ["--reasoning", "high"] : []),
-        "--authorization-mode",
-        mode,
-      ]);
+        message: "explicit message",
+        model: "fixture-model",
+        ...(harness === "codex" ? { reasoning: "high" } : {}),
+        authorizationMode: mode === "allow-all" ? "allowAll" : "interactive",
+      });
       expect(explicit.exitCode, explicit.stdout).toBe(0);
       await vi.waitFor(async () =>
         expect(
@@ -384,18 +389,15 @@ test.each(["codex", "qoder"])(
 test.each(["permission", "session-permission"])(
   "Qoder %s returns only the native menu and caller-authored resolution to the same callback",
   async (message) => {
-    const { env, cli, client: connectClient } = await fixture();
-    const spawned = await cli([
-      "spawn",
-      "qoder",
+    const { env, cli, client: connectClient, spawnControl } = await fixture();
+    const spawned = await spawnControl({
+      sessionName: "permission",
+      harness: "qoder",
       message,
-      "--name",
-      "permission",
-      "--authorization-mode",
-      "interactive",
-    ]);
+      authorizationMode: "interactive",
+    });
     expect(spawned.exitCode, spawned.stdout).toBe(0);
-    const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+    const target = decodeTurnHandle(controlData(spawned).turnHandle as string);
     const client = await connectClient();
     const events: DomainEvent[] = [];
     client.onNotification((n) => {
@@ -522,18 +524,15 @@ test.each(["permission", "session-permission"])(
 );
 
 test("an already resolved native approval cannot acknowledge an unperformed caller decision", async () => {
-  const { cli, client: connectClient } = await fixture();
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "resolved-permission",
-    "--name",
-    "resolved",
-    "--authorization-mode",
-    "interactive",
-  ]);
+  const { client: connectClient, spawnControl } = await fixture();
+  const spawned = await spawnControl({
+    sessionName: "resolved",
+    harness: "codex",
+    message: "resolved-permission",
+    authorizationMode: "interactive",
+  });
   expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+  const target = decodeTurnHandle(controlData(spawned).turnHandle as string);
   const client = await connectClient();
   const events: DomainEvent[] = [];
   client.onNotification((n) => {
@@ -568,20 +567,18 @@ test.each([
 ])(
   "%s rejects explicit unsupported %s before a native effect",
   async (harness, field) => {
-    const { env, cli } = await fixture();
-    const response = await cli([
-      "spawn",
-      harness!,
-      "caller message",
-      "--name",
-      "unsupported",
-      "--" + field!,
-      "caller value",
-    ]);
-    expect(response.exitCode, response.stdout).toBe(65);
-    expect(JSON.parse(response.stdout)).toMatchObject({
+    const { env, cli, spawnControl } = await fixture();
+    const response = await spawnControl({
+      sessionName: "unsupported",
+      harness: harness!,
+      message: "caller message",
+      ...(field === "agent"
+        ? { agent: "caller value" }
+        : { sandbox: "caller value" }),
+    });
+    expect(response.exitCode, response.stdout).toBe(70);
+    expect(controlData(response).failure).toMatchObject({
       code: "unsupported_feature",
-      feature: field,
     });
     expect(
       await access(env.REINS_W05_NATIVE_LOG).then(
@@ -589,6 +586,6 @@ test.each([
         () => false,
       ),
     ).toBe(false);
-    expect(JSON.parse((await cli(["list"])).stdout)).toEqual([]);
+    expect(controlData(await cli(["list"])).sessions).toEqual([]);
   },
 );

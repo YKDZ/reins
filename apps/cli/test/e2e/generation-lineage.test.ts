@@ -8,6 +8,13 @@ import { daemonGenerationSchema, sessionIdSchema } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
+import {
+  controlData,
+  killWithControlCli,
+  spawnWithControlCli,
+  type ControlCliResult,
+} from "./fixtures/control-cli.ts";
+
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 const cliBin = join(repoRoot, "apps/cli/dist/reins.js");
 const daemonBin = join(repoRoot, "packages/daemon/dist/main.js");
@@ -155,12 +162,12 @@ function generationOf(sessionId: string): string {
   return sessionId.slice(sessionId.lastIndexOf("@g") + 2);
 }
 
-function sessionIdFrom(result: CliResult): string {
-  return v.parse(
-    sessionIdSchema,
-    (JSON.parse(result.stdout) as { sessionId: unknown }).sessionId,
-  );
+function sessionIdFrom(result: ControlCliResult): string {
+  return v.parse(sessionIdSchema, controlData(result).sessionHandle);
 }
+
+const controlRunner = (args: readonly string[], env: NodeJS.ProcessEnv) =>
+  runCli(args, env);
 
 describe("世代身份谱系：真实 CLI + 真实 daemon + 真实 state", () => {
   // acceptance 反例：把耐久 generation 计数器回滚到旧值后，重新分配的世代
@@ -199,10 +206,12 @@ describe("世代身份谱系：真实 CLI + 真实 daemon + 真实 state", () =>
     // 第二代：真实新进程，同名 foo 取得“旧引用”。
     const second = await startDaemon(env);
     const secondPid = second.pid ?? -1;
-    const spawned2 = await runCli(
-      ["spawn", "fake", "hello", "--name", "foo"],
-      env,
-    );
+    const spawned2 = await spawnWithControlCli(controlRunner, env, repoRoot, {
+      sessionName: "foo",
+      harness: "fake",
+      message: "hello",
+      cwd: repoRoot,
+    });
     expect(spawned2.exitCode).toBe(0);
     const staleHandle = sessionIdFrom(spawned2);
     const staleGeneration = generationOf(staleHandle);
@@ -218,10 +227,12 @@ describe("世代身份谱系：真实 CLI + 真实 daemon + 真实 state", () =>
     // 第三代：真实新进程，同名 foo 重新分配。
     const third = await startDaemon(env);
     const thirdPid = third.pid ?? -1;
-    const spawned3 = await runCli(
-      ["spawn", "fake", "hello", "--name", "foo"],
-      env,
-    );
+    const spawned3 = await spawnWithControlCli(controlRunner, env, repoRoot, {
+      sessionName: "foo",
+      harness: "fake",
+      message: "hello",
+      cwd: repoRoot,
+    });
     expect(spawned3.exitCode).toBe(0);
     const currentHandle = sessionIdFrom(spawned3);
     const currentGeneration = generationOf(currentHandle);
@@ -238,24 +249,27 @@ describe("世代身份谱系：真实 CLI + 真实 daemon + 真实 state", () =>
       true,
     );
 
-    // 操作旧引用：按不存在拒绝（退出 65）。
-    const stale = await runCli(
-      ["send", staleHandle, "stale", "--placement", "new_turn"],
+    // 旧世代凭据在当前账本中按不存在处理。
+    const stale = await killWithControlCli(
+      controlRunner,
       env,
+      repoRoot,
+      staleHandle,
     );
-    expect(stale.exitCode).toBe(65);
-    expect(JSON.parse(stale.stdout)).toMatchObject({
-      code: "session_not_found",
-      sessionId: staleHandle,
+    expect(stale.exitCode).toBe(0);
+    expect(controlData(stale)).toEqual({
+      sessionHandle: staleHandle,
+      status: "not_found",
     });
 
-    // 当前会话仍可查。
     const listed = await runCli(["list", "--name", "foo"], env);
-    const sessions = JSON.parse(listed.stdout) as Array<{ sessionId: string }>;
+    const sessions = controlData(listed).sessions as Array<{
+      sessionHandle: string;
+    }>;
     expect(sessions).toHaveLength(1);
-    expect(sessions[0]?.sessionId).toBe(currentHandle);
+    expect(sessions[0]?.sessionHandle).toBe(currentHandle);
 
-    await runCli(["kill", currentHandle], env);
+    await killWithControlCli(controlRunner, env, repoRoot, currentHandle);
 
     // 每次重启确实是独立进程，且逐一退出。
     expect(new Set([firstPid, secondPid, thirdPid]).size).toBe(3);

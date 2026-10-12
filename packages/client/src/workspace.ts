@@ -39,7 +39,8 @@ import {
 import { importGitPublication } from "./git-import.ts";
 import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
 import {
-  createEventProjector,
+  createAgentFact,
+  createPresentationProjector,
   type AgentEvent,
   type AgentSubscription,
   type AgentSubscriptionEnd,
@@ -69,7 +70,7 @@ type WorkspaceProtocolResponseFor<M extends ProtocolMethod> =
     });
 export type WorkspaceControlClient = Omit<
   ReinsClient,
-  "request" | "subscribe"
+  "request" | "subscribe" | "prepareOperation" | "executeOperation"
 > & {
   request<M extends ProtocolMethod>(
     method: M,
@@ -88,10 +89,12 @@ export function projectWorkspaceHistory(history: WorkspaceHistory) {
   return {
     ...history,
     entries: history.entries.map(({ events, ...attachment }) => {
-      const project = createEventProjector();
+      const project = createPresentationProjector();
       return {
         ...attachment,
-        events: events.flatMap(({ event }) => project(event)),
+        events: events.flatMap(({ daemonGeneration, eventId, event }) =>
+          project(createAgentFact(event, eventId, daemonGeneration)),
+        ),
       };
     }),
   };

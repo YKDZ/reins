@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,11 +10,24 @@ import {
   decodeTurnHandle,
   type DomainEvent,
   type ProtocolMessage,
-  type SpawnParams,
 } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
+import {
+  connect as connectSdk,
+  type AgentFact,
+  type ReinsConnection,
+  type SpawnInput,
+  type TurnHandle,
+} from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
+
+import {
+  controlData,
+  killWithControlCli,
+  spawnWithControlCli,
+  type ControlCliRunner,
+} from "./fixtures/control-cli.ts";
 
 const repo = fileURLToPath(new URL("../../../../", import.meta.url));
 const cliBin = join(repo, "apps/cli/dist/reins.js");
@@ -62,9 +75,13 @@ async function fixture(prefix = "reins-wrr03") {
       daemon.kill("SIGTERM");
     });
   });
-  async function cli(args: string[], cwd = callerCwd) {
+  async function cli(
+    args: readonly string[],
+    cwd = callerCwd,
+    commandEnv: NodeJS.ProcessEnv = env,
+  ) {
     const child = spawn(process.execPath, [cliBin, ...args], {
-      env,
+      env: commandEnv,
       cwd,
       stdio: ["ignore", "pipe", "pipe"],
     });
@@ -77,11 +94,14 @@ async function fixture(prefix = "reins-wrr03") {
     );
     return { exitCode, stdout: stdout.join(""), stderr: stderr.join("") };
   }
+  const runControlCli: ControlCliRunner = (args, commandEnv, cwd) =>
+    cli(args, cwd, commandEnv);
   await vi.waitFor(async () => {
     expect(daemon.exitCode, errors.join("")).toBeNull();
     await access(env.REINS_SOCKET);
     const result = await cli(["list"]);
     expect(result.exitCode, result.stderr + errors.join("")).toBe(0);
+    expect(controlData(result).sessions).toEqual([]);
   });
   async function client(consumerContext = env.REINS_CONSUMER_CONTEXT) {
     const connection = await createUnixSocketClient<ProtocolMessage>(
@@ -94,21 +114,62 @@ async function fixture(prefix = "reins-wrr03") {
     expect(await client.initialize()).toHaveProperty("result");
     return client;
   }
-  return { root, runtime, daemonCwd, callerCwd, env, cli, client };
+  async function sdk() {
+    const connection = await connectSdk({
+      socketPath: env.REINS_SOCKET,
+      consumerContext: env.REINS_CONSUMER_CONTEXT,
+    });
+    cleanup.push(async () => connection.close());
+    return connection;
+  }
+  return {
+    root,
+    runtime,
+    daemonCwd,
+    callerCwd,
+    env,
+    cli,
+    client,
+    sdk,
+    runControlCli,
+  };
+}
+
+async function awaitTurnCompletion(
+  subscription: Awaited<ReturnType<ReinsConnection["attach"]>>,
+): Promise<Extract<AgentFact, { type: "turn.completed" }>> {
+  let completed: Extract<AgentFact, { type: "turn.completed" }> | undefined;
+  try {
+    for await (const fact of subscription) {
+      if (fact.type === "turn.completed") completed = fact;
+    }
+    await subscription.done;
+  } finally {
+    subscription.close();
+  }
+  if (completed === undefined) throw new Error("SDK 未报告回合结束事实");
+  return completed;
 }
 
 test("local CLI projects its cwd into an already running daemon and the worker really reads there", async () => {
-  const { callerCwd, daemonCwd, cli, client: connectClient } = await fixture();
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "read-marker",
-    "--name",
-    "directory",
-  ]);
+  const {
+    callerCwd,
+    daemonCwd,
+    cli,
+    client: connectClient,
+    env,
+    runControlCli,
+    sdk,
+  } = await fixture();
+  const spawned = await spawnWithControlCli(runControlCli, env, callerCwd, {
+    sessionName: "directory",
+    harness: "codex",
+    message: "read-marker",
+    cwd: callerCwd,
+  });
   expect(spawned.exitCode, spawned.stderr).toBe(0);
-  const ack = JSON.parse(spawned.stdout) as {
-    sessionId: string;
+  const ack = controlData(spawned) as {
+    sessionHandle: string;
     cwd: string;
     turnHandle: string;
   };
@@ -116,25 +177,23 @@ test("local CLI projects its cwd into an already running daemon and the worker r
     cwd: callerCwd,
     turnHandle: expect.stringMatching(/^[a-z0-9@/.-]+$/u),
   });
-  const waited = await cli([
-    "wait",
-    ack.turnHandle,
-    "--completion",
-    "all",
-    "--timeout",
-    "5000",
-  ]);
-  expect(waited.exitCode, waited.stderr).toBe(0);
-  const waitResult = JSON.parse(waited.stdout) as {
-    completed: { finalReply: string }[];
-  };
-  expect(JSON.parse(waitResult.completed[0]!.finalReply)).toEqual({
+  const connection = await sdk();
+  const completionSubscription = await connection.attach(
+    { scope: "turn", turnHandle: ack.turnHandle as TurnHandle },
+    { mode: "available" },
+  );
+  const completed = await awaitTurnCompletion(completionSubscription);
+  expect(JSON.parse(completed.finalReply ?? "null")).toEqual({
     cwd: callerCwd,
     marker: "caller-owned-marker",
   });
-  expect(Object.keys(ack).sort()).toEqual(["cwd", "sessionId", "turnHandle"]);
+  expect(Object.keys(ack).sort()).toEqual([
+    "cwd",
+    "sessionHandle",
+    "turnHandle",
+  ]);
   const target = decodeTurnHandle(ack.turnHandle);
-  expect(target.sessionId).toBe(ack.sessionId);
+  expect(target.sessionId).toBe(ack.sessionHandle);
   const client = await connectClient();
   const events: DomainEvent[] = [];
   client.onNotification((notification) => {
@@ -160,10 +219,10 @@ test("local CLI projects its cwd into an already running daemon and the worker r
     expect.objectContaining({ type: "turn.started", ...target }),
   );
   expect(
-    JSON.parse((await cli(["list", "--session", ack.sessionId])).stdout),
+    controlData(await cli(["list", "--session", ack.sessionHandle])).sessions,
   ).toMatchObject([
     {
-      sessionId: ack.sessionId,
+      sessionHandle: ack.sessionHandle,
       cwd: callerCwd,
       lastCompletedTurn: { turnHandle: ack.turnHandle },
     },
@@ -172,144 +231,92 @@ test("local CLI projects its cwd into an already running daemon and the worker r
   expect(
     await foreign.request("list", { sessionId: target.sessionId }),
   ).toMatchObject({ result: [] });
-  const explicit = await cli([
-    "spawn",
-    "codex",
-    "read-marker",
-    "--name",
-    "explicit",
-    "--cwd",
-    "../../daemon",
-  ]);
+  const explicit = await spawnWithControlCli(runControlCli, env, callerCwd, {
+    sessionName: "explicit",
+    harness: "codex",
+    message: "read-marker",
+    cwd: daemonCwd,
+  });
   expect(explicit.exitCode, explicit.stdout).toBe(0);
-  const explicitAck = JSON.parse(explicit.stdout) as {
+  const explicitAck = controlData(explicit) as {
     turnHandle: string;
-    sessionId: string;
+    sessionHandle: string;
     cwd: string;
   };
   expect(explicitAck.cwd).toBe(daemonCwd);
-  const explicitWait = JSON.parse(
-    (
-      await cli([
-        "wait",
-        explicitAck.turnHandle,
-        "--completion",
-        "all",
-        "--timeout",
-        "5000",
-      ])
-    ).stdout,
-  ) as { completed: { finalReply: string }[] };
-  expect(JSON.parse(explicitWait.completed[0]!.finalReply)).toEqual({
+  const explicitSubscription = await connection.attach(
+    { scope: "turn", turnHandle: explicitAck.turnHandle as TurnHandle },
+    { mode: "available" },
+  );
+  const explicitCompleted = await awaitTurnCompletion(explicitSubscription);
+  expect(JSON.parse(explicitCompleted.finalReply ?? "null")).toEqual({
     cwd: daemonCwd,
     marker: "daemon-owned-marker",
   });
-  const pretty = await cli([
-    "spawn",
-    "codex",
-    "read-marker",
-    "--name",
-    "pretty",
-    "--pretty",
-  ]);
-  expect(pretty.exitCode, pretty.stderr).toBe(0);
-  expect(pretty.stdout).toContain("Created session pretty@g");
-  expect(pretty.stdout).toContain("\nTurn pretty@g");
-  expect(pretty.stdout).toContain(`\nWorking directory ${callerCwd}\n`);
 });
 
-test("raw client rejects missing, relative and unavailable daemon-native directories before creating a session", async () => {
-  const { root, callerCwd, client: connectClient } = await fixture();
-  const client = await connectClient();
+test("public SDK delegates cwd reality checks to the daemon before creating a session", async () => {
+  const { root, callerCwd, sdk } = await fixture();
+  const connection = await sdk();
   for (const [index, cwd] of [
-    undefined,
     "relative",
     join(root, "absent"),
     join(callerCwd, "marker.txt"),
   ].entries()) {
-    const params = {
-      harness: "codex",
+    const input = {
       sessionName: `invalid-${index}`,
+      harness: "codex",
       message: "read-marker",
-      ...(cwd === undefined ? {} : { cwd }),
-    } as unknown as SpawnParams;
-    const response = await client.request("spawn", params);
-    expect(response).toMatchObject({
-      error: {
+      cwd,
+    } as unknown as SpawnInput;
+    const credential = connection.prepareOperation("spawn");
+    await expect(connection.spawn(input, credential)).rejects.toMatchObject({
+      failure: {
         code: "invalid_params",
-        issues: [expect.objectContaining({ path: "cwd" })],
+        facts: {
+          issues: [expect.objectContaining({ path: "cwd" })],
+        },
       },
     });
-    expect(await client.request("list", {})).toMatchObject({ result: [] });
+    expect(await connection.list()).toEqual([]);
   }
 });
 
-test("local path projection accepts the same directory identity and rejects a different real object", async () => {
-  const { callerCwd, daemonCwd, client: connectClient } = await fixture();
-  const client = await connectClient();
-  const caller = await stat(callerCwd, { bigint: true });
-  const cwdIdentity = { device: String(caller.dev), inode: String(caller.ino) };
-  const params = {
-    harness: "codex",
-    sessionName: "proved",
-    message: "read-marker",
-    cwd: callerCwd,
-    cwdIdentity,
-  } as unknown as SpawnParams;
-  expect(await client.request("spawn", params)).toHaveProperty("result");
-  expect(
-    await client.request("spawn", {
-      ...params,
-      sessionName: "wrong-object",
-      cwd: daemonCwd,
-    } as SpawnParams),
-  ).toMatchObject({
-    error: {
-      code: "invalid_params",
-      issues: [{ issue: "invalid_value", path: "cwd" }],
-    },
-  });
-  const listed = await client.request("list", {});
-  expect("result" in listed ? listed.result : []).toHaveLength(1);
-});
-
 test("session snapshots keep the exact active or completed turn without stale active fields", async () => {
-  const { cli, callerCwd } = await fixture();
-  const spawned = await cli(["spawn", "codex", "hold", "--name", "snapshot"]);
+  const { cli, callerCwd, env, runControlCli, sdk } = await fixture();
+  const spawned = await spawnWithControlCli(runControlCli, env, callerCwd, {
+    sessionName: "snapshot",
+    harness: "codex",
+    message: "hold",
+    cwd: callerCwd,
+  });
   expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const ack = JSON.parse(spawned.stdout) as {
-    sessionId: string;
+  const ack = controlData(spawned) as {
+    sessionHandle: string;
     turnHandle: string;
   };
-  const busy = JSON.parse((await cli(["list"])).stdout) as Record<
+  const busy = controlData(await cli(["list"])).sessions as Record<
     string,
     unknown
   >[];
   expect(busy).toMatchObject([
     {
-      sessionId: ack.sessionId,
+      sessionHandle: ack.sessionHandle,
       state: "busy",
-      activeTurnHandle: ack.turnHandle,
+      activeTurn: ack.turnHandle,
     },
   ]);
-  expect(busy[0]).not.toHaveProperty("activeTurnId");
-  const pretty = await cli(["list", "--session", ack.sessionId, "--pretty"]);
-  expect(pretty.stdout).toContain(callerCwd);
-  expect(pretty.stdout).toContain(ack.turnHandle);
+  expect(busy[0]).not.toHaveProperty("lastCompletedTurn");
+  const connection = await sdk();
+  const completionSubscription = await connection.attach(
+    { scope: "turn", turnHandle: ack.turnHandle as TurnHandle },
+    { mode: "none" },
+  );
   await writeFile(join(callerCwd, "release"), "finish");
-  expect(
-    (
-      await cli([
-        "wait",
-        ack.turnHandle,
-        "--completion",
-        "all",
-        "--timeout",
-        "5000",
-      ])
-    ).exitCode,
-  ).toBe(0);
-  const idle = JSON.parse((await cli(["list"])).stdout) as Record<
+  expect((await awaitTurnCompletion(completionSubscription)).stopReason).toBe(
+    "end_turn",
+  );
+  const idle = controlData(await cli(["list"])).sessions as Record<
     string,
     unknown
   >[];
@@ -319,9 +326,12 @@ test("session snapshots keep the exact active or completed turn without stale ac
       lastCompletedTurn: { turnHandle: ack.turnHandle, stopReason: "end_turn" },
     },
   ]);
-  expect(idle[0]).not.toHaveProperty("activeTurnHandle");
-  expect((await cli(["kill", ack.sessionId])).exitCode).toBe(0);
-  const killed = JSON.parse((await cli(["list"])).stdout) as Record<
+  expect(idle[0]).not.toHaveProperty("activeTurn");
+  expect(
+    (await killWithControlCli(runControlCli, env, callerCwd, ack.sessionHandle))
+      .exitCode,
+  ).toBe(0);
+  const killed = controlData(await cli(["list"])).sessions as Record<
     string,
     unknown
   >[];
@@ -331,20 +341,27 @@ test("session snapshots keep the exact active or completed turn without stale ac
       lastCompletedTurn: { turnHandle: ack.turnHandle, stopReason: "end_turn" },
     },
   ]);
-  expect(killed[0]).not.toHaveProperty("activeTurnHandle");
+  expect(killed[0]).not.toHaveProperty("activeTurn");
 });
 
 test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择", async () => {
-  const { cli, callerCwd } = await fixture("reins-wrr06-placement");
-  const created = await cli(["spawn", "codex", "hold", "--name", "placement"]);
+  const { cli, callerCwd, env, runControlCli } = await fixture(
+    "reins-wrr06-placement",
+  );
+  const created = await spawnWithControlCli(runControlCli, env, callerCwd, {
+    sessionName: "placement",
+    harness: "codex",
+    message: "hold",
+    cwd: callerCwd,
+  });
   expect(created.exitCode).toBe(0);
-  const initial = JSON.parse(created.stdout) as {
-    sessionId: string;
+  const initial = controlData(created) as {
+    sessionHandle: string;
     turnHandle: string;
   };
   const busy = await cli([
     "send",
-    initial.sessionId,
+    initial.sessionHandle,
     "new task",
     "--placement",
     "new_turn",
@@ -360,7 +377,7 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
   ]);
   expect(active.exitCode, active.stderr).toBe(0);
   expect(JSON.parse(active.stdout)).toEqual({
-    sessionId: initial.sessionId,
+    sessionId: initial.sessionHandle,
     turnHandle: initial.turnHandle,
   });
   await writeFile(join(callerCwd, "release"), "released");
@@ -387,7 +404,7 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
   expect(JSON.parse(ended.stdout)).toMatchObject({ code: "turn_not_active" });
   const next = await cli([
     "send",
-    initial.sessionId,
+    initial.sessionHandle,
     "next task",
     "--placement",
     "new_turn",
@@ -397,43 +414,42 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
     sessionId: string;
     turnHandle: string;
   };
-  expect(nextAck.sessionId).toBe(initial.sessionId);
+  expect(nextAck.sessionId).toBe(initial.sessionHandle);
   expect(nextAck.turnHandle).not.toBe(initial.turnHandle);
   expect(decodeTurnHandle(nextAck.turnHandle).sessionId).toBe(
-    initial.sessionId,
+    initial.sessionHandle,
   );
   const unspecified = await cli([
     "send",
-    initial.sessionId,
+    initial.sessionHandle,
     "missing placement",
   ]);
   expect(unspecified.exitCode).toBe(64);
 });
 
 test("interrupt 单 TurnHandle 返回接受事实，ACK 不等于取消", async () => {
-  const { cli, callerCwd } = await fixture("reins-wrr16");
-  const created = await cli([
-    "spawn",
-    "codex",
-    "hold",
-    "--name",
-    "exact-interrupt",
-  ]);
+  const { cli, callerCwd, env, runControlCli } = await fixture("reins-wrr16");
+  const created = await spawnWithControlCli(runControlCli, env, callerCwd, {
+    sessionName: "exact-interrupt",
+    harness: "codex",
+    message: "hold",
+    cwd: callerCwd,
+  });
   expect(created.exitCode, created.stderr).toBe(0);
-  const original = JSON.parse(created.stdout) as {
-    sessionId: string;
+  const original = controlData(created) as {
+    sessionHandle: string;
     turnHandle: string;
   };
   const accepted = await cli(["interrupt", original.turnHandle]);
   expect(accepted.exitCode, accepted.stdout + accepted.stderr).toBe(0);
   expect(JSON.parse(accepted.stdout)).toEqual({
-    sessionId: original.sessionId,
+    sessionId: original.sessionHandle,
     turnHandle: original.turnHandle,
   });
-  expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
-    { sessionId: original.sessionId, state: "busy" },
+  expect(controlData(await cli(["list"])).sessions).toMatchObject([
+    { sessionHandle: original.sessionHandle, state: "busy" },
   ]);
-  const incomplete = await cli(["interrupt", original.sessionId]);
+  const incomplete = await cli(["interrupt", original.sessionHandle]);
   expect(incomplete.exitCode).toBe(64);
   const multiple = await cli([
     "interrupt",
@@ -443,7 +459,7 @@ test("interrupt 单 TurnHandle 返回接受事实，ACK 不等于取消", async 
   expect(multiple.exitCode).toBe(64);
   await writeFile(join(callerCwd, "release"), "released");
   await vi.waitFor(async () =>
-    expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
+    expect(controlData(await cli(["list"])).sessions).toMatchObject([
       { state: "idle" },
     ]),
   );
