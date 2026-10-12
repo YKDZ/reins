@@ -345,7 +345,11 @@ async function killDrop(): Promise<void> {
     )
       throw new Error("The installed SDK omitted typed kill recovery facts");
     process.stdout.write(
-      `${JSON.stringify({ code: error.failure.code, stage: error.stage })}\n`,
+      `${JSON.stringify({
+        code: error.failure.code,
+        operation: error.failure.facts.operation,
+        stage: error.stage,
+      })}\n`,
     );
   } finally {
     connection.close();

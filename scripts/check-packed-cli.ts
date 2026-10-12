@@ -22,6 +22,7 @@ import {
   startUnixAcknowledgementProxy,
   startUnixConnectionProxy,
   type UnixAcknowledgementProxy,
+  type UnixConnectionProxy,
 } from "./packed-cli-fixtures/ack-proxy.ts";
 import {
   isCleanStop,
@@ -62,6 +63,8 @@ type OwnedResources = {
   runtimeRoot: string | undefined;
   directDaemon: DaemonHandle | undefined;
   acknowledgementProxy: UnixAcknowledgementProxy | undefined;
+  connectionProxy: UnixConnectionProxy | undefined;
+  releaseGates: string[];
 };
 
 const adapterFixtureSource = fileURLToPath(
@@ -201,6 +204,27 @@ async function waitForFact(
     if (Date.now() >= deadline)
       throw new Error(`Timed out waiting for ${label}`);
     await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+}
+
+async function waitForObservedExit(
+  label: string,
+  observed: ReturnType<typeof observe>,
+  timeoutMs: number,
+): Promise<{ exitCode: number | null; signal: NodeJS.Signals | null }> {
+  let timer: NodeJS.Timeout | undefined;
+  try {
+    return await Promise.race([
+      observed.completion,
+      new Promise<never>((_resolve, reject) => {
+        timer = setTimeout(
+          () => reject(new Error(`Timed out waiting for ${label}`)),
+          timeoutMs,
+        );
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
   }
 }
 
@@ -919,7 +943,10 @@ async function smokePackedCli(
   );
   const workerActivity = join(directDirectory, "worker-activity.ndjson");
   const capabilityMode = join(directDirectory, "capability-mode.txt");
+  const terminateGate = join(directDirectory, "terminate.release");
   writeFileSync(capabilityMode, "with-model", "utf8");
+  writeFileSync(terminateGate, "released", "utf8");
+  owned.releaseGates.push(terminateGate);
   const directEnv: NodeJS.ProcessEnv = {
     ...process.env,
     REINS_SOCKET: directSocket,
@@ -930,6 +957,7 @@ async function smokePackedCli(
     REINS_PACKED_FIXTURE_OBSERVATIONS: adapterObservations,
     REINS_PACKED_FIXTURE_ACTIVITY: workerActivity,
     REINS_PACKED_FIXTURE_CAPABILITY_MODE: capabilityMode,
+    REINS_PACKED_FIXTURE_TERMINATE_GATE: terminateGate,
     REINS_PACKED_FIXTURE_FAIL_FIRST_TERMINATE: "1",
     REINS_WORKER_CWD: workerDirectory,
   };
@@ -1127,13 +1155,14 @@ async function smokePackedCli(
     "sdk-spawn-recover",
     { REINS_OPERATION_INTENT_JSON: persistedSpawnIntent },
   );
+  const recoveredSpawnResult = recoveredSpawn.result;
   if (
-    !isRecord(recoveredSpawn.result) ||
-    recoveredSpawn.result.sessionHandle !==
+    !isRecord(recoveredSpawnResult) ||
+    recoveredSpawnResult.sessionHandle !==
       spawnAcknowledgement.result.sessionId ||
-    recoveredSpawn.result.cwd !== workerDirectory ||
-    typeof recoveredSpawn.result.turnHandle !== "string" ||
-    !recoveredSpawn.result.turnHandle.startsWith(
+    recoveredSpawnResult.cwd !== workerDirectory ||
+    typeof recoveredSpawnResult.turnHandle !== "string" ||
+    !recoveredSpawnResult.turnHandle.startsWith(
       `${spawnAcknowledgement.result.sessionId}/${spawnAcknowledgement.result.turnId}.`,
     )
   )
@@ -1237,7 +1266,7 @@ async function smokePackedCli(
 
   const killIntentPath = join(directDirectory, "accepted-kill.json");
   const preparedKill = await runSdkControl("prepare-kill", "sdk-prepare-kill", {
-    REINS_TARGET_SESSION: recoveredSpawn.result.sessionHandle as string,
+    REINS_TARGET_SESSION: recoveredSpawnResult.sessionHandle as string,
   });
   if (preparedKill.prepared !== true || typeof preparedKill.intent !== "string")
     throw new Error("The installed SDK did not prepare a kill credential");
@@ -1298,39 +1327,160 @@ async function smokePackedCli(
     throw new Error("Preparing a new kill credential repeated cleanup");
   writeFileSync(killIntentPath, preparedKillRetry.intent, "utf8");
   const persistedKillRetry = readFileSync(killIntentPath, "utf8");
-  const killProxyPath = join(directDirectory, "kill-ack-proxy.sock");
-  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
-    socketPath: killProxyPath,
+  rmSync(terminateGate, { force: true });
+  const killConnectionProxyPath = join(
+    directDirectory,
+    "kill-pending-proxy.sock",
+  );
+  owned.connectionProxy = await startUnixConnectionProxy({
+    socketPath: killConnectionProxyPath,
     targetPath: directSocket,
-    method: "kill",
   });
-  const killUnknown = await runSdkControl("kill-drop", "sdk-kill-drop-ack", {
-    REINS_SOCKET: owned.acknowledgementProxy.socketPath,
-    REINS_OPERATION_INTENT_JSON: persistedKillRetry,
-  });
-  const killAcknowledgement =
-    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
-  await owned.acknowledgementProxy.close();
-  owned.acknowledgementProxy = undefined;
-  if (
-    killUnknown.code !== "command_outcome_unknown" ||
-    !isRecord(killAcknowledgement.result) ||
-    killAcknowledgement.result.sessionId !==
-      recoveredSpawn.result.sessionHandle ||
-    killAcknowledgement.result.status !== "killed"
-  )
-    throw new Error(
-      "The daemon did not return kill success after real cleanup",
+  const killDisconnectChild = spawn(
+    process.execPath,
+    ["--experimental-strip-types", sdkRecoverableControlFixture, "kill-drop"],
+    {
+      cwd: sdkConsumerDirectory,
+      env: {
+        ...directEnv,
+        REINS_SOCKET: owned.connectionProxy.socketPath,
+        REINS_OPERATION_INTENT_JSON: persistedKillRetry,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const killDisconnectObserved = observe(
+    killDisconnectChild,
+    join(logsDirectory, "sdk-kill-pending-disconnect.log"),
+  );
+  let killRecoveryObserved: ReturnType<typeof observe> | undefined;
+  let killUnknown: Record<string, unknown> | undefined;
+  try {
+    await waitForFact(
+      "the in-flight SDK kill cleanup",
+      () => readJsonLines(adapterObservations),
+      (fact) =>
+        fact.type === "terminate_waiting" &&
+        fact.sessionId === recoveredSpawnResult.sessionHandle &&
+        fact.attempt === 2,
     );
-  const cleanupFactsAtAcknowledgement = readJsonLines(adapterObservations);
+    await owned.connectionProxy.close();
+    owned.connectionProxy = undefined;
+    const lostExit = await waitForObservedExit(
+      "the disconnected SDK kill caller",
+      killDisconnectObserved,
+      10_000,
+    );
+    if (lostExit.exitCode !== 0)
+      throw new Error(
+        `The disconnected SDK kill caller exited ${lostExit.exitCode}`,
+      );
+    killUnknown = readJsonRecord(
+      "sdk-kill-pending-disconnect",
+      killDisconnectObserved.stdout().toString("utf8"),
+    );
+    if (
+      killUnknown.code !== "command_outcome_unknown" ||
+      killUnknown.operation !== "kill" ||
+      killUnknown.stage !== "operation"
+    )
+      throw new Error("The installed SDK omitted the pending kill outcome");
+
+    const killRecoveryChild = spawn(
+      process.execPath,
+      [
+        "--experimental-strip-types",
+        sdkRecoverableControlFixture,
+        "kill-recover",
+      ],
+      {
+        cwd: sdkConsumerDirectory,
+        env: {
+          ...directEnv,
+          REINS_OPERATION_INTENT_JSON: persistedKillRetry,
+          REINS_EXPECTED_TURN_HANDLE: recoveredSpawnResult.turnHandle as string,
+        },
+        stdio: ["ignore", "pipe", "pipe"],
+      },
+    );
+    killRecoveryObserved = observe(
+      killRecoveryChild,
+      join(logsDirectory, "sdk-kill-join-inflight.log"),
+    );
+    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (!killRecoveryObserved.running())
+      throw new Error("The recovering SDK did not join the pending kill");
+    const pendingTerminateCalls = readJsonLines(adapterObservations).filter(
+      ({ sessionId, type }) =>
+        sessionId === recoveredSpawnResult.sessionHandle &&
+        type === "terminate_called",
+    );
+    if (pendingTerminateCalls.length !== 2)
+      throw new Error("Joining the pending kill repeated worker cleanup");
+
+    writeFileSync(terminateGate, "released", "utf8");
+    const recoveryExit = await waitForObservedExit(
+      "the SDK caller joined to the pending kill",
+      killRecoveryObserved,
+      10_000,
+    );
+    if (recoveryExit.exitCode !== 0)
+      throw new Error(`The SDK kill recovery exited ${recoveryExit.exitCode}`);
+  } finally {
+    writeFileSync(terminateGate, "released", "utf8");
+    const connectionProxy = owned.connectionProxy;
+    if (connectionProxy !== undefined) {
+      await connectionProxy.close();
+      owned.connectionProxy = undefined;
+    }
+    if (killDisconnectObserved.running())
+      await killDisconnectObserved.stop(2_000);
+    if (killRecoveryObserved?.running()) await killRecoveryObserved.stop(2_000);
+  }
+  if (killRecoveryObserved === undefined)
+    throw new Error("The in-flight kill recovery process did not start");
+  if (killUnknown === undefined)
+    throw new Error("The disconnected SDK kill result was not observed");
+  const recoveredKill = readJsonRecord(
+    "sdk-kill-join-inflight",
+    killRecoveryObserved.stdout().toString("utf8"),
+  );
   if (
-    !cleanupFactsAtAcknowledgement.some(
-      (fact) => fact.type === "terminate_finished" && fact.attempt === 2,
+    !isRecord(recoveredKill.result) ||
+    recoveredKill.result.sessionHandle !== recoveredSpawnResult.sessionHandle ||
+    recoveredKill.result.status !== "killed" ||
+    !isRecord(recoveredKill.session) ||
+    recoveredKill.session.state !== "killed" ||
+    !isRecord(recoveredKill.session.lastCompletedTurn) ||
+    recoveredKill.session.lastCompletedTurn.stopReason !== "killed" ||
+    recoveredKill.session.lastCompletedTurn.turnHandle !==
+      recoveredSpawnResult.turnHandle
+  )
+    throw new Error("The SDK did not recover the in-flight kill result");
+  const completedKillReplay = await runSdkControl(
+    "kill-recover",
+    "sdk-kill-completed-replay",
+    {
+      REINS_OPERATION_INTENT_JSON: persistedKillRetry,
+      REINS_EXPECTED_TURN_HANDLE: recoveredSpawnResult.turnHandle as string,
+    },
+  );
+  if (
+    !isRecord(completedKillReplay.result) ||
+    canonicalJson(completedKillReplay.result) !==
+      canonicalJson(recoveredKill.result)
+  )
+    throw new Error("The SDK did not replay the completed kill result");
+  const cleanupFactsAtRecovery = readJsonLines(adapterObservations);
+  if (
+    !cleanupFactsAtRecovery.some(
+      (fact) =>
+        fact.type === "terminate_finished" &&
+        fact.sessionId === recoveredSpawnResult.sessionHandle &&
+        fact.attempt === 2,
     )
   )
-    throw new Error(
-      "The daemon acknowledged kill before real cleanup finished",
-    );
+    throw new Error("The joined kill returned before real cleanup finished");
   const activityAtAcknowledgement = readJsonLines(workerActivity);
   for (const role of ["worker", "descendant"]) {
     if (
@@ -1338,37 +1488,13 @@ async function smokePackedCli(
         (fact) => fact.type === "closed" && fact.role === role,
       ).length !== 1
     )
-      throw new Error(`The ${role} descriptor was still open at the kill ACK`);
+      throw new Error(`The ${role} descriptor was still open at kill recovery`);
   }
+  assertProcessStopped("The recovered worker process", workerReady.workerPid);
   assertProcessStopped(
-    "The acknowledged worker process",
-    workerReady.workerPid,
-  );
-  assertProcessStopped(
-    "The acknowledged descendant process",
+    "The recovered descendant process",
     workerReady.descendantPid,
   );
-  const recoveredKill = await runSdkControl(
-    "kill-recover",
-    "sdk-kill-recover",
-    {
-      REINS_OPERATION_INTENT_JSON: persistedKillRetry,
-      REINS_EXPECTED_TURN_HANDLE: recoveredSpawn.result.turnHandle as string,
-    },
-  );
-  if (
-    !isRecord(recoveredKill.result) ||
-    recoveredKill.result.sessionHandle !==
-      recoveredSpawn.result.sessionHandle ||
-    recoveredKill.result.status !== "killed" ||
-    !isRecord(recoveredKill.session) ||
-    recoveredKill.session.state !== "killed" ||
-    !isRecord(recoveredKill.session.lastCompletedTurn) ||
-    recoveredKill.session.lastCompletedTurn.stopReason !== "killed" ||
-    recoveredKill.session.lastCompletedTurn.turnHandle !==
-      recoveredSpawn.result.turnHandle
-  )
-    throw new Error("The SDK did not recover the exact successful kill result");
   const finalActivity = readJsonLines(workerActivity);
   for (const role of ["worker", "descendant"]) {
     if (
@@ -1417,13 +1543,13 @@ async function smokePackedCli(
   const staleHandle = await runSdkControl(
     "handle-stale",
     "sdk-stale-session-handle",
-    { REINS_TARGET_SESSION: recoveredSpawn.result.sessionHandle as string },
+    { REINS_TARGET_SESSION: recoveredSpawnResult.sessionHandle as string },
   );
   if (
     staleSpawn.code !== "stale_command_id" ||
     staleSpawn.daemonGeneration === generationBeforeRestart ||
     staleHandle.status !== "not_found" ||
-    staleHandle.sessionHandle !== recoveredSpawn.result.sessionHandle ||
+    staleHandle.sessionHandle !== recoveredSpawnResult.sessionHandle ||
     readJsonLines(adapterObservations).filter(
       ({ type }) => type === "worker_started",
     ).length !== 1
@@ -1435,7 +1561,7 @@ async function smokePackedCli(
     generationBeforeRestart,
     generationAfterRestart: staleSpawn.daemonGeneration,
     spawnAcknowledgement: spawnAcknowledgement.result,
-    spawnResult: recoveredSpawn.result,
+    spawnResult: recoveredSpawnResult,
     spawnConflict: spawnConflict.code,
     capabilityQueriesBeforeRecovery,
     capabilityQueriesAfterRecovery,
@@ -1443,7 +1569,7 @@ async function smokePackedCli(
     newCredentialSpawn: newCredentialSpawn.code,
     spawnValidation: spawnValidation.codes,
     killFailure: failedKill.failure,
-    killAcknowledgement: killAcknowledgement.result,
+    killDisconnect: killUnknown,
     killResult: recoveredKill.result,
     workerStartedCount: 1,
     workerPids: [workerReady.workerPid, workerReady.descendantPid],
@@ -1818,9 +1944,10 @@ async function smokePackedCli(
     ".bin",
     "reins",
   );
-  const runInstalledCli = async (
+  const runInstalledCliResult = async (
     args: string[],
     label: string,
+    env: NodeJS.ProcessEnv = controlCliEnv,
   ): Promise<CommandResult> => {
     const logPath = join(logsDirectory, `${label}.log`);
     const result = toCommandResult(
@@ -1828,12 +1955,20 @@ async function smokePackedCli(
         command: frozenCli,
         args,
         cwd: applicationConsumerDirectory,
-        env: controlCliEnv,
+        env,
         logPath,
         timeoutMs: 30_000,
       }),
     );
-    requireSuccess(label, result, logPath);
+    return result;
+  };
+  const runInstalledCli = async (
+    args: string[],
+    label: string,
+    env: NodeJS.ProcessEnv = controlCliEnv,
+  ): Promise<CommandResult> => {
+    const result = await runInstalledCliResult(args, label, env);
+    requireSuccess(label, result, join(logsDirectory, `${label}.log`));
     return result;
   };
 
@@ -1866,7 +2001,7 @@ async function smokePackedCli(
       input: {
         name: "packed-cli-session",
         harness: "fixture",
-        message: "CLI raw task text",
+        message: "CLI private response-loss task",
         cwd: controlCliWorkspace,
       },
     }),
@@ -1878,33 +2013,78 @@ async function smokePackedCli(
   );
   if (!isRecord(cliIntent.input))
     throw new Error("The CLI operation intent was not persisted before spawn");
+  const cliSpawnArgs = [
+    "spawn",
+    "--operation",
+    cliIntent.credential as string,
+    "--name",
+    cliIntent.input.name as string,
+    "--harness",
+    cliIntent.input.harness as string,
+    "--message",
+    cliIntent.input.message as string,
+    "--cwd",
+    cliIntent.input.cwd as string,
+  ];
+  const cliSpawnProxyPath = join(controlCliDirectory, "spawn-ack-proxy.sock");
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: cliSpawnProxyPath,
+    targetPath: controlCliSocket,
+    method: "spawn",
+  });
+  const lostCliSpawn = await runInstalledCliResult(
+    cliSpawnArgs,
+    "installed-cli-spawn-drop-ack",
+    { ...controlCliEnv, REINS_SOCKET: owned.acknowledgementProxy.socketPath },
+  );
+  const cliSpawnAcknowledgement =
+    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+  await owned.acknowledgementProxy.close();
+  owned.acknowledgementProxy = undefined;
+  const lostCliSpawnData = readFailureEnvelope(
+    "installed CLI spawn response loss",
+    lostCliSpawn,
+    "spawn",
+    "operationFailed",
+  );
+  const cliSpawnAckResult = cliSpawnAcknowledgement.result;
+  if (
+    lostCliSpawn.status !== 70 ||
+    !isRecord(lostCliSpawnData.failure) ||
+    lostCliSpawnData.failure.code !== "command_outcome_unknown" ||
+    !isRecord(lostCliSpawnData.failure.facts) ||
+    lostCliSpawnData.failure.facts.operation !== "spawn" ||
+    !isRecord(cliSpawnAckResult) ||
+    typeof cliSpawnAckResult.sessionId !== "string" ||
+    typeof cliSpawnAckResult.turnId !== "string" ||
+    `${lostCliSpawn.stdout}${lostCliSpawn.stderr}`.includes(
+      "CLI private response-loss task",
+    )
+  )
+    throw new Error(
+      "The installed CLI did not report its lost spawn response without exposing the task",
+    );
   const cliSpawnOutput = await runInstalledCli(
-    [
-      "spawn",
-      "--operation",
-      cliIntent.credential as string,
-      "--name",
-      cliIntent.input.name as string,
-      "--harness",
-      cliIntent.input.harness as string,
-      "--message",
-      cliIntent.input.message as string,
-      "--cwd",
-      cliIntent.input.cwd as string,
-    ],
-    "installed-cli-spawn",
+    cliSpawnArgs,
+    "installed-cli-spawn-recover",
   );
   const cliSpawnData = readDataEnvelope(
-    "installed CLI spawn",
+    "installed CLI spawn recovery",
     cliSpawnOutput.stdout,
     "spawn",
   );
   if (
     typeof cliSpawnData.sessionHandle !== "string" ||
     typeof cliSpawnData.turnHandle !== "string" ||
-    cliSpawnData.cwd !== controlCliWorkspace
+    cliSpawnData.cwd !== controlCliWorkspace ||
+    cliSpawnData.sessionHandle !== cliSpawnAckResult.sessionId ||
+    !cliSpawnData.turnHandle.startsWith(
+      `${cliSpawnAckResult.sessionId}/${cliSpawnAckResult.turnId}.`,
+    )
   )
-    throw new Error("The installed CLI omitted exact spawn handles");
+    throw new Error(
+      "The installed CLI did not recover the exact spawn handles",
+    );
   const cliWorkerStarted = await waitForFact(
     "the installed CLI worker input",
     () => readJsonLines(controlCliObservations),
@@ -1925,7 +2105,7 @@ async function smokePackedCli(
       JSON.stringify(expectedCliSpecKeys) ||
     cliWorkerStarted.spec.cwd !== controlCliWorkspace ||
     cliWorkerStarted.spec.harness !== "fixture" ||
-    cliWorkerStarted.spec.message !== "CLI raw task text" ||
+    cliWorkerStarted.spec.message !== "CLI private response-loss task" ||
     cliWorkerStarted.spec.sessionId !== cliSpawnData.sessionHandle ||
     cliWorkerStarted.spec.sessionName !== "packed-cli-session" ||
     typeof cliWorkerStarted.spec.turnId !== "string"
@@ -1933,6 +2113,12 @@ async function smokePackedCli(
     throw new Error(
       "The installed CLI changed input text or materialized omitted options",
     );
+  if (
+    readJsonLines(controlCliObservations).filter(
+      ({ type }) => type === "worker_started",
+    ).length !== 1
+  )
+    throw new Error("Recovering the CLI spawn started a duplicate worker");
   const cliWorkerReady = await waitForFact(
     "the installed CLI worker process tree",
     () => readJsonLines(controlCliObservations),
@@ -2266,6 +2452,36 @@ async function smokePackedCli(
     );
   await waitForPathRemoval(controlCliSocket, 15_000);
   await waitForPathRemoval(`${controlCliSocket}.lock`, 5_000);
+  const staleCliSpawn = await runInstalledCliResult(
+    cliSpawnArgs,
+    "installed-cli-stale-spawn-credential",
+  );
+  const staleCliSpawnData = readFailureEnvelope(
+    "installed CLI stale spawn credential",
+    staleCliSpawn,
+    "spawn",
+    "operationFailed",
+  );
+  if (
+    staleCliSpawn.status !== 70 ||
+    !isRecord(staleCliSpawnData.failure) ||
+    staleCliSpawnData.failure.code !== "stale_command_id" ||
+    readJsonLines(controlCliObservations).filter(
+      ({ type }) => type === "worker_started",
+    ).length !== 1
+  )
+    throw new Error(
+      "The installed CLI did not reject its previous-generation credential without starting a worker",
+    );
+  await waitForPathRemoval(controlCliSocket, 15_000);
+  await waitForPathRemoval(`${controlCliSocket}.lock`, 5_000);
+  recorder.record("installed_cli_operation_recovery", {
+    responseLoss: lostCliSpawnData.failure,
+    droppedAcknowledgement: cliSpawnAcknowledgement,
+    recovered: cliSpawnData,
+    staleGeneration: staleCliSpawnData.failure,
+    workerStartCount: 1,
+  });
   recorder.record("frozen_consumer_cli_session_control", {
     spawn: cliSpawnData,
     list: cliListData,
@@ -2469,6 +2685,8 @@ async function main(): Promise<void> {
     runtimeRoot: undefined,
     directDaemon: undefined,
     acknowledgementProxy: undefined,
+    connectionProxy: undefined,
+    releaseGates: [],
   };
   const cleanupFailures: string[] = [];
   let primaryFailure: { readonly message: string } | undefined;
@@ -2480,6 +2698,26 @@ async function main(): Promise<void> {
         ? { message: error.message }
         : { message: `smoke threw a non-Error value (typeof ${typeof error})` };
   } finally {
+    for (const gate of owned.releaseGates) {
+      try {
+        writeFileSync(gate, "released", "utf8");
+      } catch (error) {
+        cleanupFailures.push(
+          `cleanup gate release failed: ${String(error)} (${gate})`,
+        );
+      }
+    }
+    const connectionProxy = owned.connectionProxy;
+    if (connectionProxy !== undefined) {
+      try {
+        await connectionProxy.close();
+      } catch (error) {
+        cleanupFailures.push(
+          `connection proxy cleanup failed: ${String(error)}`,
+        );
+      }
+      owned.connectionProxy = undefined;
+    }
     const proxy = owned.acknowledgementProxy;
     if (proxy !== undefined) {
       try {

@@ -20,27 +20,14 @@ import {
   turnIdSchema,
   encodeTurnHandle,
   encodePermissionHandle,
-  encodeResumeCursor,
-  daemonGenerationSchema,
   permissionIdSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
-  commandSpecForName,
-  commandSpecs,
-  flagDisplay,
-  fullUsageFor,
-  validateCommand,
-  valueHint,
   publisherCommandSpecs,
   workspaceCommandSpecs,
-  type CommandArg,
-  type CommandConstraint,
-  type CommandOption,
-  type CommandSpec,
-  type ValueKind,
 } from "../../src/command-spec.ts";
 
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -353,63 +340,128 @@ async function waitForFixtureStopped(
   }, timeoutMs);
 }
 
-function sessionIdFrom(result: CliResult): string {
-  return v.parse(
-    sessionIdSchema,
-    (JSON.parse(result.stdout) as { sessionId: unknown }).sessionId,
+type OperationData = {
+  operation?: string;
+  credential?: string;
+  sessionHandle?: string;
+  turnHandle?: string;
+  cwd?: string;
+  status?: string;
+  sessions?: Array<Record<string, unknown>>;
+  capabilities?: Array<{ harness: string; models?: unknown[] }>;
+  failures?: unknown[];
+  failure?: { code?: string; facts?: Record<string, unknown> };
+};
+
+function dataFrom(result: CliResult): OperationData {
+  const output = result.stdout.length > 0 ? result.stdout : result.stderr;
+  const data = (JSON.parse(output) as { data?: OperationData }).data;
+  if (data === undefined) throw new Error("CLI 结构化响应缺少 data");
+  return data;
+}
+
+async function preparedCredential(
+  env: NodeJS.ProcessEnv,
+  operation: "spawn" | "kill",
+): Promise<string> {
+  const result = await runCli(["prepare-operation", operation], env);
+  expect(result.exitCode, result.stdout).toBe(0);
+  const prepared = dataFrom(result);
+  expect(prepared.operation).toBe(operation);
+  expect(prepared.credential).toEqual(expect.any(String));
+  if (typeof prepared.credential !== "string") throw new Error("执行凭据缺失");
+  return prepared.credential;
+}
+
+type SpawnCliInput = {
+  readonly harness: string;
+  readonly message: string;
+  readonly name: string;
+  readonly cwd?: string;
+  readonly agent?: string;
+  readonly model?: string;
+  readonly reasoning?: string;
+  readonly authorizationMode?: "interactive" | "allowAll";
+  readonly sandbox?: string;
+  readonly captureHarnessStderr?: boolean;
+};
+
+async function spawnWithCli(
+  env: NodeJS.ProcessEnv,
+  input: SpawnCliInput,
+): Promise<CliResult> {
+  const credential = await preparedCredential(env, "spawn");
+  const args = [
+    "spawn",
+    "--operation",
+    credential,
+    "--name",
+    input.name,
+    "--harness",
+    input.harness,
+    "--message",
+    input.message,
+    "--cwd",
+    input.cwd ?? process.cwd(),
+  ];
+  for (const [flag, value] of [
+    ["--agent", input.agent],
+    ["--model", input.model],
+    ["--reasoning", input.reasoning],
+    ["--authorization-mode", input.authorizationMode],
+    ["--sandbox", input.sandbox],
+  ] as const) {
+    if (value !== undefined) args.push(flag, value);
+  }
+  if (input.captureHarnessStderr === true)
+    args.push("--capture-harness-stderr");
+  return runCli(args, env);
+}
+
+async function killWithCli(
+  env: NodeJS.ProcessEnv,
+  sessionHandle: string,
+): Promise<CliResult> {
+  const credential = await preparedCredential(env, "kill");
+  return runCli(
+    ["kill", "--session", sessionHandle, "--operation", credential],
+    env,
   );
 }
 
-describe("A 类：帮助（stdout + 退出 0）", () => {
-  test("无子命令输出 stdout 帮助", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli([], env);
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("Usage: reins [options] <command>");
-  });
+function sessionIdFrom(result: CliResult): string {
+  return v.parse(sessionIdSchema, dataFrom(result).sessionHandle);
+}
 
-  test("--help 输出 stdout 帮助", async () => {
+function turnHandleFrom(result: CliResult): string {
+  const turnHandle = dataFrom(result).turnHandle;
+  if (typeof turnHandle !== "string") throw new Error("spawn 结果缺少回合句柄");
+  return turnHandle;
+}
+
+describe("A 类：帮助（stdout + 退出 0）", () => {
+  test("--help 声明正式控制命令", async () => {
     const { env } = await freshEnv();
     const result = await runCli(["--help"], env);
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain("Usage: reins [options] <command>");
-    expect(result.stdout).toContain(
-      "spawn <harness> <message...> --name <session-name> [options]",
-    );
-    expect(result.stdout).not.toContain("spawn [options] [harness]");
+    expect(result.stdout).toContain("prepare-operation");
+    expect(result.stdout).toContain("capabilities");
+    expect(result.stdout).toContain("spawn");
+    expect(result.stdout).toContain("list");
+    expect(result.stdout).toContain("kill");
   });
 
-  test("子命令 --help 输出完整参数表", async () => {
+  test("spawn help 声明执行前凭据与显式参数", async () => {
     const { env } = await freshEnv();
     const result = await runCli(["spawn", "--help"], env);
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toContain(
-      "Usage: reins spawn <harness> <message...> --name <session-name> [options]",
-    );
+    expect(result.stdout).toContain("--operation");
+    expect(result.stdout).toContain("--harness");
+    expect(result.stdout).toContain("--message");
+    expect(result.stdout).toContain("--cwd");
     expect(result.stdout).toContain("--authorization-mode");
-  });
-
-  test("interrupt help 不再声明 message", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["interrupt", "--help"], env);
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(result.stdout).toContain(
-      "Usage: reins interrupt <target> [options]",
-    );
-    expect(result.stdout).not.toContain("--message");
-  });
-
-  test("diagnostics help exposes finite filters and constraints", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["diagnostics", "--help"], env);
-    expect(result.exitCode).toBe(0);
-    expect(result.stdout).toContain("--id <diagnostic-id>");
-    expect(result.stdout).toContain("--turn <turn-id>");
-    expect(result.stdout).toContain("--limit <n>");
   });
 
   test("--version 输出 stdout", async () => {
@@ -417,7 +469,7 @@ describe("A 类：帮助（stdout + 退出 0）", () => {
     const result = await runCli(["--version"], env);
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
-    expect(result.stdout).toBe(`${releaseVersion}\n`);
+    expect(result.stdout).toBe(`reins ${releaseVersion}\n`);
   });
 });
 
@@ -433,10 +485,11 @@ describe("CLI 进程边界（缝 D）", () => {
     const daemon = await startDaemon(env);
     let sessionId: string | undefined;
     try {
-      const spawned = await runCli(
-        ["spawn", "hang", "wait", "--name", "timeout-close"],
-        env,
-      );
+      const spawned = await spawnWithCli(env, {
+        harness: "hang",
+        message: "wait",
+        name: "timeout-close",
+      });
       sessionId = sessionIdFrom(spawned);
       const result = await runCli(
         ["attach", sessionId, "--scope", "session", "--replay", "none"],
@@ -448,7 +501,7 @@ describe("CLI 进程边界（缝 D）", () => {
       expect(result.exitCode).toBe(-1);
       expect(result.stderr).toBe("");
     } finally {
-      if (sessionId !== undefined) await runCli(["kill", sessionId], env);
+      if (sessionId !== undefined) await killWithCli(env, sessionId);
       if (daemon.exitCode === null) await stopDaemon(daemon, socketPath);
     }
   });
@@ -520,12 +573,15 @@ describe("CLI 进程边界（缝 D）", () => {
       const firstExit = waitForExit(first.child, 7_000);
       const secondExit = waitForExit(second.child, 7_000);
       expect(await Promise.all([firstExit, secondExit])).toEqual([0, 0]);
-      expect(JSON.parse(first.stdout.join(""))).toMatchObject({
-        capabilities: [],
-      });
-      expect(JSON.parse(second.stdout.join(""))).toMatchObject({
-        capabilities: [],
-      });
+      for (const stdout of [first.stdout.join(""), second.stdout.join("")]) {
+        expect(JSON.parse(stdout)).toMatchObject({
+          schemaVersion: "1",
+          command: "capabilities",
+          kind: "data",
+          variant: "result",
+          data: { capabilities: [], failures: [] },
+        });
+      }
       const pidPath = fixtureEnv.REINS_FIXTURE_PID_FILE;
       if (pidPath === undefined)
         throw new Error("fixture pid file is required");
@@ -742,32 +798,31 @@ describe("CLI 进程边界（缝 D）", () => {
     });
   });
 
-  test("spawn validates session name grammar before daemon use", async () => {
+  test("拒绝保留会话名且不创建会话", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(
-      ["spawn", "fake", "hello", "--name", "daemon"],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      code: "usage_error",
-      issues: [{ issue: "invalid_value", field: "--name" }],
+    const result = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "daemon",
     });
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
+      code: "invalid_params",
+      facts: { issues: [{ issue: "invalid_value", path: "sessionName" }] },
+    });
+    const listed = await runCli(["list"], env);
+    expect(listed.exitCode).toBe(0);
+    expect(dataFrom(listed).sessions).toEqual([]);
   });
 
   test("explicit stderr capture persists bounded UTF-8 evidence", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      [
-        "spawn",
-        "capture",
-        "hello",
-        "--name",
-        "capture-session",
-        "--capture-harness-stderr",
-      ],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "capture",
+      message: "hello",
+      name: "capture-session",
+      captureHarnessStderr: true,
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     await waitFor(async () => {
@@ -854,40 +909,33 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(pretty.stdout).toContain("harness_stderr");
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
   });
 
   test("unsupported stderr capture rejects before session creation", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(
-      [
-        "spawn",
-        "fake",
-        "hello",
-        "--name",
-        "no-capture",
-        "--capture-harness-stderr",
-      ],
-      env,
-    );
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout), result.stdout).toMatchObject({
+    const result = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "no-capture",
+      captureHarnessStderr: true,
+    });
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "unsupported_feature",
+      facts: { feature: "capture_harness_stderr" },
     });
     const sessions = await runCli(["list", "--name", "no-capture"], env);
-    expect(JSON.parse(sessions.stdout)).toEqual([]);
+    expect(dataFrom(sessions).sessions).toEqual([]);
   });
 
   test("capabilities 输出能力矩阵（JSON 默认）", async () => {
     const { env } = await freshEnv();
     const result = await runCli(["capabilities"], env);
     expect(result.exitCode).toBe(0);
-    const parsed = JSON.parse(result.stdout) as {
-      capabilities: Array<{ harness: string }>;
-      failures: unknown[];
-    };
+    const parsed = dataFrom(result);
     expect(parsed.failures).toEqual([]);
-    expect(parsed.capabilities.map((entry) => entry.harness).sort()).toEqual([
+    expect(parsed.capabilities?.map((entry) => entry.harness).sort()).toEqual([
       "cancelled",
       "capture",
       "failed",
@@ -897,50 +945,48 @@ describe("CLI 进程边界（缝 D）", () => {
     ]);
   });
 
-  test("spawn 成功并以 JSON 输出 sessionId", async () => {
+  test("spawn 返回本代会话与回合句柄", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(
-      ["spawn", "fake", "hello", "--name", "test-session"],
-      env,
-    );
+    const result = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "test-session",
+    });
     expect(result.exitCode).toBe(0);
     const sessionId = sessionIdFrom(result);
     expect(sessionId).toMatch(/@g/u);
-    await runCli(["kill", sessionId], env);
+    expect(turnHandleFrom(result).startsWith(`${sessionId}/`)).toBe(true);
+    expect(dataFrom(result).cwd).toBe(process.cwd());
+    await killWithCli(env, sessionId);
   });
 
   test("spawn 接受合法 --authorization-mode", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(
-      [
-        "spawn",
-        "fake",
-        "hi",
-        "--authorization-mode",
-        "allow-all",
-        "--name",
-        "test-session",
-      ],
-      env,
-    );
+    const result = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hi",
+      name: "test-session",
+      authorizationMode: "allowAll",
+    });
     expect(result.exitCode).toBe(0);
     const sessionId = sessionIdFrom(result);
     expect(sessionId).toMatch(/@g/u);
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
   });
 
   test("attach 仍默认流式回放事件（JSON 诊断视图）", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      ["spawn", "fake", "hello", "--name", "test-session"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "test-session",
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     const attached = await runCli(
       [
         "attach",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--scope",
         "turn",
         "--replay",
@@ -953,17 +999,18 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(attached.stdout).toContain('"type":"text"');
     expect(attached.stdout).toContain('"stopReason":"end_turn"');
     expect(attached.stdout).toContain('"role":"worker"');
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
   });
 
   test("attach appends a machine error after streamed JSON when daemon disconnects", async () => {
     const { env, socketPath } = await freshEnv();
     const daemon = await startDaemon(env);
     try {
-      const spawned = await runCli(
-        ["spawn", "fake", "hello", "--name", "disconnect-session"],
-        env,
-      );
+      const spawned = await spawnWithCli(env, {
+        harness: "fake",
+        message: "hello",
+        name: "disconnect-session",
+      });
       const sessionId = sessionIdFrom(spawned);
       const attached = startCli(
         ["attach", sessionId, "--scope", "session", "--replay", "available"],
@@ -993,10 +1040,11 @@ describe("CLI 进程边界（缝 D）", () => {
     const { env, socketPath } = await freshEnv();
     const daemon = await startDaemon(env);
     try {
-      const spawned = await runCli(
-        ["spawn", "fake", "hello", "--name", "pretty-disconnect"],
-        env,
-      );
+      const spawned = await spawnWithCli(env, {
+        harness: "fake",
+        message: "hello",
+        name: "pretty-disconnect",
+      });
       const sessionId = sessionIdFrom(spawned);
       const attached = startCli(
         [
@@ -1026,16 +1074,17 @@ describe("CLI 进程边界（缝 D）", () => {
 
   test("killing a session aborts an outstanding pretty permission prompt", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      ["spawn", "permission", "do it", "--name", "prompt-kill"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "permission",
+      message: "do it",
+      name: "prompt-kill",
+    });
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
       [
         "--pretty",
         "attach",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--scope",
         "turn",
         "--replay",
@@ -1046,7 +1095,7 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
     const exit = waitForExit(attached.child, 5_000);
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
     expect(await exit).toBe(0);
     expect(attached.stderr.join("")).toBe("");
   });
@@ -1055,16 +1104,17 @@ describe("CLI 进程边界（缝 D）", () => {
     const { dir, env } = await freshEnv();
     const requestsFile = join(dir, "permission-queue.requests");
     const queueEnv = { ...env, REINS_FIXTURE_REQUESTS_FILE: requestsFile };
-    const spawned = await runCli(
-      ["spawn", "permission", "queue", "--name", "prompt-queue"],
-      queueEnv,
-    );
+    const spawned = await spawnWithCli(queueEnv, {
+      harness: "permission",
+      message: "queue",
+      name: "prompt-queue",
+    });
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
       [
         "--pretty",
         "attach",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--scope",
         "turn",
         "--replay",
@@ -1098,7 +1148,7 @@ describe("CLI 进程边界（缝 D）", () => {
         attached.child.kill("SIGKILL");
         await waitForExit(attached.child, 2_000);
       }
-      await runCli(["kill", sessionId], queueEnv);
+      await killWithCli(queueEnv, sessionId);
     }
   });
 
@@ -1106,16 +1156,17 @@ describe("CLI 进程边界（缝 D）", () => {
     const { dir, env } = await freshEnv();
     const requestsFile = join(dir, "permission-kill.requests");
     const queueEnv = { ...env, REINS_FIXTURE_REQUESTS_FILE: requestsFile };
-    const spawned = await runCli(
-      ["spawn", "permission", "queue", "--name", "prompt-kill-queue"],
-      queueEnv,
-    );
+    const spawned = await spawnWithCli(queueEnv, {
+      harness: "permission",
+      message: "queue",
+      name: "prompt-kill-queue",
+    });
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
       [
         "--pretty",
         "attach",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--scope",
         "turn",
         "--replay",
@@ -1126,7 +1177,7 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     const exitPromise = waitForExit(attached.child, 2_000);
     await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
-    await runCli(["kill", sessionId], queueEnv);
+    await killWithCli(queueEnv, sessionId);
     expect(await exitPromise).toBe(0);
     expect(await pathExists(requestsFile)).toBe(false);
     expect(
@@ -1169,16 +1220,17 @@ describe("CLI 进程边界（缝 D）", () => {
 
   test("wait 超时退出码 4", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      ["spawn", "hang", "wait me", "--name", "test-session"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "hang",
+      message: "wait me",
+      name: "test-session",
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     const waited = await runCli(
       [
         "wait",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--completion",
         "all",
         "--timeout",
@@ -1190,21 +1242,9 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(JSON.parse(waited.stdout)).toEqual({
       status: "timeout",
       completed: [],
-      pending: [{ turnHandle: JSON.parse(spawned.stdout).turnHandle }],
+      pending: [{ turnHandle: turnHandleFrom(spawned) }],
     });
-    await runCli(["kill", sessionId], env);
-  });
-
-  test("--pretty spawn 输出人类可读英文", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["--pretty", "spawn", "fake", "hi", "--name", "test-session"],
-      env,
-    );
-    expect(result.exitCode).toBe(0);
-    const sessionId = /^Created session (.+)\n/u.exec(result.stdout)?.[1];
-    expect(sessionId).toBeDefined();
-    await runCli(["kill", sessionId ?? ""], env);
+    await killWithCli(env, sessionId);
   });
 
   test.each([
@@ -1214,10 +1254,11 @@ describe("CLI 进程边界（缝 D）", () => {
     "resolve-permission %s 成功返回 typed ack",
     async (mode, prefix) => {
       const { env } = await freshEnv();
-      const spawned = await runCli(
-        ["spawn", "permission", "do it", "--name", `resolve-${mode}`],
-        env,
-      );
+      const spawned = await spawnWithCli(env, {
+        harness: "permission",
+        message: "do it",
+        name: `resolve-${mode}`,
+      });
       const sessionId = sessionIdFrom(spawned);
       const resolved = await runCli(
         [
@@ -1247,30 +1288,23 @@ describe("CLI 进程边界（缝 D）", () => {
       } else {
         expect(resolved.stdout).toBe("Permission resolved\n");
       }
-      await runCli(["kill", sessionId], env);
+      await killWithCli(env, sessionId);
     },
   );
 
-  test("--pretty list 对空集合给出显式成功", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "list"], env);
-    expect(result.exitCode).toBe(0);
-    expect(result.stderr).toBe("");
-    expect(result.stdout).toBe("No sessions found\n");
-  });
-
   test("attach pretty 权限交互并随决议结束", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      ["spawn", "permission", "do it", "--name", "test-session"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "permission",
+      message: "do it",
+      name: "test-session",
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
       [
         "attach",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--pretty",
         "--scope",
         "turn",
@@ -1297,16 +1331,17 @@ describe("CLI 进程边界（缝 D）", () => {
         attached.child.kill("SIGKILL");
         await waitForExit(attached.child, 2_000);
       }
-      await runCli(["kill", sessionId], env);
+      await killWithCli(env, sessionId);
     }
   });
 
   test("attach pretty 显示 caller/worker 角色", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      ["spawn", "fake", "hello", "--name", "test-session"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "test-session",
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     const sent = await runCli(
@@ -1314,7 +1349,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(sent.exitCode).toBe(0);
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
     const attached = await runCli(
       [
         "attach",
@@ -1330,7 +1365,7 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(attached.exitCode).toBe(0);
     expect(attached.stdout).toContain("worker: interim");
     expect(attached.stdout).toContain("caller: next");
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
   });
 
   test("自动拉起 daemon，空闲后清理 socket", async () => {
@@ -1346,34 +1381,33 @@ describe("CLI 进程边界（缝 D）", () => {
     const { env, socketPath } = await freshEnv();
     const daemonA = await startDaemon(env);
     try {
-      const first = await runCli(
-        ["spawn", "fake", "first", "--name", "restart-session"],
-        env,
-      );
+      const first = await spawnWithCli(env, {
+        harness: "fake",
+        message: "first",
+        name: "restart-session",
+      });
       expect(first.exitCode).toBe(0);
       const oldSessionId = sessionIdFrom(first);
 
       await stopDaemon(daemonA, socketPath);
       const daemonB = await startDaemon(env);
       try {
-        const second = await runCli(
-          ["spawn", "fake", "second", "--name", "restart-session"],
-          env,
-        );
+        const second = await spawnWithCli(env, {
+          harness: "fake",
+          message: "second",
+          name: "restart-session",
+        });
         expect(second.exitCode).toBe(0);
         const newSessionId = sessionIdFrom(second);
         expect(newSessionId).not.toBe(oldSessionId);
 
-        const oldAddress = await runCli(
-          ["send", oldSessionId, "stale", "--placement", "new_turn"],
-          env,
-        );
-        expect(oldAddress.exitCode).toBe(65);
-        expect(JSON.parse(oldAddress.stdout)).toMatchObject({
-          code: "session_not_found",
-          sessionId: oldSessionId,
+        const oldAddress = await killWithCli(env, oldSessionId);
+        expect(oldAddress.exitCode).toBe(0);
+        expect(dataFrom(oldAddress)).toMatchObject({
+          sessionHandle: oldSessionId,
+          status: "not_found",
         });
-        await runCli(["kill", newSessionId], env);
+        await killWithCli(env, newSessionId);
       } finally {
         await stopDaemon(daemonB, socketPath);
       }
@@ -1383,471 +1417,6 @@ describe("CLI 进程边界（缝 D）", () => {
     }
   });
 });
-
-type UsageCase = {
-  name: string;
-  args: readonly string[];
-  code?: "usage_error" | "unknown_harness" | "invalid_params";
-  issue?:
-    | "missing_argument"
-    | "unknown_command"
-    | "unknown_option"
-    | "invalid_value"
-    | "invalid_combination";
-  target?: "argument" | "option";
-  field?: string;
-  value?: string;
-  valid?: readonly string[];
-  hint?: string;
-  suggestionContains?: readonly string[];
-  specName?: string;
-  modes?: readonly ("json" | "pretty")[];
-};
-
-function assertNever(value: never): never {
-  throw new Error(`Unhandled command-spec variant: ${String(value)}`);
-}
-
-function sampleForKind(kind: ValueKind): string {
-  switch (kind.type) {
-    case "text":
-      return "x";
-    case "sessionId":
-      return fixtureSessionId;
-    case "turnHandle":
-      return fixtureTurnHandle;
-    case "turnId":
-      return "t1";
-    case "resumeCursor":
-      return encodeResumeCursor({
-        target: {
-          scope: "session",
-          sessionId: v.parse(sessionIdSchema, fixtureSessionId),
-        },
-        daemonGeneration: v.parse(daemonGenerationSchema, "test"),
-        eventId: 1,
-      });
-    case "permissionHandle":
-      return encodePermissionHandle({
-        sessionId: v.parse(sessionIdSchema, fixtureSessionId),
-        turnId: v.parse(turnIdSchema, "t1"),
-        permissionId: v.parse(permissionIdSchema, "p1"),
-      });
-    case "permissionId":
-      return "p1";
-    case "diagnosticId":
-      return "d1-098";
-    case "time":
-      return "2026-01-01T00:00:00.000Z";
-    case "boolean":
-      return "";
-    case "enum":
-      return kind.values[0] ?? "x";
-    case "number":
-      return String(Math.max(kind.min ?? 0, 1));
-    case "jsonObject":
-      return "{}";
-    default:
-      return assertNever(kind);
-  }
-}
-
-function sampleForArg(arg: CommandArg): string {
-  if (arg.name === "message") return "hi";
-  if (arg.name === "permissionId") return "p1";
-  if (arg.name === "ids") return fixtureSessionId;
-  return sampleForKind(arg.kind);
-}
-
-function sampleForOption(option: { kind: ValueKind }): string {
-  return sampleForKind(option.kind);
-}
-
-function suggestionForMissing(
-  arg: CommandArg | { flags: string; description: string; kind: ValueKind },
-): string {
-  return valueHint(arg.kind) ?? arg.description;
-}
-
-function allMissingIssues(spec: CommandSpec): unknown[] {
-  return [
-    ...spec.args.map((arg) => ({
-      target: "argument" as const,
-      field: arg.name,
-      declaration: arg,
-    })),
-    ...spec.options
-      .filter((option) => option.required === true)
-      .map((option) => ({
-        target: "option" as const,
-        field: option.flags,
-        declaration: option,
-      })),
-  ].map(({ target, field, declaration }) => ({
-    issue: "missing_argument",
-    target,
-    field,
-    ...(declaration.kind.type === "enum"
-      ? { valid: [...declaration.kind.values] }
-      : { hint: suggestionForMissing(declaration) }),
-  }));
-}
-
-function missingArgumentCases(): UsageCase[] {
-  return commandSpecs.flatMap((spec) =>
-    spec.args.map((arg, index) => {
-      const prefix = [
-        ...spec.args.slice(0, index).map(sampleForArg),
-        ...spec.options
-          .filter((option) => option.required === true)
-          .flatMap((option) => [
-            flagDisplay(option.flags),
-            sampleForOption(option),
-          ]),
-      ];
-      return {
-        name: `${spec.name} missing ${arg.name}`,
-        args: [spec.name, ...prefix],
-        issue: "missing_argument" as const,
-        target: "argument" as const,
-        field: arg.name,
-        specName: spec.name,
-        suggestionContains: [suggestionForMissing(arg)],
-      };
-    }),
-  );
-}
-
-function missingOptionCases(): UsageCase[] {
-  return commandSpecs.flatMap((spec) =>
-    spec.options
-      .filter((option) => option.required === true)
-      .map((option) => ({
-        name: `${spec.name} missing option ${option.name}`,
-        args: baseArgs(spec, option.name),
-        issue: "missing_argument" as const,
-        target: "option" as const,
-        field: option.flags,
-        specName: spec.name,
-        suggestionContains: [suggestionForMissing(option)],
-      })),
-  );
-}
-
-type InvalidKindCategory =
-  | "number"
-  | "sessionId"
-  | "turnId"
-  | "turnHandle"
-  | "permissionId"
-  | "diagnosticId"
-  | "time"
-  | "boolean"
-  | "enum"
-  | "multiEnum"
-  | "jsonObject"
-  | "resumeCursor"
-  | "permissionHandle";
-
-type FieldOccurrence =
-  | { readonly location: "argument"; readonly field: CommandArg }
-  | { readonly location: "option"; readonly field: CommandOption };
-
-function invalidCategory(
-  kind: ValueKind,
-  variadic: boolean,
-): InvalidKindCategory | null {
-  switch (kind.type) {
-    case "text":
-      return null;
-    case "number":
-    case "sessionId":
-    case "turnId":
-    case "turnHandle":
-    case "permissionHandle":
-    case "resumeCursor":
-    case "permissionId":
-    case "diagnosticId":
-    case "time":
-    case "boolean":
-    case "jsonObject":
-      return kind.type;
-    case "enum":
-      return variadic ? "multiEnum" : "enum";
-    default:
-      return assertNever(kind);
-  }
-}
-
-function invalidValueFor(kind: ValueKind): string {
-  switch (kind.type) {
-    case "text":
-      return "";
-    case "sessionId":
-      return "not-a-session-id";
-    case "turnHandle":
-      return "bad-handle";
-    case "turnId":
-      return "T1";
-    case "resumeCursor":
-      return "resume1_invalid";
-    case "permissionHandle":
-      return "permission1_invalid";
-    case "permissionId":
-      return "P1";
-    case "diagnosticId":
-      return "d1-000";
-    case "time":
-      return "2026-01-01T00:00:00Z";
-    case "boolean":
-      return "false";
-    case "enum":
-      return "bogus";
-    case "number":
-      if (kind.max !== undefined) return String(kind.max + 1);
-      if (kind.min !== undefined) return String(kind.min - 1);
-      return "not-a-number";
-    case "jsonObject":
-      return "[]";
-    default:
-      return assertNever(kind);
-  }
-}
-
-function baseArgs(spec: CommandSpec, omittedOption?: string): string[] {
-  return [
-    spec.name,
-    ...spec.args.map(sampleForArg),
-    ...spec.options
-      .filter(
-        (option) => option.required === true && option.name !== omittedOption,
-      )
-      .flatMap((option) => [
-        flagDisplay(option.flags),
-        sampleForOption(option),
-      ]),
-  ];
-}
-
-function invalidCaseFor(
-  spec: CommandSpec,
-  occurrence: FieldOccurrence,
-): UsageCase {
-  const { field } = occurrence;
-  const invalid = invalidValueFor(field.kind);
-  const args = baseArgs(
-    spec,
-    occurrence.location === "option" ? field.name : undefined,
-  );
-  let fieldName = field.name;
-  if (occurrence.location === "argument") {
-    const index = spec.args.indexOf(occurrence.field);
-    if (field.variadic === true) {
-      args.push(invalid);
-    } else {
-      args[1 + index] = invalid;
-    }
-  } else {
-    fieldName = flagDisplay(occurrence.field.flags);
-    args.push(
-      field.kind.type === "boolean" ? `${fieldName}=${invalid}` : fieldName,
-    );
-    if (field.kind.type !== "boolean") {
-      if (field.variadic === true) args.push(sampleForOption(field));
-      args.push(invalid);
-    }
-  }
-  const hint = valueHint(field.kind);
-  return {
-    name: `${spec.name} rejects invalid ${field.name} (${invalidCategory(field.kind, field.variadic === true) ?? "text"})`,
-    args,
-    issue:
-      field.kind.type === "boolean"
-        ? ("unknown_option" as const)
-        : ("invalid_value" as const),
-    ...(field.kind.type === "boolean" ? {} : { field: fieldName }),
-    value: field.kind.type === "boolean" ? `${fieldName}=${invalid}` : invalid,
-    ...(field.kind.type === "enum"
-      ? { valid: [...field.kind.values] }
-      : field.kind.type === "boolean"
-        ? {
-            valid: [
-              ...spec.options.map((option) => flagDisplay(option.flags)),
-              "--pretty",
-            ],
-          }
-        : {}),
-    ...(field.kind.type !== "enum" && hint !== undefined ? { hint } : {}),
-    suggestionContains:
-      hint === undefined
-        ? [flagDisplay((field as CommandOption).flags)]
-        : [hint],
-    specName: spec.name,
-  };
-}
-
-const fixtureValueKinds = {
-  resumeCursor: { type: "resumeCursor", hint: "Expected fixture ResumeCursor" },
-  permissionHandle: {
-    type: "permissionHandle",
-    hint: "Expected fixture PermissionHandle",
-  },
-  number: {
-    type: "number",
-    integer: true,
-    min: 1,
-    max: 2,
-    hint: "Expected fixture integer",
-  },
-  sessionId: { type: "sessionId", hint: "Expected fixture SessionId" },
-  turnId: { type: "turnId", hint: "Expected fixture TurnId" },
-  turnHandle: { type: "turnHandle", hint: "Expected fixture TurnHandle" },
-  permissionId: {
-    type: "permissionId",
-    hint: "Expected fixture PermissionId",
-  },
-  diagnosticId: {
-    type: "diagnosticId",
-    hint: "Expected fixture DiagnosticId",
-  },
-  time: { type: "time", hint: "Expected fixture UTC time" },
-  boolean: { type: "boolean" },
-  enum: { type: "enum", values: ["one", "two"] },
-  multiEnum: { type: "enum", values: ["one", "two"] },
-  jsonObject: { type: "jsonObject", hint: "Expected fixture object" },
-} as const satisfies Record<InvalidKindCategory, ValueKind>;
-
-function derivedInvalidValueCases(): {
-  e2e: UsageCase[];
-  fixture: Array<{ category: InvalidKindCategory; spec: CommandSpec }>;
-} {
-  const found = new Set<InvalidKindCategory>();
-  const e2e: UsageCase[] = [];
-  for (const spec of commandSpecs) {
-    for (const field of spec.args) {
-      const category = invalidCategory(field.kind, field.variadic === true);
-      if (category === null) continue;
-      found.add(category);
-      e2e.push(invalidCaseFor(spec, { location: "argument", field }));
-    }
-    for (const field of spec.options) {
-      const category = invalidCategory(field.kind, field.variadic === true);
-      if (category === null) continue;
-      found.add(category);
-      e2e.push(invalidCaseFor(spec, { location: "option", field }));
-    }
-  }
-  const fixture: Array<{ category: InvalidKindCategory; spec: CommandSpec }> =
-    [];
-  for (const [category, kind] of Object.entries(fixtureValueKinds) as Array<
-    [InvalidKindCategory, ValueKind]
-  >) {
-    if (found.has(category)) continue;
-    fixture.push({
-      category,
-      spec: {
-        name: `fixture-${category}`,
-        description: "test-only value-kind fixture",
-        args: [],
-        options: [
-          {
-            name: "value",
-            flags: "--value <value>",
-            description: "fixture value",
-            variadic: category === "multiEnum",
-            kind,
-          },
-        ],
-      },
-    });
-  }
-  return {
-    e2e,
-    fixture,
-  };
-}
-
-function constraintCase(
-  spec: CommandSpec,
-  constraint: CommandConstraint,
-): UsageCase {
-  const args = baseArgs(spec);
-  const option = (name: string): CommandOption => {
-    const found = spec.options.find((candidate) => candidate.name === name);
-    if (found === undefined)
-      throw new Error(`Missing constraint field ${name}`);
-    return found;
-  };
-  const add = (name: string, value?: string): void => {
-    const target = option(name);
-    args.push(flagDisplay(target.flags));
-    if (target.kind.type !== "boolean") {
-      args.push(value ?? sampleForOption(target));
-    }
-  };
-  let field: string;
-  switch (constraint.type) {
-    case "exclusive":
-      add(constraint.field);
-      add(constraint.with[0] ?? assertNever(constraint.with[0] as never));
-      field = flagDisplay(option(constraint.field).flags);
-      break;
-    case "requires":
-      add(constraint.field);
-      field = flagDisplay(option(constraint.field).flags);
-      break;
-    case "orderedTime":
-      add(constraint.since, "2026-01-02T00:00:00.000Z");
-      add(constraint.until, "2026-01-01T00:00:00.000Z");
-      field = `${flagDisplay(option(constraint.since).flags)}, ${flagDisplay(option(constraint.until).flags)}`;
-      break;
-    default:
-      return assertNever(constraint);
-  }
-  return {
-    name: `${spec.name} rejects ${constraint.type} constraint`,
-    args,
-    issue: "invalid_combination",
-    field,
-    hint: constraint.hint,
-    suggestionContains: [constraint.hint],
-    specName: spec.name,
-  };
-}
-
-const derivedValues = derivedInvalidValueCases();
-const derivedConstraintCases = commandSpecs.flatMap((spec) =>
-  (spec.constraints ?? []).map((constraint) =>
-    constraintCase(spec, constraint),
-  ),
-);
-
-const unknownCommandCase: UsageCase = {
-  name: "unknown command",
-  args: ["bogus"],
-  issue: "unknown_command",
-  value: "bogus",
-  valid: commandSpecs.map((spec) => spec.name),
-};
-
-const removedInterruptMessageOptionCase: UsageCase = {
-  name: "interrupt removed message option",
-  args: ["interrupt", fixtureSessionId, "--message", "legacy explanation"],
-  issue: "unknown_option",
-  value: "--message",
-  valid: ["--pretty"],
-  suggestionContains: ["Allowed: --pretty"],
-  specName: "interrupt",
-};
-
-const usageCases: UsageCase[] = [
-  ...missingArgumentCases(),
-  ...missingOptionCases(),
-  ...derivedValues.e2e,
-  ...derivedConstraintCases,
-  unknownCommandCase,
-  removedInterruptMessageOptionCase,
-];
 
 describe("workspace 与 publisher 声明入口", () => {
   test("handoff 一次返回全部必填问题和子命令 canonical usage", async () => {
@@ -1955,354 +1524,6 @@ describe("workspace 与 publisher 声明入口", () => {
   });
 });
 
-describe("CLI 错误矩阵（缝 D，从命令规范派生）", () => {
-  test("每个公开值类型都由真实命令或同一派生器的专用 fixture 覆盖", () => {
-    const covered = new Set<InvalidKindCategory>();
-    let occurrences = 0;
-    for (const spec of commandSpecs) {
-      for (const field of [...spec.args, ...spec.options]) {
-        const category = invalidCategory(field.kind, field.variadic === true);
-        if (category === null) continue;
-        covered.add(category);
-        occurrences += 1;
-      }
-    }
-    expect(derivedValues.e2e).toHaveLength(occurrences);
-    for (const { category, spec } of derivedValues.fixture) {
-      const field = spec.options[0]!;
-      expect(() =>
-        validateCommand(spec, [], { value: invalidValueFor(field.kind) }),
-      ).toThrow();
-      covered.add(category);
-    }
-    expect(covered).toEqual(new Set(Object.keys(fixtureValueKinds)));
-  });
-
-  for (const spec of commandSpecs) {
-    test(`${spec.name} help 从规范显示全部值提示与约束`, async () => {
-      const { env } = await freshEnv();
-      const result = await runCli([spec.name, "--help"], env);
-      const normalized = result.stdout.replace(/\s+/gu, " ");
-      const hints = [
-        ...spec.args.map((field) => valueHint(field.kind)),
-        ...spec.options.map((field) => valueHint(field.kind)),
-        ...(spec.constraints ?? []).map((constraint) => constraint.hint),
-      ].filter((hint): hint is string => hint !== undefined);
-      for (const hint of hints) {
-        expect(normalized, `${spec.name}: ${hint}`).toContain(
-          hint.replace(/\s+/gu, " "),
-        );
-      }
-    });
-  }
-
-  for (const spec of commandSpecs) {
-    const expectedIssues = allMissingIssues(spec);
-    if (expectedIssues.length === 0) continue;
-    test(`${spec.name} 一次返回全部声明必填项`, async () => {
-      const { env } = await freshEnv();
-      const result = await runCli([spec.name], env);
-      expect(result.exitCode).toBe(64);
-      expect(result.stderr).toBe("");
-      expect(JSON.parse(result.stdout)).toMatchObject({
-        code: "usage_error",
-        issues: expectedIssues,
-        usage: `reins ${fullUsageFor(spec)}`,
-      });
-    });
-  }
-
-  for (const usageCase of usageCases) {
-    const spec =
-      usageCase.specName === undefined
-        ? undefined
-        : commandSpecForName(usageCase.specName);
-    for (const mode of usageCase.modes ?? ["json", "pretty"]) {
-      const pretty = mode === "pretty";
-      test(`${usageCase.name}（${pretty ? "pretty" : "json"}）`, async () => {
-        const { env } = await freshEnv();
-        const args = pretty ? ["--pretty", ...usageCase.args] : usageCase.args;
-        const result = await runCli(args, env);
-        expect(result.exitCode, usageCase.name).toBe(64);
-        if (pretty) {
-          expect(result.stdout).toBe("");
-          expect(result.stderr).not.toContain("error: error:");
-          expect(result.stderr.startsWith("error: ")).toBe(true);
-          if ((usageCase.suggestionContains?.length ?? 0) > 0) {
-            expect(result.stderr).toContain("suggestion: ");
-          }
-          expect(result.stderr).toContain(`usage: reins ${fullUsageFor(spec)}`);
-          for (const fragment of usageCase.suggestionContains ?? []) {
-            expect(result.stderr, usageCase.name).toContain(fragment);
-          }
-          return;
-        }
-        expect(result.stderr).toBe("");
-        const parsed = JSON.parse(result.stdout) as {
-          code: string;
-          message: string;
-          issues?: Array<{
-            issue: string;
-            target?: string;
-            field?: string;
-            value?: string;
-            valid?: string[];
-            hint?: string;
-          }>;
-          usage?: string;
-        };
-        const primaryIssue = parsed.issues?.[0];
-        expect(parsed.code).toBe(usageCase.code ?? "usage_error");
-        if (usageCase.issue !== undefined) {
-          expect(primaryIssue?.issue).toBe(usageCase.issue);
-        }
-        if (usageCase.target !== undefined) {
-          expect(primaryIssue?.target).toBe(usageCase.target);
-        }
-        if (usageCase.field !== undefined) {
-          expect(primaryIssue?.field).toBe(usageCase.field);
-        }
-        if (usageCase.value !== undefined) {
-          expect(primaryIssue?.value).toBe(usageCase.value);
-        }
-        if (usageCase.valid !== undefined) {
-          expect(primaryIssue?.valid).toEqual([...usageCase.valid]);
-        }
-        if (usageCase.hint !== undefined) {
-          expect(primaryIssue?.hint).toBe(usageCase.hint);
-        }
-        expect(parsed.usage).toBe(`reins ${fullUsageFor(spec)}`);
-        for (const fragment of usageCase.suggestionContains ?? []) {
-          expect(parsed.message, usageCase.name).toContain(fragment);
-        }
-      });
-    }
-  }
-});
-
-describe("CLI 输出金样（逐字节）", () => {
-  test("缺 harness 的 pretty 错误块", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["--pretty", "spawn", "--name", "test-session"],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe(
-      "error: Missing required argument 'harness'\n" +
-        "suggestion: Run 'reins capabilities' to list valid harnesses\n" +
-        "error: Missing required argument 'message'\n" +
-        "suggestion: initial message\n" +
-        "usage: reins spawn <harness> <message...> --name <session-name> [options]\n",
-    );
-  });
-
-  test("缺 harness 的 JSON 机器错误", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["spawn", "--name", "test-session"], env);
-    expect(result.exitCode).toBe(64);
-    expect(result.stderr).toBe("");
-    expect(result.stdout).toBe(
-      `${JSON.stringify({
-        code: "usage_error",
-        issues: [
-          {
-            issue: "missing_argument",
-            target: "argument",
-            field: "harness",
-            hint: "Run 'reins capabilities' to list valid harnesses",
-          },
-          {
-            issue: "missing_argument",
-            target: "argument",
-            field: "message",
-            hint: "initial message",
-          },
-        ],
-        message:
-          "Missing required argument 'harness'. Run 'reins capabilities' to list valid harnesses. " +
-          "Missing required argument 'message'. initial message",
-        usage:
-          "reins spawn <harness> <message...> --name <session-name> [options]",
-      })}\n`,
-    );
-  });
-
-  test("JSON 一次列全声明中可确定的缺失必填项", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["resolve-permission"], env);
-    expect(result.exitCode).toBe(64);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toEqual({
-      code: "usage_error",
-      issues: [
-        {
-          issue: "missing_argument",
-          target: "argument",
-          field: "permissionHandle",
-          hint: "Expected a valid PermissionHandle",
-        },
-        {
-          issue: "missing_argument",
-          target: "option",
-          field: "--outcome <allow|deny>",
-          valid: ["allow", "deny"],
-        },
-      ],
-      message:
-        "Missing required argument 'permissionHandle'. Expected a valid PermissionHandle. " +
-        "Missing required option '--outcome <allow|deny>'. Allowed: allow, deny",
-      usage:
-        "reins resolve-permission <permissionHandle> --outcome <allow|deny> [options]",
-    });
-  });
-
-  test("pretty 按声明顺序列出同一组缺失必填项", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "resolve-permission"], env);
-    expect(result.exitCode).toBe(64);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe(
-      "error: Missing required argument 'permissionHandle'\n" +
-        "suggestion: Expected a valid PermissionHandle\n" +
-        "error: Missing required option '--outcome <allow|deny>'\n" +
-        "suggestion: Allowed: allow, deny\n" +
-        "usage: reins resolve-permission <permissionHandle> --outcome <allow|deny> [options]\n",
-    );
-  });
-
-  test("非法 state 的 pretty 错误块", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "list", "--state", "bogus"], env);
-    expect(result.exitCode).toBe(64);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe(
-      "error: Invalid value 'bogus' for '--state'\n" +
-        "suggestion: Allowed: busy, idle, killed\n" +
-        "usage: reins list [options]\n",
-    );
-  });
-
-  test("拼错命令保留 Did you mean", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(["--pretty", "spwan"], env);
-    expect(result.exitCode).toBe(64);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe(
-      "error: Unknown command 'spwan'. Did you mean 'spawn'?\n" +
-        "suggestion: Allowed: spawn, send, wait, interrupt, kill, list, attach, diagnostics, capabilities, resolve-permission, retry\n" +
-        "usage: reins [options] <command>\n",
-    );
-  });
-
-  test("未知 harness 的 pretty 错误块（能力矩阵内联）", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["--pretty", "spawn", "nope", "x", "--name", "test-session"],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toBe(
-      "error: Unknown harness 'nope'\n" +
-        "suggestion: Allowed: fake, capture, hang, permission, failed, cancelled\n" +
-        "usage: reins spawn <harness> <message...> --name <session-name> [options]\n",
-    );
-  });
-});
-
-describe("CLI 动态值错误（能力矩阵一次往返）", () => {
-  test("unknown harness JSON 内联合法列表", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["spawn", "nope", "x", "--name", "test-session"],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(result.stderr).toBe("");
-    const parsed = JSON.parse(result.stdout) as {
-      code: string;
-      message: string;
-      harness?: string;
-      availableHarnesses?: string[];
-    };
-    expect(parsed.code).toBe("unknown_harness");
-    expect(parsed.harness).toBe("nope");
-    expect(parsed.availableHarnesses).toContain("fake");
-    expect(parsed.message).toContain("Unknown harness 'nope'");
-    expect(parsed.message).toContain("Allowed: fake");
-  });
-
-  test("invalid model JSON 内联合法模型", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["spawn", "fake", "x", "--model", "nope", "--name", "test-session"],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(result.stderr).toBe("");
-    const parsed = JSON.parse(result.stdout) as {
-      code: string;
-      message: string;
-      issues?: Array<{ path: string; reason: string }>;
-    };
-    expect(parsed.code).toBe("invalid_params");
-    expect(parsed.issues?.[0]?.path).toBe("model");
-    expect(parsed.message).toBe("Invalid parameter value: model");
-  });
-
-  test("invalid reasoning JSON 内联合法强度", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      [
-        "spawn",
-        "fake",
-        "x",
-        "--model",
-        "fake-model",
-        "--reasoning",
-        "bogus",
-        "--name",
-        "test-session",
-      ],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(result.stderr).toBe("");
-    const parsed = JSON.parse(result.stdout) as {
-      code: string;
-      message: string;
-    };
-    expect(parsed.code).toBe("invalid_params");
-    expect(parsed.message).toBe("Invalid parameter value: reasoning");
-  });
-
-  test("pretty invalid model 内联合法模型与 usage", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      [
-        "--pretty",
-        "spawn",
-        "fake",
-        "x",
-        "--model",
-        "nope",
-        "--name",
-        "test-session",
-      ],
-      env,
-    );
-    expect(result.exitCode).toBe(64);
-    expect(result.stdout).toBe("");
-    expect(result.stderr).toContain("error: Invalid parameter value: model");
-    expect(result.stderr).not.toContain("suggestion:");
-    expect(result.stderr).toContain(
-      "usage: reins spawn <harness> <message...> --name <session-name> [options]",
-    );
-  });
-});
-
 describe("CLI 域错误（不夹带 usage）", () => {
   test.each([
     "invalid-envelope",
@@ -2316,9 +1537,9 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 3_000,
     });
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(result.stdout).toBe("");
+    expect(dataFrom(result).failure).toMatchObject({
       code: "invalid_daemon_response",
     });
     expect(Date.now() - started).toBeLessThan(2_000);
@@ -2353,17 +1574,18 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("pretty permission EOF is a typed terminal error on stderr", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      ["spawn", "permission", "do it", "--name", "prompt-eof"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "permission",
+      message: "do it",
+      name: "prompt-eof",
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     const result = await runCli(
       [
         "--pretty",
         "attach",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--scope",
         "turn",
         "--replay",
@@ -2380,7 +1602,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
       "error: Permission input closed before a choice was received\n",
     );
     expect(result.stderr).not.toContain("usage:");
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
   });
 
   test("完整进程将无响应 daemon 区分为 daemon_timeout 并清理子进程", async () => {
@@ -2390,9 +1612,9 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 7_000,
     });
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toMatchObject({ code: "daemon_timeout" });
+    expect(result.exitCode).toBe(70);
+    expect(result.stdout).toBe("");
+    expect(dataFrom(result).failure).toMatchObject({ code: "daemon_timeout" });
     expect(Date.now() - started).toBeLessThan(6_500);
     await waitForFixtureStopped(fixtureEnv);
   }, 10_000);
@@ -2403,16 +1625,16 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 7_000,
     });
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("");
-    const error = JSON.parse(result.stdout) as {
-      code: string;
-      cause: { kind: string; message: string };
-    };
-    expect(error.code).toBe("daemon_start_failed");
-    expect(error.cause.kind).toBe("upstream");
-    expect(error.cause.message).toContain("é");
-    expect(Buffer.byteLength(error.cause.message, "utf8")).toBeLessThanOrEqual(
+    expect(result.exitCode).toBe(70);
+    expect(result.stdout).toBe("");
+    const failure = dataFrom(result).failure;
+    expect(failure?.code).toBe("daemon_start_failed");
+    const cause = failure?.facts?.cause as
+      | { kind: string; message: string }
+      | undefined;
+    expect(cause?.kind).toBe("upstream");
+    expect(cause?.message).toContain("é");
+    expect(Buffer.byteLength(cause?.message ?? "", "utf8")).toBeLessThanOrEqual(
       4 * 1024,
     );
     await waitForFixtureExit(fixtureEnv);
@@ -2428,11 +1650,10 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 7_000,
     });
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toEqual({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "daemon_start_failed",
-      cause: { kind: "io", message: "transport:address_in_use" },
-      message: "transport:address_in_use",
+      facts: { cause: { kind: "io", message: "transport:address_in_use" } },
     });
     await waitForFixtureExit(fixtureEnv);
   }, 10_000);
@@ -2444,12 +1665,14 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 7_000,
     });
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "daemon_start_failed",
-      cause: {
-        kind: "upstream",
-        message: expect.stringContaining("SIGTERM"),
+      facts: {
+        cause: {
+          kind: "upstream",
+          message: expect.stringContaining("SIGTERM"),
+        },
       },
     });
     expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
@@ -2464,12 +1687,14 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 7_000,
     });
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "daemon_start_failed",
-      cause: {
-        kind: "timeout",
-        message: "daemon failed to start within 5000ms",
+      facts: {
+        cause: {
+          kind: "timeout",
+          message: "daemon failed to start within 5000ms",
+        },
       },
     });
     expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
@@ -2483,13 +1708,13 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 7_000,
     });
-    expect(result.exitCode).toBe(65);
-    const error = JSON.parse(result.stdout) as {
-      cause: { kind: string; message: string };
-    };
-    expect(error.cause.kind).toBe("upstream");
-    expect(error.cause.message).toContain("report-before-exit:界");
-    expect(Buffer.byteLength(error.cause.message, "utf8")).toBeLessThanOrEqual(
+    expect(result.exitCode).toBe(70);
+    const cause = dataFrom(result).failure?.facts?.cause as
+      | { kind: string; message: string }
+      | undefined;
+    expect(cause?.kind).toBe("upstream");
+    expect(cause?.message).toContain("report-before-exit:界");
+    expect(Buffer.byteLength(cause?.message ?? "", "utf8")).toBeLessThanOrEqual(
       4 * 1024,
     );
     await waitForFixtureExit(fixtureEnv);
@@ -2501,10 +1726,12 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const result = await runCli(["capabilities"], fixtureEnv, {
       timeoutMs: 7_000,
     });
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "daemon_start_failed",
-      cause: { kind: "upstream", message: "late complete startup report" },
+      facts: {
+        cause: { kind: "upstream", message: "late complete startup report" },
+      },
     });
     await waitForFixtureExit(fixtureEnv);
   }, 10_000);
@@ -2516,20 +1743,22 @@ describe("CLI 域错误（不夹带 usage）", () => {
       ...env,
       REINS_DIAGNOSTICS_MAX_BYTES: "0",
     });
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(result.stdout).toBe("");
+    expect(dataFrom(result).failure).toMatchObject({
       code: "daemon_start_failed",
-      cause: {
-        kind: "exception",
-        message: expect.stringContaining("REINS_DIAGNOSTICS_MAX_BYTES"),
+      facts: {
+        cause: {
+          kind: "exception",
+          message: expect.stringContaining("REINS_DIAGNOSTICS_MAX_BYTES"),
+        },
       },
     });
     expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
     expect(Date.now() - started).toBeLessThan(6_500);
   }, 10_000);
 
-  test("真实 address-in-use 启动失败只由 CLI 集中 grammar 造句", async () => {
+  test("address-in-use 通过 capabilities 返回类型化启动失败且不泄露路径", async () => {
     const { dir, env: baseEnv } = await freshEnv();
     const secretSentinel = ["socket", "path", "sentinel"].join("-");
     const occupiedPath = join(dir, `${secretSentinel}.sock`);
@@ -2539,49 +1768,31 @@ describe("CLI 域错误（不夹带 usage）", () => {
       { ...baseEnv, REINS_SOCKET: occupiedPath },
       { timeoutMs: 7_000 },
     );
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toEqual({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "daemon_start_failed",
-      cause: {
-        kind: "io",
-        message: "Daemon socket address is already in use",
-      },
-      message: "Daemon socket address is already in use",
+      facts: { transportCode: "address_in_use" },
     });
-    const pretty = await runCli(
-      ["--pretty", "capabilities"],
-      { ...baseEnv, REINS_SOCKET: occupiedPath },
-      { timeoutMs: 7_000 },
-    );
-    expect(pretty.exitCode).toBe(65);
-    expect(pretty.stdout).toBe("");
-    expect(pretty.stderr).toBe(
-      "error: Daemon socket address is already in use\n",
-    );
     expect(
-      [result.stdout, result.stderr, pretty.stdout, pretty.stderr].map((text) =>
+      [result.stdout, result.stderr].map((text) =>
         text.includes(secretSentinel),
       ),
-    ).toEqual([false, false, false, false]);
+    ).toEqual([false, false]);
   }, 15_000);
 
   test("诊断 append 失败时 unexpected error 不产生悬空 diagnosticId", async () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "append-failure");
-    const result = await runCli(
-      ["spawn", "explode", "hello", "--name", "append-failure"],
-      fixtureEnv,
-      { timeoutMs: 3_000 },
-    );
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("");
-    const error = JSON.parse(result.stdout) as Record<string, unknown>;
-    expect(error).toMatchObject({
-      code: "internal_error",
-      cause: { kind: "exception", message: "worker start exploded" },
+    const result = await spawnWithCli(fixtureEnv, {
+      harness: "explode",
+      message: "hello",
+      name: "append-failure",
     });
-    expect(error).not.toHaveProperty("diagnosticId");
-    expect(error.message).not.toContain("reins diagnostics --id");
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
+      code: "internal_error",
+      facts: { cause: { kind: "exception", message: "worker start exploded" } },
+    });
     await waitForFixtureExit(fixtureEnv);
   });
 
@@ -2619,10 +1830,14 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("kill 未知会话返回 not_found 而非报错", async () => {
     const { env } = await freshEnv();
-    const result = await runCli(["kill", missingSessionId], env);
+    const credential = await preparedCredential(env, "kill");
+    const result = await runCli(
+      ["kill", "--session", missingSessionId, "--operation", credential],
+      env,
+    );
     expect(result.exitCode).toBe(0);
-    expect(JSON.parse(result.stdout)).toEqual({
-      sessionId: missingSessionId,
+    expect(dataFrom(result)).toEqual({
+      sessionHandle: missingSessionId,
       status: "not_found",
     });
   });
@@ -2633,25 +1848,11 @@ describe("CLI 域错误（不夹带 usage）", () => {
       ...env,
       REINS_DAEMON_BIN: "/bin/false",
     });
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "daemon_start_failed",
     });
   }, 10_000);
-
-  test("pretty 域错误不输出 suggestion 与 usage", async () => {
-    const { env } = await freshEnv();
-    const result = await runCli(
-      ["--pretty", "send", missingSessionId, "hi", "--placement", "new_turn"],
-      env,
-    );
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe(
-      `error: Session not found: ${missingSessionId}\n`,
-    );
-    expect(result.stderr).not.toContain("suggestion:");
-    expect(result.stderr).not.toContain("usage:");
-  });
 });
 
 describe("CLI 消费者绑定握手（01 票）", () => {
@@ -2660,8 +1861,9 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     const unboundEnv: NodeJS.ProcessEnv = { ...env };
     delete unboundEnv.REINS_CONSUMER_CONTEXT;
     const result = await runCli(["list"], unboundEnv);
-    expect(result.exitCode).toBe(64);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(result.stdout).toBe("");
+    expect(dataFrom(result).failure).toMatchObject({
       code: "consumer_context_required",
     });
     expect(await pathExists(socketPath)).toBe(false);
@@ -2669,67 +1871,73 @@ describe("CLI 消费者绑定握手（01 票）", () => {
 
   test("带绑定的真实 CLI 经 daemon 完成创建与查询", async () => {
     const { env } = await freshEnv();
-    const spawned = await runCli(
-      ["spawn", "fake", "hello", "--name", "bound-session"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "bound-session",
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
     expect(sessionId).toMatch(/@g/u);
 
     const listed = await runCli(["list"], env);
     expect(listed.exitCode).toBe(0);
-    expect(listed.stdout).toContain(sessionId);
-    await runCli(["kill", sessionId], env);
+    expect(dataFrom(listed).sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionHandle: sessionId }),
+      ]),
+    );
+    await killWithCli(env, sessionId);
   });
 
   test("同一 daemon 世代内显式会话名不可复用", async () => {
     const { env } = await freshEnv();
-    const first = await runCli(
-      ["spawn", "fake", "hello", "--name", "reused-name"],
-      env,
-    );
+    const first = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "reused-name",
+    });
     expect(first.exitCode).toBe(0);
     const firstSessionId = sessionIdFrom(first);
     expect(firstSessionId).toMatch(/@g/u);
 
-    const duplicate = await runCli(
-      ["spawn", "fake", "again", "--name", "reused-name"],
-      env,
-    );
-    expect(duplicate.exitCode).toBe(65);
-    expect(JSON.parse(duplicate.stdout)).toMatchObject({
+    const duplicate = await spawnWithCli(env, {
+      harness: "fake",
+      message: "again",
+      name: "reused-name",
+    });
+    expect(duplicate.exitCode).toBe(70);
+    expect(dataFrom(duplicate).failure).toMatchObject({
       code: "session_name_conflict",
-      sessionName: "reused-name",
+      facts: { sessionName: "reused-name" },
     });
 
-    const killed = await runCli(["kill", firstSessionId], env);
-    expect(JSON.parse(killed.stdout)).toEqual({
-      sessionId: firstSessionId,
+    const killed = await killWithCli(env, firstSessionId);
+    expect(dataFrom(killed)).toEqual({
+      sessionHandle: firstSessionId,
       status: "killed",
     });
-    const afterKill = await runCli(
-      ["spawn", "fake", "third", "--name", "reused-name"],
-      env,
-    );
-    expect(afterKill.exitCode, afterKill.stdout).toBe(65);
-    expect(JSON.parse(afterKill.stdout)).toMatchObject({
+    const afterKill = await spawnWithCli(env, {
+      harness: "fake",
+      message: "third",
+      name: "reused-name",
+    });
+    expect(afterKill.exitCode).toBe(70);
+    expect(dataFrom(afterKill).failure).toMatchObject({
       code: "session_name_conflict",
-      sessionName: "reused-name",
+      facts: { sessionName: "reused-name" },
     });
     const listed = await runCli(["list", "--name", "reused-name"], env);
     expect(listed.exitCode).toBe(0);
     expect(
-      (JSON.parse(listed.stdout) as Array<{ sessionId: string }>).map(
-        (session) => session.sessionId,
-      ),
+      dataFrom(listed).sessions?.map((session) => session.sessionHandle),
     ).toEqual([firstSessionId]);
   });
 
   test("消费者绑定不作为领域动作参数暴露", async () => {
     const { env, socketPath } = await freshEnv();
     const withFlag = await runCli(
-      ["spawn", "fake", "hello", "--consumer-context", "explicit"],
+      ["spawn", "--consumer-context", "explicit"],
       env,
     );
     expect(withFlag.exitCode).toBe(64);
@@ -2737,34 +1945,70 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     expect(await pathExists(socketPath)).toBe(false);
 
     const binding = env.REINS_CONSUMER_CONTEXT ?? "";
-    const spawned = await runCli(
-      ["spawn", "fake", "hello", "--name", "opaque-binding"],
-      env,
-    );
+    const spawned = await spawnWithCli(env, {
+      harness: "fake",
+      message: "hello",
+      name: "opaque-binding",
+    });
     expect(spawned.exitCode).toBe(0);
     expect(spawned.stdout).not.toContain(binding);
     const sessionId = sessionIdFrom(spawned);
     const listed = await runCli(["list"], env);
     expect(listed.exitCode).toBe(0);
     expect(listed.stdout).not.toContain(binding);
-    await runCli(["kill", sessionId], env);
+    await killWithCli(env, sessionId);
   });
 
-  test("另一消费者绑定的真实 CLI 把他人会话按不存在呈现", async () => {
+  test("另一消费者的公开 list 与 kill 按不存在呈现会话", async () => {
     const { env } = await freshEnv();
     const alpha = { ...env, REINS_CONSUMER_CONTEXT: "cli-alpha" };
     const beta = { ...env, REINS_CONSUMER_CONTEXT: "cli-beta" };
 
-    const spawned = await runCli(
-      ["spawn", "fake", "hello", "--name", "owned-session"],
-      alpha,
-    );
+    const spawned = await spawnWithCli(alpha, {
+      harness: "fake",
+      message: "hello",
+      name: "owned-session",
+    });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
 
     const foreignList = await runCli(["list"], beta);
     expect(foreignList.exitCode).toBe(0);
-    expect(JSON.parse(foreignList.stdout)).toEqual([]);
+    expect(dataFrom(foreignList).sessions).toEqual([]);
+
+    const foreignKill = await killWithCli(beta, sessionId);
+    expect(dataFrom(foreignKill)).toEqual({
+      sessionHandle: sessionId,
+      status: "not_found",
+    });
+
+    const ownerList = await runCli(["list"], alpha);
+    expect(ownerList.exitCode).toBe(0);
+    expect(dataFrom(ownerList).sessions).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionHandle: sessionId }),
+      ]),
+    );
+
+    const killed = await killWithCli(alpha, sessionId);
+    expect(dataFrom(killed)).toEqual({
+      sessionHandle: sessionId,
+      status: "killed",
+    });
+  });
+
+  test("另一消费者的 send 与 wait 不得访问他人会话", async () => {
+    const { env } = await freshEnv();
+    const alpha = { ...env, REINS_CONSUMER_CONTEXT: "cli-alpha" };
+    const beta = { ...env, REINS_CONSUMER_CONTEXT: "cli-beta" };
+
+    const spawned = await spawnWithCli(alpha, {
+      harness: "fake",
+      message: "hello",
+      name: "owned-send-wait-session",
+    });
+    expect(spawned.exitCode).toBe(0);
+    const sessionId = sessionIdFrom(spawned);
 
     const foreignSend = await runCli(
       ["send", sessionId, "intrude", "--placement", "new_turn"],
@@ -2776,16 +2020,10 @@ describe("CLI 消费者绑定握手（01 票）", () => {
       sessionId,
     });
 
-    const foreignKill = await runCli(["kill", sessionId], beta);
-    expect(JSON.parse(foreignKill.stdout)).toEqual({
-      sessionId,
-      status: "not_found",
-    });
-
     const foreignWait = await runCli(
       [
         "wait",
-        JSON.parse(spawned.stdout).turnHandle,
+        turnHandleFrom(spawned),
         "--completion",
         "all",
         "--timeout",
@@ -2798,11 +2036,6 @@ describe("CLI 消费者绑定握手（01 票）", () => {
       code: "session_not_found",
     });
 
-    const ownerList = await runCli(["list"], alpha);
-    expect(ownerList.exitCode).toBe(0);
-    expect(ownerList.stdout).toContain(sessionId);
-
-    const killed = await runCli(["kill", sessionId], alpha);
-    expect(JSON.parse(killed.stdout)).toEqual({ sessionId, status: "killed" });
+    await killWithCli(alpha, sessionId);
   });
 });

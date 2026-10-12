@@ -1,7 +1,7 @@
 // 真实 worker 素材只通过 daemon 已有的 REINS_ADAPTERS_MODULE 注册表接缝装载。
 // 类型输入会由 Node 24 擦除，独立 consumer 运行时不解析工作区包。
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -31,6 +31,7 @@ const fixtureCapabilities: HarnessCapability = {
 const observationPath = process.env.REINS_PACKED_FIXTURE_OBSERVATIONS;
 const activityPath = process.env.REINS_PACKED_FIXTURE_ACTIVITY;
 const capabilityModePath = process.env.REINS_PACKED_FIXTURE_CAPABILITY_MODE;
+const terminateGatePath = process.env.REINS_PACKED_FIXTURE_TERMINATE_GATE;
 const workerPath = fileURLToPath(
   new URL("./adapter-worker.ts", import.meta.url),
 );
@@ -127,6 +128,20 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
       ) {
         record({ type: "terminate_rejected", sessionId, attempt });
         throw new Error("Fixture intentionally rejects its first cleanup call");
+      }
+      if (terminateGatePath !== undefined && !existsSync(terminateGatePath)) {
+        record({ type: "terminate_waiting", sessionId, attempt });
+        await new Promise<void>((resolve) => {
+          const checkGate = (): void => {
+            if (existsSync(terminateGatePath)) {
+              resolve();
+              return;
+            }
+            setTimeout(checkGate, 10);
+          };
+          checkGate();
+        });
+        record({ type: "terminate_gate_released", sessionId, attempt });
       }
       if (worker.child.pid !== undefined) {
         try {
