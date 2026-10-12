@@ -15,6 +15,12 @@ catalogs:
     '@types/proper-lockfile':
       specifier: ^4.1.4
       version: 4.1.4
+    '@valibot/to-json-schema':
+      specifier: ^1.7.1
+      version: 1.8.0
+    '@ykdz/cli-contract':
+      specifier: 0.2.1
+      version: 0.2.1
     commander:
       specifier: ^15.0.0
       version: 15.0.0
@@ -195,9 +201,15 @@ importers:
       '@reins/workspace-source':
         specifier: workspace:*
         version: link:../../packages/workspace-source
-      commander:
+      '@valibot/to-json-schema':
         specifier: 'catalog:'
-        version: 15.0.0
+        version: 1.8.0(valibot@1.4.2(typescript@7.0.2))
+      '@ykdz/cli-contract':
+        specifier: 'catalog:'
+        version: 0.2.1
+      '@ykdz/reins-sdk':
+        specifier: workspace:*
+        version: link:../../packages/sdk
       proper-lockfile:
         specifier: 'catalog:'
         version: 4.1.2
@@ -215,6 +227,8 @@ importers:
         injected: false
       '@reins/workspace-source':
         injected: false
+      '@ykdz/reins-sdk':
+        injected: false
     devDependencies:
       '@reins/typescript-config':
         specifier: workspace:*
@@ -225,6 +239,9 @@ importers:
       '@types/proper-lockfile':
         specifier: 'catalog:'
         version: 4.1.4
+      commander:
+        specifier: 'catalog:'
+        version: 15.0.0
       oxfmt:
         specifier: 'catalog:'
         version: 0.58.0
@@ -584,6 +601,40 @@ importers:
       vitest:
         specifier: 'catalog:'
         version: 4.1.10(@types/node@24.13.3)
+
+  packages/sdk:
+    dependencies:
+      '@reins/client':
+        specifier: workspace:*
+        version: link:../client
+      '@reins/protocol':
+        specifier: workspace:*
+        version: link:../protocol
+      '@reins/transport':
+        specifier: workspace:*
+        version: link:../transport
+      valibot:
+        specifier: 'catalog:'
+        version: 1.4.2(typescript@7.0.2)
+    devDependencies:
+      '@reins/typescript-config':
+        specifier: workspace:*
+        version: link:../typescript-config
+      '@types/node':
+        specifier: 'catalog:'
+        version: 24.13.3
+      oxfmt:
+        specifier: 'catalog:'
+        version: 0.58.0
+      oxlint:
+        specifier: 'catalog:'
+        version: 1.78.0(oxlint-tsgolint@7.0.2001)
+      oxlint-tsgolint:
+        specifier: 'catalog:'
+        version: 7.0.2001
+      typescript-7:
+        specifier: 'catalog:'
+        version: typescript@7.0.2
 
   packages/test-platform:
     devDependencies:
@@ -1336,6 +1387,11 @@ packages:
     engines: {node: '>=16.20.0'}
     cpu: [x64]
     os: [win32]
+
+  '@valibot/to-json-schema@1.8.0':
+    resolution: {integrity: sha512-a0M+uwCuQZEPAo65NYkFSJ14O5c213KoSZmPdoCfuFvUhfULi4T2Z6Tpjv6lTVMW9RoLm74RpRAjNEa43KcN+g==}
+    peerDependencies:
+      valibot: ^1.5.0
 
   '@vitest/expect@4.1.10':
     resolution: {integrity: sha512-YsCn+qAk1GWjQOWFEsEcL2gNQ0zmVmQu3T03qP6UyjhtmdtwtbuI+DASn/7iQB3HGTXkdBwGddzxPlmiql5vlA==}
@@ -2371,6 +2427,10 @@ snapshots:
 
   '@typescript/typescript-win32-x64@7.0.2':
     optional: true
+
+  '@valibot/to-json-schema@1.8.0(valibot@1.4.2(typescript@7.0.2))':
+    dependencies:
+      valibot: 1.4.2(typescript@7.0.2)
 
   '@vitest/expect@4.1.10':
     dependencies:

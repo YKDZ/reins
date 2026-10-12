@@ -5,7 +5,8 @@
     "noEmit": true,
     "paths": {
       "@reins/daemon": ["./packages/daemon/src/index.ts"],
-      "@reins/protocol": ["./packages/protocol/src/index.ts"]
+      "@reins/protocol": ["./packages/protocol/src/index.ts"],
+      "@ykdz/reins-sdk": ["./packages/sdk/src/index.ts"]
     }
   },
   "files": [
@@ -21,6 +22,7 @@
     "scripts/packed-cli-fixtures/evidence.ts",
     "scripts/packed-cli-fixtures/process.ts",
     "scripts/packed-cli-fixtures/sdk.ts",
+    "scripts/packed-cli-fixtures/sdk-query.ts",
     "scripts/packed-cli-fixtures/simulated-adapter.ts",
     "scripts/packed-cli-fixtures/types.ts",
     "scripts/prepare-test-platform-input.ts",

@@ -103,7 +103,11 @@ function collectFiles(directory: string): string[] {
 }
 
 const { name, version } = assertReleaseVersionAuthority(repository);
-const expectedTarball = releaseTarballName(name, version);
+const runtimeTarball = releaseTarballName(name, version);
+const sdkTarball = releaseTarballName("@ykdz/reins-sdk", version);
+const expectedTarballs = [runtimeTarball, sdkTarball].sort((a, b) =>
+  a.localeCompare(b),
+);
 
 // 只接受匹配校验的正式 tarball：目录必须恰好是 SHA256SUMS 加唯一 tarball，
 // 且 SHA256SUMS 与实际重算的摘要逐字符一致。
@@ -116,22 +120,27 @@ const releaseNames = releaseFiles
   .map((entry) => entry.name)
   .sort((a, b) => a.localeCompare(b));
 if (
-  releaseNames.length !== 2 ||
-  releaseNames[0] !== "SHA256SUMS" ||
-  releaseNames[1] !== expectedTarball
+  releaseNames.length !== 3 ||
+  !releaseNames.includes("SHA256SUMS") ||
+  expectedTarballs.some((tarball) => !releaseNames.includes(tarball))
 ) {
   throw new Error(
-    `Expected exactly SHA256SUMS and ${expectedTarball}; found: ${releaseNames.join(", ")}`,
+    `Expected both same-version tarballs and SHA256SUMS; found: ${releaseNames.join(", ")}`,
   );
 }
-const tarball = join(releaseDirectory, expectedTarball);
-const tarballDigest = sha256File(tarball);
+const candidateDigests = new Map(
+  expectedTarballs.map((tarball) => [
+    tarball,
+    sha256File(join(releaseDirectory, tarball)),
+  ]),
+);
 const checksumsPath = join(releaseDirectory, "SHA256SUMS");
-if (
-  readFileSync(checksumsPath, "utf8") !==
-  `${tarballDigest}  ${expectedTarball}\n`
-) {
-  throw new Error("SHA256SUMS does not exactly match the release tarball");
+const expectedChecksums = [...candidateDigests.entries()]
+  .map(([tarball, digest]) => `${digest}  ${tarball}`)
+  .sort((left, right) => left.localeCompare(right))
+  .join("\n");
+if (readFileSync(checksumsPath, "utf8") !== `${expectedChecksums}\n`) {
+  throw new Error("SHA256SUMS does not exactly match both release tarballs");
 }
 
 // 复用现有正式发行校验：摘要自洽的同名 tarball 仍可能是 validator 会拒绝的包。
@@ -183,15 +192,23 @@ rmSync(acceptanceDirectory, { recursive: true, force: true });
 mkdirSync(candidateDirectory, { recursive: true });
 mkdirSync(consumerDirectory, { recursive: true });
 
-copyFileSync(tarball, join(candidateDirectory, expectedTarball));
+for (const tarball of expectedTarballs) {
+  copyFileSync(
+    join(releaseDirectory, tarball),
+    join(candidateDirectory, tarball),
+  );
+}
 copyFileSync(checksumsPath, join(candidateDirectory, "SHA256SUMS"));
 
-// 消费者以稳定相对路径引用同组内的正式 tarball，随组移动后仍可解析。
+// 消费者以稳定相对路径同时引用同版运行包与 SDK，随组移动后仍可解析。
 const consumerManifest = {
   name: "reins-acceptance-consumer",
   version: "0.0.0",
   private: true,
-  dependencies: { [name]: `file:../candidate/${expectedTarball}` },
+  dependencies: {
+    [name]: `file:../candidate/${runtimeTarball}`,
+    "@ykdz/reins-sdk": `file:../candidate/${sdkTarball}`,
+  },
 };
 writeFileSync(
   join(consumerDirectory, "package.json"),
@@ -236,5 +253,5 @@ writeFileSync(
 );
 
 process.stdout.write(
-  `Acceptance input prepared: ${relative(repository, acceptanceDirectory)} (pnpm ${pnpmVersion}, candidate sha256 ${tarballDigest})\n`,
+  `Acceptance input prepared: ${relative(repository, acceptanceDirectory)} (pnpm ${pnpmVersion}, runtime sha256 ${candidateDigests.get(runtimeTarball)}, SDK sha256 ${candidateDigests.get(sdkTarball)})\n`,
 );

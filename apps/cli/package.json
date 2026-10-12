@@ -55,7 +55,9 @@
     "@reins/transport": "workspace:*",
     "@reins/workspace-protocol": "workspace:*",
     "@reins/workspace-source": "workspace:*",
-    "commander": "catalog:",
+    "@valibot/to-json-schema": "catalog:",
+    "@ykdz/cli-contract": "catalog:",
+    "@ykdz/reins-sdk": "workspace:*",
     "proper-lockfile": "catalog:",
     "valibot": "catalog:"
   },
@@ -63,6 +65,7 @@
     "@reins/typescript-config": "workspace:*",
     "@types/node": "catalog:",
     "@types/proper-lockfile": "catalog:",
+    "commander": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
@@ -84,6 +87,9 @@
       "injected": false
     },
     "@reins/workspace-source": {
+      "injected": false
+    },
+    "@ykdz/reins-sdk": {
       "injected": false
     }
   },

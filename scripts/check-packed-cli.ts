@@ -40,6 +40,7 @@ import {
   readJsonObject,
   releaseTarballName,
   resolveReleaseRuntimeDependencies,
+  resolveReleaseSdkDependencies,
 } from "./release-package.ts";
 
 type CommandResult = {
@@ -58,6 +59,12 @@ type OwnedResources = {
 const adapterFixtureSource = fileURLToPath(
   new URL("./packed-cli-fixtures/adapter-fixture.ts", import.meta.url),
 );
+const sdkQuerySource = fileURLToPath(
+  new URL("./packed-cli-fixtures/sdk-query.ts", import.meta.url),
+);
+const applicationQuerySource = fileURLToPath(
+  new URL("./packed-cli-fixtures/application-query.ts", import.meta.url),
+);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -65,6 +72,26 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 
 function readManifest(directory: string): Record<string, unknown> {
   return readJsonObject(join(directory, "package.json"));
+}
+
+function readDataEnvelope(
+  label: string,
+  stdout: string,
+  command: string,
+): Record<string, unknown> {
+  const envelope: unknown = JSON.parse(stdout);
+  if (
+    !isRecord(envelope) ||
+    envelope.kind !== "data" ||
+    envelope.command !== command ||
+    envelope.variant !== "result" ||
+    !isRecord(envelope.data)
+  ) {
+    throw new Error(
+      `${label} did not return the cli-contract data envelope: ${stdout}`,
+    );
+  }
+  return envelope.data;
 }
 
 // 兼容原入口的断言形状：命令结果 + 从进程启动即完整落盘的日志。
@@ -121,6 +148,7 @@ async function smokePackedCli(
   const releaseIdentity = assertReleaseVersionAuthority(repository);
   const expectedRuntimeDependencies =
     resolveReleaseRuntimeDependencies(repository);
+  const expectedSdkDependencies = resolveReleaseSdkDependencies(repository);
 
   // 环境准备：临时安装/runtime 目录归本入口所有；日志写入调用方证据目录。
   owned.temporaryRoot = mkdtempSync(join(tmpdir(), "reins-packed-cli-"));
@@ -141,23 +169,31 @@ async function smokePackedCli(
     releaseIdentity.version,
   );
   const tarball = join(artifactDirectory, tarballName);
+  const sdkTarballName = releaseTarballName(
+    "@ykdz/reins-sdk",
+    releaseIdentity.version,
+  );
+  const sdkTarball = join(artifactDirectory, sdkTarballName);
 
   mkdirSync(installDirectory);
   // 证据目录由调用方指定且可能被复用：日志目录按幂等方式准备。
   mkdirSync(logsDirectory, { recursive: true });
 
   const artifacts = readdirSync(artifactDirectory).sort();
-  if (
-    artifacts.length !== 2 ||
-    artifacts[0] !== "SHA256SUMS" ||
-    artifacts[1] !== tarballName
-  ) {
+  const expectedArtifacts = ["SHA256SUMS", sdkTarballName, tarballName].sort();
+  if (JSON.stringify(artifacts) !== JSON.stringify(expectedArtifacts)) {
     throw new Error(`Unexpected release artifact set: ${artifacts.join(", ")}`);
   }
-  const actualDigest = createHash("sha256")
+  const runtimeDigest = createHash("sha256")
     .update(readFileSync(tarball))
     .digest("hex");
-  const expectedDigest = `${actualDigest}  ${tarballName}\n`;
+  const sdkDigest = createHash("sha256")
+    .update(readFileSync(sdkTarball))
+    .digest("hex");
+  const expectedDigest =
+    [`${runtimeDigest}  ${tarballName}`, `${sdkDigest}  ${sdkTarballName}`]
+      .sort()
+      .join("\n") + "\n";
   if (
     readFileSync(join(artifactDirectory, "SHA256SUMS"), "utf8") !==
     expectedDigest
@@ -171,6 +207,7 @@ async function smokePackedCli(
         name: "reins-packed-cli-smoke",
         version: "0.0.0",
         private: true,
+        allowScripts: { "@qodercn-ai/qodercn-agent-sdk": true },
       },
       null,
       2,
@@ -187,9 +224,11 @@ async function smokePackedCli(
         "--no-fund",
         "--package-lock=false",
         tarball,
+        sdkTarball,
       ],
       cwd: installDirectory,
       logPath: installLog,
+      timeoutMs: 300_000,
     }),
   );
   requireSuccess("clean install", install, installLog);
@@ -210,6 +249,10 @@ async function smokePackedCli(
     throw new Error("Packed install did not expose both runtime executables");
 
   const installedManifest = readManifest(installedPackage);
+  const runtimeExports = installedManifest.exports;
+  const applicationExport = isRecord(runtimeExports)
+    ? runtimeExports["./application"]
+    : undefined;
   if (
     installedManifest.name !== releaseIdentity.name ||
     installedManifest.version !== releaseIdentity.version ||
@@ -218,11 +261,70 @@ async function smokePackedCli(
       JSON.stringify(expectedRuntimeDependencies) ||
     JSON.stringify(installedManifest.os) !== JSON.stringify(["linux"]) ||
     JSON.stringify(installedManifest.cpu) !== JSON.stringify(["x64"]) ||
+    !isRecord(applicationExport) ||
+    applicationExport.types !== "./dist/application.d.ts" ||
+    applicationExport.default !== "./dist/application.js" ||
+    Object.keys(runtimeExports as Record<string, unknown>).length !== 1 ||
     "private" in installedManifest ||
-    "exports" in installedManifest ||
     "imports" in installedManifest
   ) {
     throw new Error("Installed manifest diverged from the release authority");
+  }
+  const installedSdkPackage = join(
+    installDirectory,
+    "node_modules",
+    "@ykdz",
+    "reins-sdk",
+  );
+  const installedSdkManifest = readManifest(installedSdkPackage);
+  const sdkExports = installedSdkManifest.exports;
+  const sdkEntry = isRecord(sdkExports) ? sdkExports["."] : undefined;
+  if (
+    installedSdkManifest.name !== "@ykdz/reins-sdk" ||
+    installedSdkManifest.version !== releaseIdentity.version ||
+    installedSdkManifest.types !== "./dist/index.d.ts" ||
+    !isRecord(installedSdkManifest.dependencies) ||
+    JSON.stringify(installedSdkManifest.dependencies) !==
+      JSON.stringify(expectedSdkDependencies) ||
+    !isRecord(sdkEntry) ||
+    sdkEntry.types !== "./dist/index.d.ts" ||
+    sdkEntry.default !== "./dist/index.js" ||
+    Object.keys(sdkExports as Record<string, unknown>).length !== 1 ||
+    "private" in installedSdkManifest ||
+    "imports" in installedSdkManifest ||
+    "os" in installedSdkManifest ||
+    "cpu" in installedSdkManifest ||
+    "@ykdz/reins" in
+      (installedSdkManifest.dependencies as Record<string, unknown>) ||
+    Object.keys(installedSdkManifest.dependencies).some((name) =>
+      name.startsWith("@reins/"),
+    )
+  ) {
+    throw new Error(
+      "Installed SDK manifest diverged from its public release contract",
+    );
+  }
+  const sdkDistribution = join(installedSdkPackage, "dist");
+  const sdkFiles = filesRecursively(sdkDistribution);
+  const declarations = sdkFiles.filter((path) => path.endsWith(".d.ts"));
+  const javascript = sdkFiles.filter((path) => path.endsWith(".js"));
+  if (
+    declarations.length === 0 ||
+    javascript.length === 0 ||
+    declarations.some((path) =>
+      /from ["'](?:@reins\/|@ykdz\/reins(?:\/|["']))/u.test(
+        readFileSync(path, "utf8"),
+      ),
+    ) ||
+    javascript.some((path) =>
+      /from ["'](?:@reins\/|@ykdz\/reins(?:\/|["']))/u.test(
+        readFileSync(path, "utf8"),
+      ),
+    )
+  ) {
+    throw new Error(
+      "SDK distribution exposed a private import or omitted its API",
+    );
   }
   if (
     readFileSync(join(installedPackage, "README.md"), "utf8") !==
@@ -238,14 +340,351 @@ async function smokePackedCli(
       "Packed LICENSE did not come from the repository authority",
     );
   }
-  for (const name of ["reins.js", "reins-daemon.js"] as const) {
+  for (const name of [
+    "reins.js",
+    "reins-daemon.js",
+    "reins-workspace-manager.js",
+  ] as const) {
     const path = join(installedPackage, "dist", name);
     if ((statSync(path).mode & 0o777) !== 0o755)
       throw new Error(`Packed executable mode is not 0755: ${name}`);
   }
+  const applicationDistribution = join(installedPackage, "dist");
+  for (const name of ["application.js", "application.d.ts"] as const) {
+    if (!existsSync(join(applicationDistribution, name))) {
+      throw new Error(`Packed application export omitted ${name}`);
+    }
+  }
+  const applicationFiles = [
+    "application.js",
+    "application.d.ts",
+    "application-contracts.d.ts",
+  ];
+  for (const name of applicationFiles) {
+    const path = join(applicationDistribution, name);
+    if (!existsSync(path)) {
+      throw new Error(`Packed application export omitted ${name}`);
+    }
+    const source = readFileSync(path, "utf8");
+    if (/from ["']@reins\//u.test(source)) {
+      throw new Error(`Application export leaked a private import: ${name}`);
+    }
+    if (name.endsWith(".d.ts") && source.includes("application-runtime")) {
+      throw new Error(`Application declaration leaked private runtime types`);
+    }
+  }
 
   // SDK 与额外厂商运行时：从已安装发行包上下文按正常模块解析定位，不假设 npm
   // 扁平布局；记录实际版本与运行时文件摘要（该下载不在包锁冻结范围）。
+  const sdkConsumerDirectory = join(temporaryRoot, "sdk-only-consumer");
+  const sdkCandidateDirectory = join(sdkConsumerDirectory, "candidate");
+  mkdirSync(sdkCandidateDirectory, { recursive: true });
+  const sdkCandidate = join(sdkCandidateDirectory, sdkTarballName);
+  copyFileSync(sdkTarball, sdkCandidate);
+  if (
+    createHash("sha256").update(readFileSync(sdkCandidate)).digest("hex") !==
+    sdkDigest
+  ) {
+    throw new Error(
+      "SDK-only consumer candidate differs from the release tarball",
+    );
+  }
+  writeFileSync(
+    join(sdkConsumerDirectory, "package.json"),
+    `${JSON.stringify(
+      {
+        name: "reins-sdk-only-consumer",
+        version: "0.0.0",
+        private: true,
+        type: "module",
+        dependencies: {
+          "@ykdz/reins-sdk": `file:candidate/${sdkTarballName}`,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  const sdkQueryFixture = join(sdkConsumerDirectory, "sdk-query.ts");
+  copyFileSync(sdkQuerySource, sdkQueryFixture);
+
+  const sdkLockGenerationLog = join(
+    logsDirectory,
+    "sdk-only-lock-generation.log",
+  );
+  const sdkLockGeneration = toCommandResult(
+    await runLoggedCommand({
+      command: "pnpm",
+      args: ["install", "--lockfile-only"],
+      cwd: sdkConsumerDirectory,
+      logPath: sdkLockGenerationLog,
+      timeoutMs: 120_000,
+    }),
+  );
+  requireSuccess(
+    "SDK-only consumer lock generation",
+    sdkLockGeneration,
+    sdkLockGenerationLog,
+  );
+  const sdkLockPath = join(sdkConsumerDirectory, "pnpm-lock.yaml");
+  const sdkLockDigest = createHash("sha256")
+    .update(readFileSync(sdkLockPath))
+    .digest("hex");
+  recorder.record("sdk_only_consumer_lock", {
+    digest: sdkLockDigest,
+    package: "@ykdz/reins-sdk",
+    version: releaseIdentity.version,
+    tarballSha256: sdkDigest,
+  });
+
+  const sdkInstallLog = join(logsDirectory, "sdk-only-frozen-install.log");
+  const sdkInstall = toCommandResult(
+    await runLoggedCommand({
+      command: "pnpm",
+      args: ["install", "--frozen-lockfile"],
+      cwd: sdkConsumerDirectory,
+      logPath: sdkInstallLog,
+      timeoutMs: 120_000,
+    }),
+  );
+  requireSuccess("SDK-only frozen install", sdkInstall, sdkInstallLog);
+  if (
+    createHash("sha256").update(readFileSync(sdkLockPath)).digest("hex") !==
+    sdkLockDigest
+  ) {
+    throw new Error("Frozen SDK-only install rewrote its consumer lock");
+  }
+  const consumerEvidenceDirectory = join(evidenceDirectory, "consumers");
+  mkdirSync(consumerEvidenceDirectory, { recursive: true });
+  copyFileSync(
+    join(sdkConsumerDirectory, "package.json"),
+    join(consumerEvidenceDirectory, "sdk-only-package.json"),
+  );
+  copyFileSync(
+    sdkLockPath,
+    join(consumerEvidenceDirectory, "sdk-only-pnpm-lock.yaml"),
+  );
+  recorder.record("sdk_only_frozen_install", {
+    exitCode: sdkInstall.status,
+    logPath: sdkInstallLog,
+  });
+
+  const typecheckLog = join(logsDirectory, "sdk-only-types.log");
+  const typecheck = toCommandResult(
+    await runLoggedCommand({
+      command: join(repository, "node_modules", ".bin", "tsc"),
+      args: [
+        "--noEmit",
+        "--strict",
+        "--noUnusedLocals",
+        "--noUnusedParameters",
+        "--target",
+        "ES2023",
+        "--module",
+        "NodeNext",
+        "--moduleResolution",
+        "NodeNext",
+        "--skipLibCheck",
+        "false",
+        sdkQueryFixture,
+      ],
+      cwd: sdkConsumerDirectory,
+      logPath: typecheckLog,
+      timeoutMs: 120_000,
+    }),
+  );
+  requireSuccess("SDK-only installed type check", typecheck, typecheckLog);
+  recorder.record("sdk_only_public_types", {
+    exitCode: typecheck.status,
+    logPath: typecheckLog,
+    declaration: "compiled from installed SDK package",
+  });
+
+  const applicationConsumerDirectory = join(
+    temporaryRoot,
+    "runtime-sdk-consumer",
+  );
+  const applicationCandidateDirectory = join(
+    applicationConsumerDirectory,
+    "candidate",
+  );
+  mkdirSync(applicationCandidateDirectory, { recursive: true });
+  const applicationRuntimeCandidate = join(
+    applicationCandidateDirectory,
+    tarballName,
+  );
+  const applicationSdkCandidate = join(
+    applicationCandidateDirectory,
+    sdkTarballName,
+  );
+  copyFileSync(tarball, applicationRuntimeCandidate);
+  copyFileSync(sdkTarball, applicationSdkCandidate);
+  if (
+    createHash("sha256")
+      .update(readFileSync(applicationRuntimeCandidate))
+      .digest("hex") !== runtimeDigest ||
+    createHash("sha256")
+      .update(readFileSync(applicationSdkCandidate))
+      .digest("hex") !== sdkDigest
+  ) {
+    throw new Error("Dual-package consumer candidates changed release bytes");
+  }
+  writeFileSync(
+    join(applicationConsumerDirectory, "package.json"),
+    `${JSON.stringify(
+      {
+        name: "reins-runtime-sdk-consumer",
+        version: "0.0.0",
+        private: true,
+        type: "module",
+        dependencies: {
+          "@ykdz/reins": `file:candidate/${tarballName}`,
+          "@ykdz/reins-sdk": `file:candidate/${sdkTarballName}`,
+        },
+      },
+      null,
+      2,
+    )}\n`,
+  );
+  writeFileSync(
+    join(applicationConsumerDirectory, "pnpm-workspace.yaml"),
+    `packages: []\nallowBuilds:\n  "@qodercn-ai/qodercn-agent-sdk": true\noverrides:\n  "@ykdz/reins-sdk": "file:candidate/${sdkTarballName}"\n`,
+  );
+  const applicationQueryFixture = join(
+    applicationConsumerDirectory,
+    "application-query.ts",
+  );
+  copyFileSync(applicationQuerySource, applicationQueryFixture);
+
+  const applicationLockGenerationLog = join(
+    logsDirectory,
+    "runtime-sdk-lock-generation.log",
+  );
+  const applicationLockGeneration = toCommandResult(
+    await runLoggedCommand({
+      command: "pnpm",
+      args: ["install", "--lockfile-only"],
+      cwd: applicationConsumerDirectory,
+      logPath: applicationLockGenerationLog,
+      timeoutMs: 120_000,
+    }),
+  );
+  requireSuccess(
+    "runtime and SDK consumer lock generation",
+    applicationLockGeneration,
+    applicationLockGenerationLog,
+  );
+  const applicationLockPath = join(
+    applicationConsumerDirectory,
+    "pnpm-lock.yaml",
+  );
+  const applicationLockDigest = createHash("sha256")
+    .update(readFileSync(applicationLockPath))
+    .digest("hex");
+  recorder.record("runtime_sdk_consumer_lock", {
+    digest: applicationLockDigest,
+    packages: ["@ykdz/reins", "@ykdz/reins-sdk"],
+    version: releaseIdentity.version,
+    runtimeTarballSha256: runtimeDigest,
+    sdkTarballSha256: sdkDigest,
+  });
+
+  const applicationInstallLog = join(
+    logsDirectory,
+    "runtime-sdk-frozen-install.log",
+  );
+  const applicationInstall = toCommandResult(
+    await runLoggedCommand({
+      command: "pnpm",
+      args: ["install", "--frozen-lockfile"],
+      cwd: applicationConsumerDirectory,
+      logPath: applicationInstallLog,
+      timeoutMs: 300_000,
+    }),
+  );
+  requireSuccess(
+    "runtime and SDK frozen install",
+    applicationInstall,
+    applicationInstallLog,
+  );
+  if (
+    createHash("sha256")
+      .update(readFileSync(applicationLockPath))
+      .digest("hex") !== applicationLockDigest
+  ) {
+    throw new Error("Frozen runtime and SDK install rewrote its consumer lock");
+  }
+  copyFileSync(
+    join(applicationConsumerDirectory, "package.json"),
+    join(consumerEvidenceDirectory, "runtime-sdk-package.json"),
+  );
+  copyFileSync(
+    join(applicationConsumerDirectory, "pnpm-workspace.yaml"),
+    join(consumerEvidenceDirectory, "runtime-sdk-pnpm-workspace.yaml"),
+  );
+  copyFileSync(
+    applicationLockPath,
+    join(consumerEvidenceDirectory, "runtime-sdk-pnpm-lock.yaml"),
+  );
+  const consumerRuntimeManifest = readManifest(
+    join(applicationConsumerDirectory, "node_modules", "@ykdz", "reins"),
+  );
+  const consumerSdkManifest = readManifest(
+    join(applicationConsumerDirectory, "node_modules", "@ykdz", "reins-sdk"),
+  );
+  if (
+    consumerRuntimeManifest.version !== releaseIdentity.version ||
+    consumerSdkManifest.version !== releaseIdentity.version
+  ) {
+    throw new Error("Frozen consumer installed mismatched package versions");
+  }
+  recorder.record("runtime_sdk_frozen_install", {
+    exitCode: applicationInstall.status,
+    logPath: applicationInstallLog,
+    lockDigest: applicationLockDigest,
+    runtimePackage: consumerRuntimeManifest.name,
+    sdkPackage: consumerSdkManifest.name,
+    version: releaseIdentity.version,
+  });
+
+  const applicationTypecheckLog = join(
+    logsDirectory,
+    "runtime-sdk-application-types.log",
+  );
+  const applicationTypecheck = toCommandResult(
+    await runLoggedCommand({
+      command: join(repository, "node_modules", ".bin", "tsc"),
+      args: [
+        "--noEmit",
+        "--strict",
+        "--noUnusedLocals",
+        "--noUnusedParameters",
+        "--target",
+        "ES2023",
+        "--module",
+        "NodeNext",
+        "--moduleResolution",
+        "NodeNext",
+        "--skipLibCheck",
+        "false",
+        applicationQueryFixture,
+      ],
+      cwd: applicationConsumerDirectory,
+      logPath: applicationTypecheckLog,
+      timeoutMs: 120_000,
+    }),
+  );
+  requireSuccess(
+    "installed runtime application type check",
+    applicationTypecheck,
+    applicationTypecheckLog,
+  );
+  recorder.record("runtime_application_public_types", {
+    exitCode: applicationTypecheck.status,
+    logPath: applicationTypecheckLog,
+    import: "@ykdz/reins/application",
+  });
+
   const sdk = locateInstalledSdk(installedPackage);
   if (sdk.runtimeEntrypointBytes < 10 * 1024 * 1024) {
     throw new Error("Qoder postinstall did not provision its worker runtime");
@@ -283,12 +722,11 @@ async function smokePackedCli(
   );
   assertOutput("packed help", help, { status: 0, stderr: "" }, helpLog);
   if (
-    !help.stdout.includes("Usage: reins [options] <command>") ||
-    !help.stdout.includes(
-      "spawn <harness> <message...> --name <session-name> [options]",
-    )
+    !help.stdout.includes("Usage\n  reins <command>") ||
+    !help.stdout.includes("  capabilities\n") ||
+    !help.stdout.includes("  list\n")
   )
-    throw new Error("Packed help omitted canonical command usage");
+    throw new Error("Packed help omitted the query-only command contract");
 
   const versionLog = join(logsDirectory, "cli-version.log");
   const version = toCommandResult(
@@ -304,43 +742,9 @@ async function smokePackedCli(
     { status: 0, stderr: "" },
     versionLog,
   );
-  if (version.stdout !== `${releaseIdentity.version}\n`) {
+  if (version.stdout !== `reins ${releaseIdentity.version}\n`) {
     throw new Error(`Packed version diverged: ${version.stdout}`);
   }
-
-  const usageLog = join(logsDirectory, "cli-usage-error.log");
-  const usage = toCommandResult(
-    await runLoggedCommand({
-      command: cli,
-      args: ["resolve-permission", "test@g2"],
-      logPath: usageLog,
-    }),
-  );
-  assertOutput(
-    "packed usage error",
-    usage,
-    { status: 64, stderr: "" },
-    usageLog,
-  );
-  const usageError: unknown = JSON.parse(usage.stdout);
-  const usageIssues =
-    isRecord(usageError) && Array.isArray(usageError.issues)
-      ? usageError.issues
-      : [];
-  const usageIssue = usageIssues[0];
-  if (
-    !isRecord(usageError) ||
-    usageError.code !== "usage_error" ||
-    usageIssues.length !== 1 ||
-    !isRecord(usageIssue) ||
-    usageIssue.issue !== "missing_argument" ||
-    usageIssue.target !== "option" ||
-    usageIssue.field !== "--outcome <allow|deny>" ||
-    JSON.stringify(usageIssue.valid) !== JSON.stringify(["allow", "deny"]) ||
-    usageError.usage !==
-      "reins resolve-permission <permissionHandle> --outcome <allow|deny> [options]"
-  )
-    throw new Error(`Packed usage error was incomplete: ${usage.stdout}`);
 
   // adapter 素材：受正式接口类型约束的注册表模块，复制给 daemon 的现有注册表接缝；
   // 只有 type-only 输入，type import 由 Node 24 类型擦除，运行期不解析 workspace 包。
@@ -383,7 +787,8 @@ async function smokePackedCli(
     { status: 0, stderr: "" },
     directListLog,
   );
-  if (directList.stdout !== "[]\n")
+  const listData = readDataEnvelope("packed list", directList.stdout, "list");
+  if (JSON.stringify(listData) !== JSON.stringify({ sessions: [] }))
     throw new Error(
       `Packed daemon returned unexpected output: ${directList.stdout}`,
     );
@@ -419,16 +824,41 @@ async function smokePackedCli(
     ],
     failures: [],
   };
+  const capabilitiesData = readDataEnvelope(
+    "packed capabilities",
+    capabilities.stdout,
+    "capabilities",
+  );
   if (
-    JSON.stringify(JSON.parse(capabilities.stdout) as unknown) !==
-    JSON.stringify(expectedCapabilities)
+    JSON.stringify(capabilitiesData) !== JSON.stringify(expectedCapabilities)
   ) {
     throw new Error(
       `Packed capabilities were unexpected: ${capabilities.stdout}`,
     );
   }
   recorder.record("registry_capabilities", {
-    stdout: JSON.parse(capabilities.stdout) as unknown,
+    stdout: capabilitiesData,
+  });
+
+  const sdkQueryLog = join(logsDirectory, "sdk-only-query.log");
+  const sdkQuery = toCommandResult(
+    await runLoggedCommand({
+      command: process.execPath,
+      args: ["--experimental-strip-types", sdkQueryFixture],
+      cwd: sdkConsumerDirectory,
+      env: directEnv,
+      logPath: sdkQueryLog,
+    }),
+  );
+  requireSuccess(
+    "installed SDK query against the packed daemon",
+    sdkQuery,
+    sdkQueryLog,
+  );
+  recorder.record("sdk_only_query", {
+    exitCode: sdkQuery.status,
+    logPath: sdkQueryLog,
+    socketPath: directSocket,
   });
 
   const directHandle = owned.directDaemon;
@@ -442,6 +872,61 @@ async function smokePackedCli(
   }
   await waitForPathRemoval(directSocket, 5_000);
   await waitForPathRemoval(`${directSocket}.lock`, 5_000);
+
+  // 通过已冻结安装的正式 application export 启动 sibling daemon 并查询。
+  const applicationDirectory = join(runtimeDirectory, "application");
+  mkdirSync(applicationDirectory);
+  const applicationSocket = join(applicationDirectory, "reins.sock");
+  const applicationEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: applicationSocket,
+    REINS_STATE_DIR: join(applicationDirectory, "state"),
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_CONSUMER_CONTEXT: "packed-application-check",
+    REINS_IDLE_TIMEOUT_MS: "100",
+    REINS_DAEMON_BIN: daemon,
+  };
+  const applicationQueryLog = join(
+    logsDirectory,
+    "runtime-sdk-application-query.log",
+  );
+  const applicationQuery = toCommandResult(
+    await runLoggedCommand({
+      command: process.execPath,
+      args: ["--experimental-strip-types", applicationQueryFixture],
+      cwd: applicationConsumerDirectory,
+      env: applicationEnv,
+      logPath: applicationQueryLog,
+      timeoutMs: 20_000,
+    }),
+  );
+  requireSuccess(
+    "installed application start and query",
+    applicationQuery,
+    applicationQueryLog,
+  );
+  const applicationResult: unknown = JSON.parse(applicationQuery.stdout);
+  if (
+    !isRecord(applicationResult) ||
+    applicationResult.status !== "queried" ||
+    applicationResult.capabilityHarness !== "fixture" ||
+    applicationResult.sessionCount !== 0 ||
+    applicationResult.failureCode !== "invalid_params" ||
+    applicationResult.failureStage !== "query"
+  ) {
+    throw new Error(
+      `Installed application returned unexpected output: ${applicationQuery.stdout}`,
+    );
+  }
+  await waitForPathRemoval(applicationSocket, 5_000);
+  await waitForPathRemoval(`${applicationSocket}.lock`, 5_000);
+  recorder.record("runtime_application_start_query", {
+    exitCode: applicationQuery.status,
+    logPath: applicationQueryLog,
+    result: applicationResult,
+    socketRemoved: true,
+    daemonExecutable: daemon,
+  });
 
   const automaticDirectory = join(runtimeDirectory, "automatic");
   mkdirSync(automaticDirectory);
@@ -470,7 +955,12 @@ async function smokePackedCli(
     { status: 0, stderr: "" },
     automaticListLog,
   );
-  if (automaticList.stdout !== "[]\n") {
+  const automaticListData = readDataEnvelope(
+    "automatic packed list",
+    automaticList.stdout,
+    "list",
+  );
+  if (JSON.stringify(automaticListData) !== JSON.stringify({ sessions: [] })) {
     throw new Error(
       `Sibling daemon returned unexpected output: ${automaticList.stdout}`,
     );

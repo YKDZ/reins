@@ -1,16 +1,17 @@
+import { spawn } from "node:child_process";
 import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { consumerContextSchema, sessionNameSchema } from "@reins/protocol";
+import type { ReinsConnection, SessionHandle } from "@ykdz/reins-sdk";
+import { ReinsSdkError } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test } from "vitest";
 
-import {
-  connectReins,
-  isReinsStartupTransportFailure,
-} from "../../src/application.ts";
+import { connectReinsClient } from "../../src/application-runtime.ts";
+import { connectReins } from "../../src/application.ts";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 const daemonBin = join(repository, "packages/daemon/dist/main.js");
@@ -23,7 +24,8 @@ const fixtureDaemonBin = join(
   "apps/cli/test/e2e/fixtures/daemon-fixture.mjs",
 );
 const fixtures: Array<{ directory: string; daemonPids: string }> = [];
-const clients: Awaited<ReturnType<typeof connectReins>>[] = [];
+const clients: ReinsConnection[] = [];
+const controlClients: Awaited<ReturnType<typeof connectReinsClient>>[] = [];
 
 async function workingDirectoryIdentity(): Promise<{
   device: string;
@@ -50,8 +52,22 @@ async function waitForProcessExit(
   throw new Error(`Daemon process ${pid} did not exit`);
 }
 
+async function waitForSocket(path: string, timeoutMs = 5_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    try {
+      if ((await stat(path)).isSocket()) return;
+    } catch {
+      // The fixture has not bound the socket yet.
+    }
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`Daemon socket ${path} did not appear`);
+}
+
 afterEach(async () => {
   for (const client of clients.splice(0)) client.close();
+  for (const client of controlClients.splice(0)) client.close();
   for (const fixture of fixtures.splice(0)) {
     let pids: number[] = [];
     try {
@@ -119,7 +135,9 @@ test("non-CLI callers share one real daemon and reconnect to the same session", 
   ]);
   clients.push(first, second);
 
-  const spawned = await first.request("spawn", {
+  const control = await connectReinsClient(options);
+  controlClients.push(control);
+  const spawned = await control.request("spawn", {
     harness: "fake",
     message: "keep this session after disconnect",
     sessionName: v.parse(sessionNameSchema, "application-session"),
@@ -128,12 +146,19 @@ test("non-CLI callers share one real daemon and reconnect to the same session", 
   });
   expect(spawned).toHaveProperty("result");
   if ("error" in spawned) throw new Error(spawned.error.code);
-  const sessionId = spawned.result.sessionId;
+  const sessionHandle = spawned.result.sessionId;
 
-  const observedBySecond = await second.request("list", { sessionId });
-  expect(observedBySecond).toMatchObject({
-    result: [{ sessionId, sessionName: "application-session" }],
+  const observedBySecond = await second.list({
+    sessionHandle: sessionHandle as unknown as SessionHandle,
   });
+  expect(observedBySecond).toMatchObject([
+    {
+      sessionHandle,
+      sessionName: "application-session",
+      state: "idle",
+      lastCompletedTurn: { stopReason: "end_turn" },
+    },
+  ]);
 
   first.close();
   second.close();
@@ -141,12 +166,17 @@ test("non-CLI callers share one real daemon and reconnect to the same session", 
 
   const reconnected = await connectReins(options);
   clients.push(reconnected);
-  const observedAfterReconnect = await reconnected.request("list", {
-    sessionId,
+  const observedAfterReconnect = await reconnected.list({
+    sessionHandle: sessionHandle as unknown as SessionHandle,
   });
-  expect(observedAfterReconnect).toMatchObject({
-    result: [{ sessionId, sessionName: "application-session" }],
-  });
+  expect(observedAfterReconnect).toMatchObject([
+    {
+      sessionHandle,
+      sessionName: "application-session",
+      state: "idle",
+      lastCompletedTurn: { stopReason: "end_turn" },
+    },
+  ]);
 
   const launchedPids = (await readFile(daemonPids, "utf8"))
     .trim()
@@ -190,15 +220,13 @@ test("application startup failure keeps the raw transport code", async () => {
     failure = error;
   }
 
+  expect(failure).toBeInstanceOf(ReinsSdkError);
   expect(failure).toMatchObject({
-    kind: "reins_startup_transport_failure",
-    code: "address_in_use",
+    failure: {
+      code: "daemon_start_failed",
+      facts: { transportCode: "address_in_use" },
+    },
   });
-  expect(isReinsStartupTransportFailure(failure)).toBe(true);
-  if (!isReinsStartupTransportFailure(failure)) {
-    throw new Error("Expected a typed startup transport failure");
-  }
-  expect(failure.code).toBe("address_in_use");
   await waitForProcessExit(Number(await readFile(fixturePid, "utf8")));
 
   env.REINS_DAEMON_BIN = daemonLauncher;
@@ -209,9 +237,65 @@ test("application startup failure keeps the raw transport code", async () => {
     env,
   });
   clients.push(retried);
-  const capabilities = await retried.request("capabilities", {});
-  expect(capabilities).toHaveProperty("result");
+  const capabilities = await retried.capabilities();
+  expect(capabilities).toHaveProperty("capabilities");
   expect((await readFile(daemonSockets, "utf8")).trim().split("\n")).toEqual([
     env.REINS_SOCKET,
   ]);
+});
+
+test("a connected daemon handshake failure does not launch a replacement", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "reins-application-handshake-"),
+  );
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const socketPath = join(directory, "reins.sock");
+  const fixturePid = join(directory, "fixture.pid");
+  const existingDaemon = spawn(process.execPath, [fixtureDaemonBin], {
+    env: {
+      ...process.env,
+      REINS_SOCKET: socketPath,
+      REINS_FIXTURE_DAEMON_MODE: "initialize-close",
+      REINS_FIXTURE_PID_FILE: daemonPids,
+      REINS_FIXTURE_EXIT_FILE: fixturePid,
+    },
+    stdio: "ignore",
+  });
+  if (existingDaemon.pid === undefined)
+    throw new Error("Could not start handshake fixture daemon");
+  existingDaemon.unref();
+  await waitForSocket(socketPath);
+
+  const launchMarker = join(directory, "unexpected-launches.txt");
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf 'launched\\n' >> '${launchMarker}'\nexit 1\n`,
+    { mode: 0o700 },
+  );
+  let failure: unknown;
+  try {
+    await connectReins({
+      consumerContext: v.parse(consumerContextSchema, "application-e2e"),
+      env: {
+        ...process.env,
+        REINS_SOCKET: socketPath,
+        REINS_STATE_DIR: join(directory, "state"),
+        REINS_DAEMON_BIN: daemonLauncher,
+      },
+      timeoutMs: 1_000,
+    });
+  } catch (error) {
+    failure = error;
+  }
+
+  expect(failure).toBeInstanceOf(ReinsSdkError);
+  expect(failure).toMatchObject({
+    stage: "handshake",
+    failure: { code: "daemon_disconnected", facts: {} },
+  });
+  await expect(readFile(launchMarker, "utf8")).rejects.toMatchObject({
+    code: "ENOENT",
+  });
 });
