@@ -2502,7 +2502,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
     expect(result.stderr).toBe("");
     expect(JSON.parse(result.stdout)).toMatchObject({ code: "daemon_timeout" });
     expect(Date.now() - started).toBeLessThan(6_500);
-    await waitForFixtureExit(fixtureEnv);
+    await waitForFixtureStopped(fixtureEnv);
   }, 10_000);
 
   test("daemon 启动失败返回 UTF-8 有界 cause 并清理子进程", async () => {
@@ -2526,6 +2526,25 @@ describe("CLI 域错误（不夹带 usage）", () => {
     await waitForFixtureExit(fixtureEnv);
   }, 10_000);
 
+  test("启动报告的 transport 前缀按原始 cause 保留", async () => {
+    const { dir, env } = await freshEnv();
+    const fixtureEnv = fixtureDaemonEnv(
+      env,
+      dir,
+      "startup-transport-lookalike",
+    );
+    const result = await runCli(["capabilities"], fixtureEnv, {
+      timeoutMs: 7_000,
+    });
+    expect(result.exitCode).toBe(65);
+    expect(JSON.parse(result.stdout)).toEqual({
+      code: "daemon_start_failed",
+      cause: { kind: "io", message: "transport:address_in_use" },
+      message: "transport:address_in_use",
+    });
+    await waitForFixtureExit(fixtureEnv);
+  }, 10_000);
+
   test("daemon 被 signal 终止后仍观察同 socket 到总 deadline", async () => {
     const { dir, env } = await freshEnv();
     const fixtureEnv = fixtureDaemonEnv(env, dir, "startup-signal");
@@ -2539,6 +2558,26 @@ describe("CLI 域错误（不夹带 usage）", () => {
       cause: {
         kind: "upstream",
         message: expect.stringContaining("SIGTERM"),
+      },
+    });
+    expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);
+    expect(Date.now() - started).toBeLessThan(6_500);
+    await waitForFixtureStopped(fixtureEnv);
+  }, 10_000);
+
+  test("存活但未监听的进程超时后按原始 timeout 失败并清理", async () => {
+    const { dir, env } = await freshEnv();
+    const fixtureEnv = fixtureDaemonEnv(env, dir, "startup-never-listens");
+    const started = Date.now();
+    const result = await runCli(["capabilities"], fixtureEnv, {
+      timeoutMs: 7_000,
+    });
+    expect(result.exitCode).toBe(65);
+    expect(JSON.parse(result.stdout)).toMatchObject({
+      code: "daemon_start_failed",
+      cause: {
+        kind: "timeout",
+        message: "daemon failed to start within 5000ms",
       },
     });
     expect(Date.now() - started).toBeGreaterThanOrEqual(4_500);

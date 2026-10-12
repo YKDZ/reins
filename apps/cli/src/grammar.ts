@@ -64,6 +64,9 @@ export function renderCliError(
   error: CliError,
   spec?: CommandSpec,
 ): RenderedError {
+  if ("transportCode" in error) {
+    return renderedError(transportErrorMessage(error.transportCode));
+  }
   if (isWorkspaceError(error)) {
     const message = error.code.replaceAll("_", " ");
     const description =

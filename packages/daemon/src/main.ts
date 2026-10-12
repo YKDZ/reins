@@ -114,7 +114,7 @@ async function main(): Promise<void> {
   const flags = parseFlags(process.argv.slice(2));
   const adaptersModule =
     flags.adaptersModule ?? process.env.REINS_ADAPTERS_MODULE;
-  const socketPath = resolveReinsSocketPath(process.env);
+  const socketPath = resolveReinsSocketPath({ env: process.env });
   await mkdir(dirname(socketPath), { recursive: true });
   const adapters = await loadAdapters(adaptersModule);
   const transport = createUnixSocketServer<ProtocolMessage>({

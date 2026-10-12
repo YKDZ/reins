@@ -64,6 +64,30 @@ if (mode === "startup-failure") {
   process.exit(23);
 }
 
+if (mode === "startup-transport-lookalike") {
+  const fd = Number(process.env.REINS_STARTUP_FD ?? "3");
+  writeFileSync(
+    fd,
+    `${encodeMessage({
+      v: 1,
+      cause: { kind: "io", message: "transport:address_in_use" },
+    })}\n`,
+  );
+  process.exit(23);
+}
+
+if (mode === "startup-transport-address-in-use") {
+  const fd = Number(process.env.REINS_STARTUP_FD ?? "3");
+  writeFileSync(
+    fd,
+    `${encodeMessage({
+      v: 1,
+      transport: { code: "address_in_use" },
+    })}\n`,
+  );
+  process.exit(23);
+}
+
 if (mode === "startup-signal") {
   process.kill(process.pid, "SIGTERM");
 }
@@ -94,6 +118,10 @@ if (mode === "startup-report-late") {
     })}\n`,
   );
   process.exit(25);
+}
+
+if (mode === "startup-never-listens") {
+  await new Promise((resolve) => setInterval(resolve, 60_000));
 }
 
 if (socketPath === undefined) throw new Error("REINS_SOCKET is required");
