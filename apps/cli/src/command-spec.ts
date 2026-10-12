@@ -5,8 +5,6 @@ import {
   diagnosticIdSchema,
   permissionIdSchema,
   permissionHandleSchema,
-  resumeCursorSchema,
-  type ResumeCursor,
   decodePermissionHandle,
   type PermissionTarget,
   sessionIdSchema,
@@ -38,7 +36,6 @@ export type ValueKind =
   | { readonly type: "turnHandle"; readonly hint: string }
   | { readonly type: "permissionId"; readonly hint: string }
   | { readonly type: "permissionHandle"; readonly hint: string }
-  | { readonly type: "resumeCursor"; readonly hint: string }
   | { readonly type: "diagnosticId"; readonly hint: string }
   | { readonly type: "time"; readonly hint: string }
   | { readonly type: "boolean" }
@@ -175,42 +172,6 @@ const commandSpecData = [
       },
     ],
     options: [],
-  }),
-  defineCommand({
-    name: "attach",
-    description: "Subscribe to an exact session or turn",
-    args: [
-      {
-        name: "target",
-        description: "SessionHandle or complete TurnHandle",
-        kind: { type: "text" },
-      },
-    ],
-    options: [
-      {
-        name: "scope",
-        flags: "--scope <session|turn>",
-        required: true,
-        description: "subscription scope",
-        kind: { type: "enum", values: ["session", "turn"] },
-      },
-      {
-        name: "replay",
-        flags: "--replay <none|available|after>",
-        required: true,
-        description: "bounded event history policy; after requires --cursor",
-        kind: { type: "enum", values: ["none", "available", "after"] },
-      },
-      {
-        name: "cursor",
-        flags: "--cursor <ResumeCursor>",
-        description: "resume an interrupted attach; only with --replay after",
-        kind: {
-          type: "resumeCursor",
-          hint: "Use the complete ResumeCursor from a disconnected attach",
-        },
-      },
-    ],
   }),
   defineCommand({
     name: "diagnostics",
@@ -635,38 +596,34 @@ export const publisherGroupSpec: CommandSpec = {
 
 type CommandSpecData = (typeof commandSpecData)[number];
 
-type ParsedValue<K extends ValueKind> = K extends {
-  readonly type: "resumeCursor";
-}
-  ? ResumeCursor
-  : K extends { readonly type: "text" }
-    ? string
-    : K extends { readonly type: "sessionId" }
-      ? SessionId
-      : K extends { readonly type: "turnHandle" }
-        ? TurnTarget
-        : K extends { readonly type: "turnId" }
-          ? TurnId
-          : K extends { readonly type: "permissionHandle" }
-            ? PermissionTarget
-            : K extends { readonly type: "permissionId" }
-              ? PermissionId
-              : K extends { readonly type: "diagnosticId" }
-                ? DiagnosticId
-                : K extends { readonly type: "time" }
-                  ? string
-                  : K extends { readonly type: "boolean" }
-                    ? boolean
-                    : K extends {
-                          readonly type: "enum";
-                          readonly values: readonly (infer E extends string)[];
-                        }
-                      ? E
-                      : K extends { readonly type: "number" }
-                        ? number
-                        : K extends { readonly type: "jsonObject" }
-                          ? Record<string, unknown>
-                          : never;
+type ParsedValue<K extends ValueKind> = K extends { readonly type: "text" }
+  ? string
+  : K extends { readonly type: "sessionId" }
+    ? SessionId
+    : K extends { readonly type: "turnHandle" }
+      ? TurnTarget
+      : K extends { readonly type: "turnId" }
+        ? TurnId
+        : K extends { readonly type: "permissionHandle" }
+          ? PermissionTarget
+          : K extends { readonly type: "permissionId" }
+            ? PermissionId
+            : K extends { readonly type: "diagnosticId" }
+              ? DiagnosticId
+              : K extends { readonly type: "time" }
+                ? string
+                : K extends { readonly type: "boolean" }
+                  ? boolean
+                  : K extends {
+                        readonly type: "enum";
+                        readonly values: readonly (infer E extends string)[];
+                      }
+                    ? E
+                    : K extends { readonly type: "number" }
+                      ? number
+                      : K extends { readonly type: "jsonObject" }
+                        ? Record<string, unknown>
+                        : never;
 
 type FieldValue<F extends CommandArg | CommandOption> = F extends {
   readonly variadic: true;
@@ -926,13 +883,6 @@ function invocationFromParsed(
         options: typedOptions<"interrupt">(),
         mode,
       };
-    case "attach":
-      return {
-        command: "attach",
-        args: typedArgs<"attach">(),
-        options: typedOptions<"attach">(),
-        mode,
-      };
     case "diagnostics":
       return {
         command: "diagnostics",
@@ -1159,18 +1109,6 @@ function validateValue(
           hint: kind.hint,
         });
       return;
-    case "resumeCursor":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(resumeCursorSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
     case "permissionHandle":
       if (
         typeof value !== "string" ||
@@ -1278,8 +1216,6 @@ function parseFieldValue(
       return decodeTurnHandle(String(value));
     case "turnId":
       return v.parse(turnIdSchema, value);
-    case "resumeCursor":
-      return v.parse(resumeCursorSchema, value);
     case "permissionHandle":
       return decodePermissionHandle(String(value));
     case "permissionId":
@@ -1303,7 +1239,6 @@ export function valueHint(kind: ValueKind): string | undefined {
     case "turnHandle":
     case "permissionId":
     case "permissionHandle":
-    case "resumeCursor":
     case "diagnosticId":
     case "time":
     case "number":

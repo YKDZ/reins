@@ -5,7 +5,6 @@ import {
   mkdir,
   mkdtemp,
   rm,
-  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,14 +16,15 @@ import {
   consumerContextSchema,
   decodeTurnHandle,
   decodePermissionHandle,
-  encodePermissionHandle,
   encodeTurnHandle,
-  sessionNameSchema,
   turnIdSchema,
   type ProtocolMessage,
 } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
-import { connect as connectSdk } from "@ykdz/reins-sdk";
+import {
+  connect as connectSdk,
+  createPresentationProjector,
+} from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -123,7 +123,25 @@ async function fixture(rich = false) {
     cleanup.push(async () => connection.close());
     return connection;
   }
-  return { root, runtime, daemonCwd, callerCwd, env, cli, client, sdk, daemon };
+  async function spawnSession(sessionName: string, message: string) {
+    const connection = await sdk();
+    return connection.spawn(
+      { sessionName, harness: "codex", message, cwd: callerCwd },
+      connection.prepareOperation("spawn"),
+    );
+  }
+  return {
+    root,
+    runtime,
+    daemonCwd,
+    callerCwd,
+    env,
+    cli,
+    client,
+    sdk,
+    spawnSession,
+    daemon,
+  };
 }
 
 test("public SDK facts keep their identity across none, available, and after, and CLI renders the same history", async () => {
@@ -131,24 +149,16 @@ test("public SDK facts keep their identity across none, available, and after, an
   const gate = join(f.root, "stable-facts-release");
   const resolutionFile = join(f.root, "stable-facts-resolution.json");
   const control = await f.client();
-  const cwdStat = await stat(f.callerCwd, { bigint: true });
-  const spawned = await control.request("spawn", {
-    harness: "codex",
-    sessionName: v.parse(sessionNameSchema, "stable-facts"),
-    message: JSON.stringify({
+  const spawned = await f.spawnSession(
+    "stable-facts",
+    JSON.stringify({
       gate,
       reply: "done",
       permission: true,
       resolutionFile,
     }),
-    cwd: f.callerCwd,
-    cwdIdentity: { device: String(cwdStat.dev), inode: String(cwdStat.ino) },
-  });
-  if ("error" in spawned) throw new Error(spawned.error.code);
-  const turnHandle = encodeTurnHandle({
-    sessionId: spawned.result.sessionId,
-    turnId: spawned.result.turnId,
-  });
+  );
+  const turnHandle = spawned.turnHandle;
   const observer = await f.sdk();
   const target = {
     scope: "turn" as const,
@@ -207,8 +217,7 @@ test("public SDK facts keep their identity across none, available, and after, an
     observer.attach(
       {
         scope: "session",
-        sessionHandle: spawned.result
-          .sessionId as unknown as import("@ykdz/reins-sdk").SessionHandle,
+        sessionHandle: spawned.sessionHandle,
       },
       { mode: "after", cursor: checkpoint },
     ),
@@ -221,6 +230,13 @@ test("public SDK facts keep their identity across none, available, and after, an
     },
   });
 
+  const targetAddress = decodeTurnHandle(turnHandle);
+  expect(
+    await control.request("wait", {
+      targets: [targetAddress],
+      completion: "all",
+    }),
+  ).toMatchObject({ result: { completed: [{ finalReply: "done" }] } });
   const structured = await f.cli([
     "attach",
     turnHandle,
@@ -267,19 +283,12 @@ test("interrupting a live CLI attach closes observation without killing its turn
   const f = await fixture(true);
   const gate = join(f.root, "interrupt-release");
   const control = await f.client();
-  const cwdStat = await stat(f.callerCwd, { bigint: true });
-  const spawned = await control.request("spawn", {
-    harness: "codex",
-    sessionName: v.parse(sessionNameSchema, "interrupt-observation"),
-    message: JSON.stringify({ gate, reply: "still running" }),
-    cwd: f.callerCwd,
-    cwdIdentity: { device: String(cwdStat.dev), inode: String(cwdStat.ino) },
-  });
-  if ("error" in spawned) throw new Error(spawned.error.code);
-  const turnHandle = encodeTurnHandle({
-    sessionId: spawned.result.sessionId,
-    turnId: spawned.result.turnId,
-  });
+  const spawned = await f.spawnSession(
+    "interrupt-observation",
+    JSON.stringify({ gate, reply: "still running" }),
+  );
+  const turnHandle = spawned.turnHandle;
+  const target = decodeTurnHandle(turnHandle);
   const child = spawn(
     process.execPath,
     [cliBin, "attach", turnHandle, "--scope", "turn", "--replay", "none"],
@@ -307,175 +316,174 @@ test("interrupting a live CLI attach closes observation without killing its turn
   expect(stdout.join("")).toContain('"variant":"ended"');
   expect(stdout.join("")).toContain('"reason":"closed"');
   expect(
-    await control.request("list", { sessionId: spawned.result.sessionId }),
-  ).toMatchObject({
-    result: [expect.objectContaining({ state: "busy" })],
-  });
+    await (await f.sdk()).list({ sessionHandle: spawned.sessionHandle }),
+  ).toEqual([expect.objectContaining({ state: "busy" })]);
 
   await writeFile(gate, "release");
-  const target = decodeTurnHandle(turnHandle);
   expect(
     await control.request("wait", { targets: [target], completion: "all" }),
   ).toMatchObject({ result: { completed: [{ finalReply: "still running" }] } });
 });
 
-test("a completed turn receives its establishment ACK before any subscription notification", async () => {
-  const { cli, env } = await fixture();
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "caller task",
-    "--name",
-    "ack-order",
-  ]);
-  expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const connection = await createUnixSocketClient<ProtocolMessage>(
-    env.REINS_SOCKET,
-  );
-  const messages: ProtocolMessage[] = [];
-  connection.onEvent((event) => {
-    if (event.kind === "message") messages.push(event.message);
-  });
-  const client = createReinsClient(connection, {
-    consumerContext: v.parse(consumerContextSchema, env.REINS_CONSUMER_CONTEXT),
-  });
-  cleanup.push(async () => client.close());
-  expect(await client.initialize()).toHaveProperty("result");
-  await vi.waitFor(async () =>
-    expect(await client.request("list", {})).toMatchObject({
-      result: [expect.objectContaining({ state: "idle" })],
-    }),
-  );
-  messages.length = 0;
-  let end!: () => void;
-  const ended = new Promise<void>((resolve) => {
-    end = resolve;
-  });
-  client.onNotification((notification) => {
-    if (notification.method === "attach.ended") end();
-  });
+test("the SDK replays a completed turn when observation starts after completion", async () => {
+  const f = await fixture();
+  const spawned = await f.spawnSession("ack-order", "caller task");
+  const control = await f.client();
   expect(
-    await client.request("attach", {
-      scope: "turn",
-      ...target,
-      replay: { mode: "none" },
+    await control.request("wait", {
+      targets: [decodeTurnHandle(spawned.turnHandle)],
+      completion: "all",
     }),
-  ).toHaveProperty("result");
-  await ended;
-  expect(messages[0]).toMatchObject({
-    kind: "response",
-    result: expect.anything(),
+  ).toMatchObject({ result: { completed: [{ stopReason: "end_turn" }] } });
+  const observer = await f.sdk();
+  const subscription = await observer.attach(
+    { scope: "turn", turnHandle: spawned.turnHandle },
+    { mode: "available" },
+  );
+  const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of subscription) facts.push(fact);
+  expect(await subscription.done).toMatchObject({ reason: "end_turn" });
+  expect(facts.at(-1)).toMatchObject({
+    type: "turn.completed",
+    turnHandle: spawned.turnHandle,
+    stopReason: "end_turn",
   });
 });
 
-test("none turn subscription stays on its exact turn while session subscription survives it and closes explicitly", async () => {
+test("SDK turn observation ends on its exact turn while session observation continues", async () => {
   const f = await fixture();
   const gate = join(f.root, "release");
-  const first = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "first" }),
-    "--name",
+  const first = await f.spawnSession(
     "exact",
-  ]);
-  const target = decodeTurnHandle(JSON.parse(first.stdout).turnHandle);
-  const client = await f.client();
-  const wire: import("@reins/protocol").ProtocolNotification[] = [];
-  client.onNotification((event) => wire.push(event));
-  const turn = await client.subscribe({
-    scope: "turn",
-    ...target,
-    replay: { mode: "none" },
-  });
-  const session = await client.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "none" },
-  });
-  expect(turn.establishment).not.toHaveProperty("subscriptionId");
-  expect(turn.establishment.target).not.toHaveProperty("sessionId");
-  const turnEvents: import("@reins/client").AgentEvent[] = [];
-  const sessionEvents: import("@reins/client").AgentEvent[] = [];
-  turn.onEvent((event) => turnEvents.push(event));
-  session.onEvent((event) => sessionEvents.push(event));
+    JSON.stringify({ gate, reply: "first" }),
+  );
+  const firstAddress = decodeTurnHandle(first.turnHandle);
+  const observer = await f.sdk();
+  const control = await f.client();
+  const turn = await observer.attach(
+    { scope: "turn", turnHandle: first.turnHandle },
+    { mode: "none" },
+  );
+  const session = await observer.attach(
+    { scope: "session", sessionHandle: first.sessionHandle },
+    { mode: "none" },
+  );
+  const collect = async (
+    subscription: Awaited<ReturnType<typeof observer.attach>>,
+  ) => {
+    const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+    for await (const fact of subscription) facts.push(fact);
+    return facts;
+  };
+  const turnFactsPromise = collect(turn);
+  const sessionFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  const sessionFactsPromise = (async () => {
+    for await (const fact of session) sessionFacts.push(fact);
+  })();
   await writeFile(gate, "release");
+  const turnFacts = await turnFactsPromise;
   expect(await turn.done).toMatchObject({ reason: "end_turn" });
-  const sent = await f.cli([
-    "send",
-    target.sessionId,
-    "successor",
-    "--placement",
-    "new_turn",
-  ]);
-  expect(sent.exitCode, sent.stdout).toBe(0);
+  const sent = await control.request("send", {
+    placement: "new_turn",
+    sessionId: firstAddress.sessionId,
+    message: "successor",
+  });
+  if ("error" in sent) throw new Error(sent.error.code);
+  const secondTurnHandle = encodeTurnHandle({
+    sessionId: sent.result.sessionId,
+    turnId: sent.result.turnId,
+  }) as unknown as import("@ykdz/reins-sdk").TurnHandle;
   await vi.waitFor(() =>
     expect(
-      sessionEvents.filter((event) => event.type === "turn.completed"),
+      sessionFacts.filter((fact) => fact.type === "turn.completed"),
     ).toHaveLength(2),
   );
-  expect(
-    turnEvents.filter((event) => event.type === "turn.completed"),
-  ).toHaveLength(1);
   session.close();
   expect(await session.done).toMatchObject({ reason: "closed" });
-  const closed = wire.find(
-    (event) =>
-      event.method === "attach.ended" && event.params.reason === "closed",
-  )!;
-  const positions = wire
-    .filter(
-      (event) =>
-        event.method === "event" &&
-        event.params.subscriptionId === closed.params.subscriptionId,
-    )
-    .map((event) => (event.method === "event" ? event.params.eventId : 0));
-  expect(positions).toEqual([...positions].sort((a, b) => a - b));
-  expect(new Set(positions).size).toBe(positions.length);
+  await sessionFactsPromise;
+  const turnEnds = (facts: readonly import("@ykdz/reins-sdk").AgentFact[]) =>
+    facts.filter((fact) => fact.type === "turn.completed");
+  expect(turnEnds(turnFacts)).toHaveLength(1);
+  expect(turnEnds(sessionFacts)).toHaveLength(2);
+  expect(turnEnds(sessionFacts).map((fact) => fact.turnHandle)).toEqual([
+    first.turnHandle,
+    secondTurnHandle,
+  ]);
 });
 
-test("shared client projects merged text, paired tools and a complete permission reusable by a short-lived CLI", async () => {
+test("SDK facts retain permission history while the presenter pairs text and tools", async () => {
   const f = await fixture(true);
   const gate = join(f.root, "release"),
     resolutionFile = join(f.root, "resolution.json");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "done", permission: true, resolutionFile }),
-    "--name",
+  const spawned = await f.spawnSession(
     "permission",
-  ]);
-  expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await f.client();
-  const subscription = await client.subscribe({
-    scope: "turn",
-    ...target,
-    replay: { mode: "none" },
-  });
-  const events: import("@reins/client").AgentEvent[] = [];
-  subscription.onEvent((event) => events.push(event));
-  await writeFile(gate, "release");
-  await vi.waitFor(() =>
-    expect(events.some((event) => event.type === "permission.requested")).toBe(
-      true,
-    ),
+    JSON.stringify({ gate, reply: "done", permission: true, resolutionFile }),
   );
-  const permission = events.find(
-    (event) => event.type === "permission.requested",
-  )!;
-  if (permission.type !== "permission.requested")
-    throw new Error("missing permission");
+  const observer = await f.sdk();
+  const control = await f.client();
+  const subscription = await observer.attach(
+    { scope: "turn", turnHandle: spawned.turnHandle },
+    { mode: "none" },
+  );
+  const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  const presentations: import("@ykdz/reins-sdk").AgentPresentation[] = [];
+  const project = createPresentationProjector();
+  const consumed = (async () => {
+    for await (const fact of subscription) {
+      facts.push(fact);
+      presentations.push(...project(fact));
+      if (fact.type !== "permission.requested") continue;
+      const permissionAddress = decodePermissionHandle(fact.permissionHandle);
+      const rejected = await control.request("resolvePermission", {
+        ...permissionAddress,
+        turnId: v.parse(turnIdSchema, "wrong-parent"),
+        resolution: { outcome: "deny" },
+      });
+      expect(rejected).toMatchObject({ error: { code: "invalid_params" } });
+      await expect(access(resolutionFile)).rejects.toThrow();
+      const resolution = await control.request("resolvePermission", {
+        ...permissionAddress,
+        resolution: { outcome: "deny", feedback: "caller feedback" },
+      });
+      expect(resolution).toHaveProperty("result");
+    }
+  })();
+  await writeFile(gate, "release");
+  await consumed;
+  expect(await subscription.done).toMatchObject({ reason: "end_turn" });
+  const requested = facts.find((fact) => fact.type === "permission.requested");
+  const resolved = facts.find((fact) => fact.type === "permission.resolved");
+  expect(requested).toMatchObject({ type: "permission.requested" });
+  expect(resolved).toMatchObject({ type: "permission.resolved" });
+  if (requested?.type !== "permission.requested")
+    throw new Error("missing permission request fact");
+  if (resolved?.type !== "permission.resolved")
+    throw new Error("missing permission resolution fact");
+  expect(resolved.permissionHandle).toBe(requested.permissionHandle);
+  expect(facts.find((fact) => fact.type === "message")).toMatchObject({
+    content: "hello world",
+  });
   expect(
-    events
-      .filter((event) => event.type === "text")
-      .map((event) => event.content)
+    presentations
+      .filter((presentation) => presentation.type === "text")
+      .map((presentation) => presentation.content)
       .join(""),
   ).toBe("hello world");
-  expect(events.find((event) => event.type === "tool.completed")).toMatchObject(
-    { name: "read-file", result: "file contents" },
-  );
-  for (const event of events)
+  expect(
+    presentations.find(
+      (presentation) => presentation.type === "text" && presentation.complete,
+    ),
+  ).toMatchObject({ complete: true });
+  expect(facts.find((fact) => fact.type === "tool.completed")).toMatchObject({
+    name: "native-result-name",
+    result: "file contents",
+  });
+  expect(
+    presentations.find(
+      (presentation) => presentation.type === "tool.completed",
+    ),
+  ).toMatchObject({ name: "read-file", result: "file contents" });
+  for (const fact of facts)
     for (const key of [
       "sessionId",
       "turnId",
@@ -483,156 +491,96 @@ test("shared client projects merged text, paired tools and a complete permission
       "messageId",
       "toolCallId",
       "subscriptionId",
+      "eventId",
     ])
-      expect(event).not.toHaveProperty(key);
-  const rejected = await f.cli([
-    "resolve-permission",
-    encodePermissionHandle({
-      ...decodePermissionHandle(permission.permissionHandle),
-      turnId: v.parse(turnIdSchema, "wrong-parent"),
-    }),
-    "--outcome",
-    "deny",
-  ]);
-  expect(rejected.exitCode, rejected.stdout + rejected.stderr).toBe(64);
-  expect(JSON.parse(rejected.stdout)).toMatchObject({ code: "invalid_params" });
-  await expect(access(resolutionFile)).rejects.toThrow();
-  const resolution = await f.cli([
-    "resolve-permission",
-    permission.permissionHandle,
-    "--outcome",
-    "deny",
-    "--feedback",
-    "caller feedback",
-  ]);
-  expect(resolution.exitCode, resolution.stdout + resolution.stderr).toBe(0);
-  expect(JSON.parse(resolution.stdout)).toMatchObject({
-    permissionHandle: permission.permissionHandle,
-    status: "resolved",
-  });
-  const ended = await subscription.done;
-  expect(ended).toEqual({
-    target: {
-      scope: "turn",
-      turnHandle: JSON.parse(spawned.stdout).turnHandle,
-    },
-    reason: "end_turn",
-    lastEventId: expect.any(Number),
-  });
+      expect(fact).not.toHaveProperty(key);
   expect(JSON.parse(await readFile(resolutionFile, "utf8"))).toEqual({
     outcome: "deny",
     feedback: "caller feedback",
   });
   expect(
-    events.filter((event) => event.type === "permission.resolved"),
+    facts.filter((fact) => fact.type === "permission.resolved"),
   ).toHaveLength(1);
 });
 
 test.each(["failed", "cancelled"] as const)(
-  "turn scope ends at %s and cannot follow a successor",
+  "turn scope preserves its %s terminal fact and text rendering",
   async (stopReason) => {
     const f = await fixture();
     const gate = join(f.root, "release");
-    const spawned = await f.cli([
-      "spawn",
-      "codex",
-      JSON.stringify({ gate, reply: "done", stopReason }),
-      "--name",
+    const spawned = await f.spawnSession(
       "terminal",
-    ]);
-    const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-    const client = await f.client();
-    const subscription = await client.subscribe({
-      scope: "turn",
-      ...target,
-      replay: { mode: "none" },
-    });
-    const events: { type: string; [key: string]: unknown }[] = [];
-    subscription.onEvent((event) => events.push(event));
+      JSON.stringify({ gate, reply: "done", stopReason }),
+    );
+    const observer = await f.sdk();
+    const subscription = await observer.attach(
+      { scope: "turn", turnHandle: spawned.turnHandle },
+      { mode: "none" },
+    );
     await writeFile(gate, "release");
+    const events: import("@ykdz/reins-sdk").AgentFact[] = [];
+    for await (const event of subscription) events.push(event);
     expect(await subscription.done).toMatchObject({ reason: stopReason });
+    const terminal = events.find((event) => event.type === "turn.completed");
+    expect(terminal).toMatchObject({ type: "turn.completed", stopReason });
+    const failure =
+      stopReason === "failed"
+        ? {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
+          }
+        : undefined;
     if (stopReason === "failed") {
-      const terminal = events.find((event) => event.type === "turn.completed");
-      const failure = {
-        failureCategory: "unclassified",
-        retryDisposition: "unknown",
-      };
       expect(terminal).toMatchObject({ failure });
       expect(terminal).not.toHaveProperty("turnId");
-      const waited = await client.request("wait", {
-        targets: [target],
-        completion: "all",
-        timeoutMs: 0,
-      });
-      expect(waited).toMatchObject({ result: { completed: [{ failure }] } });
-      const args = [
-        "attach",
-        JSON.parse(spawned.stdout).turnHandle,
-        "--scope",
-        "turn",
-        "--replay",
-        "available",
-      ];
-      const json = await f.cli(args);
-      expect(json.exitCode, json.stdout + json.stderr).toBe(0);
-      const projected = json.stdout
-        .trim()
-        .split("\n")
-        .map((line) => JSON.parse(line))
-        .find((event) => event.type === "turn.completed");
-      expect(projected).toMatchObject({
-        failure,
-        message: expect.stringContaining("unknown"),
-      });
-      expect(projected).not.toHaveProperty("subscriptionId");
-      const pretty = await f.cli([...args, "--pretty"]);
-      expect(pretty.exitCode, pretty.stdout + pretty.stderr).toBe(0);
-      expect(pretty.stdout).toContain(projected.message);
+      const control = await f.client();
+      expect(
+        await control.request("wait", {
+          targets: [decodeTurnHandle(spawned.turnHandle)],
+          completion: "all",
+          timeoutMs: 0,
+        }),
+      ).toMatchObject({ result: { completed: [{ failure }] } });
     }
+    const args = [
+      "attach",
+      spawned.turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "available",
+    ];
+    const structured = await f.cli(args);
+    expect(structured.exitCode, structured.stdout + structured.stderr).toBe(0);
+    const frames = structured.stdout
+      .trim()
+      .split("\n")
+      .map((line) => JSON.parse(line) as Record<string, unknown>);
+    const projected = frames
+      .filter((frame) => frame.kind === "record" && frame.variant === "fact")
+      .map((frame) => (frame.data as { fact: Record<string, unknown> }).fact)
+      .find((fact) => fact.type === "turn.completed");
+    expect(projected).toMatchObject({ type: "turn.completed", stopReason });
+    if (failure !== undefined) expect(projected).toMatchObject({ failure });
+    const rendered = await f.cli([...args, "--output-format", "text"]);
+    expect(rendered.exitCode, rendered.stdout + rendered.stderr).toBe(0);
+    expect(rendered.stdout).toContain(`[turn completed] ${stopReason}`);
   },
 );
 
-test("client close rejects subscription completion with daemon_disconnected", async () => {
-  const f = await fixture();
-  const gate = join(f.root, "never-release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "unused" }),
-    "--name",
-    "close",
-  ]);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await f.client();
-  const subscription = await client.subscribe({
-    scope: "session",
-    sessionId: target.sessionId,
-    replay: { mode: "none" },
-  });
-  const result = expect(subscription.done).rejects.toThrow(
-    '"code":"daemon_disconnected"',
-  );
-  client.close();
-  await result;
-});
-
-test("CLI emits legal NDJSON partial events followed by daemon_disconnected and exits 65", async () => {
+test("CLI preserves structured facts before a typed daemon_disconnected failure", async () => {
   const f = await fixture(true);
   const gate = join(f.root, "release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "unused", permission: true }),
-    "--name",
+  const spawned = await f.spawnSession(
     "disconnect",
-  ]);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+    JSON.stringify({ gate, reply: "unused", permission: true }),
+  );
   const child = spawn(
     process.execPath,
     [
       cliBin,
       "attach",
-      JSON.parse(spawned.stdout).turnHandle,
+      spawned.turnHandle,
       "--scope",
       "turn",
       "--replay",
@@ -655,54 +603,71 @@ test("CLI emits legal NDJSON partial events followed by daemon_disconnected and 
   const exited = new Promise<number | null>((resolve) =>
     child.once("close", resolve),
   );
-  // 独立观察者确认会话仍未终止；CLI 在注册后才可收到以下原生事件。
   await vi.waitFor(() =>
-    expect(output.join("")).toContain('"subscription.established"'),
+    expect(output.join("")).toContain('"variant":"established"'),
   );
   await writeFile(gate, "release");
-  await vi.waitFor(() =>
-    expect(output.join("")).toContain('"permission.requested"'),
-  );
+  await vi.waitFor(() => expect(output.join("")).toContain('"variant":"fact"'));
   f.daemon.kill("SIGKILL");
-  expect(await exited, stderr.join("")).toBe(65);
-  const lines = output
+  expect(await exited, stderr.join("")).toBe(70);
+  const records = output
     .join("")
     .trim()
     .split("\n")
-    .map((line) => JSON.parse(line));
-  expect(lines.some((line) => line.type === "text")).toBe(true);
-  expect(lines.at(-1)).toMatchObject({ code: "daemon_disconnected" });
-  expect(lines).not.toContainEqual(
-    expect.objectContaining({ sessionId: target.sessionId }),
-  );
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(
+    records.some(
+      (record) => record.kind === "record" && record.variant === "fact",
+    ),
+  ).toBe(true);
+  const failures = stderr
+    .join("")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(failures.at(-1)).toMatchObject({
+    kind: "failure",
+    command: "attach",
+    variant: "attachFailed",
+    data: { failure: { code: "daemon_disconnected" } },
+  });
+  for (const frame of [...records, ...failures])
+    expect(frame).not.toHaveProperty("sessionId");
 });
 
-test("concurrent connections with the same request ID each release their own subscription after ACK", async () => {
+test("separate SDK observers receive the same stable fact history", async () => {
   const f = await fixture();
   const gate = join(f.root, "release");
-  const spawned = await f.cli([
-    "spawn",
-    "codex",
-    JSON.stringify({ gate, reply: "done" }),
-    "--name",
+  const spawned = await f.spawnSession(
     "concurrent",
+    JSON.stringify({ gate, reply: "done" }),
+  );
+  const [firstObserver, secondObserver] = await Promise.all([f.sdk(), f.sdk()]);
+  const target = {
+    scope: "turn" as const,
+    turnHandle: spawned.turnHandle,
+  };
+  const [first, second] = await Promise.all([
+    firstObserver.attach(target, { mode: "none" }),
+    secondObserver.attach(target, { mode: "none" }),
   ]);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const first = await f.client(),
-    second = await f.client();
-  const subscriptions = await Promise.all([
-    first.subscribe({ scope: "turn", ...target, replay: { mode: "none" } }),
-    second.subscribe({ scope: "turn", ...target, replay: { mode: "none" } }),
-  ]);
-  const ended = [false, false];
-  subscriptions.forEach((subscription, index) => {
-    void subscription.done.then(
-      () => {
-        ended[index] = true;
-      },
-      () => {},
-    );
-  });
+  const collect = async (
+    subscription: Awaited<ReturnType<typeof firstObserver.attach>>,
+  ) => {
+    const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+    for await (const fact of subscription) facts.push(fact);
+    return facts;
+  };
+  const firstFacts = collect(first);
+  const secondFacts = collect(second);
   await writeFile(gate, "release");
-  await vi.waitFor(() => expect(ended).toEqual([true, true]));
+  const histories = await Promise.all([firstFacts, secondFacts]);
+  expect(await first.done).toMatchObject({ reason: "end_turn" });
+  expect(await second.done).toMatchObject({ reason: "end_turn" });
+  expect(histories[0]).toEqual(histories[1]);
+  expect(histories[0].at(-1)).toMatchObject({
+    type: "turn.completed",
+    turnHandle: spawned.turnHandle,
+    stopReason: "end_turn",
+  });
 });
