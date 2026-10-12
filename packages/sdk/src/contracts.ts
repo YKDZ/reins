@@ -5,6 +5,8 @@ declare const messageKeyBrand: unique symbol;
 declare const toolKeyBrand: unique symbol;
 declare const resumeCursorBrand: unique symbol;
 declare const operationCredentialBrand: unique symbol;
+declare const permissionHandleBrand: unique symbol;
+declare const diagnosticIdBrand: unique symbol;
 
 export type SessionHandle = string & {
   readonly [sessionHandleBrand]: "SessionHandle";
@@ -20,7 +22,13 @@ export type ToolKey = string & { readonly [toolKeyBrand]: "ToolKey" };
 export type ResumeCursor = string & {
   readonly [resumeCursorBrand]: "ResumeCursor";
 };
-export type OperationKind = "spawn" | "kill";
+export type PermissionHandle = string & {
+  readonly [permissionHandleBrand]: "PermissionHandle";
+};
+export type DiagnosticId = string & {
+  readonly [diagnosticIdBrand]: "DiagnosticId";
+};
+export type OperationKind = "spawn" | "kill" | "resolvePermission";
 export type OperationCredential<Kind extends OperationKind> = string & {
   readonly [operationCredentialBrand]: Kind;
 };
@@ -120,6 +128,49 @@ export type PermissionOption =
 export type PermissionResolution =
   | { outcome: "allow"; scope: "once" | "session" }
   | { outcome: "deny"; feedback?: string };
+export type DiagnosticsFilter = {
+  harness?: string;
+  sources?: import("@reins/protocol").DiagnosticSource[];
+  kinds?: import("@reins/protocol").DiagnosticKind[];
+  minSeverity?: import("@reins/protocol").DiagnosticSeverity;
+  since?: string;
+  until?: string;
+  limit?: number;
+};
+export type DiagnosticsQuery =
+  | { diagnosticId: DiagnosticId }
+  | (DiagnosticsFilter & {
+      sessionHandle?: SessionHandle;
+      turnHandle?: never;
+    })
+  | (DiagnosticsFilter & {
+      sessionHandle?: SessionHandle;
+      turnHandle: TurnHandle;
+    });
+type ProtocolDiagnosticRecord = import("@reins/protocol").DiagnosticRecord;
+type PublicDiagnosticRecord<T extends ProtocolDiagnosticRecord> = Omit<
+  T,
+  "sessionId" | "turnId" | "diagnosticId"
+> & {
+  diagnosticId: DiagnosticId;
+} & ("sessionId" extends keyof T
+    ? undefined extends T["sessionId"]
+      ? { sessionHandle?: SessionHandle }
+      : { sessionHandle: SessionHandle }
+    : {}) &
+  ("turnId" extends keyof T
+    ? undefined extends T["turnId"]
+      ? { turnHandle?: TurnHandle }
+      : { turnHandle: TurnHandle }
+    : {});
+export type DiagnosticRecord = ProtocolDiagnosticRecord extends infer T
+  ? T extends ProtocolDiagnosticRecord
+    ? PublicDiagnosticRecord<T>
+    : never
+  : never;
+export type DiagnosticsResult =
+  | { record: DiagnosticRecord }
+  | { records: DiagnosticRecord[]; truncated: boolean };
 export type AgentFact =
   | (FactBase & {
       type: "session.created";
@@ -152,21 +203,21 @@ export type AgentFact =
     })
   | (TurnFactBase & {
       type: "permission.requested";
-      permissionHandle: string;
+      permissionHandle: PermissionHandle;
       kind: string;
       input?: unknown;
       options: PermissionOption[];
     })
   | (TurnFactBase & {
       type: "permission.resolved";
-      permissionHandle: string;
+      permissionHandle: PermissionHandle;
       resolution: PermissionResolution;
     })
   | (TurnFactBase & {
       type: "turn.completed";
       finalReply: string | null;
       usage?: Record<string, unknown>;
-      diagnosticId?: string;
+      diagnosticId?: DiagnosticId;
       stopReason: "failed";
       failure: HarnessFailure;
     })
@@ -174,7 +225,7 @@ export type AgentFact =
       type: "turn.completed";
       finalReply: string | null;
       usage?: Record<string, unknown>;
-      diagnosticId?: string;
+      diagnosticId?: DiagnosticId;
       stopReason: "end_turn" | "cancelled" | "killed";
     })
   | (FactBase & { type: "session.killed" });
@@ -285,6 +336,10 @@ type FailureFactsByCode = {
     operation: OperationKind;
   };
   operation_credential_invalid: Record<never, never>;
+  permission_not_pending: { permissionHandle: PermissionHandle };
+  permission_resolution_mismatch: { permissionHandle: PermissionHandle };
+  diagnostic_not_found: { diagnosticId: DiagnosticId };
+  diagnostics_unavailable: Record<never, never>;
   unknown_harness: { harness: string; availableHarnesses: string[] };
   unsupported_feature: { feature: string };
   session_name_conflict: { sessionName: string };
@@ -341,5 +396,11 @@ export type ReinsConnection = {
     input: KillInput,
     credential: OperationCredential<"kill">,
   ): Promise<KillResult>;
+  resolvePermission(
+    permissionHandle: PermissionHandle,
+    resolution: PermissionResolution,
+    credential: OperationCredential<"resolvePermission">,
+  ): Promise<{ permissionHandle: PermissionHandle; status: "resolved" }>;
+  diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsResult>;
   close(): void;
 };

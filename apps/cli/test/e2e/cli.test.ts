@@ -19,9 +19,15 @@ import {
   sessionIdSchema,
   turnIdSchema,
   encodeTurnHandle,
-  encodePermissionHandle,
-  permissionIdSchema,
 } from "@reins/protocol";
+import {
+  connect as connectSdk,
+  ReinsSdkError,
+  type AgentFact,
+  type PermissionHandle,
+  type ReinsConnection,
+  type TurnHandle,
+} from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -203,11 +209,6 @@ async function waitFor(
 }
 
 const cleanupDirs: string[] = [];
-const fixtureSessionId = v.parse(sessionIdSchema, "test-session@gfixture");
-const fixtureTurnHandle = encodeTurnHandle({
-  sessionId: fixtureSessionId,
-  turnId: v.parse(turnIdSchema, "t1"),
-});
 const missingSessionId = v.parse(sessionIdSchema, "missing@gfixture");
 
 afterEach(async () => {
@@ -332,7 +333,11 @@ type OperationData = {
   turnHandle?: string;
   cwd?: string;
   status?: string;
+  permissionHandle?: string;
   sessions?: Array<Record<string, unknown>>;
+  record?: Record<string, unknown>;
+  records?: Array<Record<string, unknown>>;
+  truncated?: boolean;
   capabilities?: Array<{ harness: string; models?: unknown[] }>;
   failures?: unknown[];
   failure?: { code?: string; facts?: Record<string, unknown> };
@@ -347,15 +352,56 @@ function dataFrom(result: CliResult): OperationData {
 
 async function preparedCredential(
   env: NodeJS.ProcessEnv,
-  operation: "spawn" | "kill",
+  operation: "spawn" | "kill" | "resolve-permission",
 ): Promise<string> {
   const result = await runCli(["prepare-operation", operation], env);
-  expect(result.exitCode, result.stdout).toBe(0);
+  expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
   const prepared = dataFrom(result);
   expect(prepared.operation).toBe(operation);
   expect(prepared.credential).toEqual(expect.any(String));
   if (typeof prepared.credential !== "string") throw new Error("执行凭据缺失");
   return prepared.credential;
+}
+
+async function connectSdkForEnv(
+  env: NodeJS.ProcessEnv,
+): Promise<ReinsConnection> {
+  const socketPath = env.REINS_SOCKET;
+  const consumerContext = env.REINS_CONSUMER_CONTEXT;
+  if (socketPath === undefined || consumerContext === undefined)
+    throw new Error("SDK control tests require a socket and consumer binding");
+  return connectSdk({ socketPath, consumerContext });
+}
+
+async function permissionRequestFor(
+  connection: ReinsConnection,
+  turnHandle: string,
+): Promise<Extract<AgentFact, { type: "permission.requested" }>> {
+  const subscription = await connection.attach(
+    { scope: "turn", turnHandle: turnHandle as TurnHandle },
+    { mode: "available" },
+  );
+  try {
+    for await (const fact of subscription) {
+      if (fact.type === "permission.requested") return fact;
+    }
+  } finally {
+    subscription.close();
+    await subscription.done;
+  }
+  throw new Error("The permission adapter emitted no request fact");
+}
+
+async function sdkFailureFor(
+  action: () => Promise<unknown>,
+): Promise<ReinsSdkError> {
+  try {
+    await action();
+  } catch (error) {
+    if (error instanceof ReinsSdkError) return error;
+    throw error;
+  }
+  throw new Error("The SDK operation unexpectedly succeeded");
 }
 
 type SpawnCliInput = {
@@ -528,7 +574,7 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.exitCode).toBe(0);
     expect(result.stderr).toBe("");
     expect(result.stdout.trim().split("\n")).toHaveLength(1);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(dataFrom(result)).toMatchObject({
       records: [
         { operation: "diagnostics_store", reason: "initialized" },
         { operation: "daemon", reason: "started" },
@@ -537,7 +583,7 @@ describe("CLI 进程边界（缝 D）", () => {
     });
   });
 
-  test("真实 malformed transport diagnostic 经正式 CLI 输出 JSON 与 pretty", async () => {
+  test("真实 malformed transport diagnostic 经正式 CLI 输出结构化与文本", async () => {
     const { env: baseEnv, socketPath } = await freshEnv();
     const env = { ...baseEnv, REINS_IDLE_TIMEOUT_MS: "5000" };
     const daemon = await startDaemon(env);
@@ -558,7 +604,7 @@ describe("CLI 进程边界（缝 D）", () => {
         env,
       );
       expect(json.exitCode).toBe(0);
-      const result = JSON.parse(json.stdout) as {
+      const result = dataFrom(json) as {
         records: Array<Record<string, unknown>>;
         truncated: boolean;
       };
@@ -588,10 +634,16 @@ describe("CLI 进程边界（缝 D）", () => {
         "source",
         "v",
       ]);
-      expect(json.stdout).toBe(`${JSON.stringify(result)}\n`);
+      expect(json.stdout.trim().split("\n")).toHaveLength(1);
 
       const pretty = await runCli(
-        ["--pretty", "diagnostics", "--kind", "transport_failure"],
+        [
+          "--output-format",
+          "text",
+          "diagnostics",
+          "--kind",
+          "transport_failure",
+        ],
         env,
       );
       expect(pretty.exitCode).toBe(0);
@@ -611,7 +663,7 @@ describe("CLI 进程边界（缝 D）", () => {
     }
   });
 
-  test("legacy v1 transport TextEvidence 不进入正式 CLI JSON 与 pretty", async () => {
+  test("legacy v1 transport TextEvidence 不进入正式 CLI 结构化与文本输出", async () => {
     const { env, socketPath } = await freshEnv();
     const stateDirectory = env.REINS_STATE_DIR;
     if (stateDirectory === undefined)
@@ -643,7 +695,7 @@ describe("CLI 进程边界（缝 D）", () => {
     try {
       const json = await runCli(["diagnostics", "--id", diagnosticId], env);
       expect(json.exitCode).toBe(0);
-      const result = JSON.parse(json.stdout) as {
+      const result = dataFrom(json) as {
         record: Record<string, unknown>;
       };
       const safeRecord = {
@@ -658,7 +710,7 @@ describe("CLI 进程边界（缝 D）", () => {
       };
       expect(result).toEqual({ record: safeRecord });
       const pretty = await runCli(
-        ["--pretty", "diagnostics", "--id", diagnosticId],
+        ["--output-format", "text", "diagnostics", "--id", diagnosticId],
         env,
       );
       expect(pretty.exitCode).toBe(0);
@@ -689,16 +741,27 @@ describe("CLI 进程边界（缝 D）", () => {
   });
 
   test("diagnostics rejects exact id combined with filters before daemon use", async () => {
-    const { env } = await freshEnv();
+    const { dir, env } = await freshEnv();
+    const fixtureEnv = fixtureDaemonEnv(
+      env,
+      dir,
+      "diagnostics-invalid-combination",
+    );
     const result = await runCli(
       ["diagnostics", "--id", "d1-098", "--harness", "fake"],
-      env,
+      fixtureEnv,
     );
     expect(result.exitCode).toBe(64);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      code: "usage_error",
-      issues: [{ issue: "invalid_combination" }],
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toMatchObject({
+      schemaVersion: "1",
+      command: "diagnostics",
+      kind: "usageFailure",
+      issues: [{ code: "inputRejected" }],
     });
+    expect(await pathExists(fixtureEnv.REINS_FIXTURE_PID_FILE ?? "")).toBe(
+      false,
+    );
   });
 
   test.each([
@@ -717,12 +780,20 @@ describe("CLI 进程边界（缝 D）", () => {
     ["limit has an inclusive upper bound", ["diagnostics", "--limit", "1001"]],
     ["limit is an integer", ["diagnostics", "--limit", "1.5"]],
   ])("diagnostics validates $0 locally", async (_name, args) => {
-    const { env } = await freshEnv();
-    const result = await runCli(args, env);
+    const { dir, env } = await freshEnv();
+    const fixtureEnv = fixtureDaemonEnv(env, dir, "diagnostics-invalid-input");
+    const result = await runCli(args, fixtureEnv);
     expect(result.exitCode).toBe(64);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      code: "usage_error",
+    expect(result.stdout).toBe("");
+    expect(JSON.parse(result.stderr)).toMatchObject({
+      schemaVersion: "1",
+      command: "diagnostics",
+      kind: "usageFailure",
+      issues: [{ code: "inputRejected" }],
     });
+    expect(await pathExists(fixtureEnv.REINS_FIXTURE_PID_FILE ?? "")).toBe(
+      false,
+    );
   });
 
   test("拒绝保留会话名且不创建会话", async () => {
@@ -757,14 +828,14 @@ describe("CLI 进程边界（缝 D）", () => {
         ["diagnostics", "--session", sessionId, "--kind", "harness_stderr"],
         env,
       );
-      return JSON.parse(queried.stdout).records.length === 3;
+      return dataFrom(queried).records?.length === 3;
     });
     const queried = await runCli(
       ["diagnostics", "--session", sessionId, "--kind", "harness_stderr"],
       env,
     );
     const record = (
-      JSON.parse(queried.stdout) as {
+      dataFrom(queried) as {
         records: Array<{
           text: { text: string; truncated: boolean; originalBytes: number };
         }>;
@@ -775,12 +846,12 @@ describe("CLI 进程边界（缝 D）", () => {
       originalBytes: 20_000,
     });
     expect(Buffer.byteLength(record?.text.text ?? "", "utf8")).toBe(16 * 1024);
-    const all = JSON.parse(queried.stdout) as {
+    const all = dataFrom(queried) as {
       records: Array<{
         diagnosticId: string;
         recordedAt: string;
-        sessionId: string;
-        turnId: string;
+        sessionHandle: string;
+        turnHandle: string;
       }>;
     };
     const first = all.records[0]!;
@@ -788,12 +859,12 @@ describe("CLI 进程边界（缝 D）", () => {
       ["diagnostics", "--id", first.diagnosticId],
       env,
     );
-    expect(JSON.parse(exact.stdout)).toMatchObject({
+    expect(dataFrom(exact)).toMatchObject({
       record: { diagnosticId: first.diagnosticId },
     });
     for (const args of [
       ["--session", sessionId],
-      ["--session", sessionId, "--turn", first.turnId],
+      ["--session", sessionId, "--turn", first.turnHandle],
       ["--session", sessionId, "--harness", "capture", "--source", "harness"],
       ["--harness", "capture"],
       ["--source", "harness", "adapter"],
@@ -802,13 +873,13 @@ describe("CLI 进程边界（缝 D）", () => {
       ["--since", first.recordedAt, "--until", first.recordedAt],
     ]) {
       const filtered = await runCli(["diagnostics", ...args], env);
-      expect(JSON.parse(filtered.stdout).records.length).toBeGreaterThan(0);
+      expect(dataFrom(filtered).records?.length).toBeGreaterThan(0);
     }
     const excludedByAnd = await runCli(
       ["diagnostics", "--session", sessionId, "--harness", "fake"],
       env,
     );
-    expect(JSON.parse(excludedByAnd.stdout)).toEqual({
+    expect(dataFrom(excludedByAnd)).toEqual({
       records: [],
       truncated: false,
     });
@@ -816,7 +887,7 @@ describe("CLI 进程边界（缝 D）", () => {
       ["diagnostics", "--session", sessionId, "--limit", "1"],
       env,
     );
-    expect(JSON.parse(latest.stdout)).toMatchObject({
+    expect(dataFrom(latest)).toMatchObject({
       records: [
         expect.objectContaining({
           diagnosticId: all.records.at(-1)?.diagnosticId,
@@ -825,14 +896,14 @@ describe("CLI 进程边界（缝 D）", () => {
       truncated: true,
     });
     const empty = await runCli(["diagnostics", "--harness", "none"], env);
-    expect(JSON.parse(empty.stdout)).toEqual({ records: [], truncated: false });
+    expect(dataFrom(empty)).toEqual({ records: [], truncated: false });
     const missing = await runCli(["diagnostics", "--id", "d1-098"], env);
     expect(missing.exitCode).toBe(65);
-    expect(JSON.parse(missing.stdout)).toMatchObject({
+    expect(dataFrom(missing).failure).toMatchObject({
       code: "diagnostic_not_found",
     });
     const pretty = await runCli(
-      ["--pretty", "diagnostics", "--id", first.diagnosticId],
+      ["--output-format", "text", "diagnostics", "--id", first.diagnosticId],
       env,
     );
     expect(pretty.stdout).toContain("harness_stderr");
@@ -911,7 +982,8 @@ describe("CLI 进程边界（缝 D）", () => {
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
       [
-        "--pretty",
+        "--output-format",
+        "text",
         "attach",
         turnHandleFrom(spawned),
         "--scope",
@@ -925,7 +997,10 @@ describe("CLI 进程边界（缝 D）", () => {
     await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
     const exit = waitForExit(attached.child, 5_000);
     await killWithCli(env, sessionId);
-    expect(await exit).toBe(0);
+    expect(
+      await exit,
+      `${attached.stdout.join("")}\n${attached.stderr.join("")}`,
+    ).toBe(0);
     expect(attached.stderr.join("")).toBe("");
   });
 
@@ -941,7 +1016,8 @@ describe("CLI 进程边界（缝 D）", () => {
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
       [
-        "--pretty",
+        "--output-format",
+        "text",
         "attach",
         turnHandleFrom(spawned),
         "--scope",
@@ -993,7 +1069,8 @@ describe("CLI 进程边界（缝 D）", () => {
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
       [
-        "--pretty",
+        "--output-format",
+        "text",
         "attach",
         turnHandleFrom(spawned),
         "--scope",
@@ -1007,44 +1084,74 @@ describe("CLI 进程边界（缝 D）", () => {
     const exitPromise = waitForExit(attached.child, 2_000);
     await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
     await killWithCli(queueEnv, sessionId);
-    expect(await exitPromise).toBe(0);
+    expect(
+      await exitPromise,
+      `${attached.stdout.join("")}\n${attached.stderr.join("")}`,
+    ).toBe(0);
     expect(await pathExists(requestsFile)).toBe(false);
     expect(
       attached.stdout.join("").match(/Permission requested:/gu),
     ).toHaveLength(1);
   });
 
-  test("disconnect aborts an outstanding pretty prompt without a late resolution", async () => {
-    const { dir, env } = await freshEnv();
-    const fixtureEnv = fixtureDaemonEnv(env, dir, "prompt-disconnect");
-    const attached = startCli(
-      [
-        "--pretty",
-        "attach",
-        fixtureTurnHandle,
-        "--scope",
-        "turn",
-        "--replay",
-        "available",
-      ],
-      fixtureEnv,
-      true,
-    );
-    const exitPromise = waitForExit(attached.child, 2_000);
-    await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
-    const started = Date.now();
-    expect(await exitPromise).toBe(65);
-    expect(Date.now() - started).toBeLessThan(1_500);
-    expect(attached.stdout.join("")).not.toContain("[attach ended]");
-    expect(attached.stderr.join("")).toContain("error: Daemon disconnected");
-    const requestsPath = fixtureEnv.REINS_FIXTURE_REQUESTS_FILE;
-    if (requestsPath === undefined)
-      throw new Error("requests file is required");
-    expect((await readFile(requestsPath, "utf8")).trim().split("\n")).toEqual([
-      "initialize",
-      "attach",
-    ]);
-    await waitForFixtureExit(fixtureEnv);
+  test("SIGINT cancels an outstanding permission prompt without deciding it", async () => {
+    const { dir, env: baseEnv, socketPath } = await freshEnv();
+    const requestsFile = join(dir, "prompt-interrupt.requests");
+    const env = { ...baseEnv, REINS_FIXTURE_REQUESTS_FILE: requestsFile };
+    const daemon = await startDaemon(env);
+    let attached: ReturnType<typeof startCli> | undefined;
+    let sessionHandle: string | undefined;
+    try {
+      const spawned = await spawnWithCli(env, {
+        harness: "permission",
+        message: "interrupt while prompting",
+        name: "prompt-interrupt",
+      });
+      sessionHandle = sessionIdFrom(spawned);
+      const turnHandle = turnHandleFrom(spawned);
+      attached = startCli(
+        [
+          "--output-format",
+          "text",
+          "attach",
+          turnHandle,
+          "--scope",
+          "turn",
+          "--replay",
+          "available",
+        ],
+        env,
+        true,
+      );
+      const exitPromise = waitForExit(attached.child, 2_000);
+      await waitFor(() => attached!.stdout.join("").includes("Choose (1-2):"));
+      const started = Date.now();
+      expect(attached.child.kill("SIGINT")).toBe(true);
+      expect(
+        await exitPromise,
+        `${attached.stdout.join("")}\n${attached.stderr.join("")}`,
+      ).toBe(0);
+      expect(Date.now() - started).toBeLessThan(1_500);
+      expect(attached.stdout.join("")).not.toContain("[attach ended]");
+      expect(attached.stdout.join("")).not.toContain("[turn completed]");
+      expect(await pathExists(requestsFile)).toBe(false);
+      const listed = await runCli(["list", "--session", sessionHandle], env);
+      expect(dataFrom(listed).sessions?.[0]).toMatchObject({ state: "busy" });
+    } finally {
+      attached?.child.stdin?.destroy();
+      if (
+        attached !== undefined &&
+        attached.child.exitCode === null &&
+        attached.child.signalCode === null
+      ) {
+        attached.child.kill("SIGKILL");
+        await waitForExit(attached.child, 2_000);
+      }
+      if (sessionHandle !== undefined && daemon.exitCode === null)
+        await killWithCli(env, sessionHandle);
+      if (daemon.exitCode === null && daemon.signalCode === null)
+        await stopDaemon(daemon, socketPath);
+    }
   });
 
   test("wait 超时退出码 4", async () => {
@@ -1077,49 +1184,156 @@ describe("CLI 进程边界（缝 D）", () => {
   });
 
   test.each([
-    ["json", []],
-    ["pretty", ["--pretty"]],
+    ["structured", []],
+    ["text", ["--output-format", "text"]],
   ] as const)(
-    "resolve-permission %s 成功返回 typed ack",
+    "resolve-permission %s 通过预先凭据返回 typed ack",
     async (mode, prefix) => {
-      const { env } = await freshEnv();
+      const { dir, env: baseEnv } = await freshEnv();
+      const requestsFile = join(dir, `resolve-${mode}.requests`);
+      const env = { ...baseEnv, REINS_FIXTURE_REQUESTS_FILE: requestsFile };
       const spawned = await spawnWithCli(env, {
         harness: "permission",
         message: "do it",
         name: `resolve-${mode}`,
       });
       const sessionId = sessionIdFrom(spawned);
+      const connection = await connectSdkForEnv(env);
+      let request: Extract<AgentFact, { type: "permission.requested" }>;
+      try {
+        request = await permissionRequestFor(
+          connection,
+          turnHandleFrom(spawned),
+        );
+      } finally {
+        connection.close();
+      }
+      expect(request.options).toEqual([
+        { outcome: "allow", scope: "once" },
+        { outcome: "deny", feedback: false },
+      ]);
+      expect("permissionId" in request).toBe(false);
+      const credential = await preparedCredential(env, "resolve-permission");
       const resolved = await runCli(
         [
           ...prefix,
           "resolve-permission",
-          encodePermissionHandle({
-            sessionId: v.parse(sessionIdSchema, sessionId),
-            turnId: v.parse(turnIdSchema, "t1"),
-            permissionId: v.parse(permissionIdSchema, "p1"),
-          }),
+          request.permissionHandle,
           "--outcome",
           "allow",
+          "--scope",
+          "once",
+          "--operation",
+          credential,
         ],
         env,
       );
       expect(resolved.exitCode).toBe(0);
       expect(resolved.stderr).toBe("");
-      if (mode === "json") {
-        expect(JSON.parse(resolved.stdout)).toEqual({
-          permissionHandle: encodePermissionHandle({
-            sessionId: v.parse(sessionIdSchema, sessionId),
-            turnId: v.parse(turnIdSchema, "t1"),
-            permissionId: v.parse(permissionIdSchema, "p1"),
-          }),
+      if (mode === "structured") {
+        expect(dataFrom(resolved)).toEqual({
+          permissionHandle: request.permissionHandle,
           status: "resolved",
         });
       } else {
         expect(resolved.stdout).toBe("Permission resolved\n");
       }
+      expect(await readFile(requestsFile, "utf8")).toBe("p1\n");
       await killWithCli(env, sessionId);
     },
   );
+
+  test("SDK 用不透明句柄与单次凭据拒绝未提供决议", async () => {
+    const { dir, env: baseEnv } = await freshEnv();
+    const requestsFile = join(dir, "sdk-permission.requests");
+    const env = { ...baseEnv, REINS_FIXTURE_REQUESTS_FILE: requestsFile };
+    const spawned = await spawnWithCli(env, {
+      harness: "permission",
+      message: "do it",
+      name: "sdk-permission-validation",
+    });
+    expect(spawned.exitCode).toBe(0);
+    const sessionHandle = sessionIdFrom(spawned);
+    const connection = await connectSdkForEnv(env);
+    try {
+      const request = await permissionRequestFor(
+        connection,
+        turnHandleFrom(spawned),
+      );
+      const malformed = await sdkFailureFor(() =>
+        connection.resolvePermission(
+          "not-a-permission-handle" as PermissionHandle,
+          { outcome: "allow", scope: "once" },
+          connection.prepareOperation("resolvePermission"),
+        ),
+      );
+      expect(malformed.failure).toEqual({
+        code: "invalid_params",
+        facts: {
+          issues: [{ issue: "invalid_value", path: "permissionHandle" }],
+        },
+      });
+      expect(await pathExists(requestsFile)).toBe(false);
+
+      const rejectedCredential =
+        connection.prepareOperation("resolvePermission");
+      const invalidOption = { outcome: "allow", scope: "session" } as const;
+      const rejected = await sdkFailureFor(() =>
+        connection.resolvePermission(
+          request.permissionHandle,
+          invalidOption,
+          rejectedCredential,
+        ),
+      );
+      expect(rejected.failure).toEqual({
+        code: "permission_resolution_mismatch",
+        facts: { permissionHandle: request.permissionHandle },
+      });
+      const replayedFailure = await sdkFailureFor(() =>
+        connection.resolvePermission(
+          request.permissionHandle,
+          invalidOption,
+          rejectedCredential,
+        ),
+      );
+      expect(replayedFailure.failure).toEqual(rejected.failure);
+      const conflict = await sdkFailureFor(() =>
+        connection.resolvePermission(
+          request.permissionHandle,
+          { outcome: "deny" },
+          rejectedCredential,
+        ),
+      );
+      expect(conflict.failure.code).toBe("command_id_conflict");
+      expect(await pathExists(requestsFile)).toBe(false);
+
+      const resolved = await connection.resolvePermission(
+        request.permissionHandle,
+        { outcome: "allow", scope: "once" },
+        connection.prepareOperation("resolvePermission"),
+      );
+      expect(resolved).toEqual({
+        permissionHandle: request.permissionHandle,
+        status: "resolved",
+      });
+      expect(await readFile(requestsFile, "utf8")).toBe("p1\n");
+      const duplicate = await sdkFailureFor(() =>
+        connection.resolvePermission(
+          request.permissionHandle,
+          { outcome: "allow", scope: "once" },
+          connection.prepareOperation("resolvePermission"),
+        ),
+      );
+      expect(duplicate.failure).toEqual({
+        code: "permission_not_pending",
+        facts: { permissionHandle: request.permissionHandle },
+      });
+      expect(await readFile(requestsFile, "utf8")).toBe("p1\n");
+    } finally {
+      connection.close();
+      await killWithCli(env, sessionHandle);
+    }
+  });
 
   test("attach pretty 权限交互并随决议结束", async () => {
     const { env } = await freshEnv();
@@ -1134,7 +1348,8 @@ describe("CLI 进程边界（缝 D）", () => {
       [
         "attach",
         turnHandleFrom(spawned),
-        "--pretty",
+        "--output-format",
+        "text",
         "--scope",
         "turn",
         "--replay",
@@ -1146,7 +1361,10 @@ describe("CLI 进程边界（缝 D）", () => {
     try {
       await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
       attached.child.stdin?.end("1\n");
-      expect(await waitForExit(attached.child)).toBe(0);
+      expect(
+        await waitForExit(attached.child),
+        `${attached.stdout.join("")}\n${attached.stderr.join("")}`,
+      ).toBe(0);
       expect(attached.stdout.join("")).toContain("Permission requested");
       expect(attached.stdout.join("")).toContain("[attach ended]");
       expect(attached.stdout.join("")).toContain("[turn completed] end_turn");
@@ -1342,7 +1560,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
     await waitForFixtureExit(fixtureEnv);
   });
 
-  test("pretty permission EOF is a typed terminal error on stderr", async () => {
+  test("text permission EOF is a typed terminal error on stderr", async () => {
     const { env } = await freshEnv();
     const spawned = await spawnWithCli(env, {
       harness: "permission",
@@ -1353,7 +1571,8 @@ describe("CLI 域错误（不夹带 usage）", () => {
     const sessionId = sessionIdFrom(spawned);
     const result = await runCli(
       [
-        "--pretty",
+        "--output-format",
+        "text",
         "attach",
         turnHandleFrom(spawned),
         "--scope",

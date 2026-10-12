@@ -9,6 +9,9 @@ import {
 } from "@reins/client/control";
 import type {
   AttachParams,
+  DiagnosticId as ProtocolDiagnosticId,
+  DiagnosticRecord as ProtocolDiagnosticRecord,
+  DiagnosticsResult as ProtocolDiagnosticsResult,
   MachineError,
   ProtocolMessage,
   ProtocolParams,
@@ -16,11 +19,14 @@ import type {
   SideEffectMethod,
   SessionInfo as ProtocolSessionInfo,
   SessionId,
+  TurnId,
   ResumeCursor as ProtocolResumeCursor,
 } from "@reins/protocol";
 import {
   consumerContextSchema,
+  decodePermissionHandle,
   decodeTurnHandle,
+  encodePermissionHandle,
   encodeTurnHandle,
   REINS_PROTOCOL_MAJOR_VERSION,
 } from "@reins/protocol";
@@ -29,6 +35,10 @@ import * as v from "valibot";
 
 import {
   type ConnectOptions,
+  type DiagnosticId,
+  type DiagnosticRecord,
+  type DiagnosticsQuery,
+  type DiagnosticsResult,
   type OperationCredential,
   type OperationKind,
   type ReinsConnection,
@@ -42,6 +52,7 @@ import {
   type FactSubscription,
   type SessionHandle,
   type SessionInfo,
+  type PermissionHandle,
   type TurnHandle,
 } from "./contracts.ts";
 import { ReinsSdkError } from "./errors.ts";
@@ -53,6 +64,11 @@ export type {
   CapabilityFailure,
   CapabilityModel,
   ConnectOptions,
+  DiagnosticId,
+  DiagnosticRecord,
+  DiagnosticsFilter,
+  DiagnosticsQuery,
+  DiagnosticsResult,
   KillInput,
   KillResult,
   OperationCredential,
@@ -81,6 +97,7 @@ export type {
   FactSubscription,
   MessageKey,
   PermissionOption,
+  PermissionHandle,
   PermissionResolution,
   ReplayPolicy,
   ResumeCursor,
@@ -159,6 +176,14 @@ export async function connect(
             : { sessionId: sessionHandle as unknown as SessionId }),
         } as ProtocolParams<"list">;
         return (await query(client!, "list", params)).map(mapSessionInfo);
+      },
+      async diagnostics(filter) {
+        const result = await query(
+          client!,
+          "diagnostics",
+          projectDiagnosticsParams(filter),
+        );
+        return projectDiagnosticsResult(result);
       },
       async attach(target, replay, signal) {
         let source: Awaited<ReturnType<ControlClient["subscribeFacts"]>>;
@@ -262,6 +287,33 @@ export async function connect(
           status: result.status,
         };
       },
+      async resolvePermission(permissionHandle, resolution, credential) {
+        let target: ReturnType<typeof decodePermissionHandle>;
+        try {
+          target = decodePermissionHandle(permissionHandle);
+        } catch {
+          throw new ReinsSdkError(
+            {
+              code: "invalid_params",
+              facts: {
+                issues: [{ issue: "invalid_value", path: "permissionHandle" }],
+              },
+            },
+            "operation",
+          );
+        }
+        const result = await perform(
+          client!,
+          "resolvePermission",
+          { ...target, resolution },
+          credential,
+          permissionHandle,
+        );
+        return {
+          permissionHandle: encodePermissionHandle(result) as PermissionHandle,
+          status: "resolved",
+        };
+      },
       close() {
         client?.close();
       },
@@ -349,11 +401,15 @@ async function perform<M extends SideEffectMethod>(
   method: M,
   params: ProtocolParams<M>,
   credential: OperationCredential<M & OperationKind>,
+  permissionHandle?: PermissionHandle,
 ): Promise<ProtocolResult<M>> {
   try {
     const response = await client.executeOperation(method, params, credential);
     if ("error" in response)
-      throw new ReinsSdkError(projectFailure(response.error), "operation");
+      throw new ReinsSdkError(
+        projectFailure(response.error, permissionHandle),
+        "operation",
+      );
     return response.result;
   } catch (error) {
     if (error instanceof ReinsSdkError) throw error;
@@ -371,7 +427,7 @@ async function perform<M extends SideEffectMethod>(
   }
 }
 
-async function query<M extends "capabilities" | "list">(
+async function query<M extends "capabilities" | "list" | "diagnostics">(
   client: ControlClient,
   method: M,
   params: ProtocolParams<M>,
@@ -389,11 +445,87 @@ async function query<M extends "capabilities" | "list">(
   }
 }
 
+function projectDiagnosticsParams(
+  query: DiagnosticsQuery | undefined,
+): ProtocolParams<"diagnostics"> {
+  if (query === undefined) return {};
+  if ("diagnosticId" in query)
+    return {
+      diagnosticId: query.diagnosticId as unknown as ProtocolDiagnosticId,
+    };
+  const { sessionHandle, turnHandle, ...filters } = query;
+  if (turnHandle !== undefined) {
+    const target = decodeTurnHandle(turnHandle);
+    if (
+      sessionHandle !== undefined &&
+      sessionHandle !== (target.sessionId as unknown as SessionHandle)
+    )
+      throw new ReinsSdkError({
+        code: "invalid_params",
+        facts: {
+          issues: [
+            {
+              issue: "invalid_combination",
+              paths: ["sessionHandle", "turnHandle"],
+            },
+          ],
+        },
+      });
+    return { ...filters, ...target } as ProtocolParams<"diagnostics">;
+  }
+  return {
+    ...filters,
+    ...(sessionHandle === undefined
+      ? {}
+      : { sessionId: sessionHandle as unknown as SessionId }),
+  } as ProtocolParams<"diagnostics">;
+}
+
+function projectDiagnosticsResult(
+  result: ProtocolDiagnosticsResult,
+): DiagnosticsResult {
+  if ("record" in result)
+    return { record: projectDiagnosticRecord(result.record) };
+  return {
+    records: result.records.map(projectDiagnosticRecord),
+    truncated: result.truncated,
+  };
+}
+
+function projectDiagnosticRecord(
+  record: ProtocolDiagnosticRecord,
+): DiagnosticRecord {
+  const address = record as ProtocolDiagnosticRecord & {
+    sessionId?: SessionId;
+    turnId?: TurnId;
+  };
+  const { sessionId, turnId, diagnosticId, ...fields } = address;
+  return {
+    ...fields,
+    diagnosticId: diagnosticId as unknown as DiagnosticId,
+    ...(sessionId === undefined
+      ? {}
+      : { sessionHandle: sessionId as unknown as SessionHandle }),
+    ...(turnId === undefined || sessionId === undefined
+      ? {}
+      : {
+          turnHandle: encodeTurnHandle({
+            sessionId,
+            turnId,
+          }) as unknown as TurnHandle,
+        }),
+  } as DiagnosticRecord;
+}
+
 function projectClientFailure(
   failure: ReinsClientError["failure"],
 ): ReinsFailure {
   if (isCommandOutcomeUnknown(failure)) {
-    if (failure.method !== "spawn" && failure.method !== "kill")
+    if (
+      failure.method !== "spawn" &&
+      failure.method !== "kill" &&
+      failure.method !== "resolvePermission"
+    )
       return {
         code: "unexpected_failure",
         facts: { remoteCode: failure.code },
@@ -406,7 +538,10 @@ function projectClientFailure(
   return projectFailure(failure);
 }
 
-function projectFailure(failure: MachineError): ReinsFailure {
+function projectFailure(
+  failure: MachineError,
+  permissionHandle?: PermissionHandle,
+): ReinsFailure {
   switch (failure.code) {
     case "consumer_context_required":
     case "protocol_error":
@@ -473,6 +608,20 @@ function projectFailure(failure: MachineError): ReinsFailure {
           sessionHandle: failure.sessionId as unknown as SessionHandle,
         },
       };
+    case "permission_not_pending":
+    case "permission_resolution_mismatch":
+      return permissionHandle === undefined
+        ? { code: "unexpected_failure", facts: { remoteCode: failure.code } }
+        : { code: failure.code, facts: { permissionHandle } };
+    case "diagnostic_not_found":
+      return {
+        code: failure.code,
+        facts: {
+          diagnosticId: failure.diagnosticId as unknown as DiagnosticId,
+        },
+      };
+    case "diagnostics_unavailable":
+      return { code: failure.code, facts: {} };
     case "capability_query_failed":
     case "internal_error":
     case "diagnostics_store_corrupt":

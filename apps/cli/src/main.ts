@@ -15,6 +15,9 @@ import {
   ReinsSdkError,
   createPresentationProjector,
   type CapabilitiesResult,
+  type DiagnosticId,
+  type DiagnosticsQuery,
+  type DiagnosticsResult,
   type OperationCredential,
   type OperationKind,
   type SpawnInput,
@@ -26,6 +29,9 @@ import {
   type SessionFilter,
   type SessionInfo,
   type SessionHandle,
+  type PermissionHandle,
+  type PermissionOption,
+  type PermissionResolution,
   type TurnHandle,
   type ResumeCursor,
 } from "@ykdz/reins-sdk";
@@ -37,9 +43,16 @@ export type ReinsCliDependencies = {
   readonly connect: () => Promise<ReinsConnection>;
   readonly outputFormat: OutputFormat;
   readonly cancelOutput: () => void;
+  readonly readLine: (
+    prompt: string,
+    signal: AbortSignal,
+  ) => Promise<string | undefined>;
 };
 
-type ReinsCliRuntimeDependencies = Pick<ReinsCliDependencies, "connect">;
+type ReinsCliRuntimeDependencies = Pick<
+  ReinsCliDependencies,
+  "connect" | "readLine"
+>;
 
 export type CliRuntime = {
   readonly argv: readonly string[];
@@ -134,7 +147,7 @@ const sessionListSchema = v.strictObject({
 });
 
 const preparedOperationSchema = v.strictObject({
-  operation: v.picklist(["spawn", "kill"]),
+  operation: v.picklist(["spawn", "kill", "resolve-permission"]),
   credential: v.string(),
 });
 const spawnResultSchema = v.strictObject({
@@ -151,6 +164,103 @@ const sdkFailureSchema = v.strictObject({
   code: v.string(),
   facts: v.record(v.string(), v.unknown()),
 });
+
+const diagnosticsRecordSchema = v.record(v.string(), v.unknown());
+const diagnosticsResultSchema = v.union([
+  v.strictObject({ record: diagnosticsRecordSchema }),
+  v.strictObject({
+    records: v.array(diagnosticsRecordSchema),
+    truncated: v.boolean(),
+  }),
+]);
+
+const permissionResolutionInputSchema = standardSchema(
+  v.pipe(
+    v.strictObject({
+      permission: v.string(),
+      operation: v.string(),
+      outcome: v.picklist(["allow", "deny"]),
+      scope: v.optional(v.picklist(["once", "session"])),
+      feedback: v.optional(v.string()),
+    }),
+    v.check(({ outcome, scope, feedback }) =>
+      outcome === "allow" ? feedback === undefined : scope === undefined,
+    ),
+  ),
+  ["check"],
+);
+
+const diagnosticsInputSchema = standardSchema(
+  v.pipe(
+    v.strictObject({
+      id: v.optional(v.string()),
+      session: v.optional(v.string()),
+      turn: v.optional(v.string()),
+      harness: v.optional(v.string()),
+      source: v.optional(
+        v.array(v.picklist(["daemon", "core", "adapter", "harness"])),
+      ),
+      kind: v.optional(
+        v.array(
+          v.picklist([
+            "lifecycle",
+            "mapping_gap",
+            "compatibility_gap",
+            "request_failure",
+            "stream_failure",
+            "turn_failure",
+            "authorization_failure",
+            "protocol_violation",
+            "transport_failure",
+            "storage_failure",
+            "harness_stderr",
+          ]),
+        ),
+      ),
+      minSeverity: v.optional(
+        v.picklist(["debug", "info", "warning", "error"]),
+      ),
+      since: v.optional(v.string()),
+      until: v.optional(v.string()),
+      limit: v.optional(v.string()),
+    }),
+    v.check(
+      ({
+        id,
+        session,
+        turn,
+        harness,
+        source,
+        kind,
+        minSeverity,
+        since,
+        until,
+        limit,
+      }) => {
+        const hasFilters =
+          session !== undefined ||
+          turn !== undefined ||
+          harness !== undefined ||
+          source !== undefined ||
+          kind !== undefined ||
+          minSeverity !== undefined ||
+          since !== undefined ||
+          until !== undefined ||
+          limit !== undefined;
+        return (
+          !(id !== undefined && hasFilters) &&
+          !(turn !== undefined && session === undefined) &&
+          (since === undefined || until === undefined || since <= until) &&
+          (limit === undefined ||
+            (/^\d+$/u.test(limit) &&
+              Number(limit) >= 1 &&
+              Number(limit) <= 1000))
+        );
+      },
+    ),
+  ),
+  ["check"],
+);
 
 const emptyInput = standardSchema(v.object({}));
 
@@ -282,11 +392,14 @@ function createCli(version: string) {
         fields: {
           operation: {
             kind: "positional",
-            description: "Operation to prepare: spawn or kill.",
+            description:
+              "Operation to prepare: spawn, kill, or resolve-permission.",
           },
         },
         input: standardSchema(
-          v.object({ operation: v.picklist(["spawn", "kill"]) }),
+          v.object({
+            operation: v.picklist(["spawn", "kill", "resolve-permission"]),
+          }),
         ),
         success: {
           kind: "data",
@@ -314,8 +427,12 @@ function createCli(version: string) {
           let connection: ReinsConnection | undefined;
           try {
             connection = await dependencies.connect();
+            const operation =
+              input.operation === "resolve-permission"
+                ? "resolvePermission"
+                : input.operation;
             const credential: OperationCredential<OperationKind> =
-              connection.prepareOperation(input.operation);
+              connection.prepareOperation(operation);
             return outcome.data.result({
               operation: input.operation,
               credential,
@@ -633,6 +750,239 @@ function createCli(version: string) {
           }
         },
       }),
+      ...define.command("resolvePermission")({
+        kind: "command",
+        parent: "reins",
+        name: "resolve-permission",
+        description:
+          "Resolve a pending Harness permission using a prepared credential.",
+        fields: {
+          permission: {
+            kind: "positional",
+            description:
+              "Exact PermissionHandle from an observed permission fact.",
+          },
+          operation: {
+            kind: "valueOption",
+            longOption: "--operation",
+            description:
+              "Credential returned by prepare-operation resolve-permission.",
+          },
+          outcome: {
+            kind: "valueOption",
+            longOption: "--outcome",
+            description: "The offered outcome: allow or deny.",
+          },
+          scope: {
+            kind: "valueOption",
+            longOption: "--scope",
+            description: "Allow scope when the selected option offers it.",
+          },
+          feedback: {
+            kind: "valueOption",
+            longOption: "--feedback",
+            description: "Optional denial feedback when supported.",
+          },
+        },
+        input: permissionResolutionInputSchema,
+        success: {
+          kind: "data",
+          variants: {
+            result: {
+              description: "Resolved permission handle",
+              exitCode: 0,
+              schema: standardSchema(
+                v.strictObject({
+                  permissionHandle: v.string(),
+                  status: v.literal("resolved"),
+                }),
+              ),
+              text: () => text.line("Permission resolved"),
+            },
+          },
+        },
+        failures: {
+          operationFailed: {
+            description:
+              "The Harness permission could not be resolved or recovered",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) =>
+              text.line(`Permission resolution failed: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const resolution: PermissionResolution =
+              input.outcome === "allow"
+                ? { outcome: "allow", scope: input.scope ?? "once" }
+                : input.feedback === undefined
+                  ? { outcome: "deny" }
+                  : { outcome: "deny", feedback: input.feedback };
+            const result = await connection.resolvePermission(
+              input.permission as PermissionHandle,
+              resolution,
+              input.operation as OperationCredential<"resolvePermission">,
+            );
+            return outcome.data.result(result);
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.operationFailed({
+                failure: error.failure,
+              });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
+      ...define.command("diagnostics")({
+        kind: "command",
+        parent: "reins",
+        name: "diagnostics",
+        description:
+          "Query stored failure evidence and finite diagnostic snapshots.",
+        fields: {
+          id: {
+            kind: "valueOption",
+            longOption: "--id",
+            description: "Return one exact diagnostic record.",
+          },
+          session: {
+            kind: "valueOption",
+            longOption: "--session",
+            description: "Filter by an exact session handle.",
+          },
+          turn: {
+            kind: "valueOption",
+            longOption: "--turn",
+            description: "Filter by an exact turn handle.",
+          },
+          harness: {
+            kind: "valueOption",
+            longOption: "--harness",
+            description: "Filter by a runtime Harness id.",
+          },
+          source: {
+            kind: "repeatableOption",
+            longOption: "--source",
+            description: "Filter by diagnostic source; may be repeated.",
+          },
+          kind: {
+            kind: "repeatableOption",
+            longOption: "--kind",
+            description: "Filter by diagnostic kind; may be repeated.",
+          },
+          minSeverity: {
+            kind: "valueOption",
+            longOption: "--min-severity",
+            description: "Minimum diagnostic severity.",
+          },
+          since: {
+            kind: "valueOption",
+            longOption: "--since",
+            description: "Include diagnostics recorded at or after this time.",
+          },
+          until: {
+            kind: "valueOption",
+            longOption: "--until",
+            description: "Include diagnostics recorded at or before this time.",
+          },
+          limit: {
+            kind: "valueOption",
+            longOption: "--limit",
+            description: "Maximum records to return, from 1 to 1000.",
+          },
+        },
+        input: diagnosticsInputSchema,
+        success: {
+          kind: "data",
+          variants: {
+            result: {
+              description: "Matching diagnostic records",
+              exitCode: 0,
+              schema: standardSchema(diagnosticsResultSchema),
+              text: (result) => text.line(JSON.stringify(result)),
+            },
+          },
+        },
+        failures: {
+          queryFailed: {
+            description: "The diagnostic query failed",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) =>
+              text.line(`Diagnostics query failed: ${failure.code}`),
+          },
+          diagnosticNotFound: {
+            description: "The requested diagnostic record does not exist",
+            exitCode: 65,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) =>
+              text.line(`Diagnostic not found: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const query: DiagnosticsQuery =
+              input.id === undefined
+                ? {
+                    ...(input.session === undefined
+                      ? {}
+                      : { sessionHandle: input.session as SessionHandle }),
+                    ...(input.turn === undefined
+                      ? {}
+                      : { turnHandle: input.turn as TurnHandle }),
+                    ...(input.harness === undefined
+                      ? {}
+                      : { harness: input.harness }),
+                    ...(input.source === undefined
+                      ? {}
+                      : { sources: input.source }),
+                    ...(input.kind === undefined ? {} : { kinds: input.kind }),
+                    ...(input.minSeverity === undefined
+                      ? {}
+                      : { minSeverity: input.minSeverity }),
+                    ...(input.since === undefined
+                      ? {}
+                      : { since: input.since }),
+                    ...(input.until === undefined
+                      ? {}
+                      : { until: input.until }),
+                    ...(input.limit === undefined
+                      ? {}
+                      : { limit: Number(input.limit) }),
+                  }
+                : { diagnosticId: input.id as DiagnosticId };
+            const result: DiagnosticsResult =
+              await connection.diagnostics(query);
+            return outcome.data.result(result);
+          } catch (error) {
+            if (
+              error instanceof ReinsSdkError &&
+              error.failure.code === "diagnostic_not_found"
+            )
+              return outcome.failure.diagnosticNotFound({
+                failure: error.failure,
+              });
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.queryFailed({ failure: error.failure });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
       ...define.command("attach")({
         kind: "command",
         parent: "reins",
@@ -715,6 +1065,26 @@ function createCli(version: string) {
             ),
             text: ({ failure }) => text.line(`Attach failed: ${failure.code}`),
           },
+          permissionInputClosed: {
+            description: "Permission input ended before a selection was made.",
+            exitCode: 65,
+            schema: standardSchema(
+              v.strictObject({ code: v.literal("permission_input_closed") }),
+            ),
+            text: () =>
+              text.line(
+                "error: Permission input closed before a choice was received",
+              ),
+          },
+          permissionChoiceInvalid: {
+            description: "The selected permission option was not offered.",
+            exitCode: 64,
+            schema: standardSchema(
+              v.strictObject({ code: v.literal("permission_choice_invalid") }),
+            ),
+            text: () =>
+              text.line("error: Choose one of the offered permission options"),
+          },
         },
         async *handler({ dependencies, input, outcome }) {
           const scope = input.scope;
@@ -737,11 +1107,19 @@ function createCli(version: string) {
           let subscription:
             | Awaited<ReturnType<ReinsConnection["attach"]>>
             | undefined;
+          let promptAbort: AbortController | undefined;
           let interrupt: (() => void) | undefined;
+          let interrupted = false;
           try {
             connection = await dependencies.connect();
             subscription = await connection.attach(target, replay);
+            void subscription.done.then(
+              () => promptAbort?.abort(),
+              () => promptAbort?.abort(),
+            );
             interrupt = () => {
+              interrupted = true;
+              promptAbort?.abort();
               subscription?.close();
               connection?.close();
               dependencies.cancelOutput();
@@ -757,8 +1135,60 @@ function createCli(version: string) {
               } else {
                 for (const presentation of project(fact))
                   yield outcome.record.presentation({ presentation });
+                if (fact.type === "permission.requested") {
+                  if (fact.options.length === 0)
+                    return outcome.failure.permissionChoiceInvalid({
+                      code: "permission_choice_invalid",
+                    });
+                  const currentPromptAbort = new AbortController();
+                  promptAbort = currentPromptAbort;
+                  let choice: string | undefined;
+                  try {
+                    choice = await dependencies.readLine(
+                      renderPermissionPrompt(fact),
+                      currentPromptAbort.signal,
+                    );
+                  } catch (error) {
+                    if (error instanceof Error && error.name === "AbortError")
+                      break;
+                    throw error;
+                  } finally {
+                    promptAbort = undefined;
+                  }
+                  if (choice === undefined)
+                    return outcome.failure.permissionInputClosed({
+                      code: "permission_input_closed",
+                    });
+                  const index = Number(choice.trim());
+                  if (
+                    !Number.isInteger(index) ||
+                    index < 1 ||
+                    index > fact.options.length
+                  )
+                    return outcome.failure.permissionChoiceInvalid({
+                      code: "permission_choice_invalid",
+                    });
+                  const option = fact.options[index - 1]!;
+                  const resolution = await choosePermissionResolution(
+                    dependencies,
+                    option,
+                    currentPromptAbort.signal,
+                  );
+                  if (resolution === undefined)
+                    return outcome.failure.permissionInputClosed({
+                      code: "permission_input_closed",
+                    });
+                  const credential =
+                    connection.prepareOperation("resolvePermission");
+                  await connection.resolvePermission(
+                    fact.permissionHandle,
+                    resolution,
+                    credential,
+                  );
+                }
               }
             }
+            if (interrupted) return outcome.streamSuccess();
             const end = await subscription.done;
             yield outcome.record.ended({ end });
             return outcome.streamSuccess();
@@ -839,4 +1269,34 @@ function renderPresentation(presentation: AgentPresentation): string {
   if (presentation.type === "session.created")
     return `Created session ${presentation.sessionHandle}\n`;
   return "\n";
+}
+
+function renderPermissionPrompt(
+  fact: Extract<AgentFact, { type: "permission.requested" }>,
+): string {
+  const choices = fact.options
+    .map((option, index) => `${index + 1}) ${permissionOptionLabel(option)}`)
+    .join("\n");
+  return `Permission requested: ${fact.kind}\n${choices}\nChoose (1-${fact.options.length}): `;
+}
+
+function permissionOptionLabel(option: PermissionOption): string {
+  if (option.outcome === "allow")
+    return option.scope === "once" ? "Allow once" : "Allow for this session";
+  return option.feedback ? "Deny with feedback" : "Deny";
+}
+
+async function choosePermissionResolution(
+  dependencies: ReinsCliDependencies,
+  option: PermissionOption,
+  signal: AbortSignal,
+): Promise<PermissionResolution | undefined> {
+  if (option.outcome === "allow") return option;
+  if (!option.feedback) return { outcome: "deny" };
+  const feedback = await dependencies.readLine("Feedback (optional): ", signal);
+  return feedback === undefined || feedback.length === 0
+    ? feedback === undefined
+      ? undefined
+      : { outcome: "deny" }
+    : { outcome: "deny", feedback };
 }

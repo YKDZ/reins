@@ -7,6 +7,8 @@ import type {
   KillResult,
   OperationCredential,
   OperationKind,
+  PermissionHandle,
+  PermissionResolution,
   ReinsConnection,
   SessionHandle,
   SpawnInput,
@@ -72,6 +74,9 @@ test("attach waits for each write before reading again and closes on writer fail
     async list() {
       return [];
     },
+    async diagnostics() {
+      return { records: [], truncated: false };
+    },
     async attach() {
       return subscription;
     },
@@ -93,6 +98,12 @@ test("attach waits for each write before reading again and closes on writer fail
       _credential: OperationCredential<"kill">,
     ): Promise<KillResult> {
       return { sessionHandle: input.sessionHandle, status: "killed" };
+    },
+    async resolvePermission(
+      permissionHandle: PermissionHandle,
+      _resolution: PermissionResolution,
+    ) {
+      return { permissionHandle, status: "resolved" as const };
     },
     close() {
       connectionClosed = true;
@@ -125,7 +136,10 @@ test("attach waits for each write before reading again and closes on writer fail
       "none",
     ],
     version: "test",
-    dependencies: { connect: async () => connection },
+    dependencies: {
+      connect: async () => connection,
+      readLine: async () => undefined,
+    },
     cancelOutput() {},
     write(output) {
       const frame = JSON.parse(output.chunk) as {
@@ -216,6 +230,9 @@ test("SIGINT releases a blocked attach write and closes its connection", async (
     async list() {
       return [];
     },
+    async diagnostics() {
+      return { records: [], truncated: false };
+    },
     async attach() {
       return subscription;
     },
@@ -238,6 +255,12 @@ test("SIGINT releases a blocked attach write and closes its connection", async (
     ): Promise<KillResult> {
       return { sessionHandle: input.sessionHandle, status: "killed" };
     },
+    async resolvePermission(
+      permissionHandle: PermissionHandle,
+      _resolution: PermissionResolution,
+    ) {
+      return { permissionHandle, status: "resolved" as const };
+    },
     close() {
       connectionClosed = true;
     },
@@ -254,7 +277,10 @@ test("SIGINT releases a blocked attach write and closes its connection", async (
       "none",
     ],
     version: "test",
-    dependencies: { connect: async () => connection },
+    dependencies: {
+      connect: async () => connection,
+      readLine: async () => undefined,
+    },
     cancelOutput() {
       expect(subscriptionClosed).toBe(true);
       expect(connectionClosed).toBe(true);
