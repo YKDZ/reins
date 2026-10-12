@@ -24,6 +24,11 @@ export type UnixAcknowledgementProxy = {
   readonly close: () => Promise<void>;
 };
 
+export type UnixConnectionProxy = {
+  readonly socketPath: string;
+  close(): Promise<void>;
+};
+
 export type UnixAcknowledgementProxyOptions = {
   readonly socketPath: string;
   readonly targetPath: string;
@@ -167,6 +172,48 @@ export async function startUnixAcknowledgementProxy(
     waitForDroppedAcknowledgement: () => droppedAcknowledgement,
     close: async () => {
       if (!dropped) rejectDropped(new Error("Proxy closed before target ACK"));
+      for (const socket of sockets) socket.destroy();
+      sockets.clear();
+      await new Promise<void>((resolve) => {
+        if (!server.listening) {
+          resolve();
+          return;
+        }
+        server.close(() => resolve());
+      });
+    },
+  };
+}
+
+// 只转发真实 Unix socket 字节流；close 用于让一个正式消费者观察到传输断开。
+export async function startUnixConnectionProxy(options: {
+  readonly socketPath: string;
+  readonly targetPath: string;
+}): Promise<UnixConnectionProxy> {
+  const sockets = new Set<Socket>();
+  const server: Server = createServer((downstream) => {
+    const upstream = createConnection(options.targetPath);
+    sockets.add(downstream);
+    sockets.add(upstream);
+    downstream.on("error", () => upstream.destroy());
+    upstream.on("error", () => downstream.destroy());
+    downstream.on("close", () => sockets.delete(downstream));
+    upstream.on("close", () => sockets.delete(upstream));
+    downstream.pipe(upstream);
+    upstream.pipe(downstream);
+  });
+
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(options.socketPath, resolve);
+  });
+
+  let closed = false;
+  return {
+    socketPath: options.socketPath,
+    close: async () => {
+      if (closed) return;
+      closed = true;
       for (const socket of sockets) socket.destroy();
       sockets.clear();
       await new Promise<void>((resolve) => {

@@ -444,8 +444,14 @@ async function replayFacts(): Promise<void> {
   } finally {
     connection.close();
   }
-  const checkpoint = checkpoints[0];
-  if (facts.length < 2 || checkpoint === undefined)
+  const deliveredFactCount = Number(process.env.REINS_RESUME_FACT_COUNT ?? "1");
+  const checkpoint = checkpoints[deliveredFactCount - 1];
+  if (
+    facts.length < 2 ||
+    !Number.isInteger(deliveredFactCount) ||
+    deliveredFactCount < 1 ||
+    checkpoint === undefined
+  )
     throw new Error("The installed SDK did not receive replayable facts");
   const disconnectedCheckpoint = process.env.REINS_RESUME_CURSOR;
   if (
@@ -453,7 +459,7 @@ async function replayFacts(): Promise<void> {
     disconnectedCheckpoint !== checkpoint
   )
     throw new Error(
-      "The disconnect checkpoint did not identify the first fact",
+      "The disconnect checkpoint did not identify the last delivered fact",
     );
 
   const resumedConnection = await connectSdk();
@@ -474,7 +480,9 @@ async function replayFacts(): Promise<void> {
   } finally {
     resumedConnection.close();
   }
-  const expectedSuffix = facts.slice(1);
+  if (deliveredFactCount > facts.length)
+    throw new Error("The resume cursor did not identify a delivered fact");
+  const expectedSuffix = facts.slice(deliveredFactCount);
   if (JSON.stringify(resumedFacts) !== JSON.stringify(expectedSuffix))
     throw new Error(
       "The installed SDK replay skipped or changed delivered facts",
@@ -500,27 +508,36 @@ async function disconnectAfterFirstFact(): Promise<void> {
   );
   const first = await subscription.next();
   if (first.done) throw new Error("The installed SDK received no first fact");
-  const checkpoint = subscription.checkpoint;
+  const deliveredFacts = [first.value];
   connection.close();
   let disconnected: ReinsSdkError | undefined;
   try {
-    await subscription.done;
+    for (;;) {
+      const item = await subscription.next();
+      if (item.done) break;
+      deliveredFacts.push(item.value);
+    }
   } catch (error) {
     disconnected = failure(error);
   } finally {
     subscription.close();
   }
+  const checkpoint = subscription.checkpoint;
   if (
     disconnected?.failure.code !== "daemon_disconnected" ||
-    disconnected.failure.facts.resumeCursor !== checkpoint
+    disconnected.failure.facts.resumeCursor !== checkpoint ||
+    deliveredFacts.length < 2
   )
     throw new Error(
-      "The installed SDK did not return its last delivered fact checkpoint on disconnect",
+      "The installed SDK did not return its last queued-and-delivered fact checkpoint on disconnect",
     );
   process.stdout.write(
     `${JSON.stringify({
       firstFactId: first.value.factId,
       firstFactType: first.value.type,
+      deliveredFactIds: deliveredFacts.map((fact) => fact.factId),
+      queuedFactCount: deliveredFacts.length - 1,
+      deliveredFactCount: deliveredFacts.length,
       checkpoint,
       code: disconnected.failure.code,
       cursorMatchesDeliveredFact: true,

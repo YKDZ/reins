@@ -28,6 +28,12 @@ async function fixture(autoAck = true) {
   });
   cleanup.push(() => client.close());
   let attach: ProtocolRequest | undefined;
+  let resolveAttachRequested!: () => void;
+  const attachRequested = new Promise<void>((resolve) => {
+    resolveAttachRequested = resolve;
+  });
+  const controls: { method: string; subscriptionId: string }[] = [];
+  const requestMethods: string[] = [];
   const ack = (): void => {
     if (attach === undefined) throw new Error("Missing attach request");
     pair.server.send({
@@ -45,6 +51,7 @@ async function fixture(autoAck = true) {
   pair.server.onEvent((event) => {
     if (event.kind !== "message" || event.message.kind !== "request") return;
     const request = event.message;
+    requestMethods.push(request.method);
     if (request.method === "initialize")
       pair.server.send({
         kind: "response",
@@ -53,8 +60,20 @@ async function fixture(autoAck = true) {
       });
     else if (request.method === "attach") {
       attach = request;
+      resolveAttachRequested();
       if (autoAck) ack();
     }
+  });
+  pair.server.onEvent((event) => {
+    if (
+      event.kind === "message" &&
+      event.message.kind === "control" &&
+      event.message.method === "subscription.close"
+    )
+      controls.push({
+        method: event.message.method,
+        subscriptionId: event.message.subscriptionId,
+      });
   });
   await client.initialize();
   let position = 0;
@@ -72,7 +91,7 @@ async function fixture(autoAck = true) {
         }),
       },
     });
-  return { client, ack, emit };
+  return { client, ack, emit, attachRequested, controls, requestMethods };
 }
 const params = {
   scope: "session",
@@ -304,6 +323,74 @@ test("a disconnect cursor stops at the last fact delivered to the iterator", asy
   expect(
     decodeResumeCursor((error as AgentSubscriptionError).resumeCursor!).eventId,
   ).toBe(1);
+});
+
+test("a disconnect error cursor advances only as queued facts reach the iterator", async () => {
+  const f = await fixture();
+  const subscription = await f.client.subscribeFacts(params as never);
+  f.emit({ type: "text.delta", messageId: "m1", delta: "first" });
+  f.emit({ type: "text.delta", messageId: "m2", delta: "second" });
+  await flush();
+
+  f.client.close();
+  const doneFailure = await subscription.done.catch(
+    (reason: unknown) => reason as AgentSubscriptionError,
+  );
+  const first = await subscription.next();
+  const second = await subscription.next();
+  const iteratorFailure = await subscription
+    .next()
+    .catch((reason: unknown) => reason as AgentSubscriptionError);
+
+  expect(first.value).toMatchObject({ type: "text.delta", delta: "first" });
+  expect(second.value).toMatchObject({ type: "text.delta", delta: "second" });
+  expect(doneFailure).toBeInstanceOf(AgentSubscriptionError);
+  expect(iteratorFailure).toBeInstanceOf(AgentSubscriptionError);
+  expect(decodeResumeCursor(doneFailure.resumeCursor!).eventId).toBe(0);
+  expect(decodeResumeCursor(subscription.checkpoint).eventId).toBe(2);
+  expect(decodeResumeCursor(iteratorFailure.resumeCursor!).eventId).toBe(2);
+});
+
+test("an abort during attach establishment rejects promptly and closes a late subscription", async () => {
+  const f = await fixture(false);
+  const controller = new AbortController();
+  const establishing = f.client.subscribeFacts(
+    params as never,
+    controller.signal,
+  );
+  await f.attachRequested;
+
+  controller.abort();
+  const failure = await establishing.catch((reason: unknown) => reason);
+  expect(failure).toMatchObject({ name: "AbortError" });
+  f.ack();
+  await flush();
+
+  expect(f.controls).toEqual([
+    { method: "subscription.close", subscriptionId: "subscription-1" },
+  ]);
+  expect(f.requestMethods).toEqual(["initialize", "attach"]);
+});
+
+test("an abort after attach establishment closes only the observation", async () => {
+  const f = await fixture();
+  const controller = new AbortController();
+  const subscription = await f.client.subscribeFacts(
+    params as never,
+    controller.signal,
+  );
+
+  controller.abort();
+  await expect(subscription.next()).resolves.toEqual({
+    value: undefined,
+    done: true,
+  });
+  await expect(subscription.done).resolves.toMatchObject({ reason: "closed" });
+
+  expect(f.controls).toEqual([
+    { method: "subscription.close", subscriptionId: "subscription-1" },
+  ]);
+  expect(f.requestMethods).toEqual(["initialize", "attach"]);
 });
 
 test("attach establishment has no inherited thirty-second request deadline", async () => {
