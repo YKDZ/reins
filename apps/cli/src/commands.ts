@@ -11,13 +11,7 @@ import type {
   ProtocolMethod,
   ProtocolResult,
 } from "@reins/protocol";
-import {
-  consumerContextSchema,
-  encodePermissionHandle,
-  decodeTurnHandle,
-  turnHandleSchema,
-  sessionIdSchema,
-} from "@reins/protocol";
+import { consumerContextSchema, encodePermissionHandle } from "@reins/protocol";
 import * as v from "valibot";
 
 import { connectReinsClient } from "./application-runtime.ts";
@@ -26,15 +20,9 @@ import type {
   CommandInvocationFor,
   CommandName,
 } from "./command-spec.ts";
-import { ExitError, EXIT_TIMEOUT, machineError, usageError } from "./errors.ts";
+import { machineError, usageError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
-import {
-  printDiagnosticsResult,
-  printInterruptResult,
-  printResolvePermissionAck,
-  printSendAck,
-  printWaitResult,
-} from "./output.ts";
+import { printDiagnosticsResult, printResolvePermissionAck } from "./output.ts";
 import { openWorkspaceControl } from "./workspace.ts";
 
 // 启动与协议握手共享五秒就绪预算。
@@ -81,81 +69,6 @@ function requireResult<M extends ProtocolMethod>(
 ): import("@reins/client").ClientResult<M> {
   if ("error" in response) throw response.error;
   return response.result;
-}
-
-async function runSend(ctx: CommandInvocationFor<"send">): Promise<void> {
-  const [target, messageParts] = ctx.args;
-  const placement = ctx.options.placement;
-  const parsed = v.safeParse(
-    placement === "active_turn" ? turnHandleSchema : sessionIdSchema,
-    target,
-  );
-  if (!parsed.success)
-    throw usageError({
-      issue: "invalid_value",
-      target: "argument",
-      field: "target",
-      value: target,
-      hint:
-        placement === "active_turn"
-          ? "Expected a valid TurnHandle"
-          : "Expected a valid SessionHandle",
-    });
-  const address =
-    placement === "active_turn"
-      ? { placement, ...decodeTurnHandle(target) }
-      : { placement, sessionId: v.parse(sessionIdSchema, target) };
-  await withClient(ctx, async (client) => {
-    const response = await client.request("send", {
-      ...address,
-      message: messageParts.join(" "),
-    });
-    printSendAck(requireResult(response), ctx.mode);
-  });
-}
-
-async function runWait(ctx: CommandInvocationFor<"wait">): Promise<void> {
-  const [targets] = ctx.args;
-  const timeoutMs = ctx.options.timeout;
-  await withClient(ctx, async (client) => {
-    const response = await client.request("wait", {
-      targets: [...targets],
-      completion: ctx.options.completion,
-      ...(timeoutMs === undefined ? {} : { timeoutMs }),
-    });
-    const result = requireResult(response);
-    printWaitResult(result, ctx.mode);
-    const exitCode =
-      result.status === "timeout"
-        ? EXIT_TIMEOUT
-        : result.completed.some((turn) => turn.stopReason === "failed")
-          ? 1
-          : result.completed.some((turn) => turn.stopReason === "killed")
-            ? 3
-            : result.completed.some((turn) => turn.stopReason === "cancelled")
-              ? 2
-              : 0;
-    if (exitCode !== 0) throw new ExitError(exitCode);
-  });
-}
-
-async function runInterrupt(
-  ctx: CommandInvocationFor<"interrupt">,
-): Promise<void> {
-  const [target] = ctx.args;
-  if (!v.safeParse(turnHandleSchema, target).success)
-    throw usageError({
-      issue: "invalid_value",
-      target: "argument",
-      field: "target",
-      value: target,
-      hint: "Expected a valid TurnHandle",
-    });
-  const address = decodeTurnHandle(target);
-  await withClient(ctx, async (client) => {
-    const response = await client.request("interrupt", address);
-    printInterruptResult(requireResult(response), ctx.mode);
-  });
 }
 
 async function runDiagnostics(
@@ -243,23 +156,17 @@ export const handlers = {
         hint: "Use the RetryToken from command_outcome_unknown",
       });
     }
-    if (identity.method === "spawn" || identity.method === "kill") {
+    if (identity.method !== "resolvePermission") {
       throw usageError({
         issue: "invalid_value",
         field: "token",
-        hint: "Use a prepared operation credential to recover spawn or kill",
+        hint: "Use the prepared operation credential to recover this request",
       });
     }
     await withClient(ctx, async (client) => {
       const response = await client.retry(token, ctx.options.params);
       const result = requireResult(response);
       switch (identity.method) {
-        case "send":
-          printSendAck(result as ProtocolResult<"send">, ctx.mode);
-          break;
-        case "interrupt":
-          printInterruptResult(result as ProtocolResult<"interrupt">, ctx.mode);
-          break;
         case "resolvePermission":
           printResolvePermissionAck(
             result as ProtocolResult<"resolvePermission">,
@@ -269,9 +176,6 @@ export const handlers = {
       }
     });
   },
-  send: runSend,
-  wait: runWait,
-  interrupt: runInterrupt,
   diagnostics: runDiagnostics,
   "resolve-permission": runResolvePermission,
 } satisfies HandlerMap;
@@ -282,12 +186,6 @@ export async function dispatchInvocation(
   switch (invocation.command) {
     case "retry":
       return handlers.retry(invocation);
-    case "send":
-      return handlers.send(invocation);
-    case "wait":
-      return handlers.wait(invocation);
-    case "interrupt":
-      return handlers.interrupt(invocation);
     case "diagnostics":
       return handlers.diagnostics(invocation);
     case "resolve-permission":

@@ -4,9 +4,12 @@ import {
   type OperationCredential,
   type ReinsConnection,
   type AgentFact,
+  type InterruptInput,
   type ResumeCursor,
   type SessionHandle,
+  type SendInput,
   type SpawnInput,
+  type TurnHandle,
 } from "@ykdz/reins-sdk";
 
 declare const process: {
@@ -24,6 +27,14 @@ type KillIntent = {
   readonly credential: OperationCredential<"kill">;
   readonly sessionHandle: SessionHandle;
 };
+type SendIntent = {
+  readonly credential: OperationCredential<"send">;
+  readonly input: SendInput;
+};
+type InterruptIntent = {
+  readonly credential: OperationCredential<"interrupt">;
+  readonly input: InterruptInput;
+};
 
 function required(name: string): string {
   const value = process.env[name];
@@ -36,9 +47,15 @@ function readIntent<T>(serialized: string): T {
   return JSON.parse(serialized) as T;
 }
 
-function publishIntent(value: SpawnIntent | KillIntent): string {
+function publishIntent(
+  value: SpawnIntent | KillIntent | SendIntent | InterruptIntent,
+): string {
   const serialized = JSON.stringify(value);
-  const restored = JSON.parse(serialized) as SpawnIntent | KillIntent;
+  const restored = JSON.parse(serialized) as
+    | SpawnIntent
+    | KillIntent
+    | SendIntent
+    | InterruptIntent;
   if (JSON.stringify(restored) !== serialized)
     throw new Error("The operation intent did not survive JSON serialization");
   return serialized;
@@ -257,6 +274,161 @@ async function spawnWithNewCredential(): Promise<void> {
   }
 }
 
+function sendInput(): SendInput {
+  return {
+    placement: "active_turn",
+    turnHandle: required("REINS_TARGET_TURN") as TurnHandle,
+    message: "  exact delivered note\nkeep spacing  ",
+  };
+}
+
+async function prepareSend(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const intent: SendIntent = {
+      credential: connection.prepareOperation("send"),
+      input: sendInput(),
+    };
+    process.stdout.write(
+      `${JSON.stringify({ prepared: true, intent: publishIntent(intent) })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function sendDrop(): Promise<void> {
+  const intent = readIntent<SendIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const error = await expectFailure(() =>
+      connection.send(intent.input, intent.credential),
+    );
+    if (
+      error.failure.code !== "command_outcome_unknown" ||
+      error.failure.facts.operation !== "send" ||
+      error.failure.facts.cause !== "disconnected" ||
+      error.stage !== "operation"
+    )
+      throw new Error("The installed SDK omitted typed send recovery facts");
+    process.stdout.write(
+      `${JSON.stringify({ code: error.failure.code, stage: error.stage })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function sendRecover(): Promise<void> {
+  const intent = readIntent<SendIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const result = await connection.send(intent.input, intent.credential);
+    if (intent.input.placement !== "active_turn")
+      throw new Error("The saved send intent was not an active-turn send");
+    if (
+      result.turnHandle !== intent.input.turnHandle ||
+      result.deliveryPoint !== "active_turn"
+    )
+      throw new Error("The SDK did not recover the exact active-turn send");
+    process.stdout.write(`${JSON.stringify({ result })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
+async function sendConflict(): Promise<void> {
+  const intent = readIntent<SendIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const error = await expectFailure(() =>
+      connection.send(
+        { ...intent.input, message: `${intent.input.message} changed` },
+        intent.credential,
+      ),
+    );
+    if (error.failure.code !== "command_id_conflict")
+      throw new Error("The SDK did not preserve the send parameter conflict");
+    process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
+async function prepareInterrupt(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const intent: InterruptIntent = {
+      credential: connection.prepareOperation("interrupt"),
+      input: { turnHandle: required("REINS_TARGET_TURN") as TurnHandle },
+    };
+    process.stdout.write(
+      `${JSON.stringify({ prepared: true, intent: publishIntent(intent) })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function interruptDrop(): Promise<void> {
+  const intent = readIntent<InterruptIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const error = await expectFailure(() =>
+      connection.interrupt(intent.input, intent.credential),
+    );
+    if (
+      error.failure.code !== "command_outcome_unknown" ||
+      error.failure.facts.operation !== "interrupt" ||
+      error.failure.facts.cause !== "disconnected" ||
+      error.stage !== "operation"
+    )
+      throw new Error(
+        "The installed SDK omitted typed interrupt recovery facts",
+      );
+    process.stdout.write(
+      `${JSON.stringify({ code: error.failure.code, stage: error.stage })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function interruptRecover(): Promise<void> {
+  const intent = readIntent<InterruptIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const result = await connection.interrupt(intent.input, intent.credential);
+    const observed = await connection.wait({
+      targets: [intent.input.turnHandle],
+      completion: "all",
+      timeoutMs: 0,
+    });
+    if (
+      result.turnHandle !== intent.input.turnHandle ||
+      result.status !== "accepted" ||
+      observed.status !== "timeout" ||
+      observed.completed.length !== 0 ||
+      observed.pending.length !== 1 ||
+      observed.pending[0] !== intent.input.turnHandle
+    )
+      throw new Error("The SDK confused interrupt acceptance with completion");
+    process.stdout.write(`${JSON.stringify({ result, observed })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
 async function prepareKill(): Promise<void> {
   const connection = await connectSdk();
   try {
@@ -402,6 +574,40 @@ async function staleSpawn(): Promise<void> {
         daemonGeneration: connection.handshake.daemonGeneration,
       })}\n`,
     );
+  } finally {
+    connection.close();
+  }
+}
+
+async function staleSend(): Promise<void> {
+  const intent = readIntent<SendIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const error = await expectFailure(() =>
+      connection.send(intent.input, intent.credential),
+    );
+    if (error.failure.code !== "stale_command_id")
+      throw new Error("The SDK did not preserve the stale send failure");
+    process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
+async function staleInterrupt(): Promise<void> {
+  const intent = readIntent<InterruptIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const error = await expectFailure(() =>
+      connection.interrupt(intent.input, intent.credential),
+    );
+    if (error.failure.code !== "stale_command_id")
+      throw new Error("The SDK did not preserve the stale interrupt failure");
+    process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
   } finally {
     connection.close();
   }
@@ -675,6 +881,27 @@ switch (mode) {
   case "spawn-new-credential":
     await spawnWithNewCredential();
     break;
+  case "prepare-send":
+    await prepareSend();
+    break;
+  case "send-drop":
+    await sendDrop();
+    break;
+  case "send-recover":
+    await sendRecover();
+    break;
+  case "send-conflict":
+    await sendConflict();
+    break;
+  case "prepare-interrupt":
+    await prepareInterrupt();
+    break;
+  case "interrupt-drop":
+    await interruptDrop();
+    break;
+  case "interrupt-recover":
+    await interruptRecover();
+    break;
   case "prepare-kill":
     await prepareKill();
     break;
@@ -692,6 +919,12 @@ switch (mode) {
     break;
   case "spawn-stale":
     await staleSpawn();
+    break;
+  case "send-stale":
+    await staleSend();
+    break;
+  case "interrupt-stale":
+    await staleInterrupt();
     break;
   case "handle-stale":
     await staleHandle();

@@ -107,11 +107,11 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
         spec,
       });
     },
-    async deliver(_sessionId, _turnId, _message) {
-      throw new Error("Message delivery is outside this fixture");
+    async deliver(sessionId, turnId, message) {
+      record({ type: "message_delivered", sessionId, turnId, message });
     },
-    async interrupt(_sessionId, _turnId) {
-      throw new Error("Interrupt is outside this fixture");
+    async interrupt(sessionId, turnId) {
+      record({ type: "interrupt_requested", sessionId, turnId });
     },
     resolvePermission(_sessionId, _permissionId, _resolution) {
       throw new Error("Permissions are outside this fixture");

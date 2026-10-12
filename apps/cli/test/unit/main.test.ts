@@ -5,13 +5,19 @@ import type {
   FactSubscription,
   KillInput,
   KillResult,
+  InterruptInput,
+  InterruptResult,
   OperationCredential,
   OperationKind,
   ReinsConnection,
   SessionHandle,
   SpawnInput,
   SpawnResult,
+  SendInput,
+  SendResult,
   TurnHandle,
+  WaitInput,
+  WaitResult,
 } from "@ykdz/reins-sdk";
 import { expect, test } from "vitest";
 
@@ -93,6 +99,26 @@ test("attach waits for each write before reading again and closes on writer fail
       _credential: OperationCredential<"kill">,
     ): Promise<KillResult> {
       return { sessionHandle: input.sessionHandle, status: "killed" };
+    },
+    async send(
+      input: SendInput,
+      _credential: OperationCredential<"send">,
+    ): Promise<SendResult> {
+      return {
+        sessionHandle:
+          input.placement === "new_turn"
+            ? input.sessionHandle
+            : target.sessionHandle,
+        turnHandle: fact.turnHandle,
+        messageId: "message-test",
+        deliveryPoint: input.placement,
+      };
+    },
+    async wait(_input: WaitInput): Promise<WaitResult> {
+      return { status: "satisfied", completed: [], pending: [] };
+    },
+    async interrupt(input: InterruptInput): Promise<InterruptResult> {
+      return { turnHandle: input.turnHandle, status: "accepted" };
     },
     close() {
       connectionClosed = true;

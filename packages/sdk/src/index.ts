@@ -23,6 +23,8 @@ import {
   decodeTurnHandle,
   encodeTurnHandle,
   REINS_PROTOCOL_MAJOR_VERSION,
+  sessionIdSchema,
+  turnHandleSchema,
 } from "@reins/protocol";
 import { createUnixSocketClient, isTransportError } from "@reins/transport";
 import * as v from "valibot";
@@ -43,6 +45,12 @@ import {
   type SessionHandle,
   type SessionInfo,
   type TurnHandle,
+  type SendInput,
+  type SendResult,
+  type WaitInput,
+  type WaitResult,
+  type InterruptInput,
+  type InterruptResult,
 } from "./contracts.ts";
 import { ReinsSdkError } from "./errors.ts";
 
@@ -55,6 +63,13 @@ export type {
   ConnectOptions,
   KillInput,
   KillResult,
+  SendInput,
+  SendResult,
+  WaitInput,
+  WaitResult,
+  CompletedTurn,
+  InterruptInput,
+  InterruptResult,
   OperationCredential,
   OperationKind,
   HarnessCapability,
@@ -262,6 +277,83 @@ export async function connect(
           status: result.status,
         };
       },
+      async send(input: SendInput, credential) {
+        if (
+          typeof input !== "object" ||
+          input === null ||
+          (input.placement !== "active_turn" && input.placement !== "new_turn")
+        )
+          throw invalidInput("placement", "operation");
+        let params: ProtocolParams<"send">;
+        if (input.placement === "active_turn") {
+          const target = targetFromHandle(input.turnHandle, "turnHandle");
+          params = {
+            placement: "active_turn",
+            ...target,
+            message: input.message,
+          };
+        } else {
+          if (!v.safeParse(sessionIdSchema, input.sessionHandle).success)
+            throw invalidInput("sessionHandle", "operation");
+          params = {
+            placement: "new_turn",
+            sessionId: input.sessionHandle as unknown as SessionId,
+            message: input.message,
+          };
+        }
+        const result = await perform(client!, "send", params, credential);
+        return {
+          sessionHandle: result.sessionId as unknown as SessionHandle,
+          turnHandle: encodeTurnHandle({
+            sessionId: result.sessionId,
+            turnId: result.turnId,
+          }) as unknown as TurnHandle,
+          messageId: result.messageId,
+          deliveryPoint: result.deliveryPoint,
+        } satisfies SendResult;
+      },
+      async wait(input: WaitInput) {
+        if (!Array.isArray(input.targets) || input.targets.length === 0)
+          throw invalidInput("targets", "query");
+        const targets = input.targets.map((handle) =>
+          targetFromHandle(handle, "targets", "query"),
+        );
+        if (
+          new Set(
+            targets.map(({ sessionId, turnId }) => `${sessionId}/${turnId}`),
+          ).size !== targets.length
+        )
+          throw invalidInput("targets", "query");
+        if (input.completion !== "any" && input.completion !== "all")
+          throw invalidInput("completion", "query");
+        if (
+          input.timeoutMs !== undefined &&
+          (!Number.isFinite(input.timeoutMs) || input.timeoutMs < 0)
+        )
+          throw invalidInput("timeoutMs", "query");
+        const result = await query(client!, "wait", {
+          targets,
+          completion: input.completion,
+          ...(input.timeoutMs === undefined
+            ? {}
+            : { timeoutMs: input.timeoutMs }),
+        });
+        return {
+          status: result.status,
+          completed: result.completed.map(projectCompletedTurn),
+          pending: result.pending.map(
+            (target) => encodeTurnHandle(target) as unknown as TurnHandle,
+          ),
+        } satisfies WaitResult;
+      },
+      async interrupt(input: InterruptInput, credential) {
+        const target = targetFromHandle(input.turnHandle, "turnHandle");
+        await perform(client!, "interrupt", target, credential);
+        return {
+          turnHandle: input.turnHandle,
+          status: "accepted",
+        } satisfies InterruptResult;
+      },
       close() {
         client?.close();
       },
@@ -371,7 +463,7 @@ async function perform<M extends SideEffectMethod>(
   }
 }
 
-async function query<M extends "capabilities" | "list">(
+async function query<M extends "capabilities" | "list" | "wait">(
   client: ControlClient,
   method: M,
   params: ProtocolParams<M>,
@@ -389,11 +481,60 @@ async function query<M extends "capabilities" | "list">(
   }
 }
 
+function targetFromHandle(
+  handle: unknown,
+  path: string,
+  stage: "query" | "operation" = "operation",
+): {
+  sessionId: SessionId;
+  turnId: ReturnType<typeof decodeTurnHandle>["turnId"];
+} {
+  if (
+    typeof handle !== "string" ||
+    !v.safeParse(turnHandleSchema, handle).success
+  )
+    throw invalidInput(path, stage);
+  return decodeTurnHandle(handle);
+}
+
+function invalidInput(
+  path: string,
+  stage: "query" | "operation",
+): ReinsSdkError {
+  return new ReinsSdkError(
+    {
+      code: "invalid_params",
+      facts: { issues: [{ issue: "invalid_value", path }] },
+    },
+    stage,
+  );
+}
+
+function projectCompletedTurn(
+  turn: ProtocolResult<"wait">["completed"][number],
+): import("./contracts.ts").CompletedTurn {
+  const { sessionId, turnId, usage, diagnosticId, ...fields } = turn;
+  return {
+    ...fields,
+    turnHandle: encodeTurnHandle({
+      sessionId,
+      turnId,
+    }) as unknown as TurnHandle,
+    ...(usage === undefined ? {} : { usage }),
+    ...(diagnosticId === undefined ? {} : { diagnosticId }),
+  } as import("./contracts.ts").CompletedTurn;
+}
+
 function projectClientFailure(
   failure: ReinsClientError["failure"],
 ): ReinsFailure {
   if (isCommandOutcomeUnknown(failure)) {
-    if (failure.method !== "spawn" && failure.method !== "kill")
+    if (
+      failure.method !== "spawn" &&
+      failure.method !== "send" &&
+      failure.method !== "interrupt" &&
+      failure.method !== "kill"
+    )
       return {
         code: "unexpected_failure",
         facts: { remoteCode: failure.code },

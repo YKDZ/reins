@@ -151,6 +151,19 @@ async function awaitTurnCompletion(
   return completed;
 }
 
+async function prepareOperation(
+  cli: Awaited<ReturnType<typeof fixture>>["cli"],
+  callerCwd: string,
+  env: NodeJS.ProcessEnv,
+  operation: "send" | "interrupt",
+): Promise<string> {
+  const result = await cli(["prepare-operation", operation], callerCwd, env);
+  expect(result.exitCode, result.stderr + result.stdout).toBe(0);
+  const credential = controlData(result).credential;
+  expect(typeof credential).toBe("string");
+  return credential as string;
+}
+
 test("local CLI projects its cwd into an already running daemon and the worker really reads there", async () => {
   const {
     callerCwd,
@@ -344,7 +357,7 @@ test("session snapshots keep the exact active or completed turn without stale ac
   expect(killed[0]).not.toHaveProperty("activeTurn");
 });
 
-test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择", async () => {
+test("CLI send preserves the explicit turn and original message", async () => {
   const { cli, callerCwd, env, runControlCli } = await fixture(
     "reins-wrr06-placement",
   );
@@ -359,75 +372,126 @@ test("CLI send 用显式落点与单值 TurnHandle，忙闲变化不改变选择
     sessionHandle: string;
     turnHandle: string;
   };
-  const busy = await cli([
-    "send",
-    initial.sessionHandle,
-    "new task",
-    "--placement",
-    "new_turn",
-  ]);
-  expect(busy.exitCode).toBe(65);
-  expect(JSON.parse(busy.stdout)).toMatchObject({ code: "session_busy" });
-  const active = await cli([
-    "send",
-    initial.turnHandle,
-    "active task",
-    "--placement",
-    "active_turn",
-  ]);
+  const exactMessage = "  active task\nkeep spacing  ";
+  const busyCredential = await prepareOperation(cli, callerCwd, env, "send");
+  const busy = await cli(
+    [
+      "send",
+      initial.sessionHandle,
+      "--placement",
+      "new_turn",
+      "--message",
+      exactMessage,
+      "--operation",
+      busyCredential,
+    ],
+    callerCwd,
+    env,
+  );
+  expect(busy.exitCode).toBe(70);
+  expect(busy.stdout + busy.stderr).toContain("session_busy");
+
+  const activeCredential = await prepareOperation(cli, callerCwd, env, "send");
+  const active = await cli(
+    [
+      "send",
+      initial.turnHandle,
+      "--placement",
+      "active_turn",
+      "--message",
+      exactMessage,
+      "--operation",
+      activeCredential,
+    ],
+    callerCwd,
+    env,
+  );
   expect(active.exitCode, active.stderr).toBe(0);
-  expect(JSON.parse(active.stdout)).toEqual({
-    sessionId: initial.sessionHandle,
+  expect(controlData(active)).toMatchObject({
+    sessionHandle: initial.sessionHandle,
     turnHandle: initial.turnHandle,
+    deliveryPoint: "active_turn",
   });
   await writeFile(join(callerCwd, "release"), "released");
-  expect(
-    (
-      await cli([
-        "wait",
-        initial.turnHandle,
-        "--completion",
-        "all",
-        "--timeout",
-        "5000",
-      ])
-    ).exitCode,
-  ).toBe(0);
-  const ended = await cli([
-    "send",
-    initial.turnHandle,
-    "late task",
-    "--placement",
-    "active_turn",
+  const completed = await cli(
+    ["wait", initial.turnHandle, "--completion", "all", "--timeout", "5000"],
+    callerCwd,
+    env,
+  );
+  expect(completed.exitCode, completed.stderr).toBe(0);
+  expect(JSON.parse(completed.stdout).data.result.completed).toEqual([
+    expect.objectContaining({
+      turnHandle: initial.turnHandle,
+      stopReason: "end_turn",
+    }),
   ]);
-  expect(ended.exitCode).toBe(65);
-  expect(JSON.parse(ended.stdout)).toMatchObject({ code: "turn_not_active" });
-  const next = await cli([
-    "send",
-    initial.sessionHandle,
-    "next task",
-    "--placement",
-    "new_turn",
-  ]);
-  expect(next.exitCode).toBe(0);
-  const nextAck = JSON.parse(next.stdout) as {
-    sessionId: string;
+
+  const staleCredential = await prepareOperation(cli, callerCwd, env, "send");
+  const ended = await cli(
+    [
+      "send",
+      initial.turnHandle,
+      "--placement",
+      "active_turn",
+      "--message",
+      "late task",
+      "--operation",
+      staleCredential,
+    ],
+    callerCwd,
+    env,
+  );
+  expect(ended.exitCode).toBe(70);
+  expect(ended.stdout + ended.stderr).toContain("turn_not_active");
+
+  const nextCredential = await prepareOperation(cli, callerCwd, env, "send");
+  const next = await cli(
+    [
+      "send",
+      initial.sessionHandle,
+      "--placement",
+      "new_turn",
+      "--message",
+      "next task",
+      "--operation",
+      nextCredential,
+    ],
+    callerCwd,
+    env,
+  );
+  expect(next.exitCode, next.stderr).toBe(0);
+  const nextAck = controlData(next) as {
+    sessionHandle: string;
     turnHandle: string;
+    deliveryPoint: string;
   };
-  expect(nextAck.sessionId).toBe(initial.sessionHandle);
+  expect(nextAck.sessionHandle).toBe(initial.sessionHandle);
   expect(nextAck.turnHandle).not.toBe(initial.turnHandle);
+  expect(nextAck.deliveryPoint).toBe("new_turn");
   expect(decodeTurnHandle(nextAck.turnHandle).sessionId).toBe(
     initial.sessionHandle,
   );
-  const unspecified = await cli([
-    "send",
-    initial.sessionHandle,
-    "missing placement",
+  const nextWait = await cli(
+    ["wait", nextAck.turnHandle, "--completion", "all"],
+    callerCwd,
+    env,
+  );
+  expect(nextWait.exitCode, nextWait.stderr).toBe(0);
+  expect(JSON.parse(nextWait.stdout).data.result.completed).toEqual([
+    expect.objectContaining({
+      turnHandle: nextAck.turnHandle,
+    }),
   ]);
+
+  const unspecified = await cli(
+    ["send", initial.sessionHandle, "--message", "missing placement"],
+    callerCwd,
+    env,
+  );
   expect(unspecified.exitCode).toBe(64);
 });
 
-test("interrupt 单 TurnHandle 返回接受事实，ACK 不等于取消", async () => {
+test("interrupt ACK is accepted before the exact turn reaches its terminal fact", async () => {
   const { cli, callerCwd, env, runControlCli } = await fixture("reins-wrr16");
   const created = await spawnWithControlCli(runControlCli, env, callerCwd, {
     sessionName: "exact-interrupt",
@@ -440,29 +504,95 @@ test("interrupt 单 TurnHandle 返回接受事实，ACK 不等于取消", async 
     sessionHandle: string;
     turnHandle: string;
   };
-  const accepted = await cli(["interrupt", original.turnHandle]);
+  const credential = await prepareOperation(cli, callerCwd, env, "interrupt");
+  const accepted = await cli(
+    ["interrupt", original.turnHandle, "--operation", credential],
+    callerCwd,
+    env,
+  );
   expect(accepted.exitCode, accepted.stdout + accepted.stderr).toBe(0);
-  expect(JSON.parse(accepted.stdout)).toEqual({
-    sessionId: original.sessionHandle,
+  expect(controlData(accepted)).toEqual({
     turnHandle: original.turnHandle,
+    status: "accepted",
   });
-  expect(controlData(await cli(["list"])).sessions).toMatchObject([
-    { sessionHandle: original.sessionHandle, state: "busy" },
-  ]);
-  const incomplete = await cli(["interrupt", original.sessionHandle]);
-  expect(incomplete.exitCode).toBe(64);
-  const multiple = await cli([
+  expect(
+    controlData(await cli(["list"], callerCwd, env)).sessions,
+  ).toMatchObject([{ sessionHandle: original.sessionHandle, state: "busy" }]);
+
+  const pending = await cli(
+    ["wait", original.turnHandle, "--completion", "all", "--timeout", "0"],
+    callerCwd,
+    env,
+  );
+  expect(pending.exitCode).toBe(4);
+  expect(JSON.parse(pending.stdout).data.result).toEqual({
+    status: "timeout",
+    completed: [],
+    pending: [{ turnHandle: original.turnHandle }],
+  });
+
+  const incompleteCredential = await prepareOperation(
+    cli,
+    callerCwd,
+    env,
     "interrupt",
-    original.turnHandle,
-    original.turnHandle,
-  ]);
+  );
+  const incomplete = await cli(
+    ["interrupt", original.sessionHandle, "--operation", incompleteCredential],
+    callerCwd,
+    env,
+  );
+  expect(incomplete.exitCode).toBe(70);
+  expect(incomplete.stdout + incomplete.stderr).toContain("invalid_params");
+
+  const multipleCredential = await prepareOperation(
+    cli,
+    callerCwd,
+    env,
+    "interrupt",
+  );
+  const multiple = await cli(
+    [
+      "interrupt",
+      original.turnHandle,
+      original.turnHandle,
+      "--operation",
+      multipleCredential,
+    ],
+    callerCwd,
+    env,
+  );
   expect(multiple.exitCode).toBe(64);
+
   await writeFile(join(callerCwd, "release"), "released");
   await vi.waitFor(async () =>
-    expect(controlData(await cli(["list"])).sessions).toMatchObject([
-      { state: "idle" },
-    ]),
+    expect(
+      controlData(await cli(["list"], callerCwd, env)).sessions,
+    ).toMatchObject([{ state: "idle" }]),
   );
-  const stale = await cli(["interrupt", original.turnHandle]);
-  expect(stale.exitCode).toBe(65);
+  const staleCredential = await prepareOperation(
+    cli,
+    callerCwd,
+    env,
+    "interrupt",
+  );
+  const stale = await cli(
+    ["interrupt", original.turnHandle, "--operation", staleCredential],
+    callerCwd,
+    env,
+  );
+  expect(stale.exitCode).toBe(70);
+  expect(stale.stdout + stale.stderr).toContain("turn_not_active");
+  const terminal = await cli(
+    ["wait", original.turnHandle, "--completion", "all"],
+    callerCwd,
+    env,
+  );
+  expect(terminal.exitCode, terminal.stderr).toBe(0);
+  expect(JSON.parse(terminal.stdout).data.result.completed).toEqual([
+    expect.objectContaining({
+      turnHandle: original.turnHandle,
+      stopReason: "end_turn",
+    }),
+  ]);
 });

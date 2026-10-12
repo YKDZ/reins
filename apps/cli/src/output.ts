@@ -1,11 +1,5 @@
 import { encodePermissionHandle, makeErrorCause } from "@reins/protocol";
-import type {
-  DiagnosticsResult,
-  ProtocolResult,
-  SendAck,
-  WaitResult,
-} from "@reins/protocol";
-import { encodeTurnHandle } from "@reins/protocol";
+import type { DiagnosticsResult, ProtocolResult } from "@reins/protocol";
 
 import { fullUsageFor, type CommandSpec } from "./command-spec.ts";
 import type { CliError } from "./errors.ts";
@@ -94,86 +88,6 @@ export function printDiagnosticsResult(
   }
   process.stdout.write(`${JSON.stringify(result.records, null, 2)}\n`);
   process.stdout.write(`truncated: ${result.truncated}\n`);
-}
-
-export function printSendAck(ack: SendAck, mode: OutputMode): void {
-  const turnHandle = encodeTurnHandle({
-    sessionId: ack.sessionId,
-    turnId: ack.turnId,
-  });
-  if (mode === "json") printJsonLine({ sessionId: ack.sessionId, turnHandle });
-  else process.stdout.write(`Sent message to ${turnHandle}\n`);
-}
-
-export function printWaitResult(
-  result: WaitResult & {
-    publications?: import("@reins/workspace-protocol").Publication[];
-    publicationError?: import("@reins/workspace-protocol").WorkspaceError;
-  },
-  mode: OutputMode,
-): void {
-  const completed = result.completed.map(({ sessionId, turnId, ...facts }) => ({
-    turnHandle: encodeTurnHandle({ sessionId, turnId }),
-    ...facts,
-    ...(facts.stopReason === "failed"
-      ? { message: harnessFailureMessage(facts.failure, facts.diagnosticId) }
-      : {}),
-  }));
-  const pending = result.pending.map((target) => ({
-    turnHandle: encodeTurnHandle(target),
-  }));
-  if (mode === "json") {
-    printJsonLine({
-      status: result.status,
-      completed,
-      pending,
-      ...(result.publications === undefined
-        ? {}
-        : { publications: result.publications }),
-      ...(result.publicationError === undefined
-        ? {}
-        : { publicationError: result.publicationError }),
-    });
-    return;
-  }
-  if (result.status === "timeout") {
-    process.stdout.write("Timed out waiting for turn completion\n");
-  }
-  for (const turn of completed) {
-    process.stdout.write(
-      `Turn completed: ${turn.stopReason} (${turn.turnHandle})\n`,
-    );
-    if (turn.stopReason === "failed")
-      process.stdout.write(
-        `${harnessFailureMessage(turn.failure, turn.diagnosticId)}\n`,
-      );
-    if (turn.finalReply !== null && turn.finalReply !== undefined) {
-      process.stdout.write(`${turn.finalReply}\n`);
-    }
-  }
-  for (const publication of result.publications ?? [])
-    process.stdout.write(
-      `[publication ready] ${publication.publicationId} ${publication.source.path} (${publication.bytes} bytes)\n`,
-    );
-  if (result.publicationError)
-    process.stdout.write(
-      `[publication discovery failed] ${result.publicationError.code}\n`,
-    );
-  for (const target of pending) {
-    process.stdout.write(`Pending: ${target.turnHandle}\n`);
-  }
-}
-
-export function printInterruptResult(
-  result: ProtocolResult<"interrupt">,
-  mode: OutputMode,
-): void {
-  const turnHandle = encodeTurnHandle(result);
-  if (mode === "json") {
-    printJsonLine({ sessionId: result.sessionId, turnHandle });
-    return;
-  }
-  process.stdout.write(`Stop request accepted: ${turnHandle}\n`);
 }
 
 export function printResolvePermissionAck(

@@ -104,76 +104,6 @@ export function defineCommand<const S extends CommandSpec>(spec: S): S {
 
 const commandSpecData = [
   defineCommand({
-    name: "send",
-    description: "Send to an explicit active turn or create a new turn",
-    args: [
-      {
-        name: "target",
-        description: "SessionHandle for new_turn or TurnHandle for active_turn",
-        kind: { type: "text" },
-      },
-      {
-        name: "message",
-        variadic: true,
-        description: "message text",
-        kind: { type: "text" },
-      },
-    ],
-    options: [
-      {
-        name: "placement",
-        flags: "--placement <placement>",
-        required: true,
-        description: "Explicit message placement",
-        kind: { type: "enum", values: ["active_turn", "new_turn"] },
-      },
-    ],
-  }),
-  defineCommand({
-    name: "wait",
-    description: "Wait for turns to complete",
-    args: [
-      {
-        name: "turns",
-        variadic: true,
-        description: "complete turn handles",
-        kind: { type: "turnHandle", hint: "Expected a complete TurnHandle" },
-      },
-    ],
-    options: [
-      {
-        name: "completion",
-        flags: "--completion <mode>",
-        required: true,
-        description: "completion condition",
-        kind: { type: "enum", values: ["any", "all"] },
-      },
-      {
-        name: "timeout",
-        flags: "--timeout <ms>",
-        description:
-          "observation timeout in milliseconds; 0 queries immediately, omitted waits indefinitely",
-        kind: {
-          type: "number",
-          min: 0,
-          hint: "Expected a non-negative number",
-        },
-      },
-    ],
-  }),
-  defineCommand({
-    name: "interrupt",
-    description: "Request stopping one exact active turn",
-    args: [
-      {
-        name: "target",
-        description: "exact TurnHandle",
-        kind: { type: "text" },
-      },
-    ],
-    options: [],
-  }),
-  defineCommand({
     name: "diagnostics",
     description: "Query a finite snapshot of stored diagnostics",
     args: [],
@@ -860,27 +790,6 @@ function invocationFromParsed(
         command: "retry",
         args: typedArgs<"retry">(),
         options: typedOptions<"retry">(),
-        mode,
-      };
-    case "send":
-      return {
-        command: "send",
-        args: typedArgs<"send">(),
-        options: typedOptions<"send">(),
-        mode,
-      };
-    case "wait":
-      return {
-        command: "wait",
-        args: typedArgs<"wait">(),
-        options: typedOptions<"wait">(),
-        mode,
-      };
-    case "interrupt":
-      return {
-        command: "interrupt",
-        args: typedArgs<"interrupt">(),
-        options: typedOptions<"interrupt">(),
         mode,
       };
     case "diagnostics":
