@@ -481,6 +481,120 @@ test("SIGINT cancels a backpressured CLI observer without stopping its turn", as
   }
 });
 
+test("closing the CLI output pipe ends observation without stopping the turn", async () => {
+  const f = await fixture(true);
+  const eventGate = join(f.root, "pipe-close-events-release");
+  const completionGate = join(f.root, "pipe-close-completion-release");
+  const control = await f.client();
+  const spawned = await f.spawnSession(
+    "pipe-close-observer",
+    JSON.stringify({
+      gate: eventGate,
+      completionGate,
+      reply: "completed after observer pipe close",
+    }),
+  );
+  const child = spawn(
+    process.execPath,
+    [
+      cliBin,
+      "attach",
+      spawned.turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "none",
+    ],
+    { cwd: f.callerCwd, env: f.env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let startupOutput = "";
+  let established = false;
+  const stderr: string[] = [];
+  let resolveEstablished!: () => void;
+  let rejectEstablished!: (error: Error) => void;
+  const establishedPromise = new Promise<void>((resolve, reject) => {
+    resolveEstablished = resolve;
+    rejectEstablished = reject;
+  });
+  const closed = new Promise<number | null>((resolve) =>
+    child.once("close", resolve),
+  );
+  cleanup.push(async () => {
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill("SIGKILL");
+    child.stdout?.resume();
+    await closed;
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    if (established) return;
+    startupOutput += chunk;
+    for (const line of startupOutput.split("\n")) {
+      if (line === "") continue;
+      const frame = JSON.parse(line) as Record<string, unknown>;
+      if (frame.kind === "record" && frame.variant === "established") {
+        established = true;
+        child.stdout?.destroy();
+        resolveEstablished();
+        return;
+      }
+    }
+  });
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => stderr.push(chunk));
+  child.once("error", rejectEstablished);
+  child.once("exit", (code, signal) => {
+    if (!established)
+      rejectEstablished(
+        new Error(
+          `Attach exited before establishment: code=${code} signal=${signal}`,
+        ),
+      );
+  });
+  const startupTimer = setTimeout(
+    () => rejectEstablished(new Error("Attach did not establish")),
+    10_000,
+  );
+  try {
+    await establishedPromise;
+    clearTimeout(startupTimer);
+    await writeFile(eventGate, "release");
+    const exitCode = await Promise.race([
+      closed,
+      new Promise<undefined>((resolve) =>
+        setTimeout(() => resolve(undefined), 5_000),
+      ),
+    ]);
+    expect(exitCode, "CLI must settle after its output pipe closes").toBe(0);
+    expect(stderr.join("")).toBe("");
+    expect(await (await f.sdk()).list()).toContainEqual(
+      expect.objectContaining({
+        sessionHandle: spawned.sessionHandle,
+        state: "busy",
+        activeTurn: spawned.turnHandle,
+      }),
+    );
+
+    await writeFile(completionGate, "release");
+    expect(
+      await control.request("wait", {
+        targets: [decodeTurnHandle(spawned.turnHandle)],
+        completion: "all",
+      }),
+    ).toMatchObject({
+      result: {
+        completed: [
+          {
+            finalReply: "completed after observer pipe close",
+          },
+        ],
+      },
+    });
+  } finally {
+    clearTimeout(startupTimer);
+  }
+});
+
 test("SDK abort preserves AbortError and closes observation without stopping its session", async () => {
   const f = await fixture();
   const gate = join(f.root, "abort-observation-release");
