@@ -2,8 +2,8 @@
 
 import { createRequire } from "node:module";
 
-import type { WriteCliOutput } from "@ykdz/cli-contract";
-import { nodeCliOutput } from "@ykdz/cli-contract/node";
+import { CliWriteError, type WriteCliOutput } from "@ykdz/cli-contract";
+import { isNodeBrokenPipe, nodeCliOutput } from "@ykdz/cli-contract/node";
 
 import { connectReins } from "./application.ts";
 import { main } from "./main.ts";
@@ -34,22 +34,33 @@ const write: WriteCliOutput = (output) => {
   });
 };
 
-const exitCode = await main({
-  argv: process.argv,
-  version,
-  write,
-  cancelOutput() {
-    if (cancelPendingWrite === undefined) return;
-    outputCancelled = true;
-    cancelPendingWrite?.();
-  },
-  dependencies: {
-    connect: () =>
-      connectReins({
-        consumerContext: process.env.REINS_CONSUMER_CONTEXT ?? "",
-        env: process.env,
-      }),
-  },
-});
+let exitCode: number;
+try {
+  exitCode = await main({
+    argv: process.argv,
+    version,
+    write,
+    cancelOutput() {
+      if (cancelPendingWrite === undefined) return;
+      outputCancelled = true;
+      cancelPendingWrite?.();
+    },
+    dependencies: {
+      connect: () =>
+        connectReins({
+          consumerContext: process.env.REINS_CONSUMER_CONTEXT ?? "",
+          env: process.env,
+        }),
+    },
+  });
+} catch (error) {
+  if (!(error instanceof CliWriteError)) throw error;
+  if (isNodeBrokenPipe(error)) {
+    exitCode = 0;
+  } else {
+    process.stderr.write("error: CLI output failed\n");
+    exitCode = 1;
+  }
+}
 process.exitCode = exitCode;
 if (outputCancelled) process.exit(exitCode);

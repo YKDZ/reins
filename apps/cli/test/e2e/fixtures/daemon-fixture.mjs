@@ -289,47 +289,11 @@ const server = createServer((socket) => {
         );
         continue;
       }
-      if (mode === "attach-long-replay" && request.method === "attach") {
-        const body = "x".repeat(16 * 1024);
-        for (let index = 0; index < 1024; index += 1) {
-          socket.write(
-            `${encodeMessage({
-              kind: "notification",
-              method: "event",
-              params: {
-                type: "message",
-                sessionId: "prompt@g1",
-                turnId: "t1",
-                messageId: `m${index}`,
-                role: "worker",
-                content: body,
-              },
-            })}\n`,
-          );
-        }
-        socket.write(
-          `${encodeMessage({
-            kind: "response",
-            requestId: request.requestId,
-            result: { sessionId: "prompt@g1", replayed: 1024 },
-          })}\n`,
-        );
-      } else if (mode === "output-error" && request.method === "capabilities") {
-        socket.write(
-          `${encodeMessage({
-            kind: "response",
-            requestId: request.requestId,
-            result: { capabilities: [], failures: [] },
-          })}\n`,
-        );
-      } else if (
-        mode === "invalid-envelope" ||
-        mode === "attach-invalid-envelope"
-      ) {
+      if (mode === "invalid-envelope") {
         socket.write(
           `${encodeMessage({ kind: "response", requestId: request.requestId })}\n`,
         );
-      } else if (mode === "invalid-error" || mode === "attach-invalid-error") {
+      } else if (mode === "invalid-error") {
         socket.write(
           `${encodeMessage({
             kind: "response",
@@ -337,10 +301,7 @@ const server = createServer((socket) => {
             error: { code: "session_not_found" },
           })}\n`,
         );
-      } else if (
-        mode === "invalid-notification" ||
-        mode === "attach-invalid-notification"
-      ) {
+      } else if (mode === "invalid-notification") {
         socket.write(
           `${encodeMessage({
             kind: "notification",
@@ -348,33 +309,12 @@ const server = createServer((socket) => {
             params: { type: "sdk.raw" },
           })}\n`,
         );
-      } else if (
-        mode === "invalid-result" ||
-        mode === "attach-invalid-result"
-      ) {
+      } else if (mode === "invalid-result") {
         socket.write(
           `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
             result: {},
-          })}\n`,
-        );
-      } else if (
-        mode === "attach-invalid-after-response" &&
-        request.method === "attach"
-      ) {
-        socket.write(
-          `${encodeMessage({
-            kind: "response",
-            requestId: request.requestId,
-            result: { sessionId: "prompt@g1", replayed: 0 },
-          })}\n`,
-        );
-        socket.write(
-          `${encodeMessage({
-            kind: "notification",
-            method: "event",
-            params: { type: "sdk.raw" },
           })}\n`,
         );
       } else if (mode === "prompt-disconnect" && request.method === "attach") {
