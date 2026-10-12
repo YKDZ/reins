@@ -7,7 +7,7 @@ ENV COREPACK_HOME="/corepack"
 ENV PNPM_HOME="/pnpm"
 ENV PATH="$PNPM_HOME/bin:$PNPM_HOME:$PATH"
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ca-certificates git \
+    && apt-get install -y --no-install-recommends bubblewrap ca-certificates git procps \
     && rm -rf /var/lib/apt/lists/* \
     && git config --system init.defaultBranch main \
     && install -d -m 0755 "$COREPACK_HOME" "$PNPM_HOME" "$PNPM_HOME/bin" \
