@@ -12,9 +12,9 @@ import { Command, CommanderError } from "commander";
 import * as v from "valibot";
 
 import {
-  commandSpecForToken,
   parseDeclaredInput,
   publisherCommandSpecs,
+  publisherCommandSpecForToken,
   publisherGroupSpec,
 } from "./command-spec.ts";
 import {
@@ -100,13 +100,13 @@ export async function publisherMain(argv: readonly string[]): Promise<number> {
         if (error.code === "commander.help") program.outputHelp();
         return 0;
       }
-      const spec = commandSpecForToken(argv, "publisher") ?? publisherGroupSpec;
+      const spec = publisherCommandSpecForToken(argv) ?? publisherGroupSpec;
       const cliError = commanderToUsageError(error, spec);
       printError(cliError, mode, spec);
       return EXIT_USAGE;
     }
     const cliError = toCliError(error);
-    printError(cliError, mode, commandSpecForToken(argv, "publisher"));
+    printError(cliError, mode, publisherCommandSpecForToken(argv));
     return exitCodeForError(cliError);
   }
 }

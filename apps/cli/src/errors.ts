@@ -1,18 +1,11 @@
-import {
-  isCommandOutcomeUnknown,
-  type CommandOutcomeUnknown,
-} from "@reins/client";
-import { ReinsClientError } from "@reins/client/control";
 import type { MachineError } from "@reins/protocol";
 import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
-import type { TransportErrorCode } from "@reins/transport";
 import {
   workspaceErrorSchema,
   type WorkspaceError,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
-import { isReinsStartupTransportFailure } from "./application-runtime.ts";
 export function isWorkspaceError(value: unknown): value is WorkspaceError {
   return v.safeParse(workspaceErrorSchema, value).success;
 }
@@ -76,30 +69,13 @@ export type UsageError = {
   readonly issues: UsageIssues;
 };
 
-export type InputError = {
-  readonly code: "input_error";
-  readonly reason: "permission_choice_eof" | "permission_feedback_eof";
-};
-
 export type OutputError = {
   readonly code: "output_error";
   readonly reason: "stdout_write_failed";
   readonly systemCode?: string;
 };
 
-type StartupTransportCliError = {
-  readonly code: "daemon_start_failed";
-  readonly transportCode: TransportErrorCode;
-};
-
-export type CliError =
-  | MachineError
-  | WorkspaceError
-  | Omit<CommandOutcomeUnknown, "commandId" | "daemonGeneration">
-  | UsageError
-  | InputError
-  | OutputError
-  | StartupTransportCliError;
+export type CliError = MachineError | WorkspaceError | UsageError | OutputError;
 
 export function outputError(systemCode?: string): OutputError {
   return {
@@ -107,20 +83,6 @@ export function outputError(systemCode?: string): OutputError {
     reason: "stdout_write_failed",
     ...(systemCode === undefined ? {} : { systemCode }),
   };
-}
-
-export function inputError(reason: InputError["reason"]): InputError {
-  return { code: "input_error", reason };
-}
-
-export function isInputError(value: unknown): value is InputError {
-  if (typeof value !== "object" || value === null) return false;
-  const candidate = value as { code?: unknown; reason?: unknown };
-  return (
-    candidate.code === "input_error" &&
-    (candidate.reason === "permission_choice_eof" ||
-      candidate.reason === "permission_feedback_eof")
-  );
 }
 
 export function isOutputError(value: unknown): value is OutputError {
@@ -155,22 +117,9 @@ export function isUsageError(value: unknown): value is UsageError {
 }
 
 export function toCliError(error: unknown): CliError {
-  if (error instanceof ReinsClientError) return toCliError(error.failure);
-  if (isReinsStartupTransportFailure(error)) {
-    return { code: "daemon_start_failed", transportCode: error.code };
-  }
-  if (isCommandOutcomeUnknown(error))
-    return {
-      code: error.code,
-      cause: error.cause,
-      method: error.method,
-      retryToken: error.retryToken,
-      ...(error.targets === undefined ? {} : { targets: error.targets }),
-    };
   if (isUsageError(error)) return error;
   if (isWorkspaceError(error)) return error;
   if (isMachineError(error)) return error;
-  if (isInputError(error)) return error;
   if (isOutputError(error)) return error;
   if (error instanceof Error) {
     return machineError({
@@ -199,11 +148,9 @@ export function exitCodeForError(error: CliError): number {
     case "method_not_found":
     case "unknown_harness":
       return EXIT_USAGE;
-    case "command_outcome_unknown":
     case "command_id_conflict":
     case "stale_command_id":
     case "output_error":
-    case "input_error":
     case "session_not_found":
     case "session_busy":
     case "turn_not_active":

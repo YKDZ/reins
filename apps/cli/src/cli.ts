@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 
 import { createRequire } from "node:module";
+import { createInterface } from "node:readline";
 
 import { CliWriteError, type WriteCliOutput } from "@ykdz/cli-contract";
 import { isNodeBrokenPipe, nodeCliOutput } from "@ykdz/cli-contract/node";
@@ -21,6 +22,7 @@ const outputPort = nodeCliOutput({
   stdout: process.stdout,
   stderr: process.stderr,
 });
+const promptReader = createPromptReader();
 let outputCancelled = false;
 let cancelPendingWrite: (() => void) | undefined;
 const write: WriteCliOutput = (output) => {
@@ -51,6 +53,7 @@ try {
           consumerContext: process.env.REINS_CONSUMER_CONTEXT ?? "",
           env: process.env,
         }),
+      readLine: (prompt, signal) => promptReader.readLine(prompt, signal),
     },
   });
 } catch (error) {
@@ -61,6 +64,80 @@ try {
     process.stderr.write("error: CLI output failed\n");
     exitCode = 1;
   }
+} finally {
+  promptReader.close();
 }
 process.exitCode = exitCode;
 if (outputCancelled) process.exit(exitCode);
+
+function createPromptReader(): {
+  readLine(prompt: string, signal: AbortSignal): Promise<string | undefined>;
+  close(): void;
+} {
+  const reader = createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+    terminal: process.stdin.isTTY,
+  });
+  const queued: string[] = [];
+  const waiters: Array<{
+    resolve(value: string | undefined): void;
+    reject(error: Error): void;
+  }> = [];
+  let closed = false;
+  reader.on("line", (line) => {
+    const waiter = waiters.shift();
+    if (waiter === undefined) queued.push(line);
+    else waiter.resolve(line);
+  });
+  reader.once("close", () => {
+    closed = true;
+    for (const waiter of waiters.splice(0)) waiter.resolve(undefined);
+  });
+
+  return {
+    async readLine(prompt, signal) {
+      await writePrompt(prompt, signal);
+      if (signal.aborted) throw abortError();
+      const line = queued.shift();
+      if (line !== undefined) return line;
+      if (closed) return undefined;
+      return new Promise((resolve, reject) => {
+        const waiter = { resolve, reject };
+        const onAbort = () => {
+          const index = waiters.indexOf(waiter);
+          if (index !== -1) waiters.splice(index, 1);
+          signal.removeEventListener("abort", onAbort);
+          reject(abortError());
+        };
+        waiters.push(waiter);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+    close() {
+      reader.close();
+    },
+  };
+}
+
+function writePrompt(prompt: string, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    process.stdout.write(prompt, (error) => {
+      signal.removeEventListener("abort", onAbort);
+      if (error !== null && error !== undefined) reject(error);
+      else resolve();
+    });
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}

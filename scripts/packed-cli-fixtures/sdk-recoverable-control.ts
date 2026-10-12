@@ -4,7 +4,10 @@ import {
   type OperationCredential,
   type ReinsConnection,
   type AgentFact,
+  type DiagnosticId,
   type InterruptInput,
+  type PermissionHandle,
+  type PermissionResolution,
   type ResumeCursor,
   type SessionHandle,
   type SendInput,
@@ -35,6 +38,11 @@ type InterruptIntent = {
   readonly credential: OperationCredential<"interrupt">;
   readonly input: InterruptInput;
 };
+type PermissionIntent = {
+  readonly credential: OperationCredential<"resolvePermission">;
+  readonly permissionHandle: PermissionHandle;
+  readonly resolution: PermissionResolution;
+};
 
 function required(name: string): string {
   const value = process.env[name];
@@ -48,14 +56,20 @@ function readIntent<T>(serialized: string): T {
 }
 
 function publishIntent(
-  value: SpawnIntent | KillIntent | SendIntent | InterruptIntent,
+  value:
+    | SpawnIntent
+    | KillIntent
+    | SendIntent
+    | InterruptIntent
+    | PermissionIntent,
 ): string {
   const serialized = JSON.stringify(value);
   const restored = JSON.parse(serialized) as
     | SpawnIntent
     | KillIntent
     | SendIntent
-    | InterruptIntent;
+    | InterruptIntent
+    | PermissionIntent;
   if (JSON.stringify(restored) !== serialized)
     throw new Error("The operation intent did not survive JSON serialization");
   return serialized;
@@ -697,6 +711,311 @@ async function staleHandle(): Promise<void> {
   }
 }
 
+async function preparePermission(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const intent: PermissionIntent = {
+      credential: connection.prepareOperation("resolvePermission"),
+      permissionHandle: required("REINS_PERMISSION_HANDLE") as PermissionHandle,
+      resolution: { outcome: "allow", scope: "once" },
+    };
+    process.stdout.write(
+      `${JSON.stringify({ prepared: true, intent: publishIntent(intent) })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function observePermission(): Promise<void> {
+  const sessionHandle = required("REINS_TARGET_SESSION") as SessionHandle;
+  const connection = await connectSdk();
+  const subscription = await connection.attach(
+    { scope: "session", sessionHandle },
+    { mode: "available" },
+  );
+  try {
+    for await (const fact of subscription) {
+      if (fact.type !== "permission.requested") continue;
+      process.stdout.write(
+        `${JSON.stringify({
+          sessionHandle: fact.sessionHandle,
+          turnHandle: fact.turnHandle,
+          permissionHandle: fact.permissionHandle,
+          options: fact.options,
+        })}\n`,
+      );
+      return;
+    }
+    throw new Error("The installed SDK observed no permission request");
+  } finally {
+    subscription.close();
+    connection.close();
+  }
+}
+
+function permissionIntent(): PermissionIntent {
+  return readIntent<PermissionIntent>(required("REINS_OPERATION_INTENT_JSON"));
+}
+
+async function permissionMismatchReplay(): Promise<void> {
+  const intent = permissionIntent();
+  const connection = await connectSdk();
+  try {
+    const mismatch = await expectFailure(() =>
+      connection.resolvePermission(
+        intent.permissionHandle,
+        { outcome: "allow", scope: "session" },
+        intent.credential,
+      ),
+    );
+    const replay = await expectFailure(() =>
+      connection.resolvePermission(
+        intent.permissionHandle,
+        { outcome: "allow", scope: "session" },
+        intent.credential,
+      ),
+    );
+    const conflict = await expectFailure(() =>
+      connection.resolvePermission(
+        intent.permissionHandle,
+        { outcome: "deny" },
+        intent.credential,
+      ),
+    );
+    if (
+      mismatch.failure.code !== "permission_resolution_mismatch" ||
+      mismatch.failure.facts.permissionHandle !== intent.permissionHandle ||
+      JSON.stringify(mismatch.failure) !== JSON.stringify(replay.failure) ||
+      conflict.failure.code !== "command_id_conflict"
+    )
+      throw new Error(
+        "The installed SDK did not preserve permission failure replay and conflict facts",
+      );
+    process.stdout.write(
+      `${JSON.stringify({
+        mismatch: mismatch.failure,
+        replay: replay.failure,
+        conflict: conflict.failure,
+      })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function resolvePermission(): Promise<void> {
+  const intent = permissionIntent();
+  const connection = await connectSdk();
+  try {
+    const result = await connection.resolvePermission(
+      intent.permissionHandle,
+      intent.resolution,
+      intent.credential,
+    );
+    if (
+      result.status !== "resolved" ||
+      result.permissionHandle !== intent.permissionHandle
+    )
+      throw new Error("The installed SDK did not resolve the exact handle");
+    process.stdout.write(`${JSON.stringify({ result })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
+async function resolvePermissionDrop(): Promise<void> {
+  const intent = permissionIntent();
+  const connection = await connectSdk();
+  try {
+    const error = await expectFailure(() =>
+      connection.resolvePermission(
+        intent.permissionHandle,
+        intent.resolution,
+        intent.credential,
+      ),
+    );
+    if (
+      error.failure.code !== "command_outcome_unknown" ||
+      error.failure.facts.operation !== "resolvePermission" ||
+      error.stage !== "operation"
+    )
+      throw new Error(
+        "The installed SDK omitted typed permission response-loss facts",
+      );
+    process.stdout.write(
+      `${JSON.stringify({ code: error.failure.code, stage: error.stage })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function resolvePermissionFailureReplay(): Promise<void> {
+  const intent = permissionIntent();
+  const connection = await connectSdk();
+  try {
+    const first = await expectFailure(() =>
+      connection.resolvePermission(
+        intent.permissionHandle,
+        intent.resolution,
+        intent.credential,
+      ),
+    );
+    const replay = await expectFailure(() =>
+      connection.resolvePermission(
+        intent.permissionHandle,
+        intent.resolution,
+        intent.credential,
+      ),
+    );
+    const query = await expectFailure(() => connection.diagnostics());
+    if (
+      first.failure.code !== "internal_error" ||
+      JSON.stringify(first.failure) !== JSON.stringify(replay.failure) ||
+      first.failure.facts.diagnosticId !== undefined ||
+      first.failure.facts.cause?.kind !== "exception" ||
+      !first.failure.facts.cause.message.includes(
+        "Fixture rejected permission delivery",
+      ) ||
+      query.failure.code !== "diagnostics_unavailable"
+    )
+      throw new Error(
+        "The SDK changed the permission failure after diagnostic persistence failed",
+      );
+    process.stdout.write(
+      `${JSON.stringify({ failure: first.failure, replay: replay.failure, query: query.failure })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function stalePermission(): Promise<void> {
+  const intent = permissionIntent();
+  const connection = await connectSdk();
+  try {
+    const error = await expectFailure(() =>
+      connection.resolvePermission(
+        intent.permissionHandle,
+        intent.resolution,
+        intent.credential,
+      ),
+    );
+    if (error.failure.code !== "stale_command_id")
+      throw new Error(
+        "The SDK accepted a previous-generation permission credential",
+      );
+    process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
+async function harnessFailureDiagnostics(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const input = { ...spawnInput(), message: "packed-harness-failure" };
+    const spawned = await connection.spawn(
+      input,
+      connection.prepareOperation("spawn"),
+    );
+    const waited = await connection.wait({
+      targets: [spawned.turnHandle],
+      completion: "all",
+      timeoutMs: 10_000,
+    });
+    const failedTurn = waited.completed[0];
+    if (
+      waited.status !== "satisfied" ||
+      failedTurn?.stopReason !== "failed" ||
+      failedTurn.failure.failureCategory !== "rate_limited" ||
+      failedTurn.failure.retryDisposition !== "wait" ||
+      failedTurn.diagnosticId === undefined
+    )
+      throw new Error("The installed SDK omitted typed Harness failure facts");
+    const result = await connection.diagnostics({
+      diagnosticId: failedTurn.diagnosticId as DiagnosticId,
+    });
+    if (
+      !("record" in result) ||
+      result.record.diagnosticId !== failedTurn.diagnosticId ||
+      result.record.source !== "adapter" ||
+      result.record.kind !== "turn_failure" ||
+      result.record.sessionHandle !== spawned.sessionHandle ||
+      result.record.turnHandle !== spawned.turnHandle ||
+      "sessionId" in result.record ||
+      "turnId" in result.record
+    )
+      throw new Error(
+        "The installed SDK did not query its projected diagnostic",
+      );
+    const turnQuery = await connection.diagnostics({
+      turnHandle: spawned.turnHandle,
+    });
+    if (
+      !("records" in turnQuery) ||
+      !turnQuery.records.some(
+        (record) => record.diagnosticId === failedTurn.diagnosticId,
+      )
+    )
+      throw new Error(
+        "The installed SDK did not query diagnostics with only a turn handle",
+      );
+    const malformedTurn = await expectFailure(() =>
+      connection.diagnostics({ turnHandle: "invalid" as TurnHandle }),
+    );
+    if (
+      malformedTurn.stage !== "query" ||
+      malformedTurn.failure.code !== "invalid_params" ||
+      !malformedTurn.failure.facts.issues.some(
+        (issue) =>
+          issue.issue === "invalid_value" && issue.path === "turnHandle",
+      )
+    )
+      throw new Error(
+        "The installed SDK did not type an invalid diagnostic turn handle",
+      );
+    const mismatchedSession = await expectFailure(() =>
+      connection.diagnostics({
+        sessionHandle: "different@g1" as SessionHandle,
+        turnHandle: spawned.turnHandle,
+      }),
+    );
+    if (
+      mismatchedSession.failure.code !== "invalid_params" ||
+      !mismatchedSession.failure.facts.issues.some(
+        (issue) =>
+          issue.issue === "invalid_combination" &&
+          issue.paths.includes("sessionHandle") &&
+          issue.paths.includes("turnHandle"),
+      )
+    )
+      throw new Error(
+        "The installed SDK accepted a mismatched diagnostic session handle",
+      );
+    const killed = await connection.kill(
+      { sessionHandle: spawned.sessionHandle },
+      connection.prepareOperation("kill"),
+    );
+    if (killed.status !== "killed")
+      throw new Error("The Harness failure worker was not cleaned up");
+    process.stdout.write(
+      `${JSON.stringify({
+        sessionHandle: spawned.sessionHandle,
+        turnHandle: spawned.turnHandle,
+        completed: failedTurn,
+        diagnostic: result.record,
+        turnQueryCount: "records" in turnQuery ? turnQuery.records.length : 0,
+        malformedTurnCode: malformedTurn.failure.code,
+        mismatchedSessionCode: mismatchedSession.failure.code,
+      })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
 async function replayFacts(): Promise<void> {
   const sessionHandle = required("REINS_TARGET_SESSION") as SessionHandle;
   const target = { scope: "session" as const, sessionHandle };
@@ -1003,6 +1322,30 @@ switch (mode) {
     break;
   case "handle-stale":
     await staleHandle();
+    break;
+  case "prepare-permission":
+    await preparePermission();
+    break;
+  case "observe-permission":
+    await observePermission();
+    break;
+  case "permission-mismatch-replay":
+    await permissionMismatchReplay();
+    break;
+  case "resolve-permission":
+    await resolvePermission();
+    break;
+  case "resolve-permission-drop":
+    await resolvePermissionDrop();
+    break;
+  case "permission-failure-replay":
+    await resolvePermissionFailureReplay();
+    break;
+  case "permission-stale":
+    await stalePermission();
+    break;
+  case "harness-failure-diagnostics":
+    await harnessFailureDiagnostics();
     break;
   case "replay-facts":
     await replayFacts();

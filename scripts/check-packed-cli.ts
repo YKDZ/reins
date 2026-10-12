@@ -10,6 +10,7 @@ import {
   mkdtempSync,
   readFileSync,
   readdirSync,
+  renameSync,
   rmSync,
   statSync,
   writeFileSync,
@@ -3763,6 +3764,1121 @@ async function smokePackedCli(
     workerPids: [cliWorkerReady.workerPid, cliWorkerReady.descendantPid],
     descriptorsClosed: ["worker", "descendant"],
     daemonSocketRemoved: true,
+  });
+
+  // 使用正式冻结安装的 SDK-only 与 runtime+SDK consumers，通过生产 daemon、Unix
+  // socket、已有注册 adapter 和真实 worker 覆盖权限与诊断闭环。
+  const permissionDirectory = join(runtimeDirectory, "permission-diagnostics");
+  mkdirSync(permissionDirectory);
+  const permissionSocket = join(permissionDirectory, "reins.sock");
+  const permissionWorkspace = join(permissionDirectory, "workspace");
+  mkdirSync(permissionWorkspace);
+  const permissionObservations = join(
+    permissionDirectory,
+    "adapter-observations.ndjson",
+  );
+  const permissionActivity = join(
+    permissionDirectory,
+    "worker-activity.ndjson",
+  );
+  const permissionEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: permissionSocket,
+    REINS_STATE_DIR: join(permissionDirectory, "state"),
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_CONSUMER_CONTEXT: "packed-permission-diagnostics",
+    REINS_IDLE_TIMEOUT_MS: "10000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: permissionObservations,
+    REINS_PACKED_FIXTURE_ACTIVITY: permissionActivity,
+    REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE: join(
+      permissionDirectory,
+      "reject-permission",
+    ),
+    REINS_WORKER_CWD: permissionWorkspace,
+  };
+  owned.directDaemon = await startDaemon({
+    label: "packed permission and diagnostics daemon",
+    executable: daemon,
+    args: [],
+    env: permissionEnv,
+    socketPath: permissionSocket,
+    logPath: join(logsDirectory, "permission-diagnostics-daemon.log"),
+    readyTimeoutMs: 5_000,
+  });
+  const runPermissionCli = (
+    args: string[],
+    label: string,
+    env: NodeJS.ProcessEnv = permissionEnv,
+  ): Promise<CommandResult> => runInstalledCli(args, label, env);
+  const runPermissionCliResult = (
+    args: string[],
+    label: string,
+    env: NodeJS.ProcessEnv = permissionEnv,
+  ): Promise<CommandResult> => runInstalledCliResult(args, label, env);
+  const runPermissionSdk = (
+    mode: string,
+    label: string,
+    extraEnv: NodeJS.ProcessEnv = {},
+  ): Promise<Record<string, unknown>> =>
+    runSdkControl(mode, label, { ...permissionEnv, ...extraEnv });
+  const spawnPermissionSession = async (
+    sessionName: string,
+    label: string,
+    message = "packed-permission",
+  ): Promise<{ sessionHandle: string; turnHandle: string }> => {
+    const prepared = await runPermissionCli(
+      ["prepare-operation", "spawn"],
+      `${label}-prepare-spawn`,
+    );
+    const preparedData = readDataEnvelope(
+      `${label} spawn credential`,
+      prepared.stdout,
+      "prepareOperation",
+    );
+    if (typeof preparedData.credential !== "string")
+      throw new Error(`${label} omitted its spawn credential`);
+    const spawned = await runPermissionCli(
+      [
+        "spawn",
+        "--operation",
+        preparedData.credential,
+        "--name",
+        sessionName,
+        "--harness",
+        "fixture",
+        "--message",
+        message,
+        "--cwd",
+        permissionWorkspace,
+      ],
+      `${label}-spawn`,
+    );
+    const data = readDataEnvelope(`${label} spawn`, spawned.stdout, "spawn");
+    if (
+      typeof data.sessionHandle !== "string" ||
+      typeof data.turnHandle !== "string"
+    )
+      throw new Error(`${label} omitted its public session handles`);
+    return {
+      sessionHandle: data.sessionHandle,
+      turnHandle: data.turnHandle,
+    };
+  };
+  const observePermission = async (
+    sessionHandle: string,
+    label: string,
+    feedback = false,
+  ): Promise<Record<string, unknown>> => {
+    const observed = await runPermissionSdk("observe-permission", label, {
+      REINS_TARGET_SESSION: sessionHandle,
+    });
+    if (
+      observed.sessionHandle !== sessionHandle ||
+      typeof observed.permissionHandle !== "string" ||
+      !Array.isArray(observed.options) ||
+      canonicalJson(observed.options) !==
+        canonicalJson([
+          { outcome: "allow", scope: "once" },
+          { outcome: "deny", feedback },
+        ])
+    )
+      throw new Error(
+        `${label} did not expose the exact observed permission menu`,
+      );
+    return observed;
+  };
+  const preparePermissionIntent = async (
+    permissionHandle: string,
+    label: string,
+  ): Promise<{ intent: string; path: string }> => {
+    const prepared = await runPermissionSdk("prepare-permission", label, {
+      REINS_PERMISSION_HANDLE: permissionHandle,
+    });
+    if (prepared.prepared !== true || typeof prepared.intent !== "string")
+      throw new Error(`${label} did not prepare a serializable decision`);
+    const path = join(permissionDirectory, `${label}.json`);
+    writeFileSync(path, prepared.intent, "utf8");
+    const persisted = readFileSync(path, "utf8");
+    if (persisted !== prepared.intent)
+      throw new Error(`${label} did not survive persistence`);
+    return { intent: persisted, path };
+  };
+  const permissionSessions: string[] = [];
+  const killPermissionSession = async (
+    sessionHandle: string,
+    label: string,
+  ): Promise<void> => {
+    const prepared = await runPermissionCli(
+      ["prepare-operation", "kill"],
+      `${label}-prepare-kill`,
+    );
+    const preparedData = readDataEnvelope(
+      `${label} kill credential`,
+      prepared.stdout,
+      "prepareOperation",
+    );
+    if (typeof preparedData.credential !== "string")
+      throw new Error(`${label} omitted its kill credential`);
+    const killed = await runPermissionCli(
+      [
+        "kill",
+        "--session",
+        sessionHandle,
+        "--operation",
+        preparedData.credential,
+      ],
+      `${label}-kill`,
+    );
+    const data = readDataEnvelope(`${label} kill`, killed.stdout, "kill");
+    if (data.status !== "killed" || data.sessionHandle !== sessionHandle)
+      throw new Error(`${label} did not clean up its actual worker`);
+  };
+  const readPermissionSession = async (
+    sessionHandle: string,
+    label: string,
+  ): Promise<Record<string, unknown>> => {
+    const listed = await runPermissionCli(
+      ["list", "--session", sessionHandle],
+      label,
+    );
+    const data = readDataEnvelope(label, listed.stdout, "list");
+    if (!Array.isArray(data.sessions) || !isRecord(data.sessions[0]))
+      throw new Error(`${label} omitted the exact session`);
+    return data.sessions[0];
+  };
+  const waitForPermissionPrompt = async (
+    session: { sessionHandle: string; turnHandle: string },
+    label: string,
+    action:
+      | "prepare-allow"
+      | "eof"
+      | "interrupt"
+      | "prepare-deny-feedback"
+      | "feedback-interrupt"
+      | "kill-during-feedback",
+  ): Promise<{
+    readonly exitCode: number | null;
+    readonly signal: NodeJS.Signals | null;
+    readonly stdout: string;
+    readonly stderr: string;
+  }> => {
+    const child = spawn(
+      frozenCli,
+      [
+        "--output-format",
+        "text",
+        "attach",
+        session.turnHandle,
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
+      {
+        cwd: applicationConsumerDirectory,
+        env: permissionEnv,
+        stdio: ["pipe", "pipe", "pipe"],
+      },
+    );
+    const observed = observe(child, join(logsDirectory, `${label}.log`));
+    try {
+      const promptDeadline = Date.now() + 10_000;
+      while (!observed.stdout().toString("utf8").includes("Choose (1-2):")) {
+        if (!observed.running())
+          throw new Error(
+            `${label} exited before asking for a permission choice`,
+          );
+        if (Date.now() >= promptDeadline)
+          throw new Error(`${label} did not show the observed permission menu`);
+        await new Promise((resolve) => setTimeout(resolve, 10));
+      }
+      if (action === "prepare-allow") child.stdin?.end("1\n");
+      else if (action === "eof") child.stdin?.end();
+      else if (action === "interrupt") {
+        if (!child.kill("SIGINT"))
+          throw new Error(`${label} could not receive SIGINT`);
+      } else {
+        child.stdin?.write("2\n");
+        const feedbackDeadline = Date.now() + 10_000;
+        while (
+          !observed.stdout().toString("utf8").includes("Feedback (optional):")
+        ) {
+          if (!observed.running())
+            throw new Error(`${label} exited before requesting feedback`);
+          if (Date.now() >= feedbackDeadline)
+            throw new Error(`${label} did not request the selected feedback`);
+          await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        if (action === "prepare-deny-feedback")
+          child.stdin?.end("The selected reason\n");
+        else if (action === "feedback-interrupt") {
+          if (!child.kill("SIGINT"))
+            throw new Error(`${label} could not receive SIGINT at feedback`);
+        } else
+          await killPermissionSession(session.sessionHandle, `${label}-kill`);
+      }
+      const exit = await waitForObservedExit(label, observed, 10_000);
+      return {
+        ...exit,
+        stdout: observed.stdout().toString("utf8"),
+        stderr: observed.stderr().toString("utf8"),
+      };
+    } finally {
+      child.stdin?.destroy();
+      if (observed.running()) await observed.stop(2_000);
+    }
+  };
+
+  const menuSession = await spawnPermissionSession(
+    "permission-menu",
+    "installed-cli-permission-menu",
+  );
+  permissionSessions.push(menuSession.sessionHandle);
+  const menuFact = await observePermission(
+    menuSession.sessionHandle,
+    "installed-sdk-observe-permission-menu",
+  );
+  const mismatchIntent = await preparePermissionIntent(
+    menuFact.permissionHandle as string,
+    "installed-sdk-permission-mismatch-intent",
+  );
+  const beforeMismatchAttempts = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === menuSession.sessionHandle && type === "permission_resolved",
+  ).length;
+  const mismatch = await runPermissionSdk(
+    "permission-mismatch-replay",
+    "installed-sdk-permission-mismatch-replay",
+    { REINS_OPERATION_INTENT_JSON: mismatchIntent.intent },
+  );
+  if (
+    !isRecord(mismatch.mismatch) ||
+    mismatch.mismatch.code !== "permission_resolution_mismatch" ||
+    !isRecord(mismatch.replay) ||
+    canonicalJson(mismatch.mismatch) !== canonicalJson(mismatch.replay) ||
+    !isRecord(mismatch.conflict) ||
+    mismatch.conflict.code !== "command_id_conflict" ||
+    readJsonLines(permissionObservations).filter(
+      ({ sessionId, type }) =>
+        sessionId === menuSession.sessionHandle &&
+        type === "permission_resolved",
+    ).length !== beforeMismatchAttempts
+  )
+    throw new Error(
+      "The installed SDK did not ledger menu mismatch before adapter execution",
+    );
+  const cliPermissionCredential = await runPermissionCli(
+    ["prepare-operation", "resolve-permission"],
+    "installed-cli-prepare-permission-resolution",
+  );
+  const cliPermissionCredentialData = readDataEnvelope(
+    "installed CLI permission credential",
+    cliPermissionCredential.stdout,
+    "prepareOperation",
+  );
+  if (typeof cliPermissionCredentialData.credential !== "string")
+    throw new Error(
+      "The installed CLI omitted its prepared permission credential",
+    );
+  const cliPermissionResolution = await runPermissionCli(
+    [
+      "resolve-permission",
+      menuFact.permissionHandle as string,
+      "--outcome",
+      "allow",
+      "--scope",
+      "once",
+      "--operation",
+      cliPermissionCredentialData.credential,
+    ],
+    "installed-cli-permission-resolution",
+  );
+  const cliPermissionResolutionData = readDataEnvelope(
+    "installed CLI permission resolution",
+    cliPermissionResolution.stdout,
+    "resolvePermission",
+  );
+  const menuResolutionCalls = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === menuSession.sessionHandle && type === "permission_resolved",
+  );
+  if (
+    cliPermissionResolutionData.status !== "resolved" ||
+    cliPermissionResolutionData.permissionHandle !==
+      menuFact.permissionHandle ||
+    menuResolutionCalls.length !== 1 ||
+    canonicalJson(menuResolutionCalls[0]?.resolution) !==
+      canonicalJson({ outcome: "allow", scope: "once" })
+  )
+    throw new Error(
+      "The installed CLI did not resolve the exact SDK-observed option",
+    );
+
+  const lostAckSession = await spawnPermissionSession(
+    "permission-lost-ack",
+    "installed-sdk-permission-lost-ack",
+  );
+  permissionSessions.push(lostAckSession.sessionHandle);
+  const lostAckFact = await observePermission(
+    lostAckSession.sessionHandle,
+    "installed-sdk-observe-permission-for-recovery",
+  );
+  const lostAckIntent = await preparePermissionIntent(
+    lostAckFact.permissionHandle as string,
+    "installed-sdk-permission-recovery-intent",
+  );
+  const permissionAckProxyPath = join(
+    permissionDirectory,
+    "resolve-permission-ack-proxy.sock",
+  );
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: permissionAckProxyPath,
+    targetPath: permissionSocket,
+    method: "resolvePermission",
+  });
+  let lostPermissionAck: Record<string, unknown> | undefined;
+  let recoveredPermissionDecision: Record<string, unknown> | undefined;
+  try {
+    const unknown = await runPermissionSdk(
+      "resolve-permission-drop",
+      "installed-sdk-permission-drop-ack",
+      {
+        REINS_SOCKET: owned.acknowledgementProxy.socketPath,
+        REINS_OPERATION_INTENT_JSON: lostAckIntent.intent,
+      },
+    );
+    lostPermissionAck =
+      await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+    if (
+      unknown.code !== "command_outcome_unknown" ||
+      unknown.stage !== "operation" ||
+      lostPermissionAck.method !== "resolvePermission" ||
+      !isRecord(lostPermissionAck.result) ||
+      lostPermissionAck.result.sessionId !== lostAckSession.sessionHandle
+    )
+      throw new Error(
+        "The installed SDK did not classify the real permission ACK loss",
+      );
+  } finally {
+    await owned.acknowledgementProxy.close();
+    owned.acknowledgementProxy = undefined;
+  }
+  recoveredPermissionDecision = await runPermissionSdk(
+    "resolve-permission",
+    "installed-sdk-permission-recover-ack",
+    { REINS_OPERATION_INTENT_JSON: lostAckIntent.intent },
+  );
+  const lostAckResolutionCalls = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === lostAckSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (
+    !isRecord(recoveredPermissionDecision.result) ||
+    recoveredPermissionDecision.result.status !== "resolved" ||
+    recoveredPermissionDecision.result.permissionHandle !==
+      lostAckFact.permissionHandle ||
+    lostAckResolutionCalls.length !== 1
+  )
+    throw new Error(
+      "The installed SDK recovery duplicated or changed permission delivery",
+    );
+
+  const promptSession = await spawnPermissionSession(
+    "permission-prompt",
+    "installed-cli-permission-prompt",
+  );
+  permissionSessions.push(promptSession.sessionHandle);
+  const chosen = await waitForPermissionPrompt(
+    promptSession,
+    "installed-cli-permission-prompt-choice",
+    "prepare-allow",
+  );
+  if (
+    chosen.exitCode !== 0 ||
+    chosen.signal !== null ||
+    chosen.stderr !== "" ||
+    !chosen.stdout.includes("Permission requested: file_access") ||
+    !chosen.stdout.includes("1) Allow once") ||
+    !chosen.stdout.includes("2) Deny") ||
+    !chosen.stdout.includes("Permission response prepared (not executed):") ||
+    chosen.stdout.includes("[turn completed]") ||
+    chosen.stdout.includes("[attach ended]")
+  )
+    throw new Error(
+      "The installed CLI did not return the selected permission intent",
+    );
+  const preparedPrefix = "Permission response prepared (not executed): ";
+  const preparedLine = chosen.stdout
+    .split(/\r?\n/u)
+    .find((line) => line.includes(preparedPrefix));
+  const preparedOffset =
+    preparedLine === undefined ? -1 : preparedLine.indexOf(preparedPrefix);
+  const preparedResponse: unknown =
+    preparedLine === undefined || preparedOffset === -1
+      ? undefined
+      : JSON.parse(preparedLine.slice(preparedOffset + preparedPrefix.length));
+  if (
+    !isRecord(preparedResponse) ||
+    typeof preparedResponse.permissionHandle !== "string" ||
+    typeof preparedResponse.credential !== "string" ||
+    canonicalJson(preparedResponse.resolution) !==
+      canonicalJson({ outcome: "allow", scope: "once" }) ||
+    preparedResponse.permissionHandle === "" ||
+    preparedResponse.credential === ""
+  )
+    throw new Error(
+      "The installed CLI omitted the exact pre-execution permission intent",
+    );
+  const interactivePermissionIntentPath = join(
+    permissionDirectory,
+    "interactive-permission-intent.json",
+  );
+  writeFileSync(
+    interactivePermissionIntentPath,
+    canonicalJson(preparedResponse),
+    { mode: 0o600 },
+  );
+  const persistedPreparedResponse: unknown = JSON.parse(
+    readFileSync(interactivePermissionIntentPath, "utf8"),
+  );
+  if (
+    !isRecord(persistedPreparedResponse) ||
+    canonicalJson(persistedPreparedResponse) !== canonicalJson(preparedResponse)
+  )
+    throw new Error(
+      "The installed CLI permission intent did not survive caller persistence",
+    );
+  const promptResolutionCallsBeforeExecute = readJsonLines(
+    permissionObservations,
+  ).filter(
+    ({ sessionId, type }) =>
+      sessionId === promptSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (promptResolutionCallsBeforeExecute.length !== 0)
+    throw new Error(
+      "The installed CLI executed a permission response before returning its credential",
+    );
+
+  const preparedResolutionArgs = [
+    "resolve-permission",
+    persistedPreparedResponse.permissionHandle as string,
+    "--outcome",
+    "allow",
+    "--scope",
+    "once",
+    "--operation",
+    persistedPreparedResponse.credential as string,
+  ];
+  const interactivePermissionProxyPath = join(
+    permissionDirectory,
+    "interactive-permission-ack-proxy.sock",
+  );
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: interactivePermissionProxyPath,
+    targetPath: permissionSocket,
+    method: "resolvePermission",
+  });
+  try {
+    const unknownPermissionResponse = await runPermissionCliResult(
+      preparedResolutionArgs,
+      "installed-cli-interactive-permission-drop-ack",
+      {
+        ...permissionEnv,
+        REINS_SOCKET: owned.acknowledgementProxy.socketPath,
+      },
+    );
+    const permissionAcknowledgement =
+      await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+    const unknownPermissionData = readFailureEnvelope(
+      "installed CLI interactive permission response loss",
+      unknownPermissionResponse,
+      "resolvePermission",
+      "operationFailed",
+    );
+    const resolvedPermissionCalls = readJsonLines(
+      permissionObservations,
+    ).filter(
+      ({ sessionId, type }) =>
+        sessionId === promptSession.sessionHandle &&
+        type === "permission_resolved",
+    );
+    if (
+      unknownPermissionResponse.status !== 70 ||
+      !isRecord(unknownPermissionData.failure) ||
+      unknownPermissionData.failure.code !== "command_outcome_unknown" ||
+      !isRecord(unknownPermissionData.failure.facts) ||
+      unknownPermissionData.failure.facts.operation !== "resolvePermission" ||
+      permissionAcknowledgement.method !== "resolvePermission" ||
+      !isRecord(permissionAcknowledgement.result) ||
+      permissionAcknowledgement.result.sessionId !==
+        promptSession.sessionHandle ||
+      resolvedPermissionCalls.length !== 1 ||
+      canonicalJson(resolvedPermissionCalls[0]?.resolution) !==
+        canonicalJson({ outcome: "allow", scope: "once" })
+    )
+      throw new Error(
+        "The installed CLI did not retain the selected permission operation after ACK loss",
+      );
+  } finally {
+    await owned.acknowledgementProxy.close();
+    owned.acknowledgementProxy = undefined;
+  }
+  const recoveredInteractivePermission = await runPermissionCli(
+    preparedResolutionArgs,
+    "installed-cli-interactive-permission-recover-ack",
+  );
+  const recoveredInteractivePermissionData = readDataEnvelope(
+    "installed CLI interactive permission recovery",
+    recoveredInteractivePermission.stdout,
+    "resolvePermission",
+  );
+  const recoveredPermissionCalls = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === promptSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (
+    recoveredInteractivePermissionData.permissionHandle !==
+      preparedResponse.permissionHandle ||
+    recoveredInteractivePermissionData.status !== "resolved" ||
+    recoveredPermissionCalls.length !== 1
+  )
+    throw new Error(
+      "The installed CLI could not recover the exact prepared permission operation",
+    );
+  const interactivePermissionConflict = await runPermissionCliResult(
+    [
+      "resolve-permission",
+      preparedResponse.permissionHandle,
+      "--outcome",
+      "deny",
+      "--operation",
+      preparedResponse.credential,
+    ],
+    "installed-cli-interactive-permission-conflict",
+  );
+  const interactivePermissionConflictData = readFailureEnvelope(
+    "installed CLI interactive permission conflict",
+    interactivePermissionConflict,
+    "resolvePermission",
+    "operationFailed",
+  );
+  const permissionCallsAfterConflict = readJsonLines(
+    permissionObservations,
+  ).filter(
+    ({ sessionId, type }) =>
+      sessionId === promptSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (
+    interactivePermissionConflict.status !== 70 ||
+    !isRecord(interactivePermissionConflictData.failure) ||
+    interactivePermissionConflictData.failure.code !== "command_id_conflict" ||
+    permissionCallsAfterConflict.length !== 1
+  )
+    throw new Error(
+      "The installed CLI accepted changed permission parameters for the saved credential",
+    );
+
+  const feedbackSession = await spawnPermissionSession(
+    "permission-feedback",
+    "installed-cli-permission-feedback",
+    "packed-permission-feedback",
+  );
+  permissionSessions.push(feedbackSession.sessionHandle);
+  await observePermission(
+    feedbackSession.sessionHandle,
+    "installed-sdk-observe-permission-feedback-menu",
+    true,
+  );
+  const feedbackResult = await waitForPermissionPrompt(
+    feedbackSession,
+    "installed-cli-permission-feedback-result",
+    "prepare-deny-feedback",
+  );
+  const feedbackResolutionCalls = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === feedbackSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (
+    feedbackResult.exitCode !== 0 ||
+    feedbackResult.signal !== null ||
+    feedbackResult.stderr !== "" ||
+    !feedbackResult.stdout.includes("Feedback (optional):") ||
+    !feedbackResult.stdout.includes(
+      "Permission response prepared (not executed):",
+    ) ||
+    feedbackResult.stdout.includes("[turn completed]") ||
+    feedbackResolutionCalls.length !== 0
+  )
+    throw new Error(
+      "The installed CLI did not prepare the selected denial response before execution",
+    );
+  const feedbackPreparedLine = feedbackResult.stdout
+    .split(/\r?\n/u)
+    .find((line) => line.includes(preparedPrefix));
+  const feedbackPreparedOffset =
+    feedbackPreparedLine === undefined
+      ? -1
+      : feedbackPreparedLine.indexOf(preparedPrefix);
+  const feedbackPreparedResponse: unknown =
+    feedbackPreparedLine === undefined || feedbackPreparedOffset === -1
+      ? undefined
+      : JSON.parse(
+          feedbackPreparedLine.slice(
+            feedbackPreparedOffset + preparedPrefix.length,
+          ),
+        );
+  if (
+    !isRecord(feedbackPreparedResponse) ||
+    typeof feedbackPreparedResponse.permissionHandle !== "string" ||
+    typeof feedbackPreparedResponse.credential !== "string" ||
+    canonicalJson(feedbackPreparedResponse.resolution) !==
+      canonicalJson({ outcome: "deny", feedback: "The selected reason" })
+  )
+    throw new Error(
+      "The installed CLI changed or omitted the selected permission feedback",
+    );
+
+  const feedbackInterruptedSession = await spawnPermissionSession(
+    "permission-feedback-interrupted",
+    "installed-cli-permission-feedback-interrupted",
+    "packed-permission-feedback",
+  );
+  permissionSessions.push(feedbackInterruptedSession.sessionHandle);
+  const feedbackInterrupted = await waitForPermissionPrompt(
+    feedbackInterruptedSession,
+    "installed-cli-permission-feedback-sigint",
+    "feedback-interrupt",
+  );
+  const feedbackInterruptedSessionState = await readPermissionSession(
+    feedbackInterruptedSession.sessionHandle,
+    "installed-cli-permission-feedback-sigint-session-state",
+  );
+  const feedbackInterruptedCalls = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === feedbackInterruptedSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (
+    feedbackInterrupted.exitCode !== 0 ||
+    feedbackInterrupted.signal !== null ||
+    feedbackInterrupted.stderr !== "" ||
+    !feedbackInterrupted.stdout.includes("Feedback (optional):") ||
+    feedbackInterrupted.stdout.includes(
+      "Permission response prepared (not executed):",
+    ) ||
+    feedbackInterrupted.stdout.includes("[attach ended]") ||
+    feedbackInterrupted.stdout.includes("[turn completed]") ||
+    feedbackInterruptedSessionState.state !== "busy" ||
+    feedbackInterruptedCalls.length !== 0
+  )
+    throw new Error(
+      "The installed CLI left denial feedback open after SIGINT or resolved it",
+    );
+
+  const feedbackEndedSession = await spawnPermissionSession(
+    "permission-feedback-ended",
+    "installed-cli-permission-feedback-ended",
+    "packed-permission-feedback",
+  );
+  permissionSessions.push(feedbackEndedSession.sessionHandle);
+  const feedbackEnded = await waitForPermissionPrompt(
+    feedbackEndedSession,
+    "installed-cli-permission-feedback-session-ended",
+    "kill-during-feedback",
+  );
+  const feedbackEndedSessionState = await readPermissionSession(
+    feedbackEndedSession.sessionHandle,
+    "installed-cli-permission-feedback-ended-session-state",
+  );
+  const feedbackEndedCalls = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === feedbackEndedSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (
+    feedbackEnded.exitCode !== 0 ||
+    feedbackEnded.signal !== null ||
+    feedbackEnded.stderr !== "" ||
+    !feedbackEnded.stdout.includes("Feedback (optional):") ||
+    feedbackEnded.stdout.includes(
+      "Permission response prepared (not executed):",
+    ) ||
+    !/\[attach ended\] (?:killed|session_killed)\b/u.test(
+      feedbackEnded.stdout,
+    ) ||
+    feedbackEnded.stdout.includes("[turn completed]") ||
+    feedbackEndedSessionState.state !== "killed" ||
+    feedbackEndedCalls.length !== 0
+  )
+    throw new Error(
+      "The installed CLI left denial feedback open after the subscription ended",
+    );
+  permissionSessions.splice(
+    permissionSessions.indexOf(feedbackEndedSession.sessionHandle),
+    1,
+  );
+
+  const eofSession = await spawnPermissionSession(
+    "permission-eof",
+    "installed-cli-permission-eof",
+  );
+  permissionSessions.push(eofSession.sessionHandle);
+  const eof = await waitForPermissionPrompt(
+    eofSession,
+    "installed-cli-permission-eof-prompt",
+    "eof",
+  );
+  const eofSessionState = await readPermissionSession(
+    eofSession.sessionHandle,
+    "installed-cli-permission-eof-session-state",
+  );
+  const eofResolutionCalls = readJsonLines(permissionObservations).filter(
+    ({ sessionId, type }) =>
+      sessionId === eofSession.sessionHandle && type === "permission_resolved",
+  );
+  if (
+    eof.exitCode !== 65 ||
+    eof.signal !== null ||
+    !eof.stdout.includes("Permission requested: file_access") ||
+    eof.stderr !==
+      "error: Permission input ended before the response was prepared\n" ||
+    eofSessionState.state !== "busy" ||
+    eofResolutionCalls.length !== 0
+  )
+    throw new Error(
+      "The installed CLI treated permission input EOF as an allow or completion",
+    );
+
+  const interruptedSession = await spawnPermissionSession(
+    "permission-interrupted",
+    "installed-cli-permission-interrupted",
+  );
+  permissionSessions.push(interruptedSession.sessionHandle);
+  const interrupted = await waitForPermissionPrompt(
+    interruptedSession,
+    "installed-cli-permission-sigint-prompt",
+    "interrupt",
+  );
+  const interruptedSessionState = await readPermissionSession(
+    interruptedSession.sessionHandle,
+    "installed-cli-permission-sigint-session-state",
+  );
+  const interruptedResolutionCalls = readJsonLines(
+    permissionObservations,
+  ).filter(
+    ({ sessionId, type }) =>
+      sessionId === interruptedSession.sessionHandle &&
+      type === "permission_resolved",
+  );
+  if (
+    interrupted.exitCode !== 0 ||
+    interrupted.signal !== null ||
+    interrupted.stderr !== "" ||
+    !interrupted.stdout.includes("Permission requested: file_access") ||
+    interrupted.stdout.includes("[attach ended]") ||
+    interrupted.stdout.includes("[turn completed]") ||
+    interruptedSessionState.state !== "busy" ||
+    interruptedResolutionCalls.length !== 0
+  )
+    throw new Error(
+      "The installed CLI reported SIGINT as a permission decision or turn completion",
+    );
+
+  for (const [index, sessionHandle] of permissionSessions.entries())
+    await killPermissionSession(
+      sessionHandle,
+      `permission-session-cleanup-${index + 1}`,
+    );
+  const permissionDaemon = owned.directDaemon;
+  const permissionDaemonStop = await stopDaemon(permissionDaemon, 5_000);
+  owned.directDaemon = undefined;
+  if (!isCleanStop(permissionDaemonStop))
+    throw new Error(
+      `Permission daemon did not stop cleanly: ${JSON.stringify(permissionDaemonStop)}`,
+    );
+  await waitForPathRemoval(permissionSocket, 5_000);
+  await waitForPathRemoval(`${permissionSocket}.lock`, 5_000);
+  owned.directDaemon = await startDaemon({
+    label: "restarted packed permission daemon",
+    executable: daemon,
+    args: [],
+    env: permissionEnv,
+    socketPath: permissionSocket,
+    logPath: join(logsDirectory, "restarted-permission-daemon.log"),
+    readyTimeoutMs: 5_000,
+  });
+  const beforeStalePermissionAttempts = readJsonLines(
+    permissionObservations,
+  ).filter(({ type }) => type === "permission_resolved").length;
+  const stalePermission = await runPermissionSdk(
+    "permission-stale",
+    "installed-sdk-stale-permission-credential",
+    { REINS_OPERATION_INTENT_JSON: mismatchIntent.intent },
+  );
+  if (
+    stalePermission.code !== "stale_command_id" ||
+    readJsonLines(permissionObservations).filter(
+      ({ type }) => type === "permission_resolved",
+    ).length !== beforeStalePermissionAttempts
+  )
+    throw new Error(
+      "The installed SDK replayed an old permission credential in a new daemon generation",
+    );
+
+  const harnessFailure = await runPermissionSdk(
+    "harness-failure-diagnostics",
+    "installed-sdk-typed-harness-failure",
+  );
+  const completedFailure = harnessFailure.completed;
+  const harnessDiagnostic = harnessFailure.diagnostic;
+  if (
+    !isRecord(completedFailure) ||
+    completedFailure.stopReason !== "failed" ||
+    !isRecord(completedFailure.failure) ||
+    completedFailure.failure.failureCategory !== "rate_limited" ||
+    completedFailure.failure.retryDisposition !== "wait" ||
+    typeof completedFailure.diagnosticId !== "string" ||
+    !isRecord(harnessDiagnostic) ||
+    harnessDiagnostic.diagnosticId !== completedFailure.diagnosticId ||
+    harnessDiagnostic.source !== "adapter" ||
+    harnessDiagnostic.kind !== "turn_failure" ||
+    typeof harnessFailure.sessionHandle !== "string" ||
+    typeof harnessFailure.turnHandle !== "string" ||
+    harnessDiagnostic.sessionHandle !== harnessFailure.sessionHandle ||
+    harnessDiagnostic.turnHandle !== harnessFailure.turnHandle ||
+    "sessionId" in harnessDiagnostic ||
+    "turnId" in harnessDiagnostic
+  )
+    throw new Error(
+      "The installed SDK did not expose queryable typed Harness failure evidence",
+    );
+  const cliHarnessDiagnostic = await runPermissionCli(
+    ["diagnostics", "--id", completedFailure.diagnosticId],
+    "installed-cli-query-harness-diagnostic",
+  );
+  const cliHarnessDiagnosticData = readDataEnvelope(
+    "installed CLI Harness diagnostic query",
+    cliHarnessDiagnostic.stdout,
+    "diagnostics",
+  );
+  if (
+    !isRecord(cliHarnessDiagnosticData.record) ||
+    canonicalJson(cliHarnessDiagnosticData.record) !==
+      canonicalJson(harnessDiagnostic)
+  )
+    throw new Error(
+      "The installed CLI did not query the SDK's exact diagnostic record",
+    );
+  const harnessSessionHandle = String(harnessFailure.sessionHandle);
+  const harnessTurnHandle = String(harnessFailure.turnHandle);
+  const cliTurnDiagnostic = await runPermissionCli(
+    ["diagnostics", "--turn", harnessTurnHandle],
+    "installed-cli-query-diagnostic-by-turn",
+  );
+  const cliTurnDiagnosticData = readDataEnvelope(
+    "installed CLI diagnostic query by turn",
+    cliTurnDiagnostic.stdout,
+    "diagnostics",
+  );
+  if (
+    !Array.isArray(cliTurnDiagnosticData.records) ||
+    !cliTurnDiagnosticData.records.some(
+      (record) =>
+        isRecord(record) &&
+        record.diagnosticId === completedFailure.diagnosticId,
+    )
+  )
+    throw new Error(
+      "The installed CLI did not query diagnostics with only a turn handle",
+    );
+  const invalidTurnCli = await runPermissionCliResult(
+    ["diagnostics", "--session", harnessSessionHandle, "--turn", "invalid"],
+    "installed-cli-invalid-diagnostic-turn",
+  );
+  const invalidTurnCliData = readFailureEnvelope(
+    "installed CLI invalid diagnostic turn",
+    invalidTurnCli,
+    "diagnostics",
+    "queryFailed",
+  );
+  const invalidTurnFailure = invalidTurnCliData.failure;
+  if (
+    invalidTurnCli.status !== 70 ||
+    `${invalidTurnCli.stdout}\n${invalidTurnCli.stderr}`.match(
+      /ValiError|projectDiagnosticsParams|at .*\.js:/u,
+    ) !== null ||
+    !isRecord(invalidTurnFailure) ||
+    invalidTurnFailure.code !== "invalid_params" ||
+    !isRecord(invalidTurnFailure.facts) ||
+    !Array.isArray(invalidTurnFailure.facts.issues) ||
+    !invalidTurnFailure.facts.issues.some(
+      (issue) =>
+        isRecord(issue) &&
+        issue.issue === "invalid_value" &&
+        issue.path === "turnHandle",
+    )
+  )
+    throw new Error(
+      "The installed CLI did not type an invalid diagnostic turn handle",
+    );
+  const mismatchedTurnCli = await runPermissionCliResult(
+    ["diagnostics", "--session", "different@g1", "--turn", harnessTurnHandle],
+    "installed-cli-mismatched-diagnostic-session",
+  );
+  const mismatchedTurnCliData = readFailureEnvelope(
+    "installed CLI mismatched diagnostic session",
+    mismatchedTurnCli,
+    "diagnostics",
+    "queryFailed",
+  );
+  const mismatchedTurnFailure = mismatchedTurnCliData.failure;
+  if (
+    mismatchedTurnCli.status !== 70 ||
+    !isRecord(mismatchedTurnFailure) ||
+    mismatchedTurnFailure.code !== "invalid_params" ||
+    !isRecord(mismatchedTurnFailure.facts) ||
+    !Array.isArray(mismatchedTurnFailure.facts.issues) ||
+    !mismatchedTurnFailure.facts.issues.some(
+      (issue) =>
+        isRecord(issue) &&
+        issue.issue === "invalid_combination" &&
+        Array.isArray(issue.paths) &&
+        issue.paths.includes("sessionHandle") &&
+        issue.paths.includes("turnHandle"),
+    )
+  )
+    throw new Error(
+      "The installed CLI accepted a mismatched diagnostic session handle",
+    );
+
+  const rejectedPermissionSession = await spawnPermissionSession(
+    "permission-diagnostic-failure",
+    "installed-cli-permission-diagnostic-failure",
+  );
+  const rejectedPermissionFact = await observePermission(
+    rejectedPermissionSession.sessionHandle,
+    "installed-sdk-observe-permission-before-diagnostic-failure",
+  );
+  const rejectedPermissionIntent = await preparePermissionIntent(
+    rejectedPermissionFact.permissionHandle as string,
+    "installed-sdk-permission-diagnostic-failure-intent",
+  );
+  const rejectPermissionPath =
+    permissionEnv.REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE;
+  if (rejectPermissionPath === undefined)
+    throw new Error("The permission failure fixture path was not configured");
+  writeFileSync(rejectPermissionPath, "reject", "utf8");
+  const activeDiagnosticsPath = join(
+    permissionEnv.REINS_STATE_DIR as string,
+    "diagnostics",
+    "active.ndjson",
+  );
+  const savedDiagnosticsPath = `${activeDiagnosticsPath}.saved`;
+  if (!existsSync(activeDiagnosticsPath))
+    throw new Error(
+      "The production diagnostics store did not create its active file",
+    );
+  renameSync(activeDiagnosticsPath, savedDiagnosticsPath);
+  mkdirSync(activeDiagnosticsPath);
+  const rejectedPermission = await runPermissionSdk(
+    "permission-failure-replay",
+    "installed-sdk-permission-diagnostic-write-failure",
+    { REINS_OPERATION_INTENT_JSON: rejectedPermissionIntent.intent },
+  );
+  if (
+    !isRecord(rejectedPermission.failure) ||
+    rejectedPermission.failure.code !== "internal_error" ||
+    !isRecord(rejectedPermission.failure.facts) ||
+    !isRecord(rejectedPermission.failure.facts.cause) ||
+    rejectedPermission.failure.facts.cause.kind !== "exception" ||
+    typeof rejectedPermission.failure.facts.cause.message !== "string" ||
+    !rejectedPermission.failure.facts.cause.message.includes(
+      "Fixture rejected permission delivery",
+    ) ||
+    rejectedPermission.failure.facts.diagnosticId !== undefined ||
+    !isRecord(rejectedPermission.query) ||
+    rejectedPermission.query.code !== "diagnostics_unavailable"
+  )
+    throw new Error(
+      "A diagnostic file failure obscured the original permission cause",
+    );
+  const cliUnavailableDiagnostics = await runPermissionCliResult(
+    ["diagnostics", "--id", completedFailure.diagnosticId],
+    "installed-cli-diagnostics-unavailable",
+  );
+  const cliUnavailableDiagnosticsData = readFailureEnvelope(
+    "installed CLI diagnostics unavailable",
+    cliUnavailableDiagnostics,
+    "diagnostics",
+    "queryFailed",
+  );
+  if (
+    cliUnavailableDiagnostics.status !== 70 ||
+    !isRecord(cliUnavailableDiagnosticsData.failure) ||
+    cliUnavailableDiagnosticsData.failure.code !== "diagnostics_unavailable"
+  )
+    throw new Error(
+      "The installed CLI did not expose unavailable diagnostic storage",
+    );
+  rmSync(activeDiagnosticsPath, { recursive: true });
+  renameSync(savedDiagnosticsPath, activeDiagnosticsPath);
+  await killPermissionSession(
+    rejectedPermissionSession.sessionHandle,
+    "permission-diagnostic-failure-cleanup",
+  );
+  const finalPermissionDaemon = owned.directDaemon;
+  const finalPermissionDaemonStop = await stopDaemon(
+    finalPermissionDaemon,
+    5_000,
+  );
+  owned.directDaemon = undefined;
+  if (!isCleanStop(finalPermissionDaemonStop))
+    throw new Error(
+      `Permission diagnostics daemon did not stop cleanly: ${JSON.stringify(finalPermissionDaemonStop)}`,
+    );
+  await waitForPathRemoval(permissionSocket, 5_000);
+  await waitForPathRemoval(`${permissionSocket}.lock`, 5_000);
+  recorder.record("frozen_consumer_permission_and_diagnostics", {
+    serializedPermissionIntentPath: mismatchIntent.path,
+    menuOptions: menuFact.options,
+    mismatch: mismatch.mismatch,
+    sameCredentialReplay: mismatch.replay,
+    changedParameters: mismatch.conflict,
+    explicitCliResolution: cliPermissionResolutionData,
+    sdkDroppedAcknowledgement: lostPermissionAck,
+    sdkRecoveredResolution: recoveredPermissionDecision.result,
+    interactiveChoice: chosen.stdout,
+    eof: {
+      exitCode: eof.exitCode,
+      sessionState: eofSessionState.state,
+      adapterResolutions: eofResolutionCalls.length,
+    },
+    sigint: {
+      exitCode: interrupted.exitCode,
+      sessionState: interruptedSessionState.state,
+      adapterResolutions: interruptedResolutionCalls.length,
+    },
+    staleCredential: stalePermission.code,
+    harnessFailure: completedFailure,
+    sdkDiagnostic: harnessDiagnostic,
+    cliDiagnostic: cliHarnessDiagnosticData.record,
+    cliTurnDiagnosticCount: Array.isArray(cliTurnDiagnosticData.records)
+      ? cliTurnDiagnosticData.records.length
+      : 0,
+    invalidDiagnosticTurn: invalidTurnFailure,
+    mismatchedDiagnosticSession: mismatchedTurnFailure,
+    diagnosticWriteFailure: rejectedPermission.failure,
+    diagnosticReplay: rejectedPermission.replay,
+    sdkQueryFailure: rejectedPermission.query,
+    cliQueryFailure: cliUnavailableDiagnosticsData.failure,
+    originalCauseRetained: true,
+    workerCleanup: "all permission and failure sessions were terminated",
+    daemonStop: finalPermissionDaemonStop,
   });
 
   const automaticDirectory = join(runtimeDirectory, "automatic");

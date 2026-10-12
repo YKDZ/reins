@@ -1,13 +1,9 @@
-import { encodePermissionHandle, makeErrorCause } from "@reins/protocol";
-import type { DiagnosticsResult, ProtocolResult } from "@reins/protocol";
-
 import { fullUsageFor, type CommandSpec } from "./command-spec.ts";
 import type { CliError } from "./errors.ts";
 import {
   isUsageClassError,
   jsonErrorMessage,
   renderCliError,
-  transportErrorMessage,
 } from "./grammar.ts";
 
 export type OutputMode = "json" | "pretty";
@@ -30,9 +26,8 @@ export function printError(
   const rendered = renderCliError(error, spec);
   if (mode === "json") {
     const message = jsonErrorMessage(rendered);
-    const projected = jsonErrorProjection(error);
     printJsonLine({
-      ...projected,
+      ...error,
       message:
         "diagnosticId" in error && error.diagnosticId !== undefined
           ? `${message}. reins diagnostics --id ${error.diagnosticId}`
@@ -58,51 +53,4 @@ export function printError(
   if (isUsageClassError(error)) {
     process.stderr.write(`usage: reins ${fullUsageFor(spec)}\n`);
   }
-}
-
-function jsonErrorProjection(error: CliError): object {
-  if ("permissionId" in error) {
-    return { code: error.code, sessionId: error.sessionId };
-  }
-  if (error.code === "daemon_start_failed" && "transportCode" in error) {
-    return {
-      code: error.code,
-      cause: makeErrorCause("io", transportErrorMessage(error.transportCode)),
-    };
-  }
-  return error;
-}
-
-export function printDiagnosticsResult(
-  result: DiagnosticsResult,
-  mode: OutputMode,
-): void {
-  if (mode === "json") {
-    printJsonLine(result);
-    return;
-  }
-  if ("record" in result) {
-    process.stdout.write(`${JSON.stringify(result.record, null, 2)}\n`);
-    return;
-  }
-  process.stdout.write(`${JSON.stringify(result.records, null, 2)}\n`);
-  process.stdout.write(`truncated: ${result.truncated}\n`);
-}
-
-export function printResolvePermissionAck(
-  ack: ProtocolResult<"resolvePermission">,
-  mode: OutputMode,
-): void {
-  if (mode === "json") {
-    printJsonLine({
-      permissionHandle: encodePermissionHandle({
-        sessionId: ack.sessionId,
-        turnId: ack.turnId,
-        permissionId: ack.permissionId,
-      }),
-      status: "resolved",
-    });
-    return;
-  }
-  process.stdout.write("Permission resolved\n");
 }

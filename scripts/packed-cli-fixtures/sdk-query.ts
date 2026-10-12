@@ -47,6 +47,13 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.sessionName;
     case "session_busy":
       return failure.facts.sessionHandle;
+    case "permission_not_pending":
+    case "permission_resolution_mismatch":
+      return failure.facts.permissionHandle;
+    case "diagnostic_not_found":
+      return failure.facts.diagnosticId;
+    case "diagnostics_unavailable":
+      return failure.code;
     case "turn_not_active":
       return failure.facts.turnHandle;
     case "unsupported_feature":

@@ -9,13 +9,16 @@ import type { HarnessAdapter } from "@reins/daemon";
 import type {
   AdapterDriverFactory,
   HarnessCapability,
+  PermissionId,
   SessionId,
+  TurnId,
   WorkerDriver,
 } from "@reins/protocol";
 
 type WorkerState = {
   readonly child: ChildProcess;
   readonly closed: Promise<void>;
+  readonly turnId: TurnId;
 };
 
 const fixtureCapabilities: HarnessCapability = {
@@ -32,6 +35,8 @@ const observationPath = process.env.REINS_PACKED_FIXTURE_OBSERVATIONS;
 const activityPath = process.env.REINS_PACKED_FIXTURE_ACTIVITY;
 const capabilityModePath = process.env.REINS_PACKED_FIXTURE_CAPABILITY_MODE;
 const terminateGatePath = process.env.REINS_PACKED_FIXTURE_TERMINATE_GATE;
+const rejectPermissionPath =
+  process.env.REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE;
 const workerPath = fileURLToPath(
   new URL("./adapter-worker.ts", import.meta.url),
 );
@@ -52,7 +57,7 @@ function currentCapabilities(): HarnessCapability {
   return fixtureCapabilities;
 }
 
-const fixtureDriverFactory: AdapterDriverFactory = () => {
+const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
   const workers = new Map<SessionId, WorkerState>();
   const terminationAttempts = new Map<SessionId, number>();
 
@@ -100,12 +105,66 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
           message: error.message,
         });
       });
-      workers.set(spec.sessionId, { child, closed });
+      workers.set(spec.sessionId, { child, closed, turnId: spec.turnId });
       record({
         type: "worker_started",
         workerPid: child.pid,
         spec,
       });
+      if (
+        spec.message === "packed-permission" ||
+        spec.message === "packed-permission-feedback"
+      ) {
+        const denyOption =
+          spec.message === "packed-permission-feedback"
+            ? { outcome: "deny" as const, feedback: true }
+            : { outcome: "deny" as const, feedback: false };
+        emit({
+          type: "permission.requested",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          permissionId: "p-packed" as PermissionId,
+          kind: "file_access",
+          input: { path: spec.cwd },
+          options: [{ outcome: "allow", scope: "once" }, denyOption],
+        });
+      }
+      if (spec.message === "packed-harness-failure") {
+        const message = "Fixture reported a failed turn";
+        void diagnostics({
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          kind: "turn_failure",
+          operation: "run_turn",
+          reason: "worker_reported_failure",
+          message: {
+            text: message,
+            truncated: false,
+            originalBytes: Buffer.byteLength(message),
+          },
+        })
+          .then((diagnosticId) => {
+            emit({
+              type: "turn.completed",
+              sessionId: spec.sessionId,
+              turnId: spec.turnId,
+              finalReply: null,
+              stopReason: "failed",
+              failure: {
+                failureCategory: "rate_limited",
+                retryDisposition: "wait",
+              },
+              ...(diagnosticId === undefined ? {} : { diagnosticId }),
+            });
+          })
+          .catch((error: unknown) => {
+            record({
+              type: "harness_failure_diagnostic_rejected",
+              sessionId: spec.sessionId,
+              message: String(error),
+            });
+          });
+      }
     },
     async deliver(sessionId, turnId, message) {
       record({ type: "message_delivered", sessionId, turnId, message });
@@ -113,8 +172,28 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
     async interrupt(sessionId, turnId) {
       record({ type: "interrupt_requested", sessionId, turnId });
     },
-    resolvePermission(_sessionId, _permissionId, _resolution) {
-      throw new Error("Permissions are outside this fixture");
+    resolvePermission(sessionId, permissionId, resolution) {
+      record({
+        type: "permission_resolved",
+        sessionId,
+        permissionId,
+        resolution,
+      });
+      if (
+        process.env.REINS_PACKED_FIXTURE_REJECT_PERMISSION === "1" ||
+        (rejectPermissionPath !== undefined && existsSync(rejectPermissionPath))
+      )
+        throw new Error("Fixture rejected permission delivery");
+      const worker = workers.get(sessionId);
+      if (worker === undefined)
+        throw new Error("Fixture permission target has no worker");
+      emit({
+        type: "turn.completed",
+        sessionId,
+        turnId: worker.turnId,
+        finalReply: null,
+        stopReason: "end_turn",
+      });
     },
     async terminate(sessionId) {
       const worker = workers.get(sessionId);
