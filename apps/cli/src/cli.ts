@@ -2,6 +2,7 @@
 
 import { createRequire } from "node:module";
 
+import type { WriteCliOutput } from "@ykdz/cli-contract";
 import { nodeCliOutput } from "@ykdz/cli-contract/node";
 
 import { connectReins } from "./application.ts";
@@ -16,11 +17,32 @@ const version =
   typeof manifest.version === "string"
     ? manifest.version
     : "unpublished";
+const outputPort = nodeCliOutput({
+  stdout: process.stdout,
+  stderr: process.stderr,
+});
+let outputCancelled = false;
+let cancelPendingWrite: (() => void) | undefined;
+const write: WriteCliOutput = (output) => {
+  if (outputCancelled) return Promise.resolve();
+  const pendingWrite = outputPort(output);
+  const cancelledWrite = new Promise<void>((resolve) => {
+    cancelPendingWrite = resolve;
+  });
+  return Promise.race([pendingWrite, cancelledWrite]).finally(() => {
+    cancelPendingWrite = undefined;
+  });
+};
 
-process.exitCode = await main({
+const exitCode = await main({
   argv: process.argv,
   version,
-  write: nodeCliOutput({ stdout: process.stdout, stderr: process.stderr }),
+  write,
+  cancelOutput() {
+    if (cancelPendingWrite === undefined) return;
+    outputCancelled = true;
+    cancelPendingWrite?.();
+  },
   dependencies: {
     connect: () =>
       connectReins({
@@ -29,3 +51,5 @@ process.exitCode = await main({
       }),
   },
 });
+process.exitCode = exitCode;
+if (outputCancelled) process.exit(exitCode);

@@ -53,6 +53,10 @@ function record(observation: Record<string, unknown>): void {
   appendFileSync(observationPath, `${JSON.stringify(observation)}\n`, "utf8");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 // 回合结束事件保持正式 DomainEvent 形状：turnId 只来自 core 交下来的本次回合。
 function completedTurn(
   sessionId: SessionId,
@@ -74,17 +78,40 @@ const simulatedDriverFactory: AdapterDriverFactory = ({ emit }) => {
     turnId: TurnId,
     message: string,
   ): void {
-    let task: { gate?: string; messages?: number; reply?: string } = {};
+    let task: {
+      gate?: string;
+      completionGate?: string;
+      messages?: number;
+      reply?: string;
+      replacement?: { draft: string; corrected: string };
+    } = {};
     try {
       const parsed: unknown = JSON.parse(message);
-      if (typeof parsed === "object" && parsed !== null) {
-        const value = parsed as Record<string, unknown>;
+      if (isRecord(parsed)) {
+        const replacement = isRecord(parsed.replacement)
+          ? parsed.replacement
+          : undefined;
         task = {
-          ...(typeof value.gate === "string" ? { gate: value.gate } : {}),
-          ...(typeof value.messages === "number"
-            ? { messages: value.messages }
+          ...(typeof parsed.gate === "string" ? { gate: parsed.gate } : {}),
+          ...(typeof parsed.completionGate === "string"
+            ? { completionGate: parsed.completionGate }
             : {}),
-          ...(typeof value.reply === "string" ? { reply: value.reply } : {}),
+          ...(typeof parsed.messages === "number"
+            ? { messages: parsed.messages }
+            : {}),
+          ...(typeof parsed.reply === "string"
+            ? { reply: parsed.reply }
+            : {}),
+          ...(replacement !== undefined &&
+          typeof replacement.draft === "string" &&
+          typeof replacement.corrected === "string"
+            ? {
+                replacement: {
+                  draft: replacement.draft,
+                  corrected: replacement.corrected,
+                },
+              }
+            : {}),
         };
       }
     } catch {
@@ -99,6 +126,24 @@ const simulatedDriverFactory: AdapterDriverFactory = ({ emit }) => {
         ))
       )
         await new Promise<void>((resolve) => setTimeout(resolve, 10));
+      if (task.replacement !== undefined) {
+        const messageId = `replacement-${turnId}` as MessageId;
+        emit({
+          type: "text.delta",
+          sessionId,
+          turnId,
+          messageId,
+          delta: task.replacement.draft,
+        });
+        emit({
+          type: "message",
+          sessionId,
+          turnId,
+          messageId,
+          role: "worker",
+          content: task.replacement.corrected,
+        });
+      }
       for (let index = 0; index < (task.messages ?? 0); index += 1) {
         emit({
           type: "message",
@@ -109,6 +154,20 @@ const simulatedDriverFactory: AdapterDriverFactory = ({ emit }) => {
           content: `message ${index}`,
         });
       }
+      record({
+        type: "events_emitted",
+        sessionId,
+        turnId,
+        messages: task.messages ?? 0,
+      });
+      while (
+        task.completionGate !== undefined &&
+        !(await access(task.completionGate).then(
+          () => true,
+          () => false,
+        ))
+      )
+        await new Promise<void>((resolve) => setTimeout(resolve, 10));
       emit(completedTurn(sessionId, turnId, task.reply));
     })();
   }

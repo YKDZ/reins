@@ -293,6 +293,194 @@ test("public SDK facts keep their identity across none, available, and after, an
   expect(rendered.stdout).not.toContain("native-result-name");
 });
 
+test("text CLI marks a corrected message snapshot instead of appending it", async () => {
+  const f = await fixture(true);
+  const gate = join(f.root, "replacement-release");
+  const spawned = await f.spawnSession(
+    "replacement-message",
+    JSON.stringify({
+      gate,
+      reply: "corrected",
+      replacement: { draft: "draft", corrected: "corrected" },
+    }),
+  );
+  await writeFile(gate, "release");
+
+  const rendered = await f.cli([
+    "attach",
+    spawned.turnHandle,
+    "--scope",
+    "turn",
+    "--replay",
+    "available",
+    "--output-format",
+    "text",
+  ]);
+
+  expect(rendered.exitCode, rendered.stdout + rendered.stderr).toBe(0);
+  expect(rendered.stdout).toContain("worker: draft");
+  expect(rendered.stdout).toContain("[message updated] worker: corrected");
+  expect(rendered.stdout).not.toContain("draftcorrected");
+});
+
+test("SIGINT cancels a backpressured CLI observer without stopping its turn", async () => {
+  const f = await fixture(true);
+  const eventGate = join(f.root, "backpressure-events-release");
+  const completionGate = join(f.root, "backpressure-completion-release");
+  const messageCount = 5_000;
+  const spawned = await f.spawnSession(
+    "backpressure-observer",
+    JSON.stringify({
+      gate: eventGate,
+      completionGate,
+      messages: messageCount,
+      reply: "completed after observer cancellation",
+    }),
+  );
+  const observer = await f.sdk();
+  expect(await observer.list()).toContainEqual(
+    expect.objectContaining({
+      sessionHandle: spawned.sessionHandle,
+      state: "busy",
+    }),
+  );
+  const subscription = await observer.attach(
+    { scope: "turn", turnHandle: spawned.turnHandle },
+    { mode: "none" },
+  );
+  const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  let observedMessages = 0;
+  let resolveAllMessages!: () => void;
+  const allMessages = new Promise<void>((resolve) => {
+    resolveAllMessages = resolve;
+  });
+  const factStream = (async () => {
+    for await (const fact of subscription) {
+      facts.push(fact);
+      if (fact.type === "message" && fact.content.startsWith("message ")) {
+        observedMessages += 1;
+        if (observedMessages === messageCount) resolveAllMessages();
+      }
+    }
+    await subscription.done;
+  })();
+
+  const child: ChildProcess = spawn(
+    process.execPath,
+    [
+      cliBin,
+      "attach",
+      spawned.turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "none",
+    ],
+    { env: f.env, cwd: f.callerCwd, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let startupOutput = "";
+  let established = false;
+  const stderr: string[] = [];
+  let resolveEstablished!: () => void;
+  let rejectEstablished!: (error: Error) => void;
+  const establishedPromise = new Promise<void>((resolve, reject) => {
+    resolveEstablished = resolve;
+    rejectEstablished = reject;
+  });
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => resolve());
+  });
+  const exited = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  cleanup.push(async () => {
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill("SIGKILL");
+    child.stdout?.resume();
+    await closed;
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    if (established) return;
+    startupOutput += chunk;
+    for (const line of startupOutput.split("\n")) {
+      if (line === "") continue;
+      const frame = JSON.parse(line) as Record<string, unknown>;
+      if (frame.kind === "record" && frame.variant === "established") {
+        established = true;
+        child.stdout?.pause();
+        resolveEstablished();
+        return;
+      }
+    }
+  });
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => stderr.push(chunk));
+  child.once("error", rejectEstablished);
+  child.once("exit", (code, signal) => {
+    if (!established)
+      rejectEstablished(
+        new Error(
+          `Attach exited before establishment: code=${code} signal=${signal}`,
+        ),
+      );
+  });
+  let startupTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(
+    () => rejectEstablished(new Error("Attach did not establish")),
+    10_000,
+  );
+  try {
+    await establishedPromise;
+    clearTimeout(startupTimer);
+    startupTimer = undefined;
+    await writeFile(eventGate, "release");
+    await allMessages;
+    expect(child.stdout?.readableLength).toBeGreaterThan(0);
+    expect(child.exitCode).toBeNull();
+    expect(child.signalCode).toBeNull();
+    expect(child.kill("SIGINT")).toBe(true);
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const exit = await Promise.race([
+      exited,
+      new Promise<undefined>((resolve) => {
+        exitTimer = setTimeout(() => resolve(undefined), 5_000);
+      }),
+    ]);
+    if (exitTimer !== undefined) clearTimeout(exitTimer);
+    expect(exit, "CLI must exit while the parent leaves stdout unread").toEqual(
+      {
+        code: 0,
+        signal: null,
+      },
+    );
+    child.stdout?.resume();
+    await closed;
+    expect(stderr.join("")).toBe("");
+
+    expect(await observer.list()).toContainEqual(
+      expect.objectContaining({
+        sessionHandle: spawned.sessionHandle,
+        state: "busy",
+      }),
+    );
+    await writeFile(completionGate, "release");
+    await factStream;
+    expect(observedMessages).toBe(messageCount);
+    expect(await subscription.done).toMatchObject({ reason: "end_turn" });
+    expect(facts.at(-1)).toMatchObject({
+      type: "turn.completed",
+      stopReason: "end_turn",
+    });
+  } finally {
+    if (startupTimer !== undefined) clearTimeout(startupTimer);
+    subscription.close();
+    await factStream.catch(() => undefined);
+  }
+});
+
 test("SDK abort preserves AbortError and closes observation without stopping its session", async () => {
   const f = await fixture();
   const gate = join(f.root, "abort-observation-release");
