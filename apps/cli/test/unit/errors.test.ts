@@ -1,6 +1,5 @@
 import { Buffer } from "node:buffer";
 
-import { ReinsClientError } from "@reins/client/control";
 import { machineErrorSchema } from "@reins/protocol";
 import * as v from "valibot";
 import { expect, test } from "vitest";
@@ -36,18 +35,6 @@ test("a local stdout failure remains a typed output error", () => {
   });
   expect(v.safeParse(machineErrorSchema, error).success).toBe(false);
   expect(exitCodeForError(error)).toBe(EXIT_RESOURCE);
-});
-
-test("client failures retain typed facts without reading Error.message", () => {
-  const failure = {
-    code: "protocol_version_mismatch",
-    requestedProtocolMajorVersion: 1,
-    supportedProtocolMajorVersion: 2,
-  } as const;
-  const clientError = new ReinsClientError(failure);
-  clientError.message = "opaque client failure";
-
-  expect(toCliError(clientError)).toEqual(failure);
 });
 
 test("an output error with a non-string system code is rejected", () => {

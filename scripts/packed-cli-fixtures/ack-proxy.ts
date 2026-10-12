@@ -7,7 +7,12 @@ import {
 } from "node:net";
 
 export type AcknowledgementDrop = {
-  readonly method: "spawn" | "send" | "interrupt" | "kill";
+  readonly method:
+    | "spawn"
+    | "send"
+    | "interrupt"
+    | "kill"
+    | "resolvePermission";
   readonly requestId: string;
   readonly commandId: string;
   readonly result: unknown;

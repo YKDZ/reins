@@ -175,11 +175,30 @@ export type PermissionOption =
 export type PermissionResolution =
   | { outcome: "allow"; scope: "once" | "session" }
   | { outcome: "deny"; feedback?: string };
+export type DiagnosticSource = "daemon" | "core" | "adapter" | "harness";
+export type DiagnosticSeverity = "debug" | "info" | "warning" | "error";
+export type DiagnosticKind =
+  | "lifecycle"
+  | "mapping_gap"
+  | "compatibility_gap"
+  | "request_failure"
+  | "stream_failure"
+  | "turn_failure"
+  | "authorization_failure"
+  | "protocol_violation"
+  | "transport_failure"
+  | "storage_failure"
+  | "harness_stderr";
+export type DiagnosticTextEvidence = {
+  text: string;
+  truncated: boolean;
+  originalBytes: number;
+};
 export type DiagnosticsFilter = {
   harness?: string;
-  sources?: import("@reins/protocol").DiagnosticSource[];
-  kinds?: import("@reins/protocol").DiagnosticKind[];
-  minSeverity?: import("@reins/protocol").DiagnosticSeverity;
+  sources?: DiagnosticSource[];
+  kinds?: DiagnosticKind[];
+  minSeverity?: DiagnosticSeverity;
   since?: string;
   until?: string;
   limit?: number;
@@ -194,27 +213,22 @@ export type DiagnosticsQuery =
       sessionHandle?: SessionHandle;
       turnHandle: TurnHandle;
     });
-type ProtocolDiagnosticRecord = import("@reins/protocol").DiagnosticRecord;
-type PublicDiagnosticRecord<T extends ProtocolDiagnosticRecord> = Omit<
-  T,
-  "sessionId" | "turnId" | "diagnosticId"
-> & {
+export type DiagnosticRecord = {
+  v: 1;
   diagnosticId: DiagnosticId;
-} & ("sessionId" extends keyof T
-    ? undefined extends T["sessionId"]
-      ? { sessionHandle?: SessionHandle }
-      : { sessionHandle: SessionHandle }
-    : {}) &
-  ("turnId" extends keyof T
-    ? undefined extends T["turnId"]
-      ? { turnHandle?: TurnHandle }
-      : { turnHandle: TurnHandle }
-    : {});
-export type DiagnosticRecord = ProtocolDiagnosticRecord extends infer T
-  ? T extends ProtocolDiagnosticRecord
-    ? PublicDiagnosticRecord<T>
-    : never
-  : never;
+  recordedAt: string;
+  severity: DiagnosticSeverity;
+  source: DiagnosticSource;
+  harness?: string;
+  sessionHandle?: SessionHandle;
+  turnHandle?: TurnHandle;
+  kind: DiagnosticKind;
+  operation?: string;
+  stage?: string;
+  reason?: string;
+  message?: DiagnosticTextEvidence;
+  [field: string]: unknown;
+};
 export type DiagnosticsResult =
   | { record: DiagnosticRecord }
   | { records: DiagnosticRecord[]; truncated: boolean };

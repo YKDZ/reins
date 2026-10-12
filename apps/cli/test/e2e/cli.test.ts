@@ -636,7 +636,7 @@ describe("CLI 进程边界（缝 D）", () => {
       ]);
       expect(json.stdout.trim().split("\n")).toHaveLength(1);
 
-      const pretty = await runCli(
+      const textOutput = await runCli(
         [
           "--output-format",
           "text",
@@ -646,16 +646,14 @@ describe("CLI 进程边界（缝 D）", () => {
         ],
         env,
       );
-      expect(pretty.exitCode).toBe(0);
-      expect(pretty.stdout).toBe(
-        `${JSON.stringify(result.records, null, 2)}\ntruncated: false\n`,
-      );
+      expect(textOutput.exitCode).toBe(0);
+      expect(JSON.parse(textOutput.stdout)).toEqual(result);
       expect(
-        [json.stdout, json.stderr, pretty.stdout, pretty.stderr].map((text) =>
-          text.includes(secretSentinel),
+        [json.stdout, json.stderr, textOutput.stdout, textOutput.stderr].map(
+          (output) => output.includes(secretSentinel),
         ),
       ).toEqual([false, false, false, false]);
-      expect([json.stderr, pretty.stderr]).toEqual(["", ""]);
+      expect([json.stderr, textOutput.stderr]).toEqual(["", ""]);
     } finally {
       if (daemon.exitCode === null && daemon.signalCode === null) {
         await stopDaemon(daemon, socketPath);
@@ -1004,14 +1002,14 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(attached.stderr.join("")).toBe("");
   });
 
-  test("pretty permission prompts are resolved once in arrival order", async () => {
+  test("交互权限选择先返回可恢复意图，显式执行前不改变原生响应", async () => {
     const { dir, env } = await freshEnv();
-    const requestsFile = join(dir, "permission-queue.requests");
-    const queueEnv = { ...env, REINS_FIXTURE_REQUESTS_FILE: requestsFile };
-    const spawned = await spawnWithCli(queueEnv, {
+    const requestsFile = join(dir, "permission-choice.requests");
+    const permissionEnv = { ...env, REINS_FIXTURE_REQUESTS_FILE: requestsFile };
+    const spawned = await spawnWithCli(permissionEnv, {
       harness: "permission",
-      message: "queue",
-      name: "prompt-queue",
+      message: "do it",
+      name: "prompt-choice",
     });
     const sessionId = sessionIdFrom(spawned);
     const attached = startCli(
@@ -1025,25 +1023,55 @@ describe("CLI 进程边界（缝 D）", () => {
         "--replay",
         "available",
       ],
-      queueEnv,
+      permissionEnv,
       true,
     );
     try {
       await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
-      attached.child.stdin?.write("1\n");
-      await waitFor(
-        () =>
-          (attached.stdout.join("").match(/Choose \(1-2\):/gu)?.length ?? 0) ===
-          2,
-      );
       attached.child.stdin?.end("1\n");
       expect(await waitForExit(attached.child, 5_000)).toBe(0);
-      expect((await readFile(requestsFile, "utf8")).trim().split("\n")).toEqual(
-        ["p1", "p2"],
+      expect(attached.stderr.join("")).toBe("");
+      const prefix = "Permission response prepared (not executed): ";
+      const preparedLine = attached.stdout
+        .join("")
+        .split(/\r?\n/u)
+        .find((line) => line.startsWith(prefix));
+      if (preparedLine === undefined)
+        throw new Error("permission intent was not returned");
+      const prepared: unknown = JSON.parse(preparedLine.slice(prefix.length));
+      if (
+        prepared === null ||
+        typeof prepared !== "object" ||
+        !("permissionHandle" in prepared) ||
+        typeof prepared.permissionHandle !== "string" ||
+        !("credential" in prepared) ||
+        typeof prepared.credential !== "string"
+      )
+        throw new Error("permission intent was incomplete");
+      expect(prepared).toMatchObject({
+        resolution: { outcome: "allow", scope: "once" },
+      });
+      expect(await pathExists(requestsFile)).toBe(false);
+
+      const resolved = await runCli(
+        [
+          "resolve-permission",
+          prepared.permissionHandle,
+          "--outcome",
+          "allow",
+          "--scope",
+          "once",
+          "--operation",
+          prepared.credential,
+        ],
+        permissionEnv,
       );
-      expect(
-        attached.stdout.join("").match(/Permission requested:/gu),
-      ).toHaveLength(2);
+      expect(resolved.exitCode).toBe(0);
+      expect(dataFrom(resolved)).toMatchObject({
+        permissionHandle: prepared.permissionHandle,
+        status: "resolved",
+      });
+      expect(await readFile(requestsFile, "utf8")).toBe("p1\n");
     } finally {
       attached.child.stdin?.destroy();
       if (
@@ -1053,7 +1081,7 @@ describe("CLI 进程边界（缝 D）", () => {
         attached.child.kill("SIGKILL");
         await waitForExit(attached.child, 2_000);
       }
-      await killWithCli(queueEnv, sessionId);
+      await killWithCli(permissionEnv, sessionId);
     }
   });
 
@@ -1335,53 +1363,6 @@ describe("CLI 进程边界（缝 D）", () => {
     }
   });
 
-  test("attach pretty 权限交互并随决议结束", async () => {
-    const { env } = await freshEnv();
-    const spawned = await spawnWithCli(env, {
-      harness: "permission",
-      message: "do it",
-      name: "test-session",
-    });
-    expect(spawned.exitCode).toBe(0);
-    const sessionId = sessionIdFrom(spawned);
-    const attached = startCli(
-      [
-        "attach",
-        turnHandleFrom(spawned),
-        "--output-format",
-        "text",
-        "--scope",
-        "turn",
-        "--replay",
-        "available",
-      ],
-      env,
-      true,
-    );
-    try {
-      await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
-      attached.child.stdin?.end("1\n");
-      expect(
-        await waitForExit(attached.child),
-        `${attached.stdout.join("")}\n${attached.stderr.join("")}`,
-      ).toBe(0);
-      expect(attached.stdout.join("")).toContain("Permission requested");
-      expect(attached.stdout.join("")).toContain("[attach ended]");
-      expect(attached.stdout.join("")).toContain("[turn completed] end_turn");
-      expect(attached.stdout.join("")).not.toContain("resolved:allow");
-    } finally {
-      attached.child.stdin?.destroy();
-      if (
-        attached.child.exitCode === null &&
-        attached.child.signalCode === null
-      ) {
-        attached.child.kill("SIGKILL");
-        await waitForExit(attached.child, 2_000);
-      }
-      await killWithCli(env, sessionId);
-    }
-  });
-
   test("自动拉起 daemon，空闲后清理 socket", async () => {
     const { env, socketPath } = await freshEnv();
     expect(await pathExists(socketPath)).toBe(false);
@@ -1588,7 +1569,7 @@ describe("CLI 域错误（不夹带 usage）", () => {
     expect(result.exitCode).toBe(65);
     expect(result.stdout).toContain("Permission requested:");
     expect(result.stderr).toBe(
-      "error: Permission input closed before a choice was received\n",
+      "error: Permission input ended before the response was prepared\n",
     );
     expect(result.stderr).not.toContain("usage:");
     await killWithCli(env, sessionId);

@@ -1,9 +1,7 @@
 import type { InvalidParamIssue, MachineError } from "@reins/protocol";
-import type { TransportErrorCode } from "@reins/transport";
 import type { CommanderError } from "commander";
 
 import {
-  commandSpecs,
   flagDisplay,
   valueHint,
   type CommandSpec,
@@ -25,21 +23,6 @@ export type RenderedErrorItem = {
 export type RenderedError = {
   readonly items: readonly [RenderedErrorItem, ...RenderedErrorItem[]];
 };
-
-export function transportErrorMessage(code: TransportErrorCode): string {
-  switch (code) {
-    case "address_in_use":
-      return "Daemon socket address is already in use";
-    case "invalid_frame":
-      return "Daemon transport received an invalid frame";
-    case "transport_closed":
-      return "Daemon transport connection closed";
-    case "io_error":
-      return "Daemon transport I/O failed";
-    case "timeout":
-      return "Daemon transport operation timed out";
-  }
-}
 
 function renderedError(message: string, suggestion?: string): RenderedError {
   return { items: [renderedErrorItem(message, suggestion)] };
@@ -63,9 +46,6 @@ export function renderCliError(
   error: CliError,
   spec?: CommandSpec,
 ): RenderedError {
-  if ("transportCode" in error) {
-    return renderedError(transportErrorMessage(error.transportCode));
-  }
   if (isWorkspaceError(error)) {
     const message = error.code.replaceAll("_", " ");
     const description =
@@ -122,20 +102,6 @@ export function renderCliError(
     );
   }
   if (error.code === "usage_error") return renderUsageError(error, spec);
-  if (error.code === "command_outcome_unknown")
-    return renderedError(
-      "Command outcome is unknown (" + error.cause + ")",
-      "Recover explicitly with reins retry " +
-        error.retryToken +
-        " --params <original-params-json>",
-    );
-  if (error.code === "input_error") {
-    return renderedError(
-      error.reason === "permission_choice_eof"
-        ? "Permission input closed before a choice was received"
-        : "Permission input closed before feedback was received",
-    );
-  }
   if (error.code === "output_error") {
     return renderedError(
       `Unable to write CLI output${error.systemCode === undefined ? "" : ` (${error.systemCode})`}`,
@@ -200,8 +166,7 @@ export function commanderToUsageError(
       return usageError({
         issue: "unknown_command",
         ...(quoted === undefined ? {} : { value: quoted }),
-        valid:
-          spec?.children ?? commandSpecs.map((candidate) => candidate.name),
+        valid: spec?.children ?? [],
         ...(didYouMean === undefined ? {} : { didYouMean }),
       });
     case "commander.unknownOption":

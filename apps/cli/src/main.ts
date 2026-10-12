@@ -233,6 +233,21 @@ const permissionResolutionInputSchema = standardSchema(
   ["check"],
 );
 
+const preparedPermissionResolutionSchema = v.strictObject({
+  permissionHandle: v.string(),
+  credential: v.string(),
+  resolution: v.union([
+    v.strictObject({
+      outcome: v.literal("allow"),
+      scope: v.picklist(["once", "session"]),
+    }),
+    v.strictObject({
+      outcome: v.literal("deny"),
+      feedback: v.optional(v.string()),
+    }),
+  ]),
+});
+
 const diagnosticsInputSchema = standardSchema(
   v.pipe(
     v.strictObject({
@@ -1396,6 +1411,15 @@ function createCli(version: string) {
                   `[attach ended] ${(end as AgentSubscriptionEnd).reason}`,
                 ),
             },
+            permissionPrepared: {
+              description:
+                "The selected permission response and its recoverable operation credential, prepared but not executed.",
+              schema: standardSchema(preparedPermissionResolutionSchema),
+              text: (prepared) =>
+                text.line(
+                  `Permission response prepared (not executed): ${JSON.stringify(prepared)}`,
+                ),
+            },
           },
           text: () => text.silent,
         },
@@ -1409,14 +1433,15 @@ function createCli(version: string) {
             text: ({ failure }) => text.line(`Attach failed: ${failure.code}`),
           },
           permissionInputClosed: {
-            description: "Permission input ended before a selection was made.",
+            description:
+              "Permission input ended before the response was prepared.",
             exitCode: 65,
             schema: standardSchema(
               v.strictObject({ code: v.literal("permission_input_closed") }),
             ),
             text: () =>
               text.line(
-                "error: Permission input closed before a choice was received",
+                "error: Permission input ended before the response was prepared",
               ),
           },
           permissionChoiceInvalid: {
@@ -1450,6 +1475,7 @@ function createCli(version: string) {
           let subscription:
             | Awaited<ReturnType<ReinsConnection["attach"]>>
             | undefined;
+          let subscriptionEnded = false;
           let promptAbort: AbortController | undefined;
           let interrupt: (() => void) | undefined;
           let interrupted = false;
@@ -1457,8 +1483,14 @@ function createCli(version: string) {
             connection = await dependencies.connect();
             subscription = await connection.attach(target, replay);
             void subscription.done.then(
-              () => promptAbort?.abort(),
-              () => promptAbort?.abort(),
+              () => {
+                subscriptionEnded = true;
+                promptAbort?.abort();
+              },
+              () => {
+                subscriptionEnded = true;
+                promptAbort?.abort();
+              },
             );
             interrupt = () => {
               interrupted = true;
@@ -1479,55 +1511,59 @@ function createCli(version: string) {
                 for (const presentation of project(fact))
                   yield outcome.record.presentation({ presentation });
                 if (fact.type === "permission.requested") {
+                  if (interrupted) return outcome.streamSuccess();
+                  if (subscriptionEnded) continue;
                   if (fact.options.length === 0)
                     return outcome.failure.permissionChoiceInvalid({
                       code: "permission_choice_invalid",
                     });
                   const currentPromptAbort = new AbortController();
                   promptAbort = currentPromptAbort;
-                  let choice: string | undefined;
                   try {
-                    choice = await dependencies.readLine(
+                    const choice = await dependencies.readLine(
                       renderPermissionPrompt(fact),
                       currentPromptAbort.signal,
                     );
+                    if (currentPromptAbort.signal.aborted) break;
+                    if (choice === undefined)
+                      return outcome.failure.permissionInputClosed({
+                        code: "permission_input_closed",
+                      });
+                    const index = Number(choice.trim());
+                    if (
+                      !Number.isInteger(index) ||
+                      index < 1 ||
+                      index > fact.options.length
+                    )
+                      return outcome.failure.permissionChoiceInvalid({
+                        code: "permission_choice_invalid",
+                      });
+                    const option = fact.options[index - 1]!;
+                    const resolution = await choosePermissionResolution(
+                      dependencies,
+                      option,
+                      currentPromptAbort.signal,
+                    );
+                    if (currentPromptAbort.signal.aborted) break;
+                    if (resolution === undefined)
+                      return outcome.failure.permissionInputClosed({
+                        code: "permission_input_closed",
+                      });
+                    yield outcome.record.permissionPrepared({
+                      permissionHandle: fact.permissionHandle,
+                      credential:
+                        connection.prepareOperation("resolvePermission"),
+                      resolution,
+                    });
+                    return outcome.streamSuccess();
                   } catch (error) {
                     if (error instanceof Error && error.name === "AbortError")
                       break;
                     throw error;
                   } finally {
-                    promptAbort = undefined;
+                    if (promptAbort === currentPromptAbort)
+                      promptAbort = undefined;
                   }
-                  if (choice === undefined)
-                    return outcome.failure.permissionInputClosed({
-                      code: "permission_input_closed",
-                    });
-                  const index = Number(choice.trim());
-                  if (
-                    !Number.isInteger(index) ||
-                    index < 1 ||
-                    index > fact.options.length
-                  )
-                    return outcome.failure.permissionChoiceInvalid({
-                      code: "permission_choice_invalid",
-                    });
-                  const option = fact.options[index - 1]!;
-                  const resolution = await choosePermissionResolution(
-                    dependencies,
-                    option,
-                    currentPromptAbort.signal,
-                  );
-                  if (resolution === undefined)
-                    return outcome.failure.permissionInputClosed({
-                      code: "permission_input_closed",
-                    });
-                  const credential =
-                    connection.prepareOperation("resolvePermission");
-                  await connection.resolvePermission(
-                    fact.permissionHandle,
-                    resolution,
-                    credential,
-                  );
                 }
               }
             }

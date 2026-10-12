@@ -5,21 +5,16 @@ import { dirname } from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
-import { createReinsClient, type ReinsClient } from "@reins/client";
-import { ReinsClientError } from "@reins/client/control";
 import type {
   ConsumerContext,
   ErrorCause,
   MachineError,
-  ProtocolMessage,
 } from "@reins/protocol";
 import { consumerContextSchema, makeErrorCause } from "@reins/protocol";
 import {
-  createUnixSocketClient,
   isTransportError,
   isTransportErrorCode,
   resolveReinsSocketPath,
-  type TransportConnection,
   type TransportErrorCode,
 } from "@reins/transport";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
@@ -249,29 +244,6 @@ export async function connectWithStartup<T>(
   throw { code: "daemon_start_failed", cause } satisfies MachineError;
 }
 
-// 未迁入 SDK 的旧动作暂复用同一启动/就绪实现。
-export function connectReinsClient(
-  options: ConnectReinsOptions,
-): Promise<ReinsClient> {
-  return connectWithStartup(
-    options,
-    async (socketPath, consumerContext, timeoutMs) => {
-      const transport =
-        await createUnixSocketClient<ProtocolMessage>(socketPath);
-      const initialized = await initializeClient(
-        transport,
-        consumerContext,
-        Date.now() + timeoutMs,
-      );
-      if (initialized.error !== undefined) {
-        initialized.client.close();
-        throw initialized.error;
-      }
-      return initialized.client;
-    },
-  );
-}
-
 async function tryConnect<T>(
   connect: ConnectionFactory<T>,
   socketPath: string,
@@ -298,43 +270,7 @@ function isConnectionUnavailable(error: unknown): boolean {
     return (
       error.stage === "connect" && error.failure.code === "daemon_disconnected"
     );
-  if (typeof error !== "object" || error === null || !("failure" in error))
-    return false;
-  const failure = error.failure;
-  return (
-    typeof failure === "object" &&
-    failure !== null &&
-    "code" in failure &&
-    failure.code === "daemon_disconnected"
-  );
-}
-
-async function initializeClient(
-  connection: TransportConnection<ProtocolMessage>,
-  consumerContext: ConsumerContext,
-  deadline: number,
-): Promise<{ client: ReinsClient; error?: MachineError }> {
-  const client = createReinsClient(connection, { consumerContext });
-  let closedError: MachineError | undefined;
-  const unsubscribe = client.onClosed((reason) => {
-    closedError = reason;
-  });
-  try {
-    const response = await client.initialize(
-      Math.max(1, deadline - Date.now()),
-    );
-    return "error" in response ? { client, error: response.error } : { client };
-  } catch (error) {
-    return { client, error: closedError ?? machineErrorFromRejection(error) };
-  } finally {
-    unsubscribe();
-  }
-}
-
-function machineErrorFromRejection(error: unknown): MachineError {
-  if (error instanceof ReinsClientError && !("retryToken" in error.failure))
-    return error.failure;
-  return { code: "daemon_disconnected" };
+  return false;
 }
 
 async function drainStartupReport(

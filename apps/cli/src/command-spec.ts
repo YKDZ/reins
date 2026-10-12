@@ -1,25 +1,4 @@
-import {
-  DIAGNOSTIC_KINDS,
-  DIAGNOSTIC_SEVERITIES,
-  DIAGNOSTIC_SOURCES,
-  diagnosticIdSchema,
-  permissionIdSchema,
-  permissionHandleSchema,
-  decodePermissionHandle,
-  type PermissionTarget,
-  sessionIdSchema,
-  turnIdSchema,
-  turnHandleSchema,
-  decodeTurnHandle,
-  utcMillisecondTimestampSchema,
-  type DiagnosticId,
-  type PermissionId,
-  type SessionId,
-  type TurnId,
-  type TurnTarget,
-} from "@reins/protocol";
 import { PUBLISHER_CAPABILITIES } from "@reins/workspace-protocol";
-import * as v from "valibot";
 
 import {
   usageError,
@@ -27,27 +6,11 @@ import {
   type UsageError,
   type UsageIssue,
 } from "./errors.ts";
-import type { OutputMode } from "./output.ts";
 
 export type ValueKind =
   | { readonly type: "text" }
-  | { readonly type: "sessionId"; readonly hint: string }
-  | { readonly type: "turnId"; readonly hint: string }
-  | { readonly type: "turnHandle"; readonly hint: string }
-  | { readonly type: "permissionId"; readonly hint: string }
-  | { readonly type: "permissionHandle"; readonly hint: string }
-  | { readonly type: "diagnosticId"; readonly hint: string }
-  | { readonly type: "time"; readonly hint: string }
   | { readonly type: "boolean" }
-  | { readonly type: "enum"; readonly values: readonly string[] }
-  | {
-      readonly type: "number";
-      readonly integer?: boolean;
-      readonly min?: number;
-      readonly max?: number;
-      readonly hint: string;
-    }
-  | { readonly type: "jsonObject"; readonly hint: string };
+  | { readonly type: "enum"; readonly values: readonly string[] };
 
 export type CommandArg = {
   readonly name: string;
@@ -73,212 +36,13 @@ export type CommandSpec = {
   readonly options: readonly CommandOption[];
   readonly usage?: string;
   readonly children?: readonly string[];
-  readonly constraints?: readonly CommandConstraint[];
 };
-
-export type CommandConstraint =
-  | {
-      readonly type: "exclusive";
-      readonly field: string;
-      readonly with: readonly string[];
-      readonly hint: string;
-    }
-  | {
-      readonly type: "requires";
-      readonly field: string;
-      readonly required: string;
-      readonly hint: string;
-    }
-  | {
-      readonly type: "orderedTime";
-      readonly since: string;
-      readonly until: string;
-      readonly hint: string;
-    };
 
 export const ROOT_USAGE = "[options] <command>";
 
 export function defineCommand<const S extends CommandSpec>(spec: S): S {
   return spec;
 }
-
-const commandSpecData = [
-  defineCommand({
-    name: "diagnostics",
-    description: "Query a finite snapshot of stored diagnostics",
-    args: [],
-    constraints: [
-      {
-        type: "exclusive",
-        field: "id",
-        with: [
-          "session",
-          "turn",
-          "harness",
-          "source",
-          "kind",
-          "minSeverity",
-          "since",
-          "until",
-          "limit",
-        ],
-        hint: "Use --id alone, or use filters without --id",
-      },
-      {
-        type: "requires",
-        field: "turn",
-        required: "session",
-        hint: "--turn requires --session",
-      },
-      {
-        type: "orderedTime",
-        since: "since",
-        until: "until",
-        hint: "--since must be earlier than or equal to --until",
-      },
-    ],
-    options: [
-      {
-        name: "id",
-        flags: "--id <diagnostic-id>",
-        description: "exact diagnostic id with checksum",
-        kind: {
-          type: "diagnosticId",
-          hint: "Expected a DiagnosticId with a valid checksum",
-        },
-      },
-      {
-        name: "session",
-        flags: "--session <session-id>",
-        description: "filter by session",
-        kind: { type: "sessionId", hint: "Expected a valid SessionId" },
-      },
-      {
-        name: "turn",
-        flags: "--turn <turn-id>",
-        description: "filter by turn (requires --session)",
-        kind: { type: "turnId", hint: "Expected a valid TurnId" },
-      },
-      {
-        name: "harness",
-        flags: "--harness <id>",
-        description: "filter by harness",
-        kind: { type: "text" },
-      },
-      {
-        name: "source",
-        flags: "--source <sources...>",
-        variadic: true,
-        description: "source filter; repeated values are OR",
-        kind: { type: "enum", values: DIAGNOSTIC_SOURCES },
-      },
-      {
-        name: "kind",
-        flags: "--kind <kinds...>",
-        variadic: true,
-        description: "kind filter; repeated values are OR",
-        kind: { type: "enum", values: DIAGNOSTIC_KINDS },
-      },
-      {
-        name: "minSeverity",
-        flags: "--min-severity <severity>",
-        description: "minimum severity",
-        kind: { type: "enum", values: DIAGNOSTIC_SEVERITIES },
-      },
-      {
-        name: "since",
-        flags: "--since <timestamp>",
-        description: "inclusive UTC timestamp",
-        kind: { type: "time", hint: "Expected an ISO 8601 UTC timestamp" },
-      },
-      {
-        name: "until",
-        flags: "--until <timestamp>",
-        description: "inclusive UTC timestamp",
-        kind: { type: "time", hint: "Expected an ISO 8601 UTC timestamp" },
-      },
-      {
-        name: "limit",
-        flags: "--limit <n>",
-        description: "latest matching records (default: 100; 1..1000)",
-        kind: {
-          type: "number",
-          integer: true,
-          min: 1,
-          max: 1000,
-          hint: "Expected an integer from 1 to 1000",
-        },
-      },
-    ],
-  }),
-  defineCommand({
-    name: "resolve-permission",
-    description:
-      "Resolve a pending permission using its complete PermissionHandle",
-    args: [
-      {
-        name: "permissionHandle",
-        description: "complete PermissionHandle",
-        kind: {
-          type: "permissionHandle",
-          hint: "Expected a valid PermissionHandle",
-        },
-      },
-    ],
-    options: [
-      {
-        name: "outcome",
-        flags: "--outcome <allow|deny>",
-        required: true,
-        description: "resolution outcome",
-        kind: { type: "enum", values: ["allow", "deny"] },
-      },
-      {
-        name: "scope",
-        flags: "--scope <once|session>",
-        description: "allow scope (default: once)",
-        kind: { type: "enum", values: ["once", "session"] },
-      },
-      {
-        name: "feedback",
-        flags: "--feedback <text>",
-        description: "deny feedback visible to the worker",
-        kind: { type: "text" },
-      },
-    ],
-  }),
-  defineCommand({
-    name: "retry",
-    description:
-      "Explicitly recover an uncertain command using its RetryToken and unchanged original parameters",
-    args: [
-      {
-        name: "token",
-        description: "RetryToken from command_outcome_unknown",
-        kind: { type: "text" },
-      },
-    ],
-    options: [
-      {
-        name: "params",
-        flags: "--params <json>",
-        required: true,
-        description:
-          "original caller parameters as JSON; the token retains the original directory facts",
-        kind: {
-          type: "jsonObject",
-          hint: "Supply the original parameters without changing their meaning",
-        },
-      },
-    ],
-  }),
-] as const satisfies readonly CommandSpec[];
-
-export type CommandName = (typeof commandSpecData)[number]["name"];
-
-export const commandSpecs: readonly (CommandSpec & {
-  readonly name: CommandName;
-})[] = commandSpecData;
 
 const text = { type: "text" } as const;
 const nativeCwd = {
@@ -504,17 +268,6 @@ export const publisherCommandSpecs: readonly CommandSpec[] =
     }),
   );
 
-export const workspaceGroupSpec: CommandSpec = {
-  name: "workspace",
-  description: "Workspace operations",
-  args: [],
-  options: [],
-  usage: "[options] <command>",
-  children: workspaceCommandSpecs.map((spec) =>
-    spec.name.slice("workspace ".length),
-  ),
-};
-
 export const publisherGroupSpec: CommandSpec = {
   name: "",
   description: "Publisher operations",
@@ -524,115 +277,15 @@ export const publisherGroupSpec: CommandSpec = {
   children: publisherCommandSpecs.map((spec) => spec.name),
 };
 
-type CommandSpecData = (typeof commandSpecData)[number];
-
-type ParsedValue<K extends ValueKind> = K extends { readonly type: "text" }
-  ? string
-  : K extends { readonly type: "sessionId" }
-    ? SessionId
-    : K extends { readonly type: "turnHandle" }
-      ? TurnTarget
-      : K extends { readonly type: "turnId" }
-        ? TurnId
-        : K extends { readonly type: "permissionHandle" }
-          ? PermissionTarget
-          : K extends { readonly type: "permissionId" }
-            ? PermissionId
-            : K extends { readonly type: "diagnosticId" }
-              ? DiagnosticId
-              : K extends { readonly type: "time" }
-                ? string
-                : K extends { readonly type: "boolean" }
-                  ? boolean
-                  : K extends {
-                        readonly type: "enum";
-                        readonly values: readonly (infer E extends string)[];
-                      }
-                    ? E
-                    : K extends { readonly type: "number" }
-                      ? number
-                      : K extends { readonly type: "jsonObject" }
-                        ? Record<string, unknown>
-                        : never;
-
-type FieldValue<F extends CommandArg | CommandOption> = F extends {
-  readonly variadic: true;
-}
-  ? readonly ParsedValue<F["kind"]>[]
-  : ParsedValue<F["kind"]>;
-
-type ParsedArgs<A extends readonly CommandArg[]> = {
-  readonly [I in keyof A]: A[I] extends CommandArg ? FieldValue<A[I]> : never;
-};
-
-type RequiredOption<O extends CommandOption> = O extends
-  | { readonly required: true }
-  | { readonly defaultValue: string }
-  ? O
-  : never;
-
-type OptionalOption<O extends CommandOption> = O extends
-  | { readonly required: true }
-  | { readonly defaultValue: string }
-  ? never
-  : O;
-
-type ParsedOptions<O extends readonly CommandOption[]> = {
-  readonly [P in O[number] as RequiredOption<P>["name"]]: FieldValue<P>;
-} & {
-  readonly [P in O[number] as OptionalOption<P>["name"]]?: FieldValue<P>;
-};
-
-type InvocationFor<S extends CommandSpecData> = {
-  readonly command: S["name"];
-  readonly contextCwd?: string;
-  readonly args: ParsedArgs<S["args"]>;
-  readonly options: ParsedOptions<S["options"]>;
-  readonly mode: OutputMode;
-};
-
-export type CommandInvocationFor<N extends CommandName> = N extends CommandName
-  ? InvocationFor<Extract<CommandSpecData, { readonly name: N }>>
-  : never;
-
-export type CommandInvocation = {
-  readonly [N in CommandName]: CommandInvocationFor<N>;
-}[CommandName];
-
-export function commandSpecForName(name: string): CommandSpec | undefined {
-  return (
-    commandSpecs.find((spec) => spec.name === name) ??
-    workspaceCommandSpecs.find((spec) => spec.name === name) ??
-    publisherCommandSpecs.find((spec) => spec.name === name)
-  );
-}
-
-export function commandSpecForToken(
+export function publisherCommandSpecForToken(
   argv: readonly string[],
-  commandSet: "root" | "publisher" = "root",
 ): CommandSpec | undefined {
-  const commandIndex = commandTokenIndex(argv, commandSet === "root");
+  const commandIndex = commandTokenIndex(argv);
   if (commandIndex === -1) return undefined;
   const commandToken = argv[commandIndex];
-  if (commandSet === "publisher") {
-    return publisherCommandSpecs.find((spec) => spec.name === commandToken);
-  }
-  if (commandToken === "workspace") {
-    const child = argv
-      .slice(commandIndex + 1)
-      .find((token) => !token.startsWith("-"));
-    return (
-      workspaceCommandSpecs.find(
-        (spec) => spec.name === `workspace ${child}`,
-      ) ?? workspaceGroupSpec
-    );
-  }
   return commandToken === undefined
     ? undefined
-    : (commandSpecs.find((candidate) => candidate.name === commandToken) ??
-        publisherCommandSpecs.find(
-          (candidate) => candidate.name === commandToken,
-        ));
+    : publisherCommandSpecs.find((spec) => spec.name === commandToken);
 }
 
 export function flagDisplay(flags: string): string {
@@ -680,60 +333,6 @@ export function validateCommand(
       option.variadic === true,
     );
   }
-  for (const constraint of spec.constraints ?? []) {
-    switch (constraint.type) {
-      case "exclusive":
-        if (
-          options[constraint.field] !== undefined &&
-          constraint.with.some((field) => options[field] !== undefined)
-        )
-          throw usageError({
-            issue: "invalid_combination",
-            field: flagFor(spec, constraint.field),
-            hint: constraint.hint,
-          });
-        break;
-      case "requires":
-        if (
-          options[constraint.field] !== undefined &&
-          options[constraint.required] === undefined
-        )
-          throw usageError({
-            issue: "invalid_combination",
-            field: flagFor(spec, constraint.field),
-            hint: constraint.hint,
-          });
-        break;
-      case "orderedTime":
-        if (
-          options[constraint.since] !== undefined &&
-          options[constraint.until] !== undefined &&
-          String(options[constraint.since]) > String(options[constraint.until])
-        )
-          throw usageError({
-            issue: "invalid_combination",
-            field: `${flagFor(spec, constraint.since)}, ${flagFor(spec, constraint.until)}`,
-            hint: constraint.hint,
-          });
-        break;
-      default:
-        assertNever(constraint);
-    }
-  }
-}
-
-export function parseCommandInvocation(
-  name: CommandName,
-  args: readonly unknown[],
-  options: Record<string, unknown>,
-  mode: OutputMode,
-): CommandInvocation {
-  const spec = commandSpecForName(name);
-  if (spec === undefined) throw new Error(`Missing command spec: ${name}`);
-  const parsed = parseDeclaredInput(spec, args, options);
-  // 上述 arity、required/default、值类型与约束均已由同一 spec 证明；
-  // 只收窄动态容器，最终 invocation 对象由泛型构造器保持字段关联。
-  return invocationFromParsed(name, parsed.args, parsed.options, mode);
 }
 
 export function parseDeclaredInput(
@@ -769,46 +368,6 @@ export function parseDeclaredInput(
     );
   }
   return { args: parsedArgs, options: parsedOptions };
-}
-
-function invocationFromParsed(
-  name: CommandName,
-  args: readonly unknown[],
-  options: Record<string, unknown>,
-  mode: OutputMode,
-): CommandInvocation {
-  const typedArgs = <
-    N extends CommandName,
-  >(): CommandInvocationFor<N>["args"] =>
-    args as unknown as CommandInvocationFor<N>["args"];
-  const typedOptions = <
-    N extends CommandName,
-  >(): CommandInvocationFor<N>["options"] => options;
-  switch (name) {
-    case "retry":
-      return {
-        command: "retry",
-        args: typedArgs<"retry">(),
-        options: typedOptions<"retry">(),
-        mode,
-      };
-    case "diagnostics":
-      return {
-        command: "diagnostics",
-        args: typedArgs<"diagnostics">(),
-        options: typedOptions<"diagnostics">(),
-        mode,
-      };
-    case "resolve-permission":
-      return {
-        command: "resolve-permission",
-        args: typedArgs<"resolve-permission">(),
-        options: typedOptions<"resolve-permission">(),
-        mode,
-      };
-    default:
-      return assertNever(name);
-  }
 }
 
 function validateInvocationShape(
@@ -891,26 +450,12 @@ function missingIssue(
   };
 }
 
-function flagFor(spec: CommandSpec, name: string): string {
-  return flagDisplay(
-    spec.options.find((option) => option.name === name)?.flags ?? `--${name}`,
-  );
-}
-
-function commandTokenIndex(
-  argv: readonly string[],
-  rootOptions: boolean,
-): number {
+function commandTokenIndex(argv: readonly string[]): number {
   for (let index = 0; index < argv.length; index += 1) {
     const token = argv[index]!;
     if (token === "--") return index + 1;
     if (token === "--pretty" || token === "--version" || token === "-V")
       continue;
-    if (rootOptions && token === "-C") {
-      index += 1;
-      continue;
-    }
-    if (rootOptions && token.startsWith("-C") && token.length > 2) continue;
     if (token.startsWith("-")) return -1;
     return index;
   }
@@ -962,134 +507,6 @@ function validateValue(
       }
       return;
     }
-    case "number": {
-      const numeric = Number(value);
-      if (
-        !Number.isFinite(numeric) ||
-        (kind.integer === true && !Number.isInteger(numeric)) ||
-        (kind.min !== undefined && numeric < kind.min) ||
-        (kind.max !== undefined && numeric > kind.max)
-      ) {
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      }
-      return;
-    }
-    case "jsonObject": {
-      if (typeof value !== "string") return;
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(value) as unknown;
-      } catch {
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value,
-          hint: kind.hint,
-        });
-      }
-      if (
-        typeof parsed !== "object" ||
-        parsed === null ||
-        Array.isArray(parsed)
-      ) {
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value,
-          hint: kind.hint,
-        });
-      }
-      return;
-    }
-    case "sessionId":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(sessionIdSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
-    case "permissionHandle":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(permissionHandleSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
-    case "permissionId":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(permissionIdSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
-    case "turnHandle":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(turnHandleSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
-    case "turnId":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(turnIdSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
-    case "diagnosticId":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(diagnosticIdSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
-    case "time":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(utcMillisecondTimestampSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
     default:
       return assertNever(kind);
   }
@@ -1110,27 +527,7 @@ function parseFieldValue(
     case "text":
     case "boolean":
     case "enum":
-    case "time":
       return value;
-    case "number":
-      return Number(value);
-    case "jsonObject": {
-      if (typeof value !== "string") return value;
-      const parsed: unknown = JSON.parse(value);
-      return parsed;
-    }
-    case "sessionId":
-      return v.parse(sessionIdSchema, value);
-    case "turnHandle":
-      return decodeTurnHandle(String(value));
-    case "turnId":
-      return v.parse(turnIdSchema, value);
-    case "permissionHandle":
-      return decodePermissionHandle(String(value));
-    case "permissionId":
-      return v.parse(permissionIdSchema, value);
-    case "diagnosticId":
-      return v.parse(diagnosticIdSchema, value);
     default:
       return assertNever(kind);
   }
@@ -1143,16 +540,6 @@ export function valueHint(kind: ValueKind): string | undefined {
       return undefined;
     case "enum":
       return `Allowed: ${kind.values.join(", ")}`;
-    case "sessionId":
-    case "turnId":
-    case "turnHandle":
-    case "permissionId":
-    case "permissionHandle":
-    case "diagnosticId":
-    case "time":
-    case "number":
-    case "jsonObject":
-      return kind.hint;
     default:
       return assertNever(kind);
   }
