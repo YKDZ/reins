@@ -87,9 +87,8 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
       workers.set(spec.sessionId, { child, closed });
       record({
         type: "worker_started",
-        sessionId: spec.sessionId,
         workerPid: child.pid,
-        turnId: spec.turnId,
+        spec,
       });
     },
     async deliver(_sessionId, _turnId, _message) {
