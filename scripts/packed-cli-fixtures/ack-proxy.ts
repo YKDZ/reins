@@ -28,7 +28,7 @@ export type UnixAcknowledgementProxyOptions = {
   readonly socketPath: string;
   readonly targetPath: string;
   readonly method: AcknowledgementDrop["method"];
-  readonly commandId: string;
+  readonly commandId?: string;
 };
 
 export async function startUnixAcknowledgementProxy(
@@ -78,12 +78,14 @@ export async function startUnixAcknowledgementProxy(
             "requestId" in request &&
             typeof request.requestId === "string" &&
             "commandId" in request &&
-            request.commandId === options.commandId
+            typeof request.commandId === "string" &&
+            (options.commandId === undefined ||
+              request.commandId === options.commandId)
           ) {
             targetRequests.set(request.requestId, {
               method: options.method,
               requestId: request.requestId,
-              commandId: options.commandId,
+              commandId: request.commandId,
             });
           }
           upstream.write(`${line}\n`);
