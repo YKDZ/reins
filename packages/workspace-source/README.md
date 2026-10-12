@@ -24,7 +24,7 @@ const material = await captureSelectedWorkingFiles(repositoryPath, commit, [
 
 路径必须从同一 Git 根开始，明确选择一个文件，不能选择目录或重复路径。`index` 读取该路径的暂存版本，`worktree` 读取当前工作文件字节；未跟踪、忽略文件也只按清单纳入。选中已删除的受跟踪路径会在目标删除该路径。目标 index 保持固定提交状态，不重建原暂存分层；调用侧不写入 HEAD、index、文件或新提交。相同清单的后续交接仍创建新树。
 
-Reins 的 `workspace handoff` 仅接受显式 `--index-file <paths...>` 或 `--worktree-file <paths...>` 选择；未选择文件时返回 `source_invalid`，不请求 Manager 创建工作区。固定提交交接应使用 Tack 的 application 或 CLI 入口。
+`captureSelectedWorkingFiles` 与对应的 Manager 内部处理仅作为票 16 迁移所需实现保留，不代表当前可用的 Reins CLI 入口。固定提交交接由 Tack 的 application 或 CLI 入口承担。
 
 选定文件支持原始二进制字节、普通 `0644`／可执行 `0755` 文件及 UTF-8 符号链接；其他权限、硬链接、特殊文件、符号链接父目录和不支持的 Git index 条目整体拒绝。清单最多 1024 项，固定 pack 与选定文件字节总和最多 32 MiB。捕获重复读取选定字节并核对文件身份、元数据及 HEAD/index；检测到变化即整体拒绝。进行中的合并、rebase、cherry-pick、revert、bisect、sequencer、index 锁及 unmerged index 同样整体拒绝。目标先校验完整固定提交及所有选定材料，再覆盖并核对字节与必要属性，失败删除整棵新输入树。
 
