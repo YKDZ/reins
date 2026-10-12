@@ -6,7 +6,6 @@ import {
   type ReinsClient,
 } from "@reins/client";
 import type {
-  AttachParams,
   DiagnosticsParams,
   PermissionResolution,
   ProtocolMethod,
@@ -22,7 +21,6 @@ import {
 import * as v from "valibot";
 
 import { connectReinsClient } from "./application-runtime.ts";
-import { runAttach } from "./attach.ts";
 import type {
   CommandInvocation,
   CommandInvocationFor,
@@ -160,54 +158,6 @@ async function runInterrupt(
   });
 }
 
-async function runAttachCommand(
-  ctx: CommandInvocationFor<"attach">,
-): Promise<void> {
-  const [target] = ctx.args;
-  if (ctx.options.replay === "after" && ctx.options.cursor === undefined)
-    throw usageError({
-      issue: "missing_argument",
-      target: "option",
-      field: "--cursor",
-      hint: "after requires a complete ResumeCursor from interrupted attach",
-    });
-  if (ctx.options.replay !== "after" && ctx.options.cursor !== undefined)
-    throw usageError({
-      issue: "invalid_combination",
-      field: "--cursor",
-      hint: "--cursor is only accepted with --replay after",
-    });
-  const replay: AttachParams["replay"] =
-    ctx.options.replay === "after"
-      ? { mode: "after", cursor: ctx.options.cursor! }
-      : { mode: ctx.options.replay };
-  let params: AttachParams;
-  try {
-    params =
-      ctx.options.scope === "turn"
-        ? {
-            scope: "turn",
-            ...decodeTurnHandle(target),
-            replay,
-          }
-        : {
-            scope: "session",
-            sessionId: v.parse(sessionIdSchema, target),
-            replay,
-          };
-  } catch {
-    throw usageError({
-      issue: "invalid_value",
-      field: "target",
-      value: target,
-      hint: "Expected a complete handle for the selected scope",
-    });
-  }
-  await withClient(ctx, async (client) => {
-    await runAttach(client, { params, mode: ctx.mode });
-  });
-}
-
 async function runDiagnostics(
   ctx: CommandInvocationFor<"diagnostics">,
 ): Promise<void> {
@@ -322,7 +272,6 @@ export const handlers = {
   send: runSend,
   wait: runWait,
   interrupt: runInterrupt,
-  attach: runAttachCommand,
   diagnostics: runDiagnostics,
   "resolve-permission": runResolvePermission,
 } satisfies HandlerMap;
@@ -339,8 +288,6 @@ export async function dispatchInvocation(
       return handlers.wait(invocation);
     case "interrupt":
       return handlers.interrupt(invocation);
-    case "attach":
-      return handlers.attach(invocation);
     case "diagnostics":
       return handlers.diagnostics(invocation);
     case "resolve-permission":

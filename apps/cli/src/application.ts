@@ -61,16 +61,22 @@ function startupSdkFailure(error: unknown): ReinsSdkError | undefined {
   const parsed = v.safeParse(machineErrorSchema, error);
   if (!parsed.success) return undefined;
   const machineError = parsed.output;
-  const failure: ReinsFailure = (() => {
+  const failure = ((): ReinsFailure => {
     switch (machineError.code) {
       case "consumer_context_required":
+        return { code: "consumer_context_required", facts: {} };
       case "protocol_error":
+        return { code: "protocol_error", facts: {} };
       case "daemon_timeout":
+        return { code: "daemon_timeout", facts: {} };
       case "invalid_daemon_response":
+        return { code: "invalid_daemon_response", facts: {} };
       case "daemon_disconnected":
+        return { code: "daemon_disconnected", facts: {} };
       case "daemon_shutting_down":
+        return { code: "daemon_shutting_down", facts: {} };
       case "workspace_detaching":
-        return { code: machineError.code, facts: {} };
+        return { code: "workspace_detaching", facts: {} };
       case "protocol_version_mismatch":
         return {
           code: machineError.code,

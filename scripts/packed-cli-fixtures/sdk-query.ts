@@ -47,6 +47,8 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.sessionName;
     case "unsupported_feature":
       return failure.facts.feature;
+    case "event_cursor_expired":
+      return `${failure.facts.oldest ?? "empty"}:${failure.facts.head ?? "empty"}`;
     case "method_not_found":
       return failure.facts.method;
     case "command_id_conflict":

@@ -1,5 +1,9 @@
 declare const sessionHandleBrand: unique symbol;
 declare const turnHandleBrand: unique symbol;
+declare const agentFactIdBrand: unique symbol;
+declare const messageKeyBrand: unique symbol;
+declare const toolKeyBrand: unique symbol;
+declare const resumeCursorBrand: unique symbol;
 declare const operationCredentialBrand: unique symbol;
 
 export type SessionHandle = string & {
@@ -7,6 +11,14 @@ export type SessionHandle = string & {
 };
 export type TurnHandle = string & {
   readonly [turnHandleBrand]: "TurnHandle";
+};
+export type AgentFactId = string & {
+  readonly [agentFactIdBrand]: "AgentFactId";
+};
+export type MessageKey = string & { readonly [messageKeyBrand]: "MessageKey" };
+export type ToolKey = string & { readonly [toolKeyBrand]: "ToolKey" };
+export type ResumeCursor = string & {
+  readonly [resumeCursorBrand]: "ResumeCursor";
 };
 export type OperationKind = "spawn" | "kill";
 export type OperationCredential<Kind extends OperationKind> = string & {
@@ -73,6 +85,123 @@ export type CapabilityFailure = HarnessFailure & {
 export type CapabilitiesResult = {
   capabilities: HarnessCapability[];
   failures: CapabilityFailure[];
+};
+
+export type AgentTarget =
+  | { scope: "session"; sessionHandle: SessionHandle }
+  | { scope: "turn"; turnHandle: TurnHandle };
+export type ReplayPolicy =
+  | { mode: "none" }
+  | { mode: "available" }
+  | { mode: "after"; cursor: ResumeCursor };
+export type AgentSubscriptionEstablishment = {
+  target: AgentTarget;
+  window: { oldest: number | null; head: number | null; truncated: boolean };
+  replayed: number;
+};
+export type AgentSubscriptionEnd = {
+  target: AgentTarget;
+  reason:
+    | "end_turn"
+    | "cancelled"
+    | "failed"
+    | "killed"
+    | "session_killed"
+    | "closed";
+};
+type FactBase = {
+  factId: AgentFactId;
+  sessionHandle: SessionHandle;
+};
+type TurnFactBase = FactBase & { turnHandle: TurnHandle };
+export type PermissionOption =
+  | { outcome: "allow"; scope: "once" | "session" }
+  | { outcome: "deny"; feedback: boolean };
+export type PermissionResolution =
+  | { outcome: "allow"; scope: "once" | "session" }
+  | { outcome: "deny"; feedback?: string };
+export type AgentFact =
+  | (FactBase & {
+      type: "session.created";
+      harness: string;
+      model: string | null;
+      reasoning: string | null;
+      cwd: string;
+      sessionName: string;
+      spawnedAt: string;
+    })
+  | (TurnFactBase & { type: "turn.started" })
+  | (TurnFactBase & {
+      type: "text.delta";
+      messageKey: MessageKey;
+      delta: string;
+    })
+  | (TurnFactBase & {
+      type: "message";
+      messageKey: MessageKey;
+      role: "caller" | "worker";
+      content: string;
+    })
+  | (TurnFactBase & { type: "tool.requested"; toolKey: ToolKey; name: string })
+  | (TurnFactBase & {
+      type: "tool.completed";
+      toolKey: ToolKey;
+      name: string;
+      result: string | null;
+      isError: boolean;
+    })
+  | (TurnFactBase & {
+      type: "permission.requested";
+      permissionHandle: string;
+      kind: string;
+      input?: unknown;
+      options: PermissionOption[];
+    })
+  | (TurnFactBase & {
+      type: "permission.resolved";
+      permissionHandle: string;
+      resolution: PermissionResolution;
+    })
+  | (TurnFactBase & {
+      type: "turn.completed";
+      finalReply: string | null;
+      usage?: Record<string, unknown>;
+      diagnosticId?: string;
+      stopReason: "failed";
+      failure: HarnessFailure;
+    })
+  | (TurnFactBase & {
+      type: "turn.completed";
+      finalReply: string | null;
+      usage?: Record<string, unknown>;
+      diagnosticId?: string;
+      stopReason: "end_turn" | "cancelled" | "killed";
+    })
+  | (FactBase & { type: "session.killed" });
+export type AgentPresentation =
+  | Omit<Extract<AgentFact, { type: "session.created" }>, "factId">
+  | Omit<Extract<AgentFact, { type: "turn.started" }>, "factId">
+  | Omit<Extract<AgentFact, { type: "tool.requested" }>, "factId" | "toolKey">
+  | Omit<Extract<AgentFact, { type: "tool.completed" }>, "factId" | "toolKey">
+  | Omit<Extract<AgentFact, { type: "permission.requested" }>, "factId">
+  | Omit<Extract<AgentFact, { type: "permission.resolved" }>, "factId">
+  | Omit<Extract<AgentFact, { type: "turn.completed" }>, "factId">
+  | Omit<Extract<AgentFact, { type: "session.killed" }>, "factId">
+  | {
+      type: "text";
+      sessionHandle: SessionHandle;
+      turnHandle: TurnHandle;
+      role: "caller" | "worker";
+      content: string;
+      operation: "append" | "replace";
+      complete: boolean;
+      start: boolean;
+    };
+export type FactSubscription = AsyncIterableIterator<AgentFact> & {
+  readonly establishment: AgentSubscriptionEstablishment;
+  readonly done: Promise<AgentSubscriptionEnd>;
+  readonly checkpoint: ResumeCursor;
+  close(): void;
 };
 
 export type SessionFilter = {
@@ -146,7 +275,7 @@ type FailureFactsByCode = {
   protocol_error: Record<never, never>;
   daemon_timeout: Record<never, never>;
   invalid_daemon_response: Record<never, never>;
-  daemon_disconnected: Record<never, never>;
+  daemon_disconnected: { resumeCursor?: ResumeCursor };
   daemon_shutting_down: Record<never, never>;
   workspace_detaching: Record<never, never>;
   command_id_conflict: Record<never, never>;
@@ -171,6 +300,7 @@ type FailureFactsByCode = {
     transportCode?: string;
   };
   unexpected_failure: { remoteCode?: string };
+  event_cursor_expired: { oldest: number | null; head: number | null };
 };
 
 /** 失败事实按 code 区分，并使用 SDK 公开术语表达。 */
@@ -195,6 +325,11 @@ export type ReinsConnection = {
   readonly handshake: ReinsHandshake;
   capabilities(): Promise<CapabilitiesResult>;
   list(filter?: SessionFilter): Promise<SessionInfo[]>;
+  attach(
+    target: AgentTarget,
+    replay: ReplayPolicy,
+    signal?: AbortSignal,
+  ): Promise<FactSubscription>;
   prepareOperation<Kind extends OperationKind>(
     kind: Kind,
   ): OperationCredential<Kind>;

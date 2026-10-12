@@ -3,6 +3,8 @@ import {
   ReinsSdkError,
   type OperationCredential,
   type ReinsConnection,
+  type AgentFact,
+  type ResumeCursor,
   type SessionHandle,
   type SpawnInput,
 } from "@ykdz/reins-sdk";
@@ -11,6 +13,7 @@ declare const process: {
   argv: string[];
   env: Record<string, string | undefined>;
   stdout: { write(value: string): void };
+  getBuiltinModule(name: string): unknown;
 };
 
 type SpawnIntent = {
@@ -418,6 +421,219 @@ async function staleHandle(): Promise<void> {
   }
 }
 
+async function replayFacts(): Promise<void> {
+  const sessionHandle = required("REINS_TARGET_SESSION") as SessionHandle;
+  const target = { scope: "session" as const, sessionHandle };
+  const connection = await connectSdk();
+  const facts: AgentFact[] = [];
+  const checkpoints: ResumeCursor[] = [];
+  let endReason: string | undefined;
+  try {
+    const subscription = await connection.attach(target, { mode: "available" });
+    try {
+      for (;;) {
+        const item = await subscription.next();
+        if (item.done) break;
+        facts.push(item.value);
+        checkpoints.push(subscription.checkpoint);
+      }
+      endReason = (await subscription.done).reason;
+    } finally {
+      subscription.close();
+    }
+  } finally {
+    connection.close();
+  }
+  const checkpoint = checkpoints[0];
+  if (facts.length < 2 || checkpoint === undefined)
+    throw new Error("The installed SDK did not receive replayable facts");
+  const disconnectedCheckpoint = process.env.REINS_RESUME_CURSOR;
+  if (
+    disconnectedCheckpoint !== undefined &&
+    disconnectedCheckpoint !== checkpoint
+  )
+    throw new Error(
+      "The disconnect checkpoint did not identify the first fact",
+    );
+
+  const resumedConnection = await connectSdk();
+  const resumedFacts: AgentFact[] = [];
+  let replayed = 0;
+  try {
+    const subscription = await resumedConnection.attach(target, {
+      mode: "after",
+      cursor: (disconnectedCheckpoint ?? checkpoint) as ResumeCursor,
+    });
+    replayed = subscription.establishment.replayed;
+    try {
+      for await (const fact of subscription) resumedFacts.push(fact);
+      await subscription.done;
+    } finally {
+      subscription.close();
+    }
+  } finally {
+    resumedConnection.close();
+  }
+  const expectedSuffix = facts.slice(1);
+  if (JSON.stringify(resumedFacts) !== JSON.stringify(expectedSuffix))
+    throw new Error(
+      "The installed SDK replay skipped or changed delivered facts",
+    );
+  process.stdout.write(
+    `${JSON.stringify({
+      facts,
+      resumedFacts,
+      replayed,
+      endReason,
+      checkpointWasDelivered: true,
+      resumedAfterDisconnect: disconnectedCheckpoint !== undefined,
+    })}\n`,
+  );
+}
+
+async function disconnectAfterFirstFact(): Promise<void> {
+  const sessionHandle = required("REINS_TARGET_SESSION") as SessionHandle;
+  const connection = await connectSdk();
+  const subscription = await connection.attach(
+    { scope: "session", sessionHandle },
+    { mode: "available" },
+  );
+  const first = await subscription.next();
+  if (first.done) throw new Error("The installed SDK received no first fact");
+  const checkpoint = subscription.checkpoint;
+  connection.close();
+  let disconnected: ReinsSdkError | undefined;
+  try {
+    await subscription.done;
+  } catch (error) {
+    disconnected = failure(error);
+  } finally {
+    subscription.close();
+  }
+  if (
+    disconnected?.failure.code !== "daemon_disconnected" ||
+    disconnected.failure.facts.resumeCursor !== checkpoint
+  )
+    throw new Error(
+      "The installed SDK did not return its last delivered fact checkpoint on disconnect",
+    );
+  process.stdout.write(
+    `${JSON.stringify({
+      firstFactId: first.value.factId,
+      firstFactType: first.value.type,
+      checkpoint,
+      code: disconnected.failure.code,
+      cursorMatchesDeliveredFact: true,
+    })}\n`,
+  );
+}
+
+async function replayWindow(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const input: SpawnInput = {
+      sessionName: "packed-history-window",
+      harness: "simulated",
+      message: JSON.stringify({
+        gate: required("REINS_HISTORY_GATE"),
+        messages: 1005,
+        reply: "window complete",
+      }),
+      cwd: required("REINS_WORKER_CWD"),
+    };
+    const spawned = await connection.spawn(
+      input,
+      connection.prepareOperation("spawn"),
+    );
+    const target = {
+      scope: "turn" as const,
+      turnHandle: spawned.turnHandle,
+    };
+    const live = await connection.attach(target, { mode: "none" });
+    const staleCursor = live.checkpoint;
+    live.close();
+    await live.done;
+    const fileSystem = process.getBuiltinModule("node:fs/promises") as {
+      writeFile(
+        path: string,
+        contents: string,
+        encoding: "utf8",
+      ): Promise<void>;
+    };
+    await fileSystem.writeFile(
+      required("REINS_HISTORY_GATE"),
+      "released",
+      "utf8",
+    );
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      const [session] = await connection.list({
+        sessionHandle: spawned.sessionHandle,
+      });
+      if (session?.state === "idle") break;
+      if (Date.now() >= deadline)
+        throw new Error("The history fixture turn did not complete");
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+
+    const available = await connection.attach(target, { mode: "available" });
+    const window = available.establishment.window;
+    const facts: AgentFact[] = [];
+    try {
+      for await (const fact of available) facts.push(fact);
+      const end = await available.done;
+      if (end.reason !== "end_turn")
+        throw new Error("The truncated turn replay had the wrong end reason");
+    } finally {
+      available.close();
+    }
+    let accepted: Awaited<ReturnType<ReinsConnection["attach"]>> | undefined;
+    let expired: ReinsSdkError | undefined;
+    try {
+      accepted = await connection.attach(target, {
+        mode: "after",
+        cursor: staleCursor,
+      });
+    } catch (error) {
+      expired = failure(error);
+    }
+    if (expired === undefined) {
+      accepted?.close();
+      throw new Error(
+        `The installed SDK accepted an expired cursor: oldest=${window.oldest}, head=${window.head}, cursor=${staleCursor}`,
+      );
+    }
+    const retainedMessages = facts.filter((fact) => fact.type === "message");
+    if (
+      !window.truncated ||
+      window.oldest === null ||
+      window.oldest <= 1 ||
+      window.head === null ||
+      facts.length !== 1000 ||
+      retainedMessages.length !== 999 ||
+      expired.failure.code !== "event_cursor_expired" ||
+      expired.failure.facts.oldest !== window.oldest ||
+      expired.failure.facts.head !== window.head
+    )
+      throw new Error(
+        "The installed SDK did not report the bounded replay window and typed cursor gap",
+      );
+    process.stdout.write(
+      `${JSON.stringify({
+        sessionHandle: spawned.sessionHandle,
+        turnHandle: spawned.turnHandle,
+        staleCursor,
+        retainedMessages: retainedMessages.length,
+        window,
+        factCount: facts.length,
+        expired: expired.failure,
+      })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
 const mode = process.argv[2];
 switch (mode) {
   case "prepare-spawn":
@@ -458,6 +674,15 @@ switch (mode) {
     break;
   case "handle-stale":
     await staleHandle();
+    break;
+  case "replay-facts":
+    await replayFacts();
+    break;
+  case "disconnect-first-fact":
+    await disconnectAfterFirstFact();
+    break;
+  case "replay-window":
+    await replayWindow();
     break;
   default:
     throw new Error("Invalid installed SDK control fixture mode");
