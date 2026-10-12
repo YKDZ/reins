@@ -65,7 +65,7 @@ async function waitForSocket(path: string, timeoutMs = 5_000): Promise<void> {
     try {
       if ((await stat(path)).isSocket()) return;
     } catch {
-      // The fixture has not bound the socket yet.
+      // fixture 尚未绑定 socket。
     }
     await new Promise((resolve) => setTimeout(resolve, 25));
   }

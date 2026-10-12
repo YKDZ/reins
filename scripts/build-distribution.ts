@@ -299,8 +299,7 @@ verifyBundle(
 );
 verifySourceMaps(sdkDistributionDirectory);
 
-// SDK declarations are emitted by its normal package build; the published JavaScript
-// comes from the same dependency-bundling pass as the runtime distribution.
+// SDK 声明由常规包构建生成；发布的 JavaScript 与运行包共用依赖打包流程。
 cpSync(join(repository, "packages/sdk/dist"), sdkDistributionDirectory, {
   recursive: true,
   filter: (source) =>

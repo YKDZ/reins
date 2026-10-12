@@ -20,6 +20,7 @@ import {
 } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 
+import { cliCopy } from "./cli-copy.ts";
 import { standardSchema } from "./standard-schema.ts";
 
 export type ReinsCliDependencies = {
@@ -129,17 +130,7 @@ function createCli(version: string) {
     root: "reins",
     help: helpCapability({
       shortAlias: "-h",
-      headings: {
-        usage: "Usage",
-        commands: "Commands",
-        arguments: "Arguments",
-        options: "Options",
-      },
-      wording: {
-        commandPlaceholder: "command",
-        choices: "Choices: {choices}",
-        default: "Default: {value}",
-      },
+      ...cliCopy.help,
     }),
     version: versionCapability({
       value: text.line(`reins ${version}`),
@@ -151,20 +142,20 @@ function createCli(version: string) {
       reins: {
         kind: "rootGroup",
         name: "reins",
-        description: "Query the Reins Harness control plane.",
+        description: cliCopy.rootDescription,
       },
       ...define.command("capabilities")({
         kind: "command",
         parent: "reins",
         name: "capabilities",
-        description: "Query runtime Harness capabilities.",
+        description: cliCopy.capabilities.description,
         fields: {},
         input: emptyInput,
         success: {
           kind: "data",
           variants: {
             result: {
-              description: "Current capability matrix",
+              description: cliCopy.capabilities.resultDescription,
               exitCode: 0,
               schema: standardSchema(capabilitiesResultSchema),
             },
@@ -172,7 +163,7 @@ function createCli(version: string) {
         },
         failures: {
           queryFailed: {
-            description: "The Reins query failed",
+            description: cliCopy.capabilities.failureDescription,
             exitCode: 70,
             schema: standardSchema(
               v.strictObject({ failure: sdkFailureSchema }),
@@ -198,32 +189,32 @@ function createCli(version: string) {
         kind: "command",
         parent: "reins",
         name: "list",
-        description: "List Reins sessions and their current state.",
+        description: cliCopy.list.description,
         fields: {
           session: {
             kind: "valueOption",
             longOption: "--session",
-            description: "Filter by an exact session handle.",
+            description: cliCopy.list.fields.session,
           },
           harness: {
             kind: "valueOption",
             longOption: "--harness",
-            description: "Filter by a runtime Harness id.",
+            description: cliCopy.list.fields.harness,
           },
           state: {
             kind: "valueOption",
             longOption: "--state",
-            description: "Filter by current session state.",
+            description: cliCopy.list.fields.state,
           },
           name: {
             kind: "valueOption",
             longOption: "--name",
-            description: "Filter by session name.",
+            description: cliCopy.list.fields.name,
           },
           model: {
             kind: "valueOption",
             longOption: "--model",
-            description: "Filter by model id.",
+            description: cliCopy.list.fields.model,
           },
         },
         input: standardSchema(
@@ -239,7 +230,7 @@ function createCli(version: string) {
           kind: "data",
           variants: {
             result: {
-              description: "Matching sessions",
+              description: cliCopy.list.resultDescription,
               exitCode: 0,
               schema: standardSchema(sessionListSchema),
             },
@@ -247,7 +238,7 @@ function createCli(version: string) {
         },
         failures: {
           queryFailed: {
-            description: "The Reins query failed",
+            description: cliCopy.list.failureDescription,
             exitCode: 70,
             schema: standardSchema(
               v.strictObject({ failure: sdkFailureSchema }),

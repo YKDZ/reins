@@ -136,7 +136,7 @@ type FailureFactsByCode = {
   unexpected_failure: { remoteCode?: string };
 };
 
-/** Failure facts are discriminated by code and expressed in SDK terms. */
+/** 失败事实按 code 区分，并使用 SDK 公开术语表达。 */
 export type ReinsFailure = {
   [Code in keyof FailureFactsByCode]: {
     code: Code;

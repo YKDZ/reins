@@ -767,11 +767,39 @@ async function smokePackedCli(
   );
   assertOutput("packed help", help, { status: 0, stderr: "" }, helpLog);
   if (
-    !help.stdout.includes("Usage\n  reins <command>") ||
+    !help.stdout.includes("用法\n  reins <命令>") ||
+    !help.stdout.includes("命令\n") ||
     !help.stdout.includes("  capabilities\n") ||
-    !help.stdout.includes("  list\n")
+    !help.stdout.includes("  list\n") ||
+    !help.stdout.includes("查询 Reins 控制面。")
   )
     throw new Error("Packed help omitted the query-only command contract");
+
+  const listHelpLog = join(logsDirectory, "cli-list-help.log");
+  const listHelp = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["list", "--help"],
+      logPath: listHelpLog,
+    }),
+  );
+  assertOutput(
+    "packed list help",
+    listHelp,
+    { status: 0, stderr: "" },
+    listHelpLog,
+  );
+  if (
+    !listHelp.stdout.includes("选项\n") ||
+    !listHelp.stdout.includes("--session") ||
+    !listHelp.stdout.includes("按精确会话句柄筛选。")
+  ) {
+    throw new Error("Packed list help omitted the localized query options");
+  }
+  recorder.record("localized_cli_help", {
+    rootLogPath: helpLog,
+    listLogPath: listHelpLog,
+  });
 
   const versionLog = join(logsDirectory, "cli-version.log");
   const version = toCommandResult(
