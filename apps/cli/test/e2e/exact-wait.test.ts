@@ -425,12 +425,14 @@ test("SDK and CLI send preserve the original message and return the exact new tu
   const cliResult = JSON.parse(cliAck.stdout).data as {
     sessionHandle: string;
     turnHandle: TurnHandle;
-    deliveryPoint: string;
   };
   expect(cliResult).toMatchObject({
     sessionHandle: initial.sessionHandle,
-    deliveryPoint: "new_turn",
   });
+  expect(Object.keys(cliResult).sort()).toEqual([
+    "sessionHandle",
+    "turnHandle",
+  ]);
   expect(cliResult.turnHandle).not.toBe(sdkAck.turnHandle);
   await expect(
     connection.wait({
@@ -446,6 +448,36 @@ test("SDK and CLI send preserve the original message and return the exact new tu
     ],
     pending: [],
   });
+
+  const textMessage = "third turn without transport details";
+  const textCredential = await preparedCredential(cli, "send");
+  const textAck = await cli(
+    [
+      "send",
+      initial.sessionHandle,
+      "--placement",
+      "new_turn",
+      "--message",
+      textMessage,
+      "--operation",
+      textCredential,
+      "--output-format",
+      "text",
+    ],
+    callerCwd,
+  );
+  expect(textAck.exitCode, textAck.stderr).toBe(0);
+  const textTurnHandle = textAck.stdout
+    .trim()
+    .match(/Message delivered to (\S+)/u)?.[1];
+  expect(textTurnHandle).toBeTruthy();
+  expect(textAck.stdout.trim()).toBe(`Message delivered to ${textTurnHandle}`);
+  await expect(
+    connection.wait({
+      targets: [textTurnHandle as TurnHandle],
+      completion: "all",
+    }),
+  ).resolves.toMatchObject({ status: "satisfied", pending: [] });
 });
 
 test("SDK interrupt returns acceptance while wait keeps the same turn pending", async () => {

@@ -15,7 +15,9 @@ import { createUnixSocketClient } from "@reins/transport";
 import {
   connect as connectSdk,
   type AgentFact,
+  type OperationCredential,
   type ReinsConnection,
+  type SessionHandle,
   type SpawnInput,
   type TurnHandle,
 } from "@ykdz/reins-sdk";
@@ -358,7 +360,7 @@ test("session snapshots keep the exact active or completed turn without stale ac
 });
 
 test("CLI send preserves the explicit turn and original message", async () => {
-  const { cli, callerCwd, env, runControlCli } = await fixture(
+  const { cli, callerCwd, env, runControlCli, sdk } = await fixture(
     "reins-wrr06-placement",
   );
   const created = await spawnWithControlCli(runControlCli, env, callerCwd, {
@@ -373,6 +375,23 @@ test("CLI send preserves the explicit turn and original message", async () => {
     turnHandle: string;
   };
   const exactMessage = "  active task\nkeep spacing  ";
+  const sdkConnection = await sdk();
+  const sdkBusyCredential = await prepareOperation(cli, callerCwd, env, "send");
+  const sdkBusy = sdkConnection.send(
+    {
+      placement: "new_turn",
+      sessionHandle: initial.sessionHandle as SessionHandle,
+      message: exactMessage,
+    },
+    sdkBusyCredential as OperationCredential<"send">,
+  );
+  await expect(sdkBusy).rejects.toMatchObject({
+    failure: {
+      code: "session_busy",
+      facts: { sessionHandle: initial.sessionHandle },
+    },
+  });
+
   const busyCredential = await prepareOperation(cli, callerCwd, env, "send");
   const busy = await cli(
     [
@@ -410,8 +429,11 @@ test("CLI send preserves the explicit turn and original message", async () => {
   expect(controlData(active)).toMatchObject({
     sessionHandle: initial.sessionHandle,
     turnHandle: initial.turnHandle,
-    deliveryPoint: "active_turn",
   });
+  expect(Object.keys(controlData(active)).sort()).toEqual([
+    "sessionHandle",
+    "turnHandle",
+  ]);
   await writeFile(join(callerCwd, "release"), "released");
   const completed = await cli(
     ["wait", initial.turnHandle, "--completion", "all", "--timeout", "5000"],
@@ -425,6 +447,28 @@ test("CLI send preserves the explicit turn and original message", async () => {
       stopReason: "end_turn",
     }),
   ]);
+
+  const sdkEndedCredential = await prepareOperation(
+    cli,
+    callerCwd,
+    env,
+    "send",
+  );
+  await expect(
+    sdkConnection.send(
+      {
+        placement: "active_turn",
+        turnHandle: initial.turnHandle as TurnHandle,
+        message: "late task",
+      },
+      sdkEndedCredential as OperationCredential<"send">,
+    ),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "turn_not_active",
+      facts: { turnHandle: initial.turnHandle },
+    },
+  });
 
   const staleCredential = await prepareOperation(cli, callerCwd, env, "send");
   const ended = await cli(
@@ -442,7 +486,10 @@ test("CLI send preserves the explicit turn and original message", async () => {
     env,
   );
   expect(ended.exitCode).toBe(70);
-  expect(ended.stdout + ended.stderr).toContain("turn_not_active");
+  expect(controlData(ended).failure).toEqual({
+    code: "turn_not_active",
+    facts: { turnHandle: initial.turnHandle },
+  });
 
   const nextCredential = await prepareOperation(cli, callerCwd, env, "send");
   const next = await cli(
@@ -463,11 +510,10 @@ test("CLI send preserves the explicit turn and original message", async () => {
   const nextAck = controlData(next) as {
     sessionHandle: string;
     turnHandle: string;
-    deliveryPoint: string;
   };
   expect(nextAck.sessionHandle).toBe(initial.sessionHandle);
   expect(nextAck.turnHandle).not.toBe(initial.turnHandle);
-  expect(nextAck.deliveryPoint).toBe("new_turn");
+  expect(Object.keys(nextAck).sort()).toEqual(["sessionHandle", "turnHandle"]);
   expect(decodeTurnHandle(nextAck.turnHandle).sessionId).toBe(
     initial.sessionHandle,
   );
@@ -492,7 +538,8 @@ test("CLI send preserves the explicit turn and original message", async () => {
 });
 
 test("interrupt ACK is accepted before the exact turn reaches its terminal fact", async () => {
-  const { cli, callerCwd, env, runControlCli } = await fixture("reins-wrr16");
+  const { cli, callerCwd, env, runControlCli, sdk } =
+    await fixture("reins-wrr16");
   const created = await spawnWithControlCli(runControlCli, env, callerCwd, {
     sessionName: "exact-interrupt",
     harness: "codex",
@@ -570,6 +617,24 @@ test("interrupt ACK is accepted before the exact turn reaches its terminal fact"
       controlData(await cli(["list"], callerCwd, env)).sessions,
     ).toMatchObject([{ state: "idle" }]),
   );
+  const sdkConnection = await sdk();
+  const sdkStaleCredential = await prepareOperation(
+    cli,
+    callerCwd,
+    env,
+    "interrupt",
+  );
+  await expect(
+    sdkConnection.interrupt(
+      { turnHandle: original.turnHandle as TurnHandle },
+      sdkStaleCredential as OperationCredential<"interrupt">,
+    ),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "turn_not_active",
+      facts: { turnHandle: original.turnHandle },
+    },
+  });
   const staleCredential = await prepareOperation(
     cli,
     callerCwd,
@@ -582,7 +647,10 @@ test("interrupt ACK is accepted before the exact turn reaches its terminal fact"
     env,
   );
   expect(stale.exitCode).toBe(70);
-  expect(stale.stdout + stale.stderr).toContain("turn_not_active");
+  expect(controlData(stale).failure).toEqual({
+    code: "turn_not_active",
+    facts: { turnHandle: original.turnHandle },
+  });
   const terminal = await cli(
     ["wait", original.turnHandle, "--completion", "all"],
     callerCwd,

@@ -155,8 +155,6 @@ const killResultSchema = v.strictObject({
 const sendResultSchema = v.strictObject({
   sessionHandle: v.string(),
   turnHandle: v.string(),
-  messageId: v.string(),
-  deliveryPoint: v.picklist(["active_turn", "new_turn"]),
 });
 const waitCompletedFields = {
   turnHandle: v.string(),
@@ -730,10 +728,8 @@ function createCli(version: string) {
               description: "The exact turn that accepted the message.",
               exitCode: 0,
               schema: standardSchema(sendResultSchema),
-              text: ({ turnHandle, deliveryPoint }) =>
-                text.line(
-                  `Message delivered to ${turnHandle} (${deliveryPoint})`,
-                ),
+              text: ({ turnHandle }) =>
+                text.line(`Message delivered to ${turnHandle}`),
             },
           },
         },
@@ -767,7 +763,10 @@ function createCli(version: string) {
               sendInput,
               input.operation as OperationCredential<"send">,
             );
-            return outcome.data.result(result);
+            return outcome.data.result({
+              sessionHandle: result.sessionHandle,
+              turnHandle: result.turnHandle,
+            });
           } catch (error) {
             if (error instanceof ReinsSdkError)
               return outcome.failure.operationFailed({

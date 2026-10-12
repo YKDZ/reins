@@ -9,7 +9,6 @@ import {
   renderCliError,
   transportErrorMessage,
 } from "./grammar.ts";
-import { harnessFailureMessage } from "./harness-failure.ts";
 
 export type OutputMode = "json" | "pretty";
 

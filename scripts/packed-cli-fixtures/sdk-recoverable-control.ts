@@ -297,6 +297,72 @@ async function prepareSend(): Promise<void> {
   }
 }
 
+async function prepareNewTurn(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const intent: SendIntent = {
+      credential: connection.prepareOperation("send"),
+      input: {
+        placement: "new_turn",
+        sessionHandle: required("REINS_TARGET_SESSION") as SessionHandle,
+        message: required("REINS_NEW_TURN_MESSAGE"),
+      },
+    };
+    process.stdout.write(
+      `${JSON.stringify({ prepared: true, intent: publishIntent(intent) })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function sendNewTurn(): Promise<void> {
+  const intent = readIntent<SendIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  if (intent.input.placement !== "new_turn")
+    throw new Error("The saved send intent was not a new-turn send");
+  const connection = await connectSdk();
+  try {
+    const result = await connection.send(intent.input, intent.credential);
+    if (
+      result.sessionHandle !== intent.input.sessionHandle ||
+      result.deliveryPoint !== "new_turn"
+    )
+      throw new Error("The SDK did not accept the exact new-turn send");
+    process.stdout.write(`${JSON.stringify({ result })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
+async function waitOrdered(): Promise<void> {
+  const parsedTargets: unknown = JSON.parse(required("REINS_TARGET_TURNS"));
+  if (
+    !Array.isArray(parsedTargets) ||
+    parsedTargets.length < 2 ||
+    !parsedTargets.every((target) => typeof target === "string")
+  )
+    throw new Error("The installed SDK wait needs ordered exact turn handles");
+  const completion = required("REINS_WAIT_COMPLETION");
+  if (completion !== "any" && completion !== "all")
+    throw new Error("The installed SDK wait completion mode is invalid");
+  const timeoutMs = Number(required("REINS_WAIT_TIMEOUT_MS"));
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < 0)
+    throw new Error("The installed SDK wait timeout is invalid");
+  const connection = await connectSdk();
+  try {
+    const result = await connection.wait({
+      targets: parsedTargets as TurnHandle[],
+      completion,
+      timeoutMs,
+    });
+    process.stdout.write(`${JSON.stringify({ result })}\n`);
+  } finally {
+    connection.close();
+  }
+}
+
 async function sendDrop(): Promise<void> {
   const intent = readIntent<SendIntent>(
     required("REINS_OPERATION_INTENT_JSON"),
@@ -883,6 +949,15 @@ switch (mode) {
     break;
   case "prepare-send":
     await prepareSend();
+    break;
+  case "prepare-new-turn":
+    await prepareNewTurn();
+    break;
+  case "send-new-turn":
+    await sendNewTurn();
+    break;
+  case "wait-ordered":
+    await waitOrdered();
     break;
   case "send-drop":
     await sendDrop();

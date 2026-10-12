@@ -330,9 +330,11 @@ type FailureFactsByCode = {
   unknown_harness: { harness: string; availableHarnesses: string[] };
   unsupported_feature: { feature: string };
   session_name_conflict: { sessionName: string };
+  session_busy: { sessionHandle: SessionHandle };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
+  turn_not_active: { turnHandle: TurnHandle };
   capability_query_failed: { cause?: ErrorCause; diagnosticId?: string };
   internal_error: { cause?: ErrorCause; diagnosticId?: string };
   diagnostics_store_corrupt: { cause?: ErrorCause; diagnosticId?: string };

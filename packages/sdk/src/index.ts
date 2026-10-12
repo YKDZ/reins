@@ -605,6 +605,13 @@ function projectFailure(failure: MachineError): ReinsFailure {
         code: failure.code,
         facts: { sessionName: failure.sessionName },
       };
+    case "session_busy":
+      return {
+        code: failure.code,
+        facts: {
+          sessionHandle: failure.sessionId as unknown as SessionHandle,
+        },
+      };
     case "session_not_found":
     case "session_killed":
     case "session_terminating":
@@ -612,6 +619,16 @@ function projectFailure(failure: MachineError): ReinsFailure {
         code: failure.code,
         facts: {
           sessionHandle: failure.sessionId as unknown as SessionHandle,
+        },
+      };
+    case "turn_not_active":
+      return {
+        code: failure.code,
+        facts: {
+          turnHandle: encodeTurnHandle({
+            sessionId: failure.sessionId,
+            turnId: failure.turnId,
+          }) as unknown as TurnHandle,
         },
       };
     case "capability_query_failed":
