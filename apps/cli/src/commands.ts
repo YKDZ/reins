@@ -24,7 +24,7 @@ import {
 } from "@reins/protocol";
 import * as v from "valibot";
 
-import { connectReins } from "./application.ts";
+import { connectReinsClient } from "./application-runtime.ts";
 import { runAttach } from "./attach.ts";
 import { CapabilityStore } from "./capabilities.ts";
 import type {
@@ -70,7 +70,7 @@ async function withClient<T>(
     ? await openWorkspaceControl(
         resolve(ctx.contextCwd ?? executionCwd ?? process.cwd()),
       )
-    : await connectReins({
+    : await connectReinsClient({
         consumerContext: consumerContext.output,
         env: process.env,
         timeoutMs: DAEMON_READY_TIMEOUT_MS,

@@ -4,6 +4,10 @@ import type {
   ProtocolMessage,
   ProtocolMethod,
   ProtocolParams,
+  ProtocolResponse,
+  ProtocolResult,
+  SideEffectMethod,
+  AttachParams,
 } from "@reins/protocol";
 import {
   createUnixSocketClient,
@@ -26,15 +30,59 @@ import {
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
-import { importGitPublication } from "./git-import.ts";
 import {
   createReinsClient,
   parseRetryToken,
   type ReinsClient,
-  type AgentEvent,
-} from "./index.ts";
+  type ProtocolResponseFor,
+} from "./control.ts";
+import { importGitPublication } from "./git-import.ts";
 import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
-import { createEventProjector } from "./subscription.ts";
+import {
+  createEventProjector,
+  type AgentEvent,
+  type AgentSubscription,
+  type AgentSubscriptionEnd,
+} from "./subscription.ts";
+
+export type WorkspaceAgentEvent =
+  | AgentEvent
+  | { type: "publication.ready"; publication: Publication };
+export type WorkspaceAgentSubscriptionEnd = AgentSubscriptionEnd & {
+  publicationError?: WorkspaceError;
+};
+export type WorkspaceAgentSubscription = Omit<
+  AgentSubscription,
+  "done" | "onEvent"
+> & {
+  readonly done: Promise<WorkspaceAgentSubscriptionEnd>;
+  onEvent(listener: (event: WorkspaceAgentEvent) => void): () => void;
+};
+type WorkspaceControlResult<M extends ProtocolMethod> = ProtocolResult<M> &
+  (M extends "wait"
+    ? { publications?: Publication[]; publicationError?: WorkspaceError }
+    : unknown);
+type WorkspaceProtocolResponseFor<M extends ProtocolMethod> =
+  | Extract<ProtocolResponse, { readonly error: unknown }>
+  | (Omit<Extract<ProtocolResponse, { readonly result: unknown }>, "result"> & {
+      readonly result: WorkspaceControlResult<M>;
+    });
+export type WorkspaceControlClient = Omit<
+  ReinsClient,
+  "request" | "subscribe"
+> & {
+  request<M extends ProtocolMethod>(
+    method: M,
+    params: ProtocolParams<M>,
+    timeoutMs?: number,
+  ): Promise<WorkspaceProtocolResponseFor<M>>;
+  retry(
+    token: string,
+    params: unknown,
+    timeoutMs?: number,
+  ): Promise<ProtocolResponseFor<SideEffectMethod>>;
+  subscribe(params: AttachParams): Promise<WorkspaceAgentSubscription>;
+};
 
 export function projectWorkspaceHistory(history: WorkspaceHistory) {
   return {
@@ -201,7 +249,7 @@ export function createWorkspaceClient(
     },
     async control(
       context: string | { workspaceHandle: WorkspaceHandle },
-    ): Promise<ReinsClient> {
+    ): Promise<WorkspaceControlClient> {
       const cwd =
         typeof context === "string"
           ? context
@@ -237,10 +285,10 @@ export function createWorkspaceClient(
         async subscribe(params) {
           const observationId = `observation${++sequence}`;
           const seen = new Set<string>();
-          const queued: AgentEvent[] = [];
-          const listeners = new Set<(event: AgentEvent) => void>();
+          const queued: WorkspaceAgentEvent[] = [];
+          const listeners = new Set<(event: WorkspaceAgentEvent) => void>();
           let active = true;
-          const emit = (event: AgentEvent) => {
+          const emit = (event: WorkspaceAgentEvent) => {
             if (!active) return;
             queued.push(event);
             if (listeners.size === 0) return;

@@ -276,6 +276,10 @@ const server = createServer((socket) => {
       // 其余 mode 的反例作用在领域请求上，不为 wait 设置隐式期限。
       if (mode === "timeout") continue;
       if (request.method === "initialize") {
+        if (mode === "initialize-close") {
+          socket.end();
+          continue;
+        }
         socket.write(
           `${encodeMessage({
             kind: "response",
