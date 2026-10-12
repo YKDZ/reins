@@ -1085,6 +1085,61 @@ describe("CLI 进程边界（缝 D）", () => {
     }
   });
 
+  test("未提供的权限选项在原生响应前拒绝", async () => {
+    const { dir, env: baseEnv } = await freshEnv();
+    const requestsFile = join(dir, "permission-choice-invalid.requests");
+    const permissionEnv = {
+      ...baseEnv,
+      REINS_FIXTURE_REQUESTS_FILE: requestsFile,
+    };
+    const spawned = await spawnWithCli(permissionEnv, {
+      harness: "permission",
+      message: "do it",
+      name: "invalid-prompt-choice",
+    });
+    const sessionId = sessionIdFrom(spawned);
+    const attached = startCli(
+      [
+        "--output-format",
+        "text",
+        "attach",
+        turnHandleFrom(spawned),
+        "--scope",
+        "turn",
+        "--replay",
+        "available",
+      ],
+      permissionEnv,
+      true,
+    );
+    try {
+      await waitFor(() => attached.stdout.join("").includes("Choose (1-2):"));
+      attached.child.stdin?.end("3\n");
+      expect(await waitForExit(attached.child, 5_000)).toBe(64);
+      const output = `${attached.stdout.join("")}\n${attached.stderr.join("")}`;
+      expect(output).toContain("Choose one of the offered permission options");
+      expect(output).not.toContain("Permission response prepared");
+      expect(output).not.toContain("[turn completed]");
+      expect(await pathExists(requestsFile)).toBe(false);
+
+      const listed = await runCli(
+        ["list", "--session", sessionId],
+        permissionEnv,
+      );
+      expect(dataFrom(listed).sessions?.[0]).toMatchObject({ state: "busy" });
+    } finally {
+      attached.child.stdin?.destroy();
+      if (
+        attached.child.exitCode === null &&
+        attached.child.signalCode === null
+      ) {
+        attached.child.kill("SIGKILL");
+        await waitForExit(attached.child, 2_000);
+      }
+      await killWithCli(permissionEnv, sessionId);
+    }
+  });
+
   test("kill aborts the active prompt and clears queued permission requests", async () => {
     const { dir, env } = await freshEnv();
     const requestsFile = join(dir, "permission-kill.requests");
