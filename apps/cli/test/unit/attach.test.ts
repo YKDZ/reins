@@ -87,6 +87,9 @@ class ControlledClient implements ReinsClient {
   readonly request: ReinsClient["request"];
   readonly retry: ReinsClient["retry"];
   readonly subscribe: ReinsClient["subscribe"];
+  readonly subscribeFacts: ReinsClient["subscribeFacts"] = async () => {
+    throw new Error("subscribeFacts is not used by the legacy attach test");
+  };
   readonly onNotification: ReinsClient["onNotification"];
   readonly onClosed: ReinsClient["onClosed"];
   readonly initialize: ReinsClient["initialize"];

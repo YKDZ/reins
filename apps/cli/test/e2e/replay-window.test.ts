@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { access, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -10,10 +10,13 @@ import {
   decodeTurnHandle,
   decodeResumeCursor,
   encodeResumeCursor,
+  encodeTurnHandle,
   daemonGenerationSchema,
+  sessionNameSchema,
   type ProtocolMessage,
 } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
+import { connect as connectSdk, ReinsSdkError } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -104,8 +107,147 @@ async function fixture(rich = true) {
     expect(await client.initialize()).toHaveProperty("result");
     return client;
   }
-  return { root, runtime, daemonCwd, callerCwd, env, cli, client, daemon };
+  async function sdk(consumerContext = env.REINS_CONSUMER_CONTEXT) {
+    const connection = await connectSdk({
+      socketPath: env.REINS_SOCKET,
+      consumerContext,
+    });
+    cleanup.push(async () => connection.close());
+    return connection;
+  }
+  return { root, runtime, daemonCwd, callerCwd, env, cli, client, sdk, daemon };
 }
+
+test("public SDK resumes exactly after the last delivered fact on disconnect", async () => {
+  const f = await fixture();
+  const gate = join(f.root, "sdk-disconnect-release");
+  const control = await f.client();
+  const cwdStat = await stat(f.callerCwd, { bigint: true });
+  const spawned = await control.request("spawn", {
+    harness: "codex",
+    sessionName: v.parse(sessionNameSchema, "sdk-disconnect"),
+    message: JSON.stringify({ gate, reply: "resumed", messages: 4 }),
+    cwd: f.callerCwd,
+    cwdIdentity: { device: String(cwdStat.dev), inode: String(cwdStat.ino) },
+  });
+  if ("error" in spawned) throw new Error(spawned.error.code);
+  const sessionHandle = spawned.result
+    .sessionId as unknown as import("@ykdz/reins-sdk").SessionHandle;
+  const turnHandle = encodeTurnHandle({
+    sessionId: spawned.result.sessionId,
+    turnId: spawned.result.turnId,
+  }) as unknown as import("@ykdz/reins-sdk").TurnHandle;
+  const target = { scope: "session" as const, sessionHandle };
+  const observer = await f.sdk();
+  const live = await observer.attach(target, { mode: "none" });
+  const firstPromise = live.next();
+  await writeFile(gate, "release");
+  const first = await firstPromise;
+  expect(first.done).toBe(false);
+  expect(first.value?.type).toBe("message");
+  const deliveredCheckpoint = live.checkpoint;
+  observer.close();
+  let disconnected: unknown;
+  try {
+    await live.done;
+  } catch (error) {
+    disconnected = error;
+  }
+  expect(disconnected).toBeInstanceOf(ReinsSdkError);
+  expect(disconnected).toMatchObject({
+    failure: {
+      code: "daemon_disconnected",
+      facts: { resumeCursor: deliveredCheckpoint },
+    },
+  });
+
+  const recovery = await f.sdk();
+  const resumed = await recovery.attach(target, {
+    mode: "after",
+    cursor: deliveredCheckpoint,
+  });
+  const resumedFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of resumed) {
+    resumedFacts.push(fact);
+    if (fact.type === "turn.completed") break;
+  }
+  expect(await resumed.done).toMatchObject({ reason: "closed" });
+  expect(resumedFacts.at(-1)?.type).toBe("turn.completed");
+
+  const full = await recovery.attach(target, { mode: "available" });
+  const fullFacts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of full) {
+    fullFacts.push(fact);
+    if (fact.type === "turn.completed") break;
+  }
+  expect(await full.done).toMatchObject({ reason: "closed" });
+  const firstIndex = fullFacts.findIndex(
+    (fact) => fact.factId === first.value?.factId,
+  );
+  expect(firstIndex).toBeGreaterThanOrEqual(0);
+  expect([first.value, ...resumedFacts]).toEqual(fullFacts.slice(firstIndex));
+
+  expect(
+    await control.request("wait", {
+      targets: [decodeTurnHandle(turnHandle)],
+      completion: "all",
+    }),
+  ).toMatchObject({ result: { completed: [{ finalReply: "resumed" }] } });
+});
+
+test("public SDK exposes a truncated window and types an expired cursor", async () => {
+  const f = await fixture();
+  const gate = join(f.root, "sdk-window-release");
+  const control = await f.client();
+  const cwdStat = await stat(f.callerCwd, { bigint: true });
+  const spawned = await control.request("spawn", {
+    harness: "codex",
+    sessionName: v.parse(sessionNameSchema, "sdk-window"),
+    message: JSON.stringify({ gate, reply: "bounded", messages: 1005 }),
+    cwd: f.callerCwd,
+    cwdIdentity: { device: String(cwdStat.dev), inode: String(cwdStat.ino) },
+  });
+  if ("error" in spawned) throw new Error(spawned.error.code);
+  const turnHandle = encodeTurnHandle({
+    sessionId: spawned.result.sessionId,
+    turnId: spawned.result.turnId,
+  }) as unknown as import("@ykdz/reins-sdk").TurnHandle;
+  const target = { scope: "turn" as const, turnHandle };
+  const observer = await f.sdk();
+  const before = await observer.attach(target, { mode: "none" });
+  const staleCursor = before.checkpoint;
+  before.close();
+  expect(await before.done).toMatchObject({ reason: "closed" });
+
+  await writeFile(gate, "release");
+  await control.request("wait", {
+    targets: [decodeTurnHandle(turnHandle)],
+    completion: "all",
+  });
+  const available = await observer.attach(target, { mode: "available" });
+  expect(available.establishment.window).toMatchObject({
+    truncated: true,
+    oldest: expect.any(Number),
+    head: expect.any(Number),
+  });
+  expect(available.establishment.window.oldest).toBeGreaterThan(1);
+  const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  for await (const fact of available) facts.push(fact);
+  expect(await available.done).toMatchObject({ reason: "end_turn" });
+  expect(facts.length).toBeLessThanOrEqual(1000);
+
+  await expect(
+    observer.attach(target, { mode: "after", cursor: staleCursor }),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "event_cursor_expired",
+      facts: {
+        oldest: available.establishment.window.oldest,
+        head: available.establishment.window.head,
+      },
+    },
+  });
+});
 
 test("available exposes a truncated bounded window and ends the exact completed turn", async () => {
   const f = await fixture();

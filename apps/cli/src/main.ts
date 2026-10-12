@@ -7,16 +7,24 @@ import {
   parseCliInvocation,
   versionCapability,
   text,
+  type OutputFormat,
   type WriteCliOutput,
 } from "@ykdz/cli-contract";
 import { isNodeBrokenPipe } from "@ykdz/cli-contract/node";
 import {
   ReinsSdkError,
+  createPresentationProjector,
   type CapabilitiesResult,
+  type AgentFact,
+  type AgentPresentation,
+  type AgentSubscriptionEstablishment,
+  type AgentSubscriptionEnd,
   type ReinsConnection,
   type SessionFilter,
   type SessionInfo,
   type SessionHandle,
+  type TurnHandle,
+  type ResumeCursor,
 } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 
@@ -24,13 +32,16 @@ import { standardSchema } from "./standard-schema.ts";
 
 export type ReinsCliDependencies = {
   readonly connect: () => Promise<ReinsConnection>;
+  readonly outputFormat: OutputFormat;
 };
+
+type ReinsCliRuntimeDependencies = Pick<ReinsCliDependencies, "connect">;
 
 export type CliRuntime = {
   readonly argv: readonly string[];
   readonly version: string;
   readonly write: WriteCliOutput;
-  readonly dependencies: ReinsCliDependencies;
+  readonly dependencies: ReinsCliRuntimeDependencies;
 };
 
 const define = defineCli<ReinsCliDependencies>();
@@ -124,6 +135,53 @@ const sdkFailureSchema = v.strictObject({
 
 const emptyInput = standardSchema(v.object({}));
 
+const attachEstablishmentSchema = v.strictObject({
+  target: v.unknown(),
+  window: v.strictObject({
+    oldest: v.nullable(v.number()),
+    head: v.nullable(v.number()),
+    truncated: v.boolean(),
+  }),
+  replayed: v.number(),
+});
+
+const attachEndSchema = v.strictObject({
+  target: v.unknown(),
+  reason: v.picklist([
+    "end_turn",
+    "cancelled",
+    "failed",
+    "killed",
+    "session_killed",
+    "closed",
+  ]),
+});
+
+const attachFactSchema = v.looseObject({
+  factId: v.string(),
+  sessionHandle: v.string(),
+  type: v.string(),
+});
+
+const attachPresentationSchema = v.looseObject({ type: v.string() });
+
+const attachInputSchema = standardSchema(
+  v.pipe(
+    v.strictObject({
+      target: v.string(),
+      scope: v.optional(v.picklist(["session", "turn"])),
+      replay: v.optional(v.picklist(["none", "available", "after"])),
+      cursor: v.optional(v.string()),
+    }),
+    v.check(
+      (input) =>
+        input.scope !== undefined &&
+        (input.replay === "after") === (input.cursor !== undefined),
+    ),
+  ),
+  ["check"],
+);
+
 function createCli(version: string) {
   return define({
     root: "reins",
@@ -145,7 +203,7 @@ function createCli(version: string) {
       value: text.line(`reins ${version}`),
       shortAlias: "-V",
     }),
-    output: outputCapability({ defaultFormat: "structured" }),
+    output: outputCapability({ defaultFormat: "structured", text: true }),
     usageFailureExitCode: 64,
     commands: {
       reins: {
@@ -167,6 +225,7 @@ function createCli(version: string) {
               description: "Current capability matrix",
               exitCode: 0,
               schema: standardSchema(capabilitiesResultSchema),
+              text: (result) => text.line(JSON.stringify(result)),
             },
           },
         },
@@ -177,6 +236,7 @@ function createCli(version: string) {
             schema: standardSchema(
               v.strictObject({ failure: sdkFailureSchema }),
             ),
+            text: ({ failure }) => text.line(`Query failed: ${failure.code}`),
           },
         },
         async handler({ dependencies, outcome }) {
@@ -242,6 +302,17 @@ function createCli(version: string) {
               description: "Matching sessions",
               exitCode: 0,
               schema: standardSchema(sessionListSchema),
+              text: ({ sessions }) =>
+                text.line(
+                  sessions.length === 0
+                    ? "No sessions found"
+                    : sessions
+                        .map(
+                          (session) =>
+                            `${session.sessionHandle}\t${session.harness}\t${session.state}\t${session.model ?? "-"}`,
+                        )
+                        .join("\n"),
+                ),
             },
           },
         },
@@ -252,6 +323,7 @@ function createCli(version: string) {
             schema: standardSchema(
               v.strictObject({ failure: sdkFailureSchema }),
             ),
+            text: ({ failure }) => text.line(`Query failed: ${failure.code}`),
           },
         },
         async handler({ dependencies, input, outcome }) {
@@ -280,6 +352,143 @@ function createCli(version: string) {
           }
         },
       }),
+      ...define.command("attach")({
+        kind: "command",
+        parent: "reins",
+        name: "attach",
+        description: "Observe stable facts for a Reins session or turn.",
+        fields: {
+          target: {
+            kind: "positional",
+            description: "A session handle or turn handle.",
+          },
+          scope: {
+            kind: "valueOption",
+            longOption: "--scope",
+            description: "The exact target scope: session or turn.",
+          },
+          replay: {
+            kind: "valueOption",
+            longOption: "--replay",
+            description:
+              "Replay none, the available window, or after a cursor.",
+          },
+          cursor: {
+            kind: "valueOption",
+            longOption: "--cursor",
+            description: "Opaque cursor required by --replay after.",
+          },
+        },
+        input: attachInputSchema,
+        success: {
+          kind: "stream",
+          records: {
+            established: {
+              description: "The subscription target and replay window.",
+              schema: standardSchema(
+                v.strictObject({ establishment: attachEstablishmentSchema }),
+              ),
+              text: ({ establishment }) => {
+                const value = establishment as AgentSubscriptionEstablishment;
+                const { oldest, head, truncated } = value.window;
+                return text.line(
+                  `Event window: ${oldest ?? "empty"} through ${head ?? "empty"} (${truncated ? "truncated" : "complete"})`,
+                );
+              },
+            },
+            fact: {
+              description: "A stable control domain fact.",
+              schema: standardSchema(
+                v.strictObject({ fact: attachFactSchema }),
+              ),
+              text: ({ fact }) =>
+                text.line(`Fact: ${(fact as AgentFact).type}`),
+            },
+            presentation: {
+              description: "A text or tool activity presentation.",
+              schema: standardSchema(
+                v.strictObject({ presentation: attachPresentationSchema }),
+              ),
+              text: ({ presentation }) =>
+                text.fragment(
+                  renderPresentation(presentation as AgentPresentation),
+                ),
+            },
+            ended: {
+              description: "The subscription ended normally.",
+              schema: standardSchema(v.strictObject({ end: attachEndSchema })),
+              text: ({ end }) =>
+                text.line(
+                  `[attach ended] ${(end as AgentSubscriptionEnd).reason}`,
+                ),
+            },
+          },
+          text: () => text.silent,
+        },
+        failures: {
+          attachFailed: {
+            description: "The Reins subscription failed.",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) => text.line(`Attach failed: ${failure.code}`),
+          },
+        },
+        async *handler({ dependencies, input, outcome }) {
+          const scope = input.scope;
+          if (scope === undefined) throw new Error("attachScopeRequired");
+          const target =
+            scope === "session"
+              ? {
+                  scope,
+                  sessionHandle: input.target as SessionHandle,
+                }
+              : { scope, turnHandle: input.target as TurnHandle };
+          const replay =
+            input.replay === "after"
+              ? {
+                  mode: "after" as const,
+                  cursor: input.cursor as ResumeCursor,
+                }
+              : { mode: input.replay ?? "available" };
+          let connection: ReinsConnection | undefined;
+          let subscription:
+            | Awaited<ReturnType<ReinsConnection["attach"]>>
+            | undefined;
+          let interrupt: (() => void) | undefined;
+          try {
+            connection = await dependencies.connect();
+            subscription = await connection.attach(target, replay);
+            interrupt = () => subscription?.close();
+            process.once("SIGINT", interrupt);
+            yield outcome.record.established({
+              establishment: subscription.establishment,
+            });
+            const project = createPresentationProjector();
+            for await (const fact of subscription) {
+              if (dependencies.outputFormat === "structured") {
+                yield outcome.record.fact({ fact });
+              } else {
+                for (const presentation of project(fact))
+                  yield outcome.record.presentation({ presentation });
+              }
+            }
+            const end = await subscription.done;
+            yield outcome.record.ended({ end });
+            return outcome.streamSuccess();
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.attachFailed({ failure: error.failure });
+            throw error;
+          } finally {
+            if (interrupt !== undefined)
+              process.removeListener("SIGINT", interrupt);
+            subscription?.close();
+            connection?.close();
+          }
+        },
+      }),
     },
   });
 }
@@ -287,9 +496,12 @@ function createCli(version: string) {
 export async function main(runtime: CliRuntime): Promise<number> {
   const contract = createCli(runtime.version);
   try {
+    const invocation = parseCliInvocation(contract, runtime.argv.slice(2));
+    const outputFormat =
+      invocation.kind === "parsed" ? invocation.outputFormat : "structured";
     const termination = await executeCli(contract, {
-      invocation: parseCliInvocation(contract, runtime.argv.slice(2)),
-      dependencies: runtime.dependencies,
+      invocation,
+      dependencies: { ...runtime.dependencies, outputFormat },
       write: runtime.write,
     });
     return termination.exitCode;
@@ -302,4 +514,30 @@ export async function main(runtime: CliRuntime): Promise<number> {
       return 0;
     throw error;
   }
+}
+
+function renderPresentation(presentation: AgentPresentation): string {
+  if (presentation.type === "text") {
+    const prefix = presentation.start ? `${presentation.role}: ` : "";
+    const suffix =
+      presentation.complete && !presentation.content.endsWith("\n") ? "\n" : "";
+    return `${prefix}${presentation.content}${suffix}` || " ";
+  }
+  if (presentation.type === "tool.requested")
+    return `[tool] ${presentation.name} requested\n`;
+  if (presentation.type === "tool.completed")
+    return `[tool] ${presentation.name} completed\n`;
+  if (presentation.type === "permission.requested")
+    return `[permission requested] ${presentation.kind}\n`;
+  if (presentation.type === "permission.resolved")
+    return `[permission resolved] ${presentation.permissionHandle}\n`;
+  if (presentation.type === "turn.completed")
+    return `[turn completed] ${presentation.stopReason}\n`;
+  if (presentation.type === "turn.started")
+    return `[turn started] ${presentation.turnHandle}\n`;
+  if (presentation.type === "session.killed")
+    return `[session killed] ${presentation.sessionHandle}\n`;
+  if (presentation.type === "session.created")
+    return `Created session ${presentation.sessionHandle}\n`;
+  return "\n";
 }

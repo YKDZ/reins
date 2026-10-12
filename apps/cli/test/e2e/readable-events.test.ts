@@ -5,6 +5,7 @@ import {
   mkdir,
   mkdtemp,
   rm,
+  stat,
   writeFile,
 } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -17,10 +18,13 @@ import {
   decodeTurnHandle,
   decodePermissionHandle,
   encodePermissionHandle,
+  encodeTurnHandle,
+  sessionNameSchema,
   turnIdSchema,
   type ProtocolMessage,
 } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
+import { connect as connectSdk } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -111,8 +115,209 @@ async function fixture(rich = false) {
     expect(await client.initialize()).toHaveProperty("result");
     return client;
   }
-  return { root, runtime, daemonCwd, callerCwd, env, cli, client, daemon };
+  async function sdk(consumerContext = env.REINS_CONSUMER_CONTEXT) {
+    const connection = await connectSdk({
+      socketPath: env.REINS_SOCKET,
+      consumerContext,
+    });
+    cleanup.push(async () => connection.close());
+    return connection;
+  }
+  return { root, runtime, daemonCwd, callerCwd, env, cli, client, sdk, daemon };
 }
+
+test("public SDK facts keep their identity across none, available, and after, and CLI renders the same history", async () => {
+  const f = await fixture(true);
+  const gate = join(f.root, "stable-facts-release");
+  const resolutionFile = join(f.root, "stable-facts-resolution.json");
+  const control = await f.client();
+  const cwdStat = await stat(f.callerCwd, { bigint: true });
+  const spawned = await control.request("spawn", {
+    harness: "codex",
+    sessionName: v.parse(sessionNameSchema, "stable-facts"),
+    message: JSON.stringify({
+      gate,
+      reply: "done",
+      permission: true,
+      resolutionFile,
+    }),
+    cwd: f.callerCwd,
+    cwdIdentity: { device: String(cwdStat.dev), inode: String(cwdStat.ino) },
+  });
+  if ("error" in spawned) throw new Error(spawned.error.code);
+  const turnHandle = encodeTurnHandle({
+    sessionId: spawned.result.sessionId,
+    turnId: spawned.result.turnId,
+  });
+  const observer = await f.sdk();
+  const target = {
+    scope: "turn" as const,
+    turnHandle: turnHandle as unknown as import("@ykdz/reins-sdk").TurnHandle,
+  };
+  const live = await observer.attach(target, { mode: "none" });
+  const checkpoint = live.checkpoint;
+  const consume = async (
+    subscription: Awaited<ReturnType<typeof observer.attach>>,
+    resolveRequests = false,
+  ) => {
+    const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+    for await (const fact of subscription) {
+      facts.push(fact);
+      if (resolveRequests && fact.type === "permission.requested") {
+        const response = await control.request("resolvePermission", {
+          ...decodePermissionHandle(fact.permissionHandle),
+          resolution: { outcome: "deny", feedback: "not approved" },
+        });
+        if ("error" in response) throw new Error(response.error.code);
+      }
+    }
+    return facts;
+  };
+  const liveFactsPromise = consume(live, true);
+  await writeFile(gate, "release");
+  const liveFacts = await liveFactsPromise;
+  expect(await live.done).toMatchObject({ reason: "end_turn" });
+  expect(liveFacts.map((fact) => fact.type)).toEqual([
+    "text.delta",
+    "text.delta",
+    "message",
+    "tool.requested",
+    "tool.completed",
+    "permission.requested",
+    "permission.resolved",
+    "turn.completed",
+  ]);
+
+  const available = await observer.attach(target, { mode: "available" });
+  const availableFacts = await consume(available);
+  expect(await available.done).toMatchObject({ reason: "end_turn" });
+  const byIdentity = new Map(availableFacts.map((fact) => [fact.factId, fact]));
+  for (const fact of liveFacts)
+    expect(byIdentity.get(fact.factId)).toEqual(fact);
+
+  const resumed = await observer.attach(target, {
+    mode: "after",
+    cursor: checkpoint,
+  });
+  const resumedFacts = await consume(resumed);
+  expect(await resumed.done).toMatchObject({ reason: "end_turn" });
+  expect(resumedFacts).toEqual(liveFacts);
+
+  await expect(
+    observer.attach(
+      {
+        scope: "session",
+        sessionHandle: spawned.result
+          .sessionId as unknown as import("@ykdz/reins-sdk").SessionHandle,
+      },
+      { mode: "after", cursor: checkpoint },
+    ),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "invalid_params",
+      facts: {
+        issues: [expect.objectContaining({ path: "replay.cursor" })],
+      },
+    },
+  });
+
+  const structured = await f.cli([
+    "attach",
+    turnHandle,
+    "--scope",
+    "turn",
+    "--replay",
+    "available",
+  ]);
+  expect(structured.exitCode, structured.stdout + structured.stderr).toBe(0);
+  const frames = structured.stdout
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const cliFacts = frames
+    .filter((frame) => frame.kind === "record" && frame.variant === "fact")
+    .map((frame) => (frame.data as { fact: Record<string, unknown> }).fact);
+  expect(cliFacts.map((fact) => fact.factId)).toEqual(
+    availableFacts.map((fact) => fact.factId),
+  );
+  expect(cliFacts.find((fact) => fact.type === "message")).toMatchObject({
+    content: "hello world",
+  });
+  for (const fact of cliFacts)
+    for (const key of ["sessionId", "turnId", "messageId", "toolCallId"])
+      expect(fact).not.toHaveProperty(key);
+
+  const rendered = await f.cli([
+    "attach",
+    turnHandle,
+    "--scope",
+    "turn",
+    "--replay",
+    "available",
+    "--output-format",
+    "text",
+  ]);
+  expect(rendered.exitCode, rendered.stdout + rendered.stderr).toBe(0);
+  expect(rendered.stdout).toContain("worker: hello world");
+  expect(rendered.stdout).toContain("[tool] read-file completed");
+  expect(rendered.stdout).not.toContain("native-result-name");
+});
+
+test("interrupting a live CLI attach closes observation without killing its turn", async () => {
+  const f = await fixture(true);
+  const gate = join(f.root, "interrupt-release");
+  const control = await f.client();
+  const cwdStat = await stat(f.callerCwd, { bigint: true });
+  const spawned = await control.request("spawn", {
+    harness: "codex",
+    sessionName: v.parse(sessionNameSchema, "interrupt-observation"),
+    message: JSON.stringify({ gate, reply: "still running" }),
+    cwd: f.callerCwd,
+    cwdIdentity: { device: String(cwdStat.dev), inode: String(cwdStat.ino) },
+  });
+  if ("error" in spawned) throw new Error(spawned.error.code);
+  const turnHandle = encodeTurnHandle({
+    sessionId: spawned.result.sessionId,
+    turnId: spawned.result.turnId,
+  });
+  const child = spawn(
+    process.execPath,
+    [cliBin, "attach", turnHandle, "--scope", "turn", "--replay", "none"],
+    { cwd: f.callerCwd, env: f.env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  child.stdout.on("data", (chunk) => stdout.push(String(chunk)));
+  child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
+  cleanup.push(async () => {
+    if (child.exitCode !== null || child.signalCode !== null) return;
+    await new Promise<void>((resolve) => {
+      child.once("close", () => resolve());
+      child.kill("SIGTERM");
+    });
+  });
+  const closed = new Promise<number | null>((resolve) =>
+    child.once("close", resolve),
+  );
+  await vi.waitFor(() =>
+    expect(stdout.join("")).toContain('"variant":"established"'),
+  );
+  child.kill("SIGINT");
+  expect(await closed, stderr.join("")).toBe(0);
+  expect(stdout.join("")).toContain('"variant":"ended"');
+  expect(stdout.join("")).toContain('"reason":"closed"');
+  expect(
+    await control.request("list", { sessionId: spawned.result.sessionId }),
+  ).toMatchObject({
+    result: [expect.objectContaining({ state: "busy" })],
+  });
+
+  await writeFile(gate, "release");
+  const target = decodeTurnHandle(turnHandle);
+  expect(
+    await control.request("wait", { targets: [target], completion: "all" }),
+  ).toMatchObject({ result: { completed: [{ finalReply: "still running" }] } });
+});
 
 test("a completed turn receives its establishment ACK before any subscription notification", async () => {
   const { cli, env } = await fixture();

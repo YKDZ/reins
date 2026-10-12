@@ -1,18 +1,23 @@
 import {
   createReinsClient,
+  AgentSubscriptionError,
   ReinsClientError,
+  createPresentationProjector as createClientPresentationProjector,
   type ReinsClient as ControlClient,
 } from "@reins/client/control";
 import type {
+  AttachParams,
   MachineError,
   ProtocolMessage,
   ProtocolParams,
   ProtocolResult,
   SessionInfo as ProtocolSessionInfo,
   SessionId,
+  ResumeCursor as ProtocolResumeCursor,
 } from "@reins/protocol";
 import {
   consumerContextSchema,
+  decodeTurnHandle,
   encodeTurnHandle,
   REINS_PROTOCOL_MAJOR_VERSION,
 } from "@reins/protocol";
@@ -23,6 +28,13 @@ import {
   type ConnectOptions,
   type ReinsConnection,
   type ReinsFailure,
+  type AgentFact,
+  type AgentPresentation,
+  type AgentSubscriptionEnd,
+  type AgentTarget,
+  type ReplayPolicy,
+  type ResumeCursor,
+  type FactSubscription,
   type SessionHandle,
   type SessionInfo,
   type TurnHandle,
@@ -49,6 +61,19 @@ export type {
   SessionState,
   StopReason,
   TurnHandle,
+  AgentFact,
+  AgentFactId,
+  AgentPresentation,
+  AgentSubscriptionEnd,
+  AgentSubscriptionEstablishment,
+  AgentTarget,
+  FactSubscription,
+  MessageKey,
+  PermissionOption,
+  PermissionResolution,
+  ReplayPolicy,
+  ResumeCursor,
+  ToolKey,
 } from "./contracts.ts";
 
 export async function connect(
@@ -124,6 +149,61 @@ export async function connect(
         } as ProtocolParams<"list">;
         return (await query(client!, "list", params)).map(mapSessionInfo);
       },
+      async attach(target, replay, signal) {
+        let source: Awaited<ReturnType<ControlClient["subscribeFacts"]>>;
+        try {
+          source = await client!.subscribeFacts(
+            projectAttachParams(target, replay),
+            signal,
+          );
+        } catch (error) {
+          throw projectSubscriptionError(error);
+        }
+        const done = source.done.catch((error: unknown) => {
+          throw projectSubscriptionError(error);
+        });
+        void done.catch(() => undefined);
+        let finished = false;
+        const subscription: FactSubscription = {
+          establishment:
+            source.establishment as unknown as FactSubscription["establishment"],
+          done: done as unknown as Promise<AgentSubscriptionEnd>,
+          get checkpoint() {
+            return source.checkpoint as unknown as ResumeCursor;
+          },
+          async next() {
+            if (finished) return { value: undefined, done: true };
+            try {
+              const item = await source.next();
+              if (item.done) {
+                finished = true;
+                return { value: undefined, done: true };
+              }
+              return { value: item.value as unknown as AgentFact, done: false };
+            } catch (error) {
+              throw projectSubscriptionError(error);
+            }
+          },
+          async return() {
+            finished = true;
+            await source.return?.();
+            return { value: undefined, done: true };
+          },
+          async throw(error?: unknown) {
+            finished = true;
+            await source.throw?.(error);
+            throw error;
+          },
+          [Symbol.asyncIterator]() {
+            return subscription;
+          },
+          close() {
+            finished = true;
+            source.close();
+          },
+        };
+        return subscription;
+      },
       close() {
         client?.close();
       },
@@ -149,6 +229,61 @@ export async function connect(
       stage,
     );
   }
+}
+
+export function createPresentationProjector(): (
+  fact: AgentFact,
+) => AgentPresentation[] {
+  return createClientPresentationProjector() as unknown as (
+    fact: AgentFact,
+  ) => AgentPresentation[];
+}
+
+function projectAttachParams(
+  target: AgentTarget,
+  replay: ReplayPolicy,
+): AttachParams {
+  const protocolReplay =
+    replay.mode === "after"
+      ? {
+          mode: "after" as const,
+          cursor: replay.cursor as unknown as ProtocolResumeCursor,
+        }
+      : replay;
+  if (target.scope === "session")
+    return {
+      scope: "session",
+      sessionId: target.sessionHandle as unknown as SessionId,
+      replay: protocolReplay,
+    };
+  return {
+    scope: "turn",
+    ...decodeTurnHandle(target.turnHandle),
+    replay: protocolReplay,
+  };
+}
+
+function projectSubscriptionError(error: unknown): ReinsSdkError {
+  if (error instanceof ReinsSdkError) return error;
+  if (error instanceof AgentSubscriptionError) {
+    const failure = projectFailure(error.failure);
+    if (
+      failure.code === "daemon_disconnected" &&
+      error.resumeCursor !== undefined
+    )
+      return new ReinsSdkError({
+        code: "daemon_disconnected",
+        facts: {
+          resumeCursor: error.resumeCursor as unknown as ResumeCursor,
+        },
+      });
+    return new ReinsSdkError(failure);
+  }
+  if (error instanceof ReinsClientError)
+    return new ReinsSdkError(projectClientFailure(error.failure));
+  if (isTransportError(error))
+    return new ReinsSdkError({ code: "daemon_disconnected", facts: {} });
+  return new ReinsSdkError({ code: "unexpected_failure", facts: {} });
 }
 
 async function query<M extends "capabilities" | "list">(
@@ -191,6 +326,11 @@ function projectFailure(failure: MachineError): ReinsFailure {
       return { code: failure.code, facts: {} };
     case "daemon_disconnected":
       return { code: failure.code, facts: {} };
+    case "event_cursor_expired":
+      return {
+        code: failure.code,
+        facts: { oldest: failure.oldest, head: failure.head },
+      };
     case "protocol_version_mismatch":
       return {
         code: failure.code,
