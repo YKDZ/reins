@@ -152,6 +152,7 @@ test("attach waits for each write before reading again and closes on writer fail
     ],
     version: "test",
     dependencies: { connect: async () => connection },
+    cancelOutput() {},
     write(output) {
       const frame = JSON.parse(output.chunk) as {
         kind?: string;
@@ -190,5 +191,142 @@ test("attach waits for each write before reading again and closes on writer fail
   });
   expect(subscriptionClosed).toBe(true);
   expect(connectionClosed).toBe(true);
+  expect(process.listenerCount("SIGINT")).toBe(listenersBefore);
+});
+
+test("SIGINT releases a blocked attach write and closes its connection", async () => {
+  const sessionHandle = "session@g1" as SessionHandle;
+  const target = { scope: "session" as const, sessionHandle };
+  let subscriptionClosed = false;
+  let connectionClosed = false;
+  let cancelWriteCalled = false;
+  let startEstablishedWrite!: () => void;
+  const establishedWriteStarted = new Promise<void>((resolve) => {
+    startEstablishedWrite = resolve;
+  });
+  let releaseEstablishedWrite!: () => void;
+  const establishedWrite = new Promise<void>((resolve) => {
+    releaseEstablishedWrite = resolve;
+  });
+  const subscription: FactSubscription = {
+    establishment: {
+      target,
+      window: { oldest: 1, head: 1, truncated: false },
+      replayed: 0,
+    },
+    done: Promise.resolve({ target, reason: "closed" }),
+    checkpoint: "resume1_hash" as FactSubscription["checkpoint"],
+    async next() {
+      return { value: undefined, done: true };
+    },
+    async return() {
+      this.close();
+      return { value: undefined, done: true };
+    },
+    async throw(error?: unknown) {
+      this.close();
+      throw error;
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    close() {
+      subscriptionClosed = true;
+    },
+  };
+  const connection = {
+    handshake: { protocolMajorVersion: 1, daemonGeneration: "g1" },
+    async capabilities() {
+      return { capabilities: [], failures: [] };
+    },
+    async list() {
+      return [];
+    },
+    async attach() {
+      return subscription;
+    },
+    prepareOperation<Kind extends OperationKind>(kind: Kind) {
+      return `credential-${kind}` as OperationCredential<Kind>;
+    },
+    async spawn(
+      _input: SpawnInput,
+      _credential: OperationCredential<"spawn">,
+    ): Promise<SpawnResult> {
+      return {
+        sessionHandle,
+        turnHandle: "turn1_hash" as TurnHandle,
+        cwd: "/tmp",
+      };
+    },
+    async kill(
+      input: KillInput,
+      _credential: OperationCredential<"kill">,
+    ): Promise<KillResult> {
+      return { sessionHandle: input.sessionHandle, status: "killed" };
+    },
+    async send() {
+      throw new Error("send is not used by the attach output test");
+    },
+    async wait() {
+      throw new Error("wait is not used by the attach output test");
+    },
+    async interrupt() {
+      throw new Error("interrupt is not used by the attach output test");
+    },
+    close() {
+      connectionClosed = true;
+    },
+  } satisfies ReinsConnection;
+  const runtime: CliRuntime = {
+    argv: [
+      "node",
+      "reins",
+      "attach",
+      sessionHandle,
+      "--scope",
+      "session",
+      "--replay",
+      "none",
+    ],
+    version: "test",
+    dependencies: { connect: async () => connection },
+    cancelOutput() {
+      expect(subscriptionClosed).toBe(true);
+      expect(connectionClosed).toBe(true);
+      cancelWriteCalled = true;
+      releaseEstablishedWrite();
+    },
+    write(output) {
+      const frame = JSON.parse(output.chunk) as {
+        kind?: string;
+        variant?: string;
+      };
+      if (frame.kind === "record" && frame.variant === "established") {
+        startEstablishedWrite();
+        return establishedWrite;
+      }
+      return Promise.resolve();
+    },
+  };
+
+  const listenersBefore = process.listenerCount("SIGINT");
+  const running = main(runtime);
+  try {
+    await establishedWriteStarted;
+    process.emit("SIGINT");
+    const settled = await Promise.race([
+      running.then(() => true),
+      new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 100)),
+    ]);
+
+    expect(settled).toBe(true);
+    expect(cancelWriteCalled).toBe(true);
+    expect(subscriptionClosed).toBe(true);
+    expect(connectionClosed).toBe(true);
+    await expect(running).resolves.toBe(0);
+  } finally {
+    releaseEstablishedWrite();
+    await running;
+  }
   expect(process.listenerCount("SIGINT")).toBe(listenersBefore);
 });

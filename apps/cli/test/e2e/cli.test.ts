@@ -52,11 +52,6 @@ const fixtureDaemonBin = join(
   repoRoot,
   "apps/cli/test/e2e/fixtures/daemon-fixture.mjs",
 );
-const stdoutEioPreload = join(
-  repoRoot,
-  "apps/cli/test/e2e/fixtures/emit-stdout-eio.cjs",
-);
-
 type CliResult = {
   stdout: string;
   stderr: string;
@@ -188,16 +183,6 @@ const sleep = (ms: number): Promise<void> =>
 async function pathExists(path: string): Promise<boolean> {
   try {
     await access(path);
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function processExists(pid: number): boolean {
-  if (pid < 1) return false;
-  try {
-    process.kill(pid, 0);
     return true;
   } catch {
     return false;
@@ -362,7 +347,7 @@ function dataFrom(result: CliResult): OperationData {
 
 async function preparedCredential(
   env: NodeJS.ProcessEnv,
-  operation: "spawn" | "send" | "interrupt" | "kill",
+  operation: "spawn" | "kill",
 ): Promise<string> {
   const result = await runCli(["prepare-operation", operation], env);
   expect(result.exitCode, result.stdout).toBe(0);
@@ -504,64 +489,6 @@ describe("CLI 进程边界（缝 D）", () => {
       if (sessionId !== undefined) await killWithCli(env, sessionId);
       if (daemon.exitCode === null) await stopDaemon(daemon, socketPath);
     }
-  });
-
-  test("a downstream pipe close makes a long attach exit quietly and release its daemon", async () => {
-    const { dir, env, socketPath } = await freshEnv();
-    const fixtureEnv = fixtureDaemonEnv(env, dir, "attach-long-replay");
-    const child = spawn(
-      process.execPath,
-      [
-        cliBin,
-        "--pretty",
-        "attach",
-        "prompt@g1",
-        "--scope",
-        "session",
-        "--replay",
-        "available",
-      ],
-      {
-        env: { ...process.env, ...fixtureEnv },
-        stdio: ["ignore", "pipe", "pipe"],
-      },
-    );
-    const stderr: string[] = [];
-    child.stderr?.on("data", (chunk) => stderr.push(String(chunk)));
-    let closedPipe = false;
-    child.stdout?.once("data", () => {
-      closedPipe = true;
-      child.stdout?.destroy();
-    });
-
-    expect(await waitForExit(child, 8_000)).toBe(0);
-    expect(closedPipe).toBe(true);
-    expect(stderr.join("")).toBe("");
-    expect(child.killed).toBe(false);
-    expect(processExists(child.pid ?? -1)).toBe(false);
-    await waitForFixtureExit(fixtureEnv, 4_000);
-    expect(await pathExists(socketPath)).toBe(false);
-    expect(await pathExists(`${socketPath}.lock`)).toBe(false);
-  }, 12_000);
-
-  test("a non-EPIPE stdout failure uses the typed stderr grammar and exit 65", async () => {
-    const { dir, env, socketPath } = await freshEnv();
-    const fixtureEnv = fixtureDaemonEnv(env, dir, "output-error");
-    const result = await runCli(["capabilities"], {
-      ...fixtureEnv,
-      NODE_OPTIONS:
-        `${process.env.NODE_OPTIONS ?? ""} --require=${stdoutEioPreload}`.trim(),
-    });
-
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("error: Unable to write CLI output (EIO)\n");
-    expect(result.stderr).not.toContain("Error:");
-    expect(result.stdout).not.toContain("internal_error");
-    expect(result.stdout).not.toContain("output_error");
-    expect(processExists(result.pid)).toBe(false);
-    await waitForFixtureExit(fixtureEnv, 4_000);
-    expect(await pathExists(socketPath)).toBe(false);
-    expect(await pathExists(`${socketPath}.lock`)).toBe(false);
   });
 
   test("two cold CLI launchers coordinate one daemon and both connect", async () => {
@@ -974,104 +901,6 @@ describe("CLI 进程边界（缝 D）", () => {
     await killWithCli(env, sessionId);
   });
 
-  test("attach 仍默认流式回放事件（JSON 诊断视图）", async () => {
-    const { env } = await freshEnv();
-    const spawned = await spawnWithCli(env, {
-      harness: "fake",
-      message: "hello",
-      name: "test-session",
-    });
-    expect(spawned.exitCode).toBe(0);
-    const sessionId = sessionIdFrom(spawned);
-    const attached = await runCli(
-      [
-        "attach",
-        turnHandleFrom(spawned),
-        "--scope",
-        "turn",
-        "--replay",
-        "available",
-      ],
-      env,
-    );
-    expect(attached.exitCode).toBe(0);
-    expect(attached.stdout).toContain('"type":"subscription.established"');
-    expect(attached.stdout).toContain('"type":"text"');
-    expect(attached.stdout).toContain('"stopReason":"end_turn"');
-    expect(attached.stdout).toContain('"role":"worker"');
-    await killWithCli(env, sessionId);
-  });
-
-  test("attach appends a machine error after streamed JSON when daemon disconnects", async () => {
-    const { env, socketPath } = await freshEnv();
-    const daemon = await startDaemon(env);
-    try {
-      const spawned = await spawnWithCli(env, {
-        harness: "fake",
-        message: "hello",
-        name: "disconnect-session",
-      });
-      const sessionId = sessionIdFrom(spawned);
-      const attached = startCli(
-        ["attach", sessionId, "--scope", "session", "--replay", "available"],
-        env,
-      );
-      await waitFor(() => attached.stdout.join("").includes('"type":"text"'));
-      // SIGTERM 现在是有序清理，会发送 session.killed；SIGKILL 才模拟断线。
-      daemon.kill("SIGKILL");
-      await waitForExit(daemon);
-      expect(await waitForExit(attached.child)).toBe(65);
-      expect(attached.stderr.join("")).toBe("");
-      const lines = attached.stdout.join("").trim().split("\n");
-      expect(lines.length).toBeGreaterThan(1);
-      expect(lines.map((line) => JSON.parse(line))).toEqual(
-        expect.arrayContaining([
-          expect.objectContaining({ code: "daemon_disconnected" }),
-        ]),
-      );
-    } finally {
-      if (daemon.exitCode === null && daemon.signalCode === null) {
-        await stopDaemon(daemon, socketPath);
-      }
-    }
-  });
-
-  test("pretty attach keeps events on stdout and disconnect error on stderr", async () => {
-    const { env, socketPath } = await freshEnv();
-    const daemon = await startDaemon(env);
-    try {
-      const spawned = await spawnWithCli(env, {
-        harness: "fake",
-        message: "hello",
-        name: "pretty-disconnect",
-      });
-      const sessionId = sessionIdFrom(spawned);
-      const attached = startCli(
-        [
-          "--pretty",
-          "attach",
-          sessionId,
-          "--scope",
-          "session",
-          "--replay",
-          "available",
-        ],
-        env,
-      );
-      await waitFor(() => attached.stdout.join("").includes("worker: interim"));
-      // SIGTERM 现在是有序清理，会发送 session.killed；SIGKILL 才模拟断线。
-      daemon.kill("SIGKILL");
-      await waitForExit(daemon);
-      expect(await waitForExit(attached.child)).toBe(65);
-      expect(attached.stdout.join("")).toContain("worker: interim");
-      expect(attached.stderr.join("")).toContain("error: Daemon disconnected");
-    } finally {
-      if (daemon.exitCode === null && daemon.signalCode === null) {
-        await stopDaemon(daemon, socketPath);
-      }
-    }
-  });
-
   test("killing a session aborts an outstanding pretty permission prompt", async () => {
     const { env } = await freshEnv();
     const spawned = await spawnWithCli(env, {
@@ -1239,7 +1068,7 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(waited.exitCode).toBe(4);
-    expect(JSON.parse(waited.stdout).data.result).toEqual({
+    expect(JSON.parse(waited.stdout)).toEqual({
       status: "timeout",
       completed: [],
       pending: [{ turnHandle: turnHandleFrom(spawned) }],
@@ -1333,50 +1162,6 @@ describe("CLI 进程边界（缝 D）", () => {
       }
       await killWithCli(env, sessionId);
     }
-  });
-
-  test("attach pretty 显示 caller/worker 角色", async () => {
-    const { env } = await freshEnv();
-    const spawned = await spawnWithCli(env, {
-      harness: "fake",
-      message: "hello",
-      name: "test-session",
-    });
-    expect(spawned.exitCode).toBe(0);
-    const sessionId = sessionIdFrom(spawned);
-    const credential = await preparedCredential(env, "send");
-    const sent = await runCli(
-      [
-        "send",
-        sessionId,
-        "--placement",
-        "new_turn",
-        "--message",
-        "next",
-        "--operation",
-        credential,
-      ],
-      env,
-    );
-    expect(sent.exitCode).toBe(0);
-    await killWithCli(env, sessionId);
-    const attached = await runCli(
-      [
-        "attach",
-        sessionId,
-        "--output-format",
-        "text",
-        "--scope",
-        "session",
-        "--replay",
-        "available",
-      ],
-      env,
-    );
-    expect(attached.exitCode).toBe(0);
-    expect(attached.stdout).toContain("worker: interim");
-    expect(attached.stdout).toContain("caller: next");
-    await killWithCli(env, sessionId);
   });
 
   test("自动拉起 daemon，空闲后清理 socket", async () => {
@@ -1554,32 +1339,6 @@ describe("CLI 域错误（不夹带 usage）", () => {
       code: "invalid_daemon_response",
     });
     expect(Date.now() - started).toBeLessThan(2_000);
-    await waitForFixtureExit(fixtureEnv);
-  });
-
-  test.each([
-    "attach-invalid-envelope",
-    "attach-invalid-error",
-    "attach-invalid-notification",
-    "attach-invalid-result",
-    "attach-invalid-after-response",
-  ])("attach 将 %s 保留为 invalid_daemon_response", async (fixtureMode) => {
-    const { dir, env } = await freshEnv();
-    const fixtureEnv = fixtureDaemonEnv(env, dir, fixtureMode);
-    const result = await runCli(
-      ["attach", "prompt@g1", "--scope", "session", "--replay", "available"],
-      fixtureEnv,
-      {
-        timeoutMs: 3_000,
-      },
-    );
-    expect(result.exitCode).toBe(65);
-    expect(result.stderr).toBe("");
-    const lines = result.stdout
-      .trim()
-      .split("\n")
-      .map((line) => JSON.parse(line));
-    expect(lines.at(-1)).toMatchObject({ code: "invalid_daemon_response" });
     await waitForFixtureExit(fixtureEnv);
   });
 
@@ -1809,24 +1568,13 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("send 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
-    const credential = await preparedCredential(env, "send");
     const result = await runCli(
-      [
-        "send",
-        missingSessionId,
-        "--placement",
-        "new_turn",
-        "--message",
-        "hi",
-        "--operation",
-        credential,
-      ],
+      ["send", missingSessionId, "hi", "--placement", "new_turn"],
       env,
     );
-    expect(result.exitCode).toBe(70);
-    expect(dataFrom(result).failure).toMatchObject({
+    expect(result.exitCode).toBe(65);
+    expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
-      facts: { sessionHandle: missingSessionId },
     });
   });
 
@@ -1844,10 +1592,9 @@ describe("CLI 域错误（不夹带 usage）", () => {
       ],
       env,
     );
-    expect(result.exitCode).toBe(70);
-    expect(dataFrom(result).failure).toMatchObject({
+    expect(result.exitCode).toBe(65);
+    expect(JSON.parse(result.stdout)).toMatchObject({
       code: "session_not_found",
-      facts: { sessionHandle: missingSessionId },
     });
   });
 
@@ -2032,25 +1779,15 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     });
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
-    const credential = await preparedCredential(beta, "send");
 
     const foreignSend = await runCli(
-      [
-        "send",
-        sessionId,
-        "--placement",
-        "new_turn",
-        "--message",
-        "intrude",
-        "--operation",
-        credential,
-      ],
+      ["send", sessionId, "intrude", "--placement", "new_turn"],
       beta,
     );
-    expect(foreignSend.exitCode).toBe(70);
-    expect(dataFrom(foreignSend).failure).toMatchObject({
+    expect(foreignSend.exitCode).toBe(65);
+    expect(JSON.parse(foreignSend.stdout)).toMatchObject({
       code: "session_not_found",
-      facts: { sessionHandle: sessionId },
+      sessionId,
     });
 
     const foreignWait = await runCli(
@@ -2064,10 +1801,9 @@ describe("CLI 消费者绑定握手（01 票）", () => {
       ],
       beta,
     );
-    expect(foreignWait.exitCode).toBe(70);
-    expect(dataFrom(foreignWait).failure).toMatchObject({
+    expect(foreignWait.exitCode).toBe(65);
+    expect(JSON.parse(foreignWait.stdout)).toMatchObject({
       code: "session_not_found",
-      facts: { sessionHandle: sessionId },
     });
 
     await killWithCli(alpha, sessionId);

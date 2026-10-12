@@ -31,6 +31,10 @@ import { afterEach, expect, test, vi } from "vitest";
 const repo = fileURLToPath(new URL("../../../../", import.meta.url));
 const cliBin = join(repo, "apps/cli/dist/reins.js");
 const daemonBin = join(repo, "packages/daemon/dist/main.js");
+const stdoutEioPreload = join(
+  repo,
+  "apps/cli/test/e2e/fixtures/emit-stdout-eio.cjs",
+);
 const adapters = fileURLToPath(
   new URL(
     "../../../../packages/daemon/test/fixtures/wait-adapters.ts",
@@ -169,6 +173,7 @@ test("public SDK facts keep their identity across none, available, and after, an
       gate,
       reply: "done",
       permission: true,
+      callerMessage: "next",
       resolutionFile,
     }),
   );
@@ -202,6 +207,7 @@ test("public SDK facts keep their identity across none, available, and after, an
   const liveFacts = await liveFactsPromise;
   expect(await live.done).toMatchObject({ reason: "end_turn" });
   expect(liveFacts.map((fact) => fact.type)).toEqual([
+    "message",
     "text.delta",
     "text.delta",
     "message",
@@ -270,9 +276,20 @@ test("public SDK facts keep their identity across none, available, and after, an
   expect(cliFacts.map((fact) => fact.factId)).toEqual(
     availableFacts.map((fact) => fact.factId),
   );
-  expect(cliFacts.find((fact) => fact.type === "message")).toMatchObject({
-    content: "hello world",
-  });
+  expect(cliFacts).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "message",
+        role: "caller",
+        content: "next",
+      }),
+      expect.objectContaining({
+        type: "message",
+        role: "worker",
+        content: "hello world",
+      }),
+    ]),
+  );
   for (const fact of cliFacts)
     for (const key of ["sessionId", "turnId", "messageId", "toolCallId"])
       expect(fact).not.toHaveProperty(key);
@@ -288,9 +305,405 @@ test("public SDK facts keep their identity across none, available, and after, an
     "text",
   ]);
   expect(rendered.exitCode, rendered.stdout + rendered.stderr).toBe(0);
+  expect(rendered.stdout).toContain("caller: next");
   expect(rendered.stdout).toContain("worker: hello world");
   expect(rendered.stdout).toContain("[tool] read-file completed");
   expect(rendered.stdout).not.toContain("native-result-name");
+});
+
+test("text CLI marks a corrected message snapshot instead of appending it", async () => {
+  const f = await fixture(true);
+  const gate = join(f.root, "replacement-release");
+  const spawned = await f.spawnSession(
+    "replacement-message",
+    JSON.stringify({
+      gate,
+      reply: "corrected",
+      replacement: { draft: "draft", corrected: "corrected" },
+    }),
+  );
+  await writeFile(gate, "release");
+
+  const rendered = await f.cli([
+    "attach",
+    spawned.turnHandle,
+    "--scope",
+    "turn",
+    "--replay",
+    "available",
+    "--output-format",
+    "text",
+  ]);
+
+  expect(rendered.exitCode, rendered.stdout + rendered.stderr).toBe(0);
+  expect(rendered.stdout).toContain("worker: draft");
+  expect(rendered.stdout).toContain("[message updated] worker: corrected");
+  expect(rendered.stdout).not.toContain("draftcorrected");
+});
+
+test("SIGINT cancels a backpressured CLI observer without stopping its turn", async () => {
+  const f = await fixture(true);
+  const eventGate = join(f.root, "backpressure-events-release");
+  const completionGate = join(f.root, "backpressure-completion-release");
+  const messageCount = 5_000;
+  const spawned = await f.spawnSession(
+    "backpressure-observer",
+    JSON.stringify({
+      gate: eventGate,
+      completionGate,
+      messages: messageCount,
+      reply: "completed after observer cancellation",
+    }),
+  );
+  const observer = await f.sdk();
+  expect(await observer.list()).toContainEqual(
+    expect.objectContaining({
+      sessionHandle: spawned.sessionHandle,
+      state: "busy",
+    }),
+  );
+  const subscription = await observer.attach(
+    { scope: "turn", turnHandle: spawned.turnHandle },
+    { mode: "none" },
+  );
+  const facts: import("@ykdz/reins-sdk").AgentFact[] = [];
+  let observedMessages = 0;
+  let resolveAllMessages!: () => void;
+  const allMessages = new Promise<void>((resolve) => {
+    resolveAllMessages = resolve;
+  });
+  const factStream = (async () => {
+    for await (const fact of subscription) {
+      facts.push(fact);
+      if (fact.type === "message" && fact.content.startsWith("message ")) {
+        observedMessages += 1;
+        if (observedMessages === messageCount) resolveAllMessages();
+      }
+    }
+    await subscription.done;
+  })();
+
+  const child: ChildProcess = spawn(
+    process.execPath,
+    [
+      cliBin,
+      "attach",
+      spawned.turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "none",
+    ],
+    { env: f.env, cwd: f.callerCwd, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let startupOutput = "";
+  let established = false;
+  const stderr: string[] = [];
+  let resolveEstablished!: () => void;
+  let rejectEstablished!: (error: Error) => void;
+  const establishedPromise = new Promise<void>((resolve, reject) => {
+    resolveEstablished = resolve;
+    rejectEstablished = reject;
+  });
+  const closed = new Promise<void>((resolve) => {
+    child.once("close", () => resolve());
+  });
+  const exited = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve) => {
+    child.once("exit", (code, signal) => resolve({ code, signal }));
+  });
+  cleanup.push(async () => {
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill("SIGKILL");
+    child.stdout?.resume();
+    await closed;
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    if (established) return;
+    startupOutput += chunk;
+    for (const line of startupOutput.split("\n")) {
+      if (line === "") continue;
+      const frame = JSON.parse(line) as Record<string, unknown>;
+      if (frame.kind === "record" && frame.variant === "established") {
+        established = true;
+        child.stdout?.pause();
+        resolveEstablished();
+        return;
+      }
+    }
+  });
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => stderr.push(chunk));
+  child.once("error", rejectEstablished);
+  child.once("exit", (code, signal) => {
+    if (!established)
+      rejectEstablished(
+        new Error(
+          `Attach exited before establishment: code=${code} signal=${signal}`,
+        ),
+      );
+  });
+  let startupTimer: ReturnType<typeof setTimeout> | undefined = setTimeout(
+    () => rejectEstablished(new Error("Attach did not establish")),
+    10_000,
+  );
+  try {
+    await establishedPromise;
+    clearTimeout(startupTimer);
+    startupTimer = undefined;
+    await writeFile(eventGate, "release");
+    await allMessages;
+    expect(child.stdout?.readableLength).toBeGreaterThan(0);
+    expect(child.exitCode).toBeNull();
+    expect(child.signalCode).toBeNull();
+    expect(child.kill("SIGINT")).toBe(true);
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const exit = await Promise.race([
+      exited,
+      new Promise<undefined>((resolve) => {
+        exitTimer = setTimeout(() => resolve(undefined), 5_000);
+      }),
+    ]);
+    if (exitTimer !== undefined) clearTimeout(exitTimer);
+    expect(exit, "CLI must exit while the parent leaves stdout unread").toEqual(
+      {
+        code: 0,
+        signal: null,
+      },
+    );
+    child.stdout?.resume();
+    await closed;
+    expect(stderr.join("")).toBe("");
+
+    expect(await observer.list()).toContainEqual(
+      expect.objectContaining({
+        sessionHandle: spawned.sessionHandle,
+        state: "busy",
+      }),
+    );
+    await writeFile(completionGate, "release");
+    await factStream;
+    expect(observedMessages).toBe(messageCount);
+    expect(await subscription.done).toMatchObject({ reason: "end_turn" });
+    expect(facts.at(-1)).toMatchObject({
+      type: "turn.completed",
+      stopReason: "end_turn",
+    });
+  } finally {
+    if (startupTimer !== undefined) clearTimeout(startupTimer);
+    subscription.close();
+    await factStream.catch(() => undefined);
+  }
+});
+
+test("closing the CLI output pipe ends observation without stopping the turn", async () => {
+  const f = await fixture(true);
+  const eventGate = join(f.root, "pipe-close-events-release");
+  const completionGate = join(f.root, "pipe-close-completion-release");
+  const control = await f.client();
+  const spawned = await f.spawnSession(
+    "pipe-close-observer",
+    JSON.stringify({
+      gate: eventGate,
+      completionGate,
+      reply: "completed after observer pipe close",
+    }),
+  );
+  const child = spawn(
+    process.execPath,
+    [
+      cliBin,
+      "attach",
+      spawned.turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "none",
+    ],
+    { cwd: f.callerCwd, env: f.env, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  let startupOutput = "";
+  let established = false;
+  const stderr: string[] = [];
+  let resolveEstablished!: () => void;
+  let rejectEstablished!: (error: Error) => void;
+  const establishedPromise = new Promise<void>((resolve, reject) => {
+    resolveEstablished = resolve;
+    rejectEstablished = reject;
+  });
+  const closed = new Promise<number | null>((resolve) =>
+    child.once("close", resolve),
+  );
+  cleanup.push(async () => {
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill("SIGKILL");
+    child.stdout?.resume();
+    await closed;
+  });
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => {
+    if (established) return;
+    startupOutput += chunk;
+    for (const line of startupOutput.split("\n")) {
+      if (line === "") continue;
+      const frame = JSON.parse(line) as Record<string, unknown>;
+      if (frame.kind === "record" && frame.variant === "established") {
+        established = true;
+        child.stdout?.destroy();
+        resolveEstablished();
+        return;
+      }
+    }
+  });
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => stderr.push(chunk));
+  child.once("error", rejectEstablished);
+  child.once("exit", (code, signal) => {
+    if (!established)
+      rejectEstablished(
+        new Error(
+          `Attach exited before establishment: code=${code} signal=${signal}`,
+        ),
+      );
+  });
+  const startupTimer = setTimeout(
+    () => rejectEstablished(new Error("Attach did not establish")),
+    10_000,
+  );
+  try {
+    await establishedPromise;
+    clearTimeout(startupTimer);
+    await writeFile(eventGate, "release");
+    let exitTimer: ReturnType<typeof setTimeout> | undefined;
+    const exitCode = await Promise.race([
+      closed,
+      new Promise<undefined>(
+        (resolve) => (exitTimer = setTimeout(() => resolve(undefined), 5_000)),
+      ),
+    ]);
+    if (exitTimer !== undefined) clearTimeout(exitTimer);
+    expect(exitCode, "CLI must settle after its output pipe closes").toBe(0);
+    expect(stderr.join("")).toBe("");
+    expect(await (await f.sdk()).list()).toContainEqual(
+      expect.objectContaining({
+        sessionHandle: spawned.sessionHandle,
+        state: "busy",
+        activeTurn: spawned.turnHandle,
+      }),
+    );
+
+    await writeFile(completionGate, "release");
+    expect(
+      await control.request("wait", {
+        targets: [decodeTurnHandle(spawned.turnHandle)],
+        completion: "all",
+      }),
+    ).toMatchObject({
+      result: {
+        completed: [
+          {
+            finalReply: "completed after observer pipe close",
+          },
+        ],
+      },
+    });
+  } finally {
+    clearTimeout(startupTimer);
+  }
+});
+
+test("a non-EPIPE attach write failure exits without a success record", async () => {
+  const f = await fixture(true);
+  const eventGate = join(f.root, "write-error-events-release");
+  const completionGate = join(f.root, "write-error-completion-release");
+  const control = await f.client();
+  const spawned = await f.spawnSession(
+    "write-error-observer",
+    JSON.stringify({
+      gate: eventGate,
+      completionGate,
+      reply: "completed after output failure",
+    }),
+  );
+  const child = spawn(
+    process.execPath,
+    [
+      cliBin,
+      "attach",
+      spawned.turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "none",
+    ],
+    {
+      cwd: f.callerCwd,
+      env: {
+        ...f.env,
+        NODE_OPTIONS:
+          `${process.env.NODE_OPTIONS ?? ""} --require=${stdoutEioPreload}`.trim(),
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const stdout: string[] = [];
+  const stderr: string[] = [];
+  child.stdout?.setEncoding("utf8");
+  child.stdout?.on("data", (chunk: string) => stdout.push(chunk));
+  child.stderr?.setEncoding("utf8");
+  child.stderr?.on("data", (chunk: string) => stderr.push(chunk));
+  const closed = new Promise<{
+    code: number | null;
+    signal: NodeJS.Signals | null;
+  }>((resolve) => {
+    child.once("close", (code, signal) => resolve({ code, signal }));
+  });
+  cleanup.push(async () => {
+    if (child.exitCode === null && child.signalCode === null)
+      child.kill("SIGKILL");
+    child.stdout?.resume();
+    await closed;
+  });
+
+  let exitTimer: ReturnType<typeof setTimeout> | undefined;
+  const result = await Promise.race([
+    closed,
+    new Promise<undefined>(
+      (resolve) => (exitTimer = setTimeout(() => resolve(undefined), 5_000)),
+    ),
+  ]);
+  if (exitTimer !== undefined) clearTimeout(exitTimer);
+  expect(result, "CLI must settle after a non-EPIPE writer failure").toEqual({
+    code: 1,
+    signal: null,
+  });
+  expect(stderr.join("")).toBe("error: CLI output failed\n");
+  expect(stderr.join("")).not.toContain("Error:");
+  expect(stderr.join("")).not.toContain(f.root);
+  expect(stdout.join("")).not.toContain('"variant":"ended"');
+  expect(await (await f.sdk()).list()).toContainEqual(
+    expect.objectContaining({
+      sessionHandle: spawned.sessionHandle,
+      state: "busy",
+      activeTurn: spawned.turnHandle,
+    }),
+  );
+
+  await writeFile(eventGate, "release");
+  await writeFile(completionGate, "release");
+  expect(
+    await control.request("wait", {
+      targets: [decodeTurnHandle(spawned.turnHandle)],
+      completion: "all",
+    }),
+  ).toMatchObject({
+    result: {
+      completed: [{ finalReply: "completed after output failure" }],
+    },
+  });
 });
 
 test("SDK abort preserves AbortError and closes observation without stopping its session", async () => {
@@ -625,7 +1038,7 @@ test.each(["failed", "cancelled"] as const)(
   },
 );
 
-test("CLI preserves structured facts before a typed daemon_disconnected failure", async () => {
+test("CLI preserves delivered facts and reports daemon disconnect in structured and text output", async () => {
   const f = await fixture(true, true);
   const gate = join(f.root, "release");
   const spawned = await f.spawnSession(
@@ -672,6 +1085,36 @@ test("CLI preserves structured facts before a typed daemon_disconnected failure"
   child.stdout.on("data", (chunk) => output.push(String(chunk)));
   const stderr: string[] = [];
   child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
+  const textChild = spawn(
+    process.execPath,
+    [
+      cliBin,
+      "attach",
+      spawned.turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "none",
+      "--output-format",
+      "text",
+    ],
+    { env: f.env, cwd: f.callerCwd, stdio: ["ignore", "pipe", "pipe"] },
+  );
+  cleanup.push(async () => {
+    if (textChild.exitCode === null && textChild.signalCode === null) {
+      textChild.kill("SIGTERM");
+      await new Promise<void>((resolve) =>
+        textChild.once("close", () => resolve()),
+      );
+    }
+  });
+  const textOutput: string[] = [];
+  textChild.stdout.on("data", (chunk) => textOutput.push(String(chunk)));
+  const textStderr: string[] = [];
+  textChild.stderr.on("data", (chunk) => textStderr.push(String(chunk)));
+  const textExited = new Promise<number | null>((resolve) =>
+    textChild.once("close", resolve),
+  );
   const exited = new Promise<number | null>((resolve) =>
     child.once("close", resolve),
   );
@@ -687,8 +1130,20 @@ test("CLI preserves structured facts before a typed daemon_disconnected failure"
   );
   await writeFile(gate, "release");
   await vi.waitFor(() => expect(cliFacts().length).toBeGreaterThanOrEqual(2));
+  await vi.waitFor(() =>
+    expect(textOutput.join("")).toContain("worker: hello world"),
+  );
+  await vi.waitFor(() =>
+    expect(textOutput.join("")).toContain("[tool] read-file completed"),
+  );
   await f.stopDaemon("SIGKILL");
   expect(await exited, stderr.join("")).toBe(70);
+  expect(await textExited, textStderr.join("")).toBe(70);
+  expect(textOutput.join("")).toContain("worker: hello world");
+  expect(textOutput.join("")).not.toContain("[attach ended]");
+  expect(textOutput.join("")).not.toContain("[turn completed]");
+  expect(textStderr.join("")).toContain("Attach failed: daemon_disconnected");
+  expect(textStderr.join("")).not.toContain("/tmp/");
   await sdkDrain;
   const records = output
     .join("")
