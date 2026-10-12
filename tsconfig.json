@@ -25,6 +25,7 @@
     "scripts/packed-cli-fixtures/process.ts",
     "scripts/packed-cli-fixtures/sdk.ts",
     "scripts/packed-cli-fixtures/sdk-query.ts",
+    "scripts/packed-cli-fixtures/sdk-recoverable-control.ts",
     "scripts/packed-cli-fixtures/simulated-adapter.ts",
     "scripts/packed-cli-fixtures/types.ts",
     "scripts/prepare-test-platform-input.ts",

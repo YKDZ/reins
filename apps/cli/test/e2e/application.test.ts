@@ -11,13 +11,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { consumerContextSchema, sessionNameSchema } from "@reins/protocol";
+import { consumerContextSchema } from "@reins/protocol";
 import type { ReinsConnection, SessionHandle } from "@ykdz/reins-sdk";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test } from "vitest";
 
-import { connectReinsClient } from "../../src/application-runtime.ts";
 import { connectReins } from "../../src/application.ts";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -32,15 +31,6 @@ const fixtureDaemonBin = join(
 );
 const fixtures: Array<{ directory: string; daemonPids: string }> = [];
 const clients: ReinsConnection[] = [];
-const controlClients: Awaited<ReturnType<typeof connectReinsClient>>[] = [];
-
-async function workingDirectoryIdentity(): Promise<{
-  device: string;
-  inode: string;
-}> {
-  const directory = await stat(process.cwd(), { bigint: true });
-  return { device: String(directory.dev), inode: String(directory.ino) };
-}
 
 async function waitForProcessExit(
   pid: number,
@@ -74,7 +64,6 @@ async function waitForSocket(path: string, timeoutMs = 5_000): Promise<void> {
 
 afterEach(async () => {
   for (const client of clients.splice(0)) client.close();
-  for (const client of controlClients.splice(0)) client.close();
   for (const fixture of fixtures.splice(0)) {
     let pids: number[] = [];
     try {
@@ -142,18 +131,15 @@ test("non-CLI callers share one real daemon and reconnect to the same session", 
   ]);
   clients.push(first, second);
 
-  const control = await connectReinsClient(options);
-  controlClients.push(control);
-  const spawned = await control.request("spawn", {
+  const spawnInput = {
     harness: "fake",
     message: "keep this session after disconnect",
-    sessionName: v.parse(sessionNameSchema, "application-session"),
+    sessionName: "application-session",
     cwd: process.cwd(),
-    cwdIdentity: await workingDirectoryIdentity(),
-  });
-  expect(spawned).toHaveProperty("result");
-  if ("error" in spawned) throw new Error(spawned.error.code);
-  const sessionHandle = spawned.result.sessionId;
+  };
+  const spawnCredential = first.prepareOperation("spawn");
+  const spawned = await first.spawn(spawnInput, spawnCredential);
+  const sessionHandle = spawned.sessionHandle;
 
   const observedBySecond = await second.list({
     sessionHandle: sessionHandle as unknown as SessionHandle,

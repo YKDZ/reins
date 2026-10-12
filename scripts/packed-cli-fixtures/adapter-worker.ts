@@ -42,7 +42,10 @@ async function runWorker(activityPath: string): Promise<void> {
   descendant.stdout?.setEncoding("utf8");
   descendant.stdout?.on("data", (data: string) => {
     if (data.includes("ready")) {
-      process.send?.({ descendantPid: descendant.pid });
+      process.send?.({
+        descendantPid: descendant.pid,
+        workerCwd: process.cwd(),
+      });
       descendant.stdout?.destroy();
     }
   });

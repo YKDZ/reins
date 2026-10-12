@@ -1,7 +1,7 @@
 // 真实 worker 素材只通过 daemon 已有的 REINS_ADAPTERS_MODULE 注册表接缝装载。
 // 类型输入会由 Node 24 擦除，独立 consumer 运行时不解析工作区包。
 import { spawn, type ChildProcess } from "node:child_process";
-import { appendFileSync, mkdirSync } from "node:fs";
+import { appendFileSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -30,6 +30,7 @@ const fixtureCapabilities: HarnessCapability = {
 };
 const observationPath = process.env.REINS_PACKED_FIXTURE_OBSERVATIONS;
 const activityPath = process.env.REINS_PACKED_FIXTURE_ACTIVITY;
+const capabilityModePath = process.env.REINS_PACKED_FIXTURE_CAPABILITY_MODE;
 const workerPath = fileURLToPath(
   new URL("./adapter-worker.ts", import.meta.url),
 );
@@ -38,6 +39,16 @@ function record(value: Record<string, unknown>): void {
   if (observationPath === undefined || observationPath === "") return;
   mkdirSync(dirname(observationPath), { recursive: true });
   appendFileSync(observationPath, `${JSON.stringify(value)}\n`, "utf8");
+}
+
+function currentCapabilities(): HarnessCapability {
+  if (
+    capabilityModePath !== undefined &&
+    capabilityModePath !== "" &&
+    readFileSync(capabilityModePath, "utf8") === "without-model"
+  )
+    return { harness: "fixture", models: [] };
+  return fixtureCapabilities;
 }
 
 const fixtureDriverFactory: AdapterDriverFactory = () => {
@@ -51,6 +62,7 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
         [workerPath, "worker", activityPath ?? ""],
         {
           detached: true,
+          cwd: spec.cwd,
           stdio: ["ignore", "ignore", "ignore", "ipc"],
         },
       );
@@ -67,7 +79,9 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
           typeof message !== "object" ||
           message === null ||
           !("descendantPid" in message) ||
-          typeof message.descendantPid !== "number"
+          typeof message.descendantPid !== "number" ||
+          !("workerCwd" in message) ||
+          typeof message.workerCwd !== "string"
         )
           return;
         record({
@@ -75,6 +89,7 @@ const fixtureDriverFactory: AdapterDriverFactory = () => {
           sessionId: spec.sessionId,
           workerPid: child.pid,
           descendantPid: message.descendantPid,
+          workerCwd: message.workerCwd,
         });
       });
       child.once("error", (error) => {
@@ -136,7 +151,13 @@ const registryAdapterModule = {
   fixture: {
     driverFactory: fixtureDriverFactory,
     async capabilities(): Promise<HarnessCapability> {
-      return fixtureCapabilities;
+      const capabilities = currentCapabilities();
+      record({
+        type: "capabilities_queried",
+        harness: capabilities.harness,
+        modelIds: capabilities.models.map(({ id }) => id),
+      });
+      return capabilities;
     },
   } satisfies HarnessAdapter,
 } satisfies Record<string, HarnessAdapter>;

@@ -69,7 +69,7 @@ type WorkspaceProtocolResponseFor<M extends ProtocolMethod> =
     });
 export type WorkspaceControlClient = Omit<
   ReinsClient,
-  "request" | "subscribe"
+  "request" | "subscribe" | "prepareOperation" | "executeOperation"
 > & {
   request<M extends ProtocolMethod>(
     method: M,
