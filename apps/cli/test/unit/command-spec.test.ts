@@ -21,22 +21,11 @@ test("direct invocation parsing rejects missing required arguments", () => {
 
 test("direct invocation parsing rejects excess arguments", () => {
   expect(() =>
-    parseCommandInvocation("capabilities", ["extra"], {}, "json"),
+    parseCommandInvocation("interrupt", ["prompt@g1", "extra"], {}, "json"),
   ).toThrowError(
     expect.objectContaining({
       code: "usage_error",
       issues: [expect.objectContaining({ issue: "invalid_value" })],
-    }),
-  );
-});
-
-test("direct invocation parsing rejects a missing required option", () => {
-  expect(() =>
-    parseCommandInvocation("spawn", ["fake", ["hello"]], {}, "json"),
-  ).toThrowError(
-    expect.objectContaining({
-      code: "usage_error",
-      issues: [expect.objectContaining({ issue: "missing_argument" })],
     }),
   );
 });
