@@ -61,11 +61,11 @@ async function runWorker(activityPath: string): Promise<void> {
 
 function runDescendant(activityPath: string): void {
   const activity = openActivity(activityPath, "descendant");
-  process.stdout.write("ready\n");
   process.once("SIGTERM", () => {
     activity.close();
     process.exit(0);
   });
+  process.stdout.write("ready\n");
 }
 
 const [mode, activityPath = ""] = process.argv.slice(2);

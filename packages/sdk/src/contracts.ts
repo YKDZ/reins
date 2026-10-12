@@ -28,7 +28,12 @@ export type PermissionHandle = string & {
 export type DiagnosticId = string & {
   readonly [diagnosticIdBrand]: "DiagnosticId";
 };
-export type OperationKind = "spawn" | "kill" | "resolvePermission";
+export type OperationKind =
+  | "spawn"
+  | "send"
+  | "interrupt"
+  | "kill"
+  | "resolvePermission";
 export type OperationCredential<Kind extends OperationKind> = string & {
   readonly [operationCredentialBrand]: Kind;
 };
@@ -54,6 +59,48 @@ export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
   status: "killed" | "not_found";
+};
+export type SendInput =
+  | {
+      placement: "new_turn";
+      sessionHandle: SessionHandle;
+      message: string;
+    }
+  | {
+      placement: "active_turn";
+      turnHandle: TurnHandle;
+      message: string;
+    };
+export type SendResult = {
+  sessionHandle: SessionHandle;
+  turnHandle: TurnHandle;
+  messageId: string;
+  deliveryPoint: "active_turn" | "new_turn";
+};
+export type WaitInput = {
+  targets: TurnHandle[];
+  completion: "any" | "all";
+  timeoutMs?: number;
+};
+export type CompletedTurn = {
+  turnHandle: TurnHandle;
+  finalReply: string | null;
+  usage?: Record<string, unknown>;
+  diagnosticId?: string;
+  stopReason: StopReason;
+} & (
+  | { stopReason: "failed"; failure: HarnessFailure }
+  | { stopReason: "end_turn" | "cancelled" | "killed" }
+);
+export type WaitResult = {
+  status: "satisfied" | "timeout";
+  completed: CompletedTurn[];
+  pending: TurnHandle[];
+};
+export type InterruptInput = { turnHandle: TurnHandle };
+export type InterruptResult = {
+  turnHandle: TurnHandle;
+  status: "accepted";
 };
 
 export type StopReason = "end_turn" | "cancelled" | "failed" | "killed";
@@ -343,9 +390,11 @@ type FailureFactsByCode = {
   unknown_harness: { harness: string; availableHarnesses: string[] };
   unsupported_feature: { feature: string };
   session_name_conflict: { sessionName: string };
+  session_busy: { sessionHandle: SessionHandle };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
+  turn_not_active: { turnHandle: TurnHandle };
   capability_query_failed: { cause?: ErrorCause; diagnosticId?: string };
   internal_error: { cause?: ErrorCause; diagnosticId?: string };
   diagnostics_store_corrupt: { cause?: ErrorCause; diagnosticId?: string };
@@ -402,5 +451,14 @@ export type ReinsConnection = {
     credential: OperationCredential<"resolvePermission">,
   ): Promise<{ permissionHandle: PermissionHandle; status: "resolved" }>;
   diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsResult>;
+  send(
+    input: SendInput,
+    credential: OperationCredential<"send">,
+  ): Promise<SendResult>;
+  wait(input: WaitInput): Promise<WaitResult>;
+  interrupt(
+    input: InterruptInput,
+    credential: OperationCredential<"interrupt">,
+  ): Promise<InterruptResult>;
   close(): void;
 };

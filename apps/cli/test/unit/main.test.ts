@@ -5,6 +5,8 @@ import type {
   FactSubscription,
   KillInput,
   KillResult,
+  InterruptInput,
+  InterruptResult,
   OperationCredential,
   OperationKind,
   PermissionHandle,
@@ -13,7 +15,11 @@ import type {
   SessionHandle,
   SpawnInput,
   SpawnResult,
+  SendInput,
+  SendResult,
   TurnHandle,
+  WaitInput,
+  WaitResult,
 } from "@ykdz/reins-sdk";
 import { expect, test } from "vitest";
 
@@ -104,6 +110,26 @@ test("attach waits for each write before reading again and closes on writer fail
       _resolution: PermissionResolution,
     ) {
       return { permissionHandle, status: "resolved" as const };
+    },
+    async send(
+      input: SendInput,
+      _credential: OperationCredential<"send">,
+    ): Promise<SendResult> {
+      return {
+        sessionHandle:
+          input.placement === "new_turn"
+            ? input.sessionHandle
+            : target.sessionHandle,
+        turnHandle: fact.turnHandle,
+        messageId: "message-test",
+        deliveryPoint: input.placement,
+      };
+    },
+    async wait(_input: WaitInput): Promise<WaitResult> {
+      return { status: "satisfied", completed: [], pending: [] };
+    },
+    async interrupt(input: InterruptInput): Promise<InterruptResult> {
+      return { turnHandle: input.turnHandle, status: "accepted" };
     },
     close() {
       connectionClosed = true;
@@ -260,6 +286,15 @@ test("SIGINT releases a blocked attach write and closes its connection", async (
       _resolution: PermissionResolution,
     ) {
       return { permissionHandle, status: "resolved" as const };
+    },
+    async send() {
+      throw new Error("send is not used by the attach output test");
+    },
+    async wait() {
+      throw new Error("wait is not used by the attach output test");
+    },
+    async interrupt() {
+      throw new Error("interrupt is not used by the attach output test");
     },
     close() {
       connectionClosed = true;
