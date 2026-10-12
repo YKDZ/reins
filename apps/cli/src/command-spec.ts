@@ -10,7 +10,6 @@ import {
   decodePermissionHandle,
   type PermissionTarget,
   sessionIdSchema,
-  sessionNameSchema,
   turnIdSchema,
   turnHandleSchema,
   decodeTurnHandle,
@@ -18,7 +17,6 @@ import {
   type DiagnosticId,
   type PermissionId,
   type SessionId,
-  type SessionName,
   type TurnId,
   type TurnTarget,
 } from "@reins/protocol";
@@ -35,7 +33,6 @@ import type { OutputMode } from "./output.ts";
 
 export type ValueKind =
   | { readonly type: "text" }
-  | { readonly type: "sessionName"; readonly hint: string }
   | { readonly type: "sessionId"; readonly hint: string }
   | { readonly type: "turnId"; readonly hint: string }
   | { readonly type: "turnHandle"; readonly hint: string }
@@ -53,12 +50,7 @@ export type ValueKind =
       readonly max?: number;
       readonly hint: string;
     }
-  | { readonly type: "jsonObject"; readonly hint: string }
-  | {
-      readonly type: "dynamic";
-      readonly source: "harness" | "model" | "reasoning";
-      readonly hint: string;
-    };
+  | { readonly type: "jsonObject"; readonly hint: string };
 
 export type CommandArg = {
   readonly name: string;
@@ -108,95 +100,12 @@ export type CommandConstraint =
     };
 
 export const ROOT_USAGE = "[options] <command>";
-const sessionNameHint =
-  "Use a lowercase slug (max 32): [a-z][a-z0-9]*(?:-[a-z0-9]+)*; reserved: daemon, core, adapter, harness, root; example: code-reviewer";
 
 export function defineCommand<const S extends CommandSpec>(spec: S): S {
   return spec;
 }
 
 const commandSpecData = [
-  defineCommand({
-    name: "spawn",
-    description: "Create a worker session",
-    args: [
-      {
-        name: "harness",
-        description: "harness id from capabilities",
-        kind: {
-          type: "dynamic",
-          source: "harness",
-          hint: "Run 'reins capabilities' to list valid harnesses",
-        },
-      },
-      {
-        name: "message",
-        variadic: true,
-        description: "initial message",
-        kind: { type: "text" },
-      },
-    ],
-    options: [
-      {
-        name: "agent",
-        flags: "--agent <name>",
-        description: "agent profile name",
-        kind: { type: "text" },
-      },
-      {
-        name: "model",
-        flags: "--model <id>",
-        description: "model id from capabilities",
-        kind: {
-          type: "dynamic",
-          source: "model",
-          hint: "Run 'reins capabilities' to list valid models",
-        },
-      },
-      {
-        name: "reasoning",
-        flags: "--reasoning <effort>",
-        description: "reasoning effort supported by the model",
-        kind: {
-          type: "dynamic",
-          source: "reasoning",
-          hint: "Run 'reins capabilities' to list valid reasoning efforts",
-        },
-      },
-      {
-        name: "cwd",
-        flags: "--cwd <path>",
-        description:
-          "local working directory in the daemon filesystem namespace (default: CLI cwd; relative paths resolve from CLI cwd)",
-        kind: { type: "text" },
-      },
-      {
-        name: "authorizationMode",
-        flags: "--authorization-mode <mode>",
-        description: "interactive | allow-all",
-        kind: { type: "enum", values: ["interactive", "allow-all"] },
-      },
-      {
-        name: "sandbox",
-        flags: "--sandbox <value>",
-        description: "harness-specific sandbox configuration",
-        kind: { type: "text" },
-      },
-      {
-        name: "name",
-        flags: "--name <session-name>",
-        required: true,
-        description: sessionNameHint,
-        kind: { type: "sessionName", hint: sessionNameHint },
-      },
-      {
-        name: "captureHarnessStderr",
-        flags: "--capture-harness-stderr",
-        description: "capture harness stderr as diagnostics",
-        kind: { type: "boolean" },
-      },
-    ],
-  }),
   defineCommand({
     name: "send",
     description: "Send to an explicit active turn or create a new turn",
@@ -266,55 +175,6 @@ const commandSpecData = [
       },
     ],
     options: [],
-  }),
-  defineCommand({
-    name: "kill",
-    description: "Kill one session permanently",
-    args: [
-      {
-        name: "sessionId",
-        description: "session id",
-        kind: { type: "sessionId", hint: "Expected a valid SessionId" },
-      },
-    ],
-    options: [],
-  }),
-  defineCommand({
-    name: "list",
-    description: "List sessions",
-    args: [],
-    options: [
-      {
-        name: "session",
-        flags: "--session <session-handle>",
-        description: "query an exact session",
-        kind: { type: "sessionId", hint: "Expected a valid SessionHandle" },
-      },
-      {
-        name: "harness",
-        flags: "--harness <id>",
-        description: "filter by harness",
-        kind: { type: "text" },
-      },
-      {
-        name: "state",
-        flags: "--state <state>",
-        description: "filter by session state",
-        kind: { type: "enum", values: ["busy", "idle", "killed"] },
-      },
-      {
-        name: "name",
-        flags: "--name <session-name>",
-        description: "filter by session name",
-        kind: { type: "sessionName", hint: sessionNameHint },
-      },
-      {
-        name: "model",
-        flags: "--model <id>",
-        description: "filter by model",
-        kind: { type: "text" },
-      },
-    ],
   }),
   defineCommand({
     name: "attach",
@@ -459,12 +319,6 @@ const commandSpecData = [
         },
       },
     ],
-  }),
-  defineCommand({
-    name: "capabilities",
-    description: "List harnesses, models and reasoning efforts",
-    args: [],
-    options: [],
   }),
   defineCommand({
     name: "resolve-permission",
@@ -787,37 +641,32 @@ type ParsedValue<K extends ValueKind> = K extends {
   ? ResumeCursor
   : K extends { readonly type: "text" }
     ? string
-    : K extends { readonly type: "sessionName" }
-      ? SessionName
-      : K extends { readonly type: "sessionId" }
-        ? SessionId
-        : K extends { readonly type: "turnHandle" }
-          ? TurnTarget
-          : K extends { readonly type: "turnId" }
-            ? TurnId
-            : K extends { readonly type: "permissionHandle" }
-              ? PermissionTarget
-              : K extends { readonly type: "permissionId" }
-                ? PermissionId
-                : K extends { readonly type: "diagnosticId" }
-                  ? DiagnosticId
-                  : K extends { readonly type: "time" }
-                    ? string
-                    : K extends { readonly type: "boolean" }
-                      ? boolean
-                      : K extends {
-                            readonly type: "enum";
-                            readonly values: readonly (infer E extends
-                              string)[];
-                          }
-                        ? E
-                        : K extends { readonly type: "number" }
-                          ? number
-                          : K extends { readonly type: "jsonObject" }
-                            ? Record<string, unknown>
-                            : K extends { readonly type: "dynamic" }
-                              ? string
-                              : never;
+    : K extends { readonly type: "sessionId" }
+      ? SessionId
+      : K extends { readonly type: "turnHandle" }
+        ? TurnTarget
+        : K extends { readonly type: "turnId" }
+          ? TurnId
+          : K extends { readonly type: "permissionHandle" }
+            ? PermissionTarget
+            : K extends { readonly type: "permissionId" }
+              ? PermissionId
+              : K extends { readonly type: "diagnosticId" }
+                ? DiagnosticId
+                : K extends { readonly type: "time" }
+                  ? string
+                  : K extends { readonly type: "boolean" }
+                    ? boolean
+                    : K extends {
+                          readonly type: "enum";
+                          readonly values: readonly (infer E extends string)[];
+                        }
+                      ? E
+                      : K extends { readonly type: "number" }
+                        ? number
+                        : K extends { readonly type: "jsonObject" }
+                          ? Record<string, unknown>
+                          : never;
 
 type FieldValue<F extends CommandArg | CommandOption> = F extends {
   readonly variadic: true;
@@ -1056,13 +905,6 @@ function invocationFromParsed(
         options: typedOptions<"retry">(),
         mode,
       };
-    case "spawn":
-      return {
-        command: "spawn",
-        args: typedArgs<"spawn">(),
-        options: typedOptions<"spawn">(),
-        mode,
-      };
     case "send":
       return {
         command: "send",
@@ -1084,20 +926,6 @@ function invocationFromParsed(
         options: typedOptions<"interrupt">(),
         mode,
       };
-    case "kill":
-      return {
-        command: "kill",
-        args: typedArgs<"kill">(),
-        options: typedOptions<"kill">(),
-        mode,
-      };
-    case "list":
-      return {
-        command: "list",
-        args: typedArgs<"list">(),
-        options: typedOptions<"list">(),
-        mode,
-      };
     case "attach":
       return {
         command: "attach",
@@ -1110,13 +938,6 @@ function invocationFromParsed(
         command: "diagnostics",
         args: typedArgs<"diagnostics">(),
         options: typedOptions<"diagnostics">(),
-        mode,
-      };
-    case "capabilities":
-      return {
-        command: "capabilities",
-        args: typedArgs<"capabilities">(),
-        options: typedOptions<"capabilities">(),
         mode,
       };
     case "resolve-permission":
@@ -1256,7 +1077,6 @@ function validateValue(
   }
   switch (kind.type) {
     case "text":
-    case "dynamic":
       if (typeof value !== "string")
         throw usageError({
           issue: "invalid_value",
@@ -1327,18 +1147,6 @@ function validateValue(
       }
       return;
     }
-    case "sessionName":
-      if (
-        typeof value !== "string" ||
-        !v.safeParse(sessionNameSchema, value).success
-      )
-        throw usageError({
-          issue: "invalid_value",
-          field,
-          value: String(value),
-          hint: kind.hint,
-        });
-      return;
     case "sessionId":
       if (
         typeof value !== "string" ||
@@ -1453,7 +1261,6 @@ function parseFieldValue(
   }
   switch (kind.type) {
     case "text":
-    case "dynamic":
     case "boolean":
     case "enum":
     case "time":
@@ -1465,8 +1272,6 @@ function parseFieldValue(
       const parsed: unknown = JSON.parse(value);
       return parsed;
     }
-    case "sessionName":
-      return v.parse(sessionNameSchema, value);
     case "sessionId":
       return v.parse(sessionIdSchema, value);
     case "turnHandle":
@@ -1493,7 +1298,6 @@ export function valueHint(kind: ValueKind): string | undefined {
       return undefined;
     case "enum":
       return `Allowed: ${kind.values.join(", ")}`;
-    case "sessionName":
     case "sessionId":
     case "turnId":
     case "turnHandle":
@@ -1504,7 +1308,6 @@ export function valueHint(kind: ValueKind): string | undefined {
     case "time":
     case "number":
     case "jsonObject":
-    case "dynamic":
       return kind.hint;
     default:
       return assertNever(kind);

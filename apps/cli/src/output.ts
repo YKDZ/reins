@@ -1,13 +1,9 @@
 import { encodePermissionHandle, makeErrorCause } from "@reins/protocol";
 import type {
-  CapabilitiesResult,
   DiagnosticsResult,
-  KillResult,
   ProtocolResult,
-  SessionInfo,
   SendAck,
   WaitResult,
-  SpawnAck,
 } from "@reins/protocol";
 import { encodeTurnHandle } from "@reins/protocol";
 
@@ -82,20 +78,6 @@ function jsonErrorProjection(error: CliError): object {
     };
   }
   return error;
-}
-
-export function printSpawnResult(result: SpawnAck, mode: OutputMode): void {
-  const turnHandle = encodeTurnHandle({
-    sessionId: result.sessionId,
-    turnId: result.turnId,
-  });
-  if (mode === "json") {
-    printJsonLine({ sessionId: result.sessionId, turnHandle, cwd: result.cwd });
-  } else {
-    process.stdout.write(
-      `Created session ${result.sessionId}\nTurn ${turnHandle}\nWorking directory ${result.cwd}\n`,
-    );
-  }
 }
 
 export function printDiagnosticsResult(
@@ -194,65 +176,6 @@ export function printInterruptResult(
   process.stdout.write(`Stop request accepted: ${turnHandle}\n`);
 }
 
-export function printKillResult(result: KillResult, mode: OutputMode): void {
-  if (mode === "json") {
-    printJsonLine(result);
-    return;
-  }
-  if (result.status === "killed") {
-    process.stdout.write(`Killed ${result.sessionId}\n`);
-  } else {
-    process.stdout.write(`Session ${result.sessionId} not found\n`);
-  }
-}
-
-export function printListResult(
-  sessions: SessionInfo[],
-  mode: OutputMode,
-): void {
-  const projected = sessions.map((session) => {
-    const { lastCompletedTurn, ...rest } = session;
-    const { activeTurnId: _activeTurnId, ...common } = rest as typeof rest & {
-      activeTurnId?: string;
-    };
-    return {
-      ...common,
-      ...(session.state === "busy"
-        ? {
-            activeTurnHandle: encodeTurnHandle({
-              sessionId: session.sessionId,
-              turnId: session.activeTurnId,
-            }),
-          }
-        : {}),
-      ...(lastCompletedTurn === undefined
-        ? {}
-        : {
-            lastCompletedTurn: {
-              turnHandle: encodeTurnHandle({
-                sessionId: session.sessionId,
-                turnId: lastCompletedTurn.turnId,
-              }),
-              stopReason: lastCompletedTurn.stopReason,
-            },
-          }),
-    };
-  });
-  if (mode === "json") {
-    printJsonLine(projected);
-    return;
-  }
-  if (sessions.length === 0) {
-    process.stdout.write("No sessions found\n");
-    return;
-  }
-  for (const session of projected) {
-    process.stdout.write(
-      `${session.sessionId}\t${session.harness}\t${session.state}\t${session.model ?? "-"}\t${session.turns}\t${session.lastCompletedTurn?.stopReason ?? "-"}\t${session.cwd}\t${session.activeTurnHandle ?? "-"}\t${session.lastCompletedTurn?.turnHandle ?? "-"}\n`,
-    );
-  }
-}
-
 export function printResolvePermissionAck(
   ack: ProtocolResult<"resolvePermission">,
   mode: OutputMode,
@@ -269,39 +192,6 @@ export function printResolvePermissionAck(
     return;
   }
   process.stdout.write("Permission resolved\n");
-}
-
-export function printCapabilitiesResult(
-  result: CapabilitiesResult,
-  mode: OutputMode,
-): void {
-  if (mode === "json") {
-    printJsonLine({
-      ...result,
-      failures: result.failures.map((failure) => ({
-        ...failure,
-        message: harnessFailureMessage(failure.failure, failure.diagnosticId),
-      })),
-    });
-    return;
-  }
-  for (const capability of result.capabilities) {
-    process.stdout.write(`${capability.harness}\n`);
-    for (const model of capability.models) {
-      const efforts =
-        model.reasoningEfforts.length === 0
-          ? "(no reasoning efforts)"
-          : model.reasoningEfforts.join(", ");
-      process.stdout.write(
-        `  ${model.id} (${model.displayName}): ${efforts}\n`,
-      );
-    }
-  }
-  for (const failure of result.failures) {
-    process.stderr.write(
-      `warning: capability query failed for ${failure.harness}: ${harnessFailureMessage(failure.failure, failure.diagnosticId)}\n`,
-    );
-  }
 }
 
 export function printAgentEvent(

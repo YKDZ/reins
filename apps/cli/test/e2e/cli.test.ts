@@ -1412,8 +1412,6 @@ function sampleForKind(kind: ValueKind): string {
   switch (kind.type) {
     case "text":
       return "x";
-    case "sessionName":
-      return "test-session";
     case "sessionId":
       return fixtureSessionId;
     case "turnHandle":
@@ -1449,17 +1447,6 @@ function sampleForKind(kind: ValueKind): string {
       return String(Math.max(kind.min ?? 0, 1));
     case "jsonObject":
       return "{}";
-    case "dynamic":
-      switch (kind.source) {
-        case "harness":
-          return "fake";
-        case "model":
-          return "fake-model";
-        case "reasoning":
-          return "low";
-        default:
-          return assertNever(kind.source);
-      }
     default:
       return assertNever(kind);
   }
@@ -1549,7 +1536,6 @@ function missingOptionCases(): UsageCase[] {
 
 type InvalidKindCategory =
   | "number"
-  | "sessionName"
   | "sessionId"
   | "turnId"
   | "turnHandle"
@@ -1560,11 +1546,8 @@ type InvalidKindCategory =
   | "enum"
   | "multiEnum"
   | "jsonObject"
-  | "dynamicHarness"
   | "resumeCursor"
-  | "permissionHandle"
-  | "dynamicModel"
-  | "dynamicReasoning";
+  | "permissionHandle";
 
 type FieldOccurrence =
   | { readonly location: "argument"; readonly field: CommandArg }
@@ -1578,7 +1561,6 @@ function invalidCategory(
     case "text":
       return null;
     case "number":
-    case "sessionName":
     case "sessionId":
     case "turnId":
     case "turnHandle":
@@ -1592,17 +1574,6 @@ function invalidCategory(
       return kind.type;
     case "enum":
       return variadic ? "multiEnum" : "enum";
-    case "dynamic":
-      switch (kind.source) {
-        case "harness":
-          return "dynamicHarness";
-        case "model":
-          return "dynamicModel";
-        case "reasoning":
-          return "dynamicReasoning";
-        default:
-          return assertNever(kind.source);
-      }
     default:
       return assertNever(kind);
   }
@@ -1612,8 +1583,6 @@ function invalidValueFor(kind: ValueKind): string {
   switch (kind.type) {
     case "text":
       return "";
-    case "sessionName":
-      return "daemon";
     case "sessionId":
       return "not-a-session-id";
     case "turnHandle":
@@ -1640,8 +1609,6 @@ function invalidValueFor(kind: ValueKind): string {
       return "not-a-number";
     case "jsonObject":
       return "[]";
-    case "dynamic":
-      return `unknown-${kind.source}`;
     default:
       return assertNever(kind);
   }
@@ -1690,37 +1657,16 @@ function invalidCaseFor(
       args.push(invalid);
     }
   }
-  if (field.kind.type === "dynamic" && field.kind.source === "reasoning") {
-    const model = spec.options.find(
-      (candidate) =>
-        candidate.kind.type === "dynamic" && candidate.kind.source === "model",
-    );
-    if (model !== undefined) {
-      args.push(flagDisplay(model.flags), sampleForOption(model));
-    }
-  }
   const hint = valueHint(field.kind);
-  const dynamicCode =
-    field.kind.type !== "dynamic"
-      ? undefined
-      : field.kind.source === "harness"
-        ? "unknown_harness"
-        : "invalid_params";
   return {
     name: `${spec.name} rejects invalid ${field.name} (${invalidCategory(field.kind, field.variadic === true) ?? "text"})`,
     args,
-    ...(dynamicCode === undefined ? {} : { code: dynamicCode }),
-    ...(dynamicCode !== undefined
-      ? {}
-      : {
-          issue:
-            field.kind.type === "boolean"
-              ? ("unknown_option" as const)
-              : ("invalid_value" as const),
-          ...(field.kind.type === "boolean" ? {} : { field: fieldName }),
-          value:
-            field.kind.type === "boolean" ? `${fieldName}=${invalid}` : invalid,
-        }),
+    issue:
+      field.kind.type === "boolean"
+        ? ("unknown_option" as const)
+        : ("invalid_value" as const),
+    ...(field.kind.type === "boolean" ? {} : { field: fieldName }),
+    value: field.kind.type === "boolean" ? `${fieldName}=${invalid}` : invalid,
     ...(field.kind.type === "enum"
       ? { valid: [...field.kind.values] }
       : field.kind.type === "boolean"
@@ -1731,19 +1677,11 @@ function invalidCaseFor(
             ],
           }
         : {}),
-    ...(dynamicCode === undefined &&
-    field.kind.type !== "enum" &&
-    hint !== undefined
-      ? { hint }
-      : {}),
-    ...(dynamicCode === undefined
-      ? {
-          suggestionContains:
-            hint === undefined
-              ? [flagDisplay((field as CommandOption).flags)]
-              : [hint],
-        }
-      : {}),
+    ...(field.kind.type !== "enum" && hint !== undefined ? { hint } : {}),
+    suggestionContains:
+      hint === undefined
+        ? [flagDisplay((field as CommandOption).flags)]
+        : [hint],
     specName: spec.name,
   };
 }
@@ -1761,7 +1699,6 @@ const fixtureValueKinds = {
     max: 2,
     hint: "Expected fixture integer",
   },
-  sessionName: { type: "sessionName", hint: "Expected fixture SessionName" },
   sessionId: { type: "sessionId", hint: "Expected fixture SessionId" },
   turnId: { type: "turnId", hint: "Expected fixture TurnId" },
   turnHandle: { type: "turnHandle", hint: "Expected fixture TurnHandle" },
@@ -1778,21 +1715,6 @@ const fixtureValueKinds = {
   enum: { type: "enum", values: ["one", "two"] },
   multiEnum: { type: "enum", values: ["one", "two"] },
   jsonObject: { type: "jsonObject", hint: "Expected fixture object" },
-  dynamicHarness: {
-    type: "dynamic",
-    source: "harness",
-    hint: "Expected fixture harness",
-  },
-  dynamicModel: {
-    type: "dynamic",
-    source: "model",
-    hint: "Expected fixture model",
-  },
-  dynamicReasoning: {
-    type: "dynamic",
-    source: "reasoning",
-    hint: "Expected fixture reasoning",
-  },
 } as const satisfies Record<InvalidKindCategory, ValueKind>;
 
 function derivedInvalidValueCases(): {
@@ -1900,40 +1822,12 @@ const derivedConstraintCases = commandSpecs.flatMap((spec) =>
   ),
 );
 
-const specialValueCases: UsageCase[] = [
-  {
-    name: "capabilities excess arguments",
-    args: ["capabilities", "x"],
-    issue: "invalid_value",
-    field: "arguments",
-    hint: "Remove the extra arguments",
-    suggestionContains: ["Remove the extra arguments"],
-    specName: "capabilities",
-  },
-];
-
 const unknownCommandCase: UsageCase = {
   name: "unknown command",
   args: ["bogus"],
   issue: "unknown_command",
   value: "bogus",
   valid: commandSpecs.map((spec) => spec.name),
-  suggestionContains: ["Allowed: spawn"],
-};
-
-const unknownOptionSpec = commandSpecForName("spawn");
-const unknownOptionCase: UsageCase = {
-  name: "unknown option",
-  args: ["spawn", "fake", "hi", "--name", "test-session", "--nope"],
-  issue: "unknown_option",
-  value: "--nope",
-  valid: [
-    ...(unknownOptionSpec?.options.map((option) => flagDisplay(option.flags)) ??
-      []),
-    "--pretty",
-  ],
-  suggestionContains: ["Allowed: --agent"],
-  specName: "spawn",
 };
 
 const removedInterruptMessageOptionCase: UsageCase = {
@@ -1951,9 +1845,7 @@ const usageCases: UsageCase[] = [
   ...missingOptionCases(),
   ...derivedValues.e2e,
   ...derivedConstraintCases,
-  ...specialValueCases,
   unknownCommandCase,
-  unknownOptionCase,
   removedInterruptMessageOptionCase,
 ];
 
