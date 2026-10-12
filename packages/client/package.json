@@ -17,6 +17,11 @@
       "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./control": {
+      "source": "./src/control.ts",
+      "types": "./dist/control.d.ts",
+      "default": "./dist/control.js"
     }
   },
   "scripts": {

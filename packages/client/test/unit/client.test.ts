@@ -177,9 +177,9 @@ test("client close rejects a pending request without waiting for its timeout", a
 test("request timeout rejects with the distinct daemon_timeout machine error", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
-  await expect(client.request("capabilities", {}, 1)).rejects.toThrow(
-    "daemon_timeout",
-  );
+  await expect(client.request("capabilities", {}, 1)).rejects.toMatchObject({
+    failure: { code: "daemon_timeout" },
+  });
   client.close();
 });
 

@@ -2,6 +2,7 @@ import {
   isCommandOutcomeUnknown,
   type CommandOutcomeUnknown,
 } from "@reins/client";
+import { ReinsClientError } from "@reins/client/control";
 import type { MachineError } from "@reins/protocol";
 import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
 import type { TransportErrorCode } from "@reins/transport";
@@ -11,7 +12,7 @@ import {
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
-import { isReinsStartupTransportFailure } from "./application.ts";
+import { isReinsStartupTransportFailure } from "./application-runtime.ts";
 export function isWorkspaceError(value: unknown): value is WorkspaceError {
   return v.safeParse(workspaceErrorSchema, value).success;
 }
@@ -154,6 +155,7 @@ export function isUsageError(value: unknown): value is UsageError {
 }
 
 export function toCliError(error: unknown): CliError {
+  if (error instanceof ReinsClientError) return toCliError(error.failure);
   if (isReinsStartupTransportFailure(error)) {
     return { code: "daemon_start_failed", transportCode: error.code };
   }
@@ -171,13 +173,6 @@ export function toCliError(error: unknown): CliError {
   if (isInputError(error)) return error;
   if (isOutputError(error)) return error;
   if (error instanceof Error) {
-    try {
-      const parsed = JSON.parse(error.message) as unknown;
-      if (isCommandOutcomeUnknown(parsed)) return toCliError(parsed);
-      if (isMachineError(parsed)) return parsed;
-    } catch {
-      // 非 JSON 错误体，按内部错误包装
-    }
     return machineError({
       code: "internal_error",
       cause: makeErrorCause("exception", error.message),

@@ -65,6 +65,8 @@ type InputIdentity = {
   readonly candidateDigest: string;
   readonly packageName: string;
   readonly candidateFile: string;
+  readonly sdkCandidateDigest: string;
+  readonly sdkCandidateFile: string;
 };
 
 const installTimeoutMs = 900_000;
@@ -192,36 +194,49 @@ function readInputIdentity(groupDirectory: string): InputIdentity {
     }
   }
 
-  // candidate/ 必须恰好是 SHA256SUMS 与唯一 tarball，且校验行与实际摘要一致。
+  // candidate/ 必须恰好是 SHA256SUMS、同版运行包与 SDK tarball，摘要逐行一致。
   const candidateFiles = Object.keys(files)
     .filter((member) => member.startsWith("candidate/"))
     .sort((left, right) => left.localeCompare(right));
   const tarballs = candidateFiles.filter((member) => member.endsWith(".tgz"));
   if (
-    tarballs.length !== 1 ||
-    candidateFiles.length !== 2 ||
+    tarballs.length !== 2 ||
+    candidateFiles.length !== 3 ||
     !candidateFiles.includes("candidate/SHA256SUMS")
   ) {
     throw new Error(
-      `Acceptance input candidate directory is not SHA256SUMS plus one tarball: ${candidateFiles.join(", ")}`,
+      `Acceptance input candidate directory must contain both tarballs and SHA256SUMS: ${candidateFiles.join(", ")}`,
     );
   }
-  const candidateFile = tarballs[0];
-  if (candidateFile === undefined) {
-    throw new Error("Acceptance input has no candidate tarball");
+  const candidateFile = tarballs.find(
+    (path) =>
+      path.startsWith("candidate/ykdz-reins-") &&
+      !path.startsWith("candidate/ykdz-reins-sdk-"),
+  );
+  const sdkCandidateFile = tarballs.find((path) =>
+    path.startsWith("candidate/ykdz-reins-sdk-"),
+  );
+  if (candidateFile === undefined || sdkCandidateFile === undefined) {
+    throw new Error("Acceptance input omitted the runtime or SDK candidate");
   }
   const candidateDigest = files[candidateFile];
-  if (candidateDigest === undefined) {
-    throw new Error("Candidate tarball is not bound by input.json");
+  const sdkCandidateDigest = files[sdkCandidateFile];
+  if (candidateDigest === undefined || sdkCandidateDigest === undefined) {
+    throw new Error("A candidate tarball is not bound by input.json");
   }
   const checksums = readFileSync(
     join(groupDirectory, "candidate/SHA256SUMS"),
     "utf8",
   );
-  const tarballName = relative("candidate", candidateFile);
-  if (checksums !== `${candidateDigest}  ${tarballName}\n`) {
+  const expectedChecksums = [
+    `${candidateDigest}  ${relative("candidate", candidateFile)}`,
+    `${sdkCandidateDigest}  ${relative("candidate", sdkCandidateFile)}`,
+  ]
+    .sort((left, right) => left.localeCompare(right))
+    .join("\n");
+  if (checksums !== `${expectedChecksums}\n`) {
     throw new Error(
-      `candidate/SHA256SUMS does not match the bound tarball digest: ${checksums}`,
+      `candidate/SHA256SUMS does not match both bound tarball digests: ${checksums}`,
     );
   }
 
@@ -236,19 +251,23 @@ function readInputIdentity(groupDirectory: string): InputIdentity {
     throw new Error("Consumer manifest has no dependencies object");
   }
   const dependencyNames = Object.keys(consumerManifest.dependencies);
-  if (dependencyNames.length !== 1) {
+  if (
+    dependencyNames.length !== 2 ||
+    !dependencyNames.includes("@ykdz/reins") ||
+    !dependencyNames.includes("@ykdz/reins-sdk")
+  ) {
     throw new Error(
-      `Consumer manifest must depend on exactly the candidate package: ${dependencyNames.join(", ")}`,
+      `Consumer manifest must depend on the runtime and SDK candidates: ${dependencyNames.join(", ")}`,
     );
   }
-  const packageName = dependencyNames[0];
-  if (packageName === undefined) {
-    throw new Error("Consumer manifest dependency name is unreadable");
-  }
-  const specifier = consumerManifest.dependencies[packageName];
-  if (specifier !== `file:../${candidateFile}`) {
+  if (
+    consumerManifest.dependencies["@ykdz/reins"] !==
+      `file:../${relative("candidate", candidateFile)}` ||
+    consumerManifest.dependencies["@ykdz/reins-sdk"] !==
+      `file:../${relative("candidate", sdkCandidateFile)}`
+  ) {
     throw new Error(
-      `Consumer manifest does not reference the group candidate in place: ${String(specifier)}`,
+      "Consumer manifest does not reference both group candidates in place",
     );
   }
 
@@ -256,8 +275,10 @@ function readInputIdentity(groupDirectory: string): InputIdentity {
     pnpmVersion,
     files,
     candidateDigest,
-    packageName,
+    packageName: "@ykdz/reins",
     candidateFile,
+    sdkCandidateDigest,
+    sdkCandidateFile,
   };
 }
 
@@ -488,6 +509,15 @@ async function runWorkerRound(
       `Installed package name diverged from the consumer manifest: ${String(installedManifest.name)}`,
     );
   }
+  const installedSdkManifest = readJsonRecordFile(
+    join(consumerDirectory, "node_modules", "@ykdz/reins-sdk", "package.json"),
+  );
+  if (
+    installedSdkManifest.name !== "@ykdz/reins-sdk" ||
+    installedSdkManifest.version !== installedManifest.version
+  ) {
+    throw new Error("Installed SDK and runtime package versions diverged");
+  }
   const installedVersion = requiredString(
     installedManifest,
     "version",
@@ -497,6 +527,9 @@ async function runWorkerRound(
     packageName: identity.packageName,
     version: installedVersion,
     candidateSha256: identity.candidateDigest,
+    sdkPackageName: installedSdkManifest.name,
+    sdkVersion: installedSdkManifest.version,
+    sdkCandidateSha256: identity.sdkCandidateDigest,
     installTool: "pnpm",
     installToolVersion: observedPnpmVersion,
   });
@@ -1023,6 +1056,8 @@ async function main(): Promise<void> {
       pnpmVersion: identity.pnpmVersion,
       candidateFile: identity.candidateFile,
       candidateSha256: identity.candidateDigest,
+      sdkCandidateFile: identity.sdkCandidateFile,
+      sdkCandidateSha256: identity.sdkCandidateDigest,
       packageName: identity.packageName,
       files: identity.files,
     });
