@@ -7,7 +7,6 @@ const releaseAuthorityDirectory = "apps/cli";
 const runtimeDistributionEntryDirectories = [
   releaseAuthorityDirectory,
   "packages/daemon",
-  "apps/workspace-manager",
 ] as const;
 const sdkDistributionEntryDirectories = ["packages/sdk"] as const;
 const sdkPackageName = "@ykdz/reins-sdk";

@@ -1,4 +1,4 @@
-import { machineErrorSchema } from "@reins/protocol";
+import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
 import {
   connect as connectSdk,
   ReinsSdkError,
@@ -33,11 +33,30 @@ export async function connectReins(
 }
 
 function startupSdkFailure(error: unknown): ReinsSdkError | undefined {
+  if (error instanceof ReinsSdkError) return undefined;
   if (isReinsStartupTransportFailure(error)) {
-    return new ReinsSdkError({
-      code: "daemon_start_failed",
-      facts: { transportCode: error.code },
-    });
+    return new ReinsSdkError(
+      {
+        code: "daemon_start_failed",
+        facts: { transportCode: error.code },
+      },
+      "connect",
+    );
+  }
+  if (error instanceof Error) {
+    const systemCode = (error as Error & { code?: unknown }).code;
+    if (typeof systemCode === "string") {
+      return new ReinsSdkError(
+        {
+          code: "daemon_start_failed",
+          facts: {
+            cause: makeErrorCause("io", error.message),
+            systemCode,
+          },
+        },
+        "connect",
+      );
+    }
   }
   const parsed = v.safeParse(machineErrorSchema, error);
   if (!parsed.success) return undefined;
@@ -74,5 +93,5 @@ function startupSdkFailure(error: unknown): ReinsSdkError | undefined {
         };
     }
   })();
-  return new ReinsSdkError(failure);
+  return new ReinsSdkError(failure, "connect");
 }

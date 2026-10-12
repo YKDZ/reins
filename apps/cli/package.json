@@ -21,8 +21,7 @@
   },
   "bin": {
     "reins": "./dist/reins.js",
-    "reins-daemon": "./dist/reins-daemon.js",
-    "reins-workspace-manager": "./dist/reins-workspace-manager.js"
+    "reins-daemon": "./dist/reins-daemon.js"
   },
   "files": [
     "dist"

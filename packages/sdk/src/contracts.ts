@@ -128,7 +128,11 @@ type FailureFactsByCode = {
   capability_query_failed: { cause?: ErrorCause; diagnosticId?: string };
   internal_error: { cause?: ErrorCause; diagnosticId?: string };
   diagnostics_store_corrupt: { cause?: ErrorCause; diagnosticId?: string };
-  daemon_start_failed: { cause?: ErrorCause; transportCode?: string };
+  daemon_start_failed: {
+    cause?: ErrorCause;
+    systemCode?: string;
+    transportCode?: string;
+  };
   unexpected_failure: { remoteCode?: string };
 };
 

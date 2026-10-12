@@ -219,7 +219,6 @@ const runtimeBundle = await rolldown({
   input: {
     reins: "apps/cli/src/cli.ts",
     "reins-daemon": "packages/daemon/src/main.ts",
-    "reins-workspace-manager": "apps/workspace-manager/src/main.ts",
     application: "apps/cli/src/application.ts",
   },
   platform: "node",
@@ -244,19 +243,10 @@ verifyBundle(
     (entry): entry is OutputChunk => entry.type === "chunk",
   ),
   Object.keys(runtimeDependencies),
-  [
-    "reins.js",
-    "reins-daemon.js",
-    "reins-workspace-manager.js",
-    "application.js",
-  ],
+  ["reins.js", "reins-daemon.js", "application.js"],
   true,
 );
-for (const name of [
-  "reins.js",
-  "reins-daemon.js",
-  "reins-workspace-manager.js",
-] as const) {
+for (const name of ["reins.js", "reins-daemon.js"] as const) {
   const path = join(runtimeDistributionDirectory, name);
   if (!readFileSync(path, "utf8").startsWith("#!/usr/bin/env node\n")) {
     throw new Error(`Executable omitted shebang: ${path}`);

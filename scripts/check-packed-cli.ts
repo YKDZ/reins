@@ -65,6 +65,18 @@ const sdkQuerySource = fileURLToPath(
 const applicationQuerySource = fileURLToPath(
   new URL("./packed-cli-fixtures/application-query.ts", import.meta.url),
 );
+const simulatedAdapterSource = fileURLToPath(
+  new URL("./packed-cli-fixtures/simulated-adapter.ts", import.meta.url),
+);
+const seedKilledSessionSource = fileURLToPath(
+  new URL(
+    "../apps/cli/test/e2e/fixtures/seed-killed-session.ts",
+    import.meta.url,
+  ),
+);
+const sdkKilledListSource = fileURLToPath(
+  new URL("./packed-cli-fixtures/sdk-killed-list.ts", import.meta.url),
+);
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
@@ -90,6 +102,29 @@ function readDataEnvelope(
     throw new Error(
       `${label} did not return the cli-contract data envelope: ${stdout}`,
     );
+  }
+  return envelope.data;
+}
+
+function readFailureEnvelope(
+  label: string,
+  result: CommandResult,
+  command: string,
+  variant: string,
+): Record<string, unknown> {
+  const lines = `${result.stdout}${result.stderr}`.split("\n").filter(Boolean);
+  if (lines.length !== 1) {
+    throw new Error(`${label} did not return one failure envelope`);
+  }
+  const envelope: unknown = JSON.parse(lines[0]!);
+  if (
+    !isRecord(envelope) ||
+    envelope.kind !== "failure" ||
+    envelope.command !== command ||
+    envelope.variant !== variant ||
+    !isRecord(envelope.data)
+  ) {
+    throw new Error(`${label} did not return a typed cli-contract failure`);
   }
   return envelope.data;
 }
@@ -340,14 +375,18 @@ async function smokePackedCli(
       "Packed LICENSE did not come from the repository authority",
     );
   }
-  for (const name of [
-    "reins.js",
-    "reins-daemon.js",
-    "reins-workspace-manager.js",
-  ] as const) {
+  for (const name of ["reins.js", "reins-daemon.js"] as const) {
     const path = join(installedPackage, "dist", name);
     if ((statSync(path).mode & 0o777) !== 0o755)
       throw new Error(`Packed executable mode is not 0755: ${name}`);
+  }
+  if (
+    !isRecord(installedManifest.bin) ||
+    JSON.stringify(Object.keys(installedManifest.bin).sort()) !==
+      JSON.stringify(["reins", "reins-daemon"]) ||
+    existsSync(join(installedPackage, "dist", "reins-workspace-manager.js"))
+  ) {
+    throw new Error("Packed runtime included an unpublished workspace manager");
   }
   const applicationDistribution = join(installedPackage, "dist");
   for (const name of ["application.js", "application.d.ts"] as const) {
@@ -555,6 +594,11 @@ async function smokePackedCli(
     "application-query.ts",
   );
   copyFileSync(applicationQuerySource, applicationQueryFixture);
+  const sdkKilledListFixture = join(
+    applicationConsumerDirectory,
+    "sdk-killed-list.ts",
+  );
+  copyFileSync(sdkKilledListSource, sdkKilledListFixture);
 
   const applicationLockGenerationLog = join(
     logsDirectory,
@@ -668,6 +712,7 @@ async function smokePackedCli(
         "--skipLibCheck",
         "false",
         applicationQueryFixture,
+        sdkKilledListFixture,
       ],
       cwd: applicationConsumerDirectory,
       logPath: applicationTypecheckLog,
@@ -928,6 +973,114 @@ async function smokePackedCli(
     daemonExecutable: daemon,
   });
 
+  // 用现有 simulated adapter 与生产 control client 创建并清理真实 daemon 会话；
+  // 该 helper 只播种状态，查询由冻结安装 consumer 内的公开 SDK 执行。
+  const simulatedAdaptersModule = join(
+    runtimeDirectory,
+    "simulated-adapter.ts",
+  );
+  copyFileSync(simulatedAdapterSource, simulatedAdaptersModule);
+  const killedListDirectory = join(runtimeDirectory, "killed-list");
+  mkdirSync(killedListDirectory);
+  const killedListSocket = join(killedListDirectory, "reins.sock");
+  const killedListEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: killedListSocket,
+    REINS_STATE_DIR: join(killedListDirectory, "state"),
+    REINS_ADAPTERS_MODULE: simulatedAdaptersModule,
+    REINS_CONSUMER_CONTEXT: "packed-killed-list-check",
+    REINS_IDLE_TIMEOUT_MS: "120000",
+  };
+  owned.directDaemon = await startDaemon({
+    label: "killed-list packed daemon",
+    executable: daemon,
+    args: [],
+    env: killedListEnv,
+    socketPath: killedListSocket,
+    logPath: join(logsDirectory, "killed-list-daemon.log"),
+    readyTimeoutMs: 5_000,
+  });
+  const seedSessionLog = join(logsDirectory, "killed-list-seed-session.log");
+  const seedSession = toCommandResult(
+    await runLoggedCommand({
+      command: process.execPath,
+      args: [
+        "--conditions=source",
+        "--experimental-strip-types",
+        seedKilledSessionSource,
+      ],
+      cwd: repository,
+      env: killedListEnv,
+      logPath: seedSessionLog,
+      timeoutMs: 30_000,
+    }),
+  );
+  requireSuccess(
+    "create and kill packed fixture session",
+    seedSession,
+    seedSessionLog,
+  );
+  const killedSession: unknown = JSON.parse(seedSession.stdout);
+  if (
+    !isRecord(killedSession) ||
+    typeof killedSession.sessionHandle !== "string" ||
+    killedSession.stopReason !== "end_turn"
+  ) {
+    throw new Error(
+      `Session fixture returned unexpected output: ${seedSession.stdout}`,
+    );
+  }
+  const killedListQueryLog = join(logsDirectory, "sdk-killed-list-query.log");
+  const killedListQuery = toCommandResult(
+    await runLoggedCommand({
+      command: process.execPath,
+      args: ["--experimental-strip-types", sdkKilledListFixture],
+      cwd: applicationConsumerDirectory,
+      env: {
+        ...killedListEnv,
+        REINS_TARGET_SESSION: killedSession.sessionHandle,
+      },
+      logPath: killedListQueryLog,
+      timeoutMs: 20_000,
+    }),
+  );
+  requireSuccess(
+    "installed SDK query for a killed session",
+    killedListQuery,
+    killedListQueryLog,
+  );
+  const killedListResult: unknown = JSON.parse(killedListQuery.stdout);
+  if (
+    !isRecord(killedListResult) ||
+    killedListResult.state !== "killed" ||
+    killedListResult.sessionHandle !== killedSession.sessionHandle ||
+    !isRecord(killedListResult.lastCompletedTurn) ||
+    killedListResult.lastCompletedTurn.stopReason !== "end_turn" ||
+    typeof killedListResult.lastCompletedTurn.turnHandle !== "string" ||
+    killedListResult.lastCompletedTurn.turnHandle === ""
+  ) {
+    throw new Error(
+      `Installed SDK omitted the killed turn summary: ${killedListQuery.stdout}`,
+    );
+  }
+  const killedListDaemon = owned.directDaemon;
+  const killedListStop = await stopDaemon(killedListDaemon, 5_000);
+  owned.directDaemon = undefined;
+  recorder.record("killed_list_daemon_stop", killedListStop);
+  if (!isCleanStop(killedListStop)) {
+    throw new Error(
+      `Killed-list daemon did not stop cleanly: ${JSON.stringify(killedListStop)} (log: ${killedListDaemon.logPath})`,
+    );
+  }
+  await waitForPathRemoval(killedListSocket, 5_000);
+  await waitForPathRemoval(`${killedListSocket}.lock`, 5_000);
+  recorder.record("sdk_killed_session_list", {
+    exitCode: killedListQuery.status,
+    logPath: killedListQueryLog,
+    seedLogPath: seedSessionLog,
+    result: killedListResult,
+  });
+
   const automaticDirectory = join(runtimeDirectory, "automatic");
   mkdirSync(automaticDirectory);
   const automaticSocket = join(automaticDirectory, "reins.sock");
@@ -970,6 +1123,91 @@ async function smokePackedCli(
   recorder.record("automatic_daemon_exit", {
     socketRemoved: true,
     logPath: automaticListLog,
+  });
+
+  const startupIoDirectory = join(runtimeDirectory, "startup-io");
+  mkdirSync(startupIoDirectory);
+  const blockedSocketParent = join(startupIoDirectory, "socket-parent");
+  writeFileSync(blockedSocketParent, "ordinary file");
+  const startupIoSocket = join(blockedSocketParent, "reins.sock");
+  const startupIoEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: startupIoSocket,
+    REINS_STATE_DIR: join(startupIoDirectory, "state"),
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_CONSUMER_CONTEXT: "packed-startup-io-check",
+    REINS_IDLE_TIMEOUT_MS: "50",
+    REINS_DAEMON_BIN: daemon,
+  };
+  const startupIoFailureLog = join(logsDirectory, "startup-io-failure.log");
+  const startupIoFailure = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["list"],
+      env: startupIoEnv,
+      logPath: startupIoFailureLog,
+    }),
+  );
+  if (startupIoFailure.status !== 70) {
+    throw new Error(
+      `Packed CLI startup IO failure returned exit ${startupIoFailure.status}\n${startupIoFailure.stdout}${startupIoFailure.stderr}\nFull log: ${startupIoFailureLog}`,
+    );
+  }
+  const startupIoFailureData = readFailureEnvelope(
+    "packed CLI startup IO failure",
+    startupIoFailure,
+    "list",
+    "queryFailed",
+  );
+  if (
+    !isRecord(startupIoFailureData.failure) ||
+    startupIoFailureData.failure.code !== "daemon_start_failed" ||
+    !isRecord(startupIoFailureData.failure.facts) ||
+    startupIoFailureData.failure.facts.systemCode !== "EEXIST" ||
+    !isRecord(startupIoFailureData.failure.facts.cause) ||
+    startupIoFailureData.failure.facts.cause.kind !== "io"
+  ) {
+    throw new Error(
+      `Packed CLI omitted typed startup IO facts: ${JSON.stringify(startupIoFailureData)}`,
+    );
+  }
+
+  rmSync(blockedSocketParent);
+  mkdirSync(blockedSocketParent);
+  const startupIoRetryLog = join(logsDirectory, "startup-io-retry.log");
+  const startupIoRetry = toCommandResult(
+    await runLoggedCommand({
+      command: cli,
+      args: ["list"],
+      env: startupIoEnv,
+      logPath: startupIoRetryLog,
+    }),
+  );
+  requireSuccess(
+    "packed CLI retry after startup IO repair",
+    startupIoRetry,
+    startupIoRetryLog,
+  );
+  const startupIoRetryData = readDataEnvelope(
+    "packed CLI retry after startup IO repair",
+    startupIoRetry.stdout,
+    "list",
+  );
+  if (JSON.stringify(startupIoRetryData) !== JSON.stringify({ sessions: [] })) {
+    throw new Error(
+      `Packed CLI retry returned unexpected output: ${startupIoRetry.stdout}`,
+    );
+  }
+  await waitForPathRemoval(startupIoSocket, 5_000);
+  await waitForPathRemoval(`${startupIoSocket}.lock`, 5_000);
+  recorder.record("typed_startup_io_failure_and_retry", {
+    failureExitCode: startupIoFailure.status,
+    failure: startupIoFailureData,
+    retryExitCode: startupIoRetry.status,
+    retry: startupIoRetryData,
+    failureLogPath: startupIoFailureLog,
+    retryLogPath: startupIoRetryLog,
+    socketRemoved: true,
   });
 
   const invalidAdaptersModule = join(temporaryRoot, "invalid-adapters.mjs");

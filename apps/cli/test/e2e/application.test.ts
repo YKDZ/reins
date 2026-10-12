@@ -1,5 +1,12 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdir,
+  mkdtemp,
+  readFile,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -242,6 +249,60 @@ test("application startup failure keeps the raw transport code", async () => {
   expect((await readFile(daemonSockets, "utf8")).trim().split("\n")).toEqual([
     env.REINS_SOCKET,
   ]);
+});
+
+test("application reports local startup IO failures and can retry", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-application-io-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const blockedParent = join(directory, "socket-parent");
+  await writeFile(blockedParent, "ordinary file");
+  const socketPath = join(blockedParent, "reins.sock");
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${process.execPath}' '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_DAEMON_BIN: daemonLauncher,
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_IDLE_TIMEOUT_MS: "120000",
+  };
+  const options = {
+    consumerContext: v.parse(consumerContextSchema, "application-e2e"),
+    env,
+  };
+
+  let failure: unknown;
+  try {
+    await connectReins(options);
+  } catch (error) {
+    failure = error;
+  }
+  expect(failure).toBeInstanceOf(ReinsSdkError);
+  expect(failure).toMatchObject({
+    stage: "connect",
+    failure: {
+      code: "daemon_start_failed",
+      facts: {
+        systemCode: "EEXIST",
+        cause: { kind: "io" },
+      },
+    },
+  });
+
+  await rm(blockedParent);
+  await mkdir(blockedParent);
+  const retried = await connectReins(options);
+  clients.push(retried);
+  expect(await retried.capabilities()).toHaveProperty("capabilities");
+  expect((await readFile(daemonPids, "utf8")).trim().split("\n")).toHaveLength(
+    1,
+  );
 });
 
 test("a connected daemon handshake failure does not launch a replacement", async () => {
