@@ -13,15 +13,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { createReinsClient } from "@reins/client";
 import {
-  consumerContextSchema,
-  decodeTurnHandle,
-  type DomainEvent,
-  type ProtocolMessage,
-} from "@reins/protocol";
-import { createUnixSocketClient } from "@reins/transport";
-import * as v from "valibot";
+  connect as connectSdk,
+  type AgentFact,
+  type ReinsConnection,
+  type SessionHandle,
+} from "@ykdz/reins-sdk";
 import { afterEach, expect, test as baseTest, vi } from "vitest";
 
 const repo = fileURLToPath(new URL("../../../../", import.meta.url));
@@ -161,86 +158,124 @@ async function fixture() {
     const result = await cli(["list"]);
     expect(result.exitCode, result.stderr + errors.join("")).toBe(0);
   });
-  async function client(consumerContext = env.REINS_CONSUMER_CONTEXT) {
-    const connection = await createUnixSocketClient<ProtocolMessage>(
-      env.REINS_SOCKET,
-    );
-    const client = createReinsClient(connection, {
-      consumerContext: v.parse(consumerContextSchema, consumerContext),
+  async function sdk() {
+    const connection = await connectSdk({
+      socketPath: env.REINS_SOCKET,
+      consumerContext: env.REINS_CONSUMER_CONTEXT,
     });
-    cleanup.push(async () => client.close());
-    expect(await client.initialize()).toHaveProperty("result");
-    return client;
+    cleanup.push(async () => connection.close());
+    return connection;
   }
-  return { root, runtime, daemon, daemonCwd, callerCwd, env, cli, client };
+  async function spawnSession(
+    connection: ReinsConnection,
+    sessionName: string,
+    cwd: string,
+    message: string,
+  ) {
+    return connection.spawn(
+      { sessionName, harness: "codex", message, cwd },
+      connection.prepareOperation("spawn"),
+    );
+  }
+  async function killSession(
+    connection: ReinsConnection,
+    sessionHandle: SessionHandle,
+  ) {
+    return connection.kill(
+      { sessionHandle },
+      connection.prepareOperation("kill"),
+    );
+  }
+  return {
+    root,
+    runtime,
+    daemon,
+    daemonCwd,
+    callerCwd,
+    env,
+    cli,
+    sdk,
+    spawnSession,
+    killSession,
+  };
 }
 
 test("kill commits exactly one killed turn before the session terminal", async () => {
-  const { cli, callerCwd, client: connect } = await fixture();
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "caller busy task",
-    "--name",
+  const { callerCwd, sdk, spawnSession, killSession } = await fixture();
+  const connection = await sdk();
+  const spawned = await spawnSession(
+    connection,
     "kill-busy",
-  ]);
-  expect(spawned.exitCode, spawned.stderr).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
-  const client = await connect();
-  const events: DomainEvent[] = [];
-  client.onNotification((notification) => {
-    if (notification.method === "event") events.push(notification.params.event);
-  });
-  expect(
-    await client.request("attach", {
-      scope: "session",
-      sessionId: target.sessionId,
-      replay: { mode: "available" },
-    }),
-  ).toHaveProperty("result");
-  await vi.waitFor(() =>
-    expect(events.some((event) => event.type === "turn.started")).toBe(true),
+    callerCwd,
+    "caller busy task",
   );
+  const subscription = await connection.attach(
+    { scope: "session", sessionHandle: spawned.sessionHandle },
+    { mode: "available" },
+  );
+  const events: AgentFact[] = [];
+  const collect = (async () => {
+    for await (const fact of subscription) events.push(fact);
+  })();
   await nativeReady(callerCwd);
-  const killed = await cli(["kill", target.sessionId]);
-  expect(killed.exitCode, killed.stdout + killed.stderr).toBe(0);
-  await vi.waitFor(() =>
-    expect(events.some((event) => event.type === "session.killed")).toBe(true),
+  const killed = await killSession(connection, spawned.sessionHandle);
+  expect(killed).toMatchObject({
+    status: "killed",
+    sessionHandle: spawned.sessionHandle,
+  });
+  await collect;
+  await expect(subscription.done).resolves.toMatchObject({
+    reason: "session_killed",
+  });
+  const terminalFacts = events.filter(
+    (fact) => fact.type === "turn.completed" || fact.type === "session.killed",
   );
-  expect(
-    events.filter(
-      (event) =>
-        event.type === "turn.completed" || event.type === "session.killed",
-    ),
-  ).toMatchObject([
+  expect(terminalFacts).toHaveLength(2);
+  expect(terminalFacts).toMatchObject([
     {
       type: "turn.completed",
-      sessionId: target.sessionId,
-      turnId: target.turnId,
+      turnHandle: spawned.turnHandle,
       stopReason: "killed",
     },
-    { type: "session.killed", sessionId: target.sessionId },
+    { type: "session.killed", sessionHandle: spawned.sessionHandle },
   ]);
 });
 
 test("kill stops the actual writer and its held FD while another session survives", async () => {
-  const { cli, callerCwd, root, daemon, client: connect } = await fixture();
+  const { callerCwd, root, daemon, sdk, spawnSession, killSession } =
+    await fixture();
+  const connection = await sdk();
   const otherCwd = join(root, "other");
   await mkdir(otherCwd);
-  const other = await cli(
-    ["spawn", "codex", "other caller task", "--name", "other-writer"],
+  const other = await spawnSession(
+    connection,
+    "other-writer",
     otherCwd,
+    "other caller task",
   );
-  expect(other.exitCode, other.stdout).toBe(0);
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "caller writer task",
-    "--name",
+  const spawned = await spawnSession(
+    connection,
     "owned-writer",
-  ]);
-  expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+    callerCwd,
+    "caller writer task",
+  );
+  const subscription = await connection.attach(
+    { scope: "session", sessionHandle: spawned.sessionHandle },
+    { mode: "available" },
+  );
+  let statesAtTerminal: string[] | undefined;
+  let pids: { parent: number; writer: number } | undefined;
+  const facts: AgentFact[] = [];
+  const collect = (async () => {
+    for await (const fact of subscription) {
+      facts.push(fact);
+      if (fact.type === "session.killed" && pids !== undefined)
+        statesAtTerminal = [
+          processState(pids.parent),
+          processState(pids.writer),
+        ];
+    }
+  })();
   await nativeReady(callerCwd);
   await vi.waitFor(async () =>
     expect(await readFile(join(otherCwd, "pids.json"), "utf8")).toContain(
@@ -261,28 +296,18 @@ test("kill stops the actual writer and its held FD while another session survive
       (await readFile(join(callerCwd, "held-original.txt"), "utf8")).length,
     ).toBeGreaterThan(before.length),
   );
-  const pids = JSON.parse(
-    await readFile(join(callerCwd, "pids.json"), "utf8"),
-  ) as { parent: number; writer: number };
-  const client = await connect();
-  let statesAtTerminal: string[] | undefined;
-  client.onNotification((n) => {
-    if (n.method === "event" && n.params.event.type === "session.killed") {
-      statesAtTerminal = [processState(pids.parent), processState(pids.writer)];
-    }
-  });
-  expect(
-    await client.request("attach", {
-      scope: "session",
-      sessionId: target.sessionId,
-      replay: { mode: "available" },
-    }),
-  ).toHaveProperty("result");
-  const killed = await cli(["kill", target.sessionId]);
+  pids = JSON.parse(await readFile(join(callerCwd, "pids.json"), "utf8")) as {
+    parent: number;
+    writer: number;
+  };
+  const killed = await killSession(connection, spawned.sessionHandle);
   const writerState = processState(pids.writer);
-  console.info(JSON.stringify({ killed, pids, writerState, statesAtTerminal }));
   expect(["Z", "X", "gone"]).toContain(writerState);
-  expect(killed.exitCode, killed.stdout + killed.stderr).toBe(0);
+  expect(killed).toMatchObject({ status: "killed" });
+  await collect;
+  await expect(subscription.done).resolves.toMatchObject({
+    reason: "session_killed",
+  });
   await vi.waitFor(() => expect(statesAtTerminal).toBeDefined());
   expect(
     statesAtTerminal!.every((state) => ["Z", "X", "gone"].includes(state)),
@@ -303,125 +328,142 @@ test("kill stops the actual writer and its held FD while another session survive
   );
   expect(await readFile(join(callerCwd, "named.txt"), "utf8")).toBe(named);
   expect(daemon.exitCode).toBeNull();
-  expect(JSON.parse((await cli(["list"])).stdout)).toEqual(
+  expect(await connection.list()).toEqual(
     expect.arrayContaining([
-      expect.objectContaining({ sessionId: target.sessionId, state: "killed" }),
       expect.objectContaining({
-        sessionId: JSON.parse(other.stdout).sessionId,
+        sessionHandle: spawned.sessionHandle,
+        state: "killed",
+      }),
+      expect.objectContaining({
+        sessionHandle: other.sessionHandle,
         state: "busy",
       }),
     ]),
   );
+  expect(facts.filter((fact) => fact.type === "session.killed")).toHaveLength(
+    1,
+  );
 });
 
 test("the single-session kill request returns one result and rejects an extra CLI target", async () => {
-  const { cli, callerCwd, client: connect } = await fixture();
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "single caller task",
-    "--name",
+  const { cli, callerCwd, sdk, spawnSession, killSession } = await fixture();
+  const connection = await sdk();
+  const spawned = await spawnSession(
+    connection,
     "single-kill",
-  ]);
-  expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+    callerCwd,
+    "single caller task",
+  );
   await nativeReady(callerCwd);
-  const rejected = await cli(["kill", target.sessionId, target.sessionId]);
-  expect(rejected.exitCode, rejected.stdout + rejected.stderr).toBe(64);
-  expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
-    { state: "busy" },
+  const prepared = await cli(["prepare-operation", "kill"]);
+  expect(prepared.exitCode, prepared.stdout + prepared.stderr).toBe(0);
+  const preparedData = (
+    JSON.parse(prepared.stdout) as {
+      data: { operation: string; credential: string };
+    }
+  ).data;
+  expect(preparedData).toMatchObject({ operation: "kill" });
+  expect(preparedData.credential).toEqual(expect.any(String));
+  const rejected = await cli([
+    "kill",
+    "--session",
+    spawned.sessionHandle,
+    "--operation",
+    preparedData.credential,
+    spawned.sessionHandle,
   ]);
-  const client = await connect();
+  expect(rejected.exitCode, rejected.stdout + rejected.stderr).toBe(64);
   expect(
-    await client.request("kill", { sessionId: target.sessionId }),
-  ).toMatchObject({
-    result: { sessionId: target.sessionId, status: "killed" },
+    await connection.list({ sessionHandle: spawned.sessionHandle }),
+  ).toMatchObject([{ state: "busy", activeTurn: spawned.turnHandle }]);
+  expect(await killSession(connection, spawned.sessionHandle)).toMatchObject({
+    sessionHandle: spawned.sessionHandle,
+    status: "killed",
   });
 });
 
 test.each(["complete during kill", "complete naturally"])(
   "kill preserves the unique natural terminal: %s",
   async (message) => {
-    const { cli, callerCwd, client: connect } = await fixture();
-    const spawned = await cli([
-      "spawn",
-      "codex",
-      message,
-      "--name",
+    const { callerCwd, sdk, spawnSession, killSession } = await fixture();
+    const connection = await sdk();
+    const spawned = await spawnSession(
+      connection,
       "natural-race",
-    ]);
-    expect(spawned.exitCode, spawned.stdout).toBe(0);
-    const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+      callerCwd,
+      message,
+    );
+    const subscription = await connection.attach(
+      { scope: "session", sessionHandle: spawned.sessionHandle },
+      { mode: "available" },
+    );
+    const events: AgentFact[] = [];
+    const collect = (async () => {
+      for await (const fact of subscription) events.push(fact);
+    })();
     await nativeReady(callerCwd);
-    const client = await connect();
-    const events: DomainEvent[] = [];
-    client.onNotification((n) => {
-      if (n.method === "event") events.push(n.params.event);
-    });
-    expect(
-      await client.request("attach", {
-        scope: "session",
-        sessionId: target.sessionId,
-        replay: { mode: "available" },
-      }),
-    ).toHaveProperty("result");
     if (message === "complete naturally")
       await vi.waitFor(() =>
-        expect(events.some((e) => e.type === "turn.completed")).toBe(true),
+        expect(events.some((fact) => fact.type === "turn.completed")).toBe(
+          true,
+        ),
       );
     const [first, concurrent] = await Promise.all([
-      cli(["kill", target.sessionId]),
-      cli(["kill", target.sessionId]),
+      killSession(connection, spawned.sessionHandle),
+      killSession(connection, spawned.sessionHandle),
     ]);
-    expect(first.exitCode, first.stdout).toBe(0);
-    expect(concurrent.exitCode, concurrent.stdout).toBe(0);
-    expect((await cli(["kill", target.sessionId])).exitCode).toBe(0);
-    await vi.waitFor(() =>
-      expect(events.some((e) => e.type === "session.killed")).toBe(true),
+    for (const result of [first, concurrent]) {
+      expect(result.sessionHandle).toBe(spawned.sessionHandle);
+      expect(["killed", "not_found"]).toContain(result.status);
+    }
+    expect(await killSession(connection, spawned.sessionHandle)).toMatchObject({
+      sessionHandle: spawned.sessionHandle,
+      status: expect.stringMatching(/^(killed|not_found)$/u),
+    });
+    await collect;
+    await expect(subscription.done).resolves.toMatchObject({
+      reason: "session_killed",
+    });
+    const terminalFacts = events.filter(
+      (fact) =>
+        fact.type === "turn.completed" || fact.type === "session.killed",
     );
-    expect(
-      events.filter(
-        (e) => e.type === "turn.completed" || e.type === "session.killed",
-      ),
-    ).toMatchObject([
+    expect(terminalFacts).toHaveLength(2);
+    expect(terminalFacts).toMatchObject([
       {
         type: "turn.completed",
-        sessionId: target.sessionId,
-        turnId: target.turnId,
+        turnHandle: spawned.turnHandle,
         stopReason: "end_turn",
       },
-      { type: "session.killed", sessionId: target.sessionId },
+      { type: "session.killed", sessionHandle: spawned.sessionHandle },
     ]);
   },
 );
 
 test("failed termination leaves the real writer and original turn alive for a fresh retry", async () => {
-  const { cli, callerCwd, client: connect } = await fixture();
-  const spawned = await cli([
-    "spawn",
-    "codex",
-    "fail first termination",
-    "--name",
+  const { callerCwd, sdk, spawnSession, killSession } = await fixture();
+  const connection = await sdk();
+  const spawned = await spawnSession(
+    connection,
     "retry-kill",
-  ]);
-  expect(spawned.exitCode, spawned.stdout).toBe(0);
-  const target = decodeTurnHandle(JSON.parse(spawned.stdout).turnHandle);
+    callerCwd,
+    "fail first termination",
+  );
+  const subscription = await connection.attach(
+    { scope: "session", sessionHandle: spawned.sessionHandle },
+    { mode: "available" },
+  );
+  const events: AgentFact[] = [];
+  const collect = (async () => {
+    for await (const fact of subscription) events.push(fact);
+  })();
   await nativeReady(callerCwd);
-  const client = await connect();
-  const events: DomainEvent[] = [];
-  client.onNotification((n) => {
-    if (n.method === "event") events.push(n.params.event);
+  await expect(
+    killSession(connection, spawned.sessionHandle),
+  ).rejects.toMatchObject({
+    name: "ReinsSdkError",
+    failure: { code: "internal_error" },
   });
-  expect(
-    await client.request("attach", {
-      scope: "session",
-      sessionId: target.sessionId,
-      replay: { mode: "available" },
-    }),
-  ).toHaveProperty("result");
-  const failed = await cli(["kill", target.sessionId]);
-  expect(failed.exitCode, failed.stdout).toBe(65);
-  expect(JSON.parse(failed.stdout)).toMatchObject({ code: "internal_error" });
   const before = await readFile(join(callerCwd, "held.txt"), "utf8");
   await vi.waitFor(async () =>
     expect(
@@ -430,17 +472,33 @@ test("failed termination leaves the real writer and original turn alive for a fr
   );
   expect(
     events.filter(
-      (e) => e.type === "turn.completed" || e.type === "session.killed",
+      (fact) =>
+        fact.type === "turn.completed" || fact.type === "session.killed",
     ),
   ).toEqual([]);
-  expect(JSON.parse((await cli(["list"])).stdout)).toMatchObject([
-    { state: "busy", activeTurnHandle: JSON.parse(spawned.stdout).turnHandle },
-  ]);
-  expect((await cli(["kill", target.sessionId])).exitCode).toBe(0);
-  await vi.waitFor(() =>
-    expect(events.some((e) => e.type === "session.killed")).toBe(true),
-  );
-  expect(events.filter((e) => e.type === "turn.completed")).toMatchObject([
-    { turnId: target.turnId, stopReason: "killed" },
+  expect(
+    await connection.list({ sessionHandle: spawned.sessionHandle }),
+  ).toMatchObject([{ state: "busy", activeTurn: spawned.turnHandle }]);
+  const killed = await killSession(connection, spawned.sessionHandle);
+  expect(killed).toMatchObject({
+    sessionHandle: spawned.sessionHandle,
+    status: "killed",
+  });
+  await collect;
+  await expect(subscription.done).resolves.toMatchObject({
+    reason: "session_killed",
+  });
+  expect(
+    events.filter(
+      (fact) =>
+        fact.type === "turn.completed" || fact.type === "session.killed",
+    ),
+  ).toMatchObject([
+    {
+      type: "turn.completed",
+      turnHandle: spawned.turnHandle,
+      stopReason: "killed",
+    },
+    { type: "session.killed", sessionHandle: spawned.sessionHandle },
   ]);
 });

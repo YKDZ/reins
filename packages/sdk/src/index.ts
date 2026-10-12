@@ -321,7 +321,8 @@ function projectAttachParams(
   };
 }
 
-function projectSubscriptionError(error: unknown): ReinsSdkError {
+function projectSubscriptionError(error: unknown): ReinsSdkError | Error {
+  if (error instanceof Error && error.name === "AbortError") return error;
   if (error instanceof ReinsSdkError) return error;
   if (error instanceof AgentSubscriptionError) {
     const failure = projectFailure(error.failure);

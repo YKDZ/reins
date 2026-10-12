@@ -172,6 +172,12 @@ export class OperationCredentialError extends Error {
   }
 }
 
+function createAbortError(): Error {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}
+
 type ClientMachineErrorCode =
   | "invalid_daemon_response"
   | "daemon_disconnected"
@@ -197,6 +203,10 @@ export function createReinsClient(
       unknown?: (cause: CommandOutcomeUnknown["cause"]) => Error;
     }
   >();
+  const cancelledResponses = new Map<
+    string,
+    (response: ProtocolResponse) => void
+  >();
   const listeners = new Set<NotificationListener>();
   const closedListeners = new Set<(reason: MachineError) => void>();
   let closed = false;
@@ -215,6 +225,7 @@ export function createReinsClient(
         ) ?? error,
       );
     pending.clear();
+    cancelledResponses.clear();
     for (const listener of Array.from(closedListeners)) listener(reason);
   };
   const unsubscribe = connection.onEvent((event) => {
@@ -224,8 +235,17 @@ export function createReinsClient(
       if (response.success) {
         const responseMessage = response.output;
         const entry = pending.get(responseMessage.requestId);
-        if (entry === undefined) return;
-        entry.resolve(responseMessage);
+        if (entry !== undefined) {
+          entry.resolve(responseMessage);
+          return;
+        }
+        const closeCancelled = cancelledResponses.get(
+          responseMessage.requestId,
+        );
+        if (closeCancelled !== undefined) {
+          cancelledResponses.delete(responseMessage.requestId);
+          closeCancelled(responseMessage);
+        }
         return;
       }
       const notification = v.safeParse(protocolNotificationSchema, message);
@@ -247,7 +267,10 @@ export function createReinsClient(
     timeoutMs = 30_000,
     originalId?: CommandId,
     originalRetryToken?: string,
+    signal?: AbortSignal,
+    onCancelledResponse?: (response: ProtocolResponse) => void,
   ): Promise<ProtocolResponseFor<M>> => {
+    if (signal?.aborted) return Promise.reject(createAbortError());
     if (closed) {
       return Promise.reject(
         new ReinsClientError(clientMachineError("daemon_disconnected")),
@@ -312,10 +335,13 @@ export function createReinsClient(
     const requestId = v.parse(requestIdSchema, `cli${seq}`);
     return new Promise<ProtocolResponseFor<M>>((resolve, reject) => {
       let settled = false;
+      let abortListener: (() => void) | undefined;
       const settle = (action: () => void): void => {
         if (settled) return;
         settled = true;
         if (timer !== null) clearTimeout(timer);
+        if (abortListener !== undefined)
+          signal?.removeEventListener("abort", abortListener);
         pending.delete(requestId);
         action();
       };
@@ -332,6 +358,14 @@ export function createReinsClient(
                 ),
               );
             }, timeoutMs);
+      if (signal !== undefined) {
+        abortListener = () => {
+          if (settled) return;
+          if (onCancelledResponse !== undefined)
+            cancelledResponses.set(requestId, onCancelledResponse);
+          settle(() => reject(createAbortError()));
+        };
+      }
       pending.set(requestId, {
         ...(commandId === undefined ? {} : { unknown }),
         resolve: (response) => {
@@ -356,6 +390,13 @@ export function createReinsClient(
         },
         reject: (error) => settle(() => reject(error)),
       });
+      if (signal !== undefined && abortListener !== undefined) {
+        signal.addEventListener("abort", abortListener, { once: true });
+        if (signal.aborted) {
+          abortListener();
+          return;
+        }
+      }
       try {
         connection.send({
           kind: "request",
@@ -380,7 +421,10 @@ export function createReinsClient(
     close(): void;
   };
 
-  const subscribeRaw = async (params: ProtocolParams<"attach">) => {
+  const subscribeRaw = async (
+    params: ProtocolParams<"attach">,
+    signal?: AbortSignal,
+  ) => {
     const queued: RawEvent[] = [];
     const initial: ProtocolNotification[] = [];
     let establishment: ProtocolResult<"attach"> | undefined;
@@ -456,7 +500,48 @@ export function createReinsClient(
     listeners.add(receive);
     closedListeners.add(disconnect);
     try {
-      const response = await request("attach", params);
+      const response = await request(
+        "attach",
+        params,
+        30_000,
+        undefined,
+        undefined,
+        signal,
+        (lateResponse) => {
+          if ("error" in lateResponse) return;
+          const parsed = v.safeParse(
+            protocolResultSchemaFor("attach"),
+            lateResponse.result,
+          );
+          if (!parsed.success) {
+            terminate(clientMachineError("invalid_daemon_response"));
+            return;
+          }
+          try {
+            connection.send({
+              kind: "control",
+              method: "subscription.close",
+              subscriptionId: parsed.output.subscriptionId,
+            });
+          } catch {
+            terminate(clientMachineError("daemon_disconnected"));
+          }
+        },
+      );
+      if (signal?.aborted) {
+        if (!("error" in response)) {
+          try {
+            connection.send({
+              kind: "control",
+              method: "subscription.close",
+              subscriptionId: response.result.subscriptionId,
+            });
+          } catch {
+            terminate(clientMachineError("daemon_disconnected"));
+          }
+        }
+        throw createAbortError();
+      }
       if ("error" in response) throw new ReinsClientError(response.error);
       establishment = response.result;
       lastDeliveredPosition =
@@ -495,6 +580,14 @@ export function createReinsClient(
           const value = queued.shift()!;
           lastDeliveredPosition = value.eventId;
           return { value, done: false };
+        }
+        if (failure instanceof AgentSubscriptionError) {
+          throw new AgentSubscriptionError(
+            failure.failure,
+            failure.resumeCursor === undefined
+              ? undefined
+              : cursorAt(lastDeliveredPosition),
+          );
         }
         if (failure !== undefined) throw failure;
         return { value: undefined, done: true };
@@ -542,12 +635,8 @@ export function createReinsClient(
   };
 
   const subscribeFacts: SubscribeFacts = async (params, signal) => {
-    if (signal?.aborted) {
-      const error = new Error("The operation was aborted");
-      error.name = "AbortError";
-      throw error;
-    }
-    const raw = await subscribeRaw(params);
+    if (signal?.aborted) throw createAbortError();
+    const raw = await subscribeRaw(params, signal);
     const factDone = raw.done.then(({ target, reason }) => ({
       target,
       reason,

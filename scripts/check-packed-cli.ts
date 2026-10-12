@@ -1,6 +1,7 @@
 // 正式发行包的 npm 干净安装 smoke：安装兼容性与既有业务场景断言留在本入口，
 // 环境准备之外的一切进程生命周期（启动、就绪、超时、停止、完整日志）走
 // scripts/packed-cli-fixtures 的窄共享接缝，供后续 Docker 正式包 smoke 复用。
+import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -19,6 +20,7 @@ import { fileURLToPath } from "node:url";
 
 import {
   startUnixAcknowledgementProxy,
+  startUnixConnectionProxy,
   type UnixAcknowledgementProxy,
 } from "./packed-cli-fixtures/ack-proxy.ts";
 import {
@@ -31,6 +33,7 @@ import {
   type FactRecorder,
 } from "./packed-cli-fixtures/evidence.ts";
 import {
+  observe,
   runLoggedCommand,
   waitForPathRemoval,
 } from "./packed-cli-fixtures/process.ts";
@@ -1968,14 +1971,126 @@ async function smokePackedCli(
       REINS_TARGET_SESSION: cliSpawnData.sessionHandle as string,
     },
   );
+  const deliveredFactCount = disconnectedSdk.deliveredFactCount;
+  const queuedFactCount = disconnectedSdk.queuedFactCount;
+  const deliveredFactIds = disconnectedSdk.deliveredFactIds;
   if (
     typeof disconnectedSdk.checkpoint !== "string" ||
     disconnectedSdk.code !== "daemon_disconnected" ||
-    disconnectedSdk.cursorMatchesDeliveredFact !== true
+    disconnectedSdk.cursorMatchesDeliveredFact !== true ||
+    typeof queuedFactCount !== "number" ||
+    !Number.isInteger(queuedFactCount) ||
+    queuedFactCount < 1 ||
+    typeof deliveredFactCount !== "number" ||
+    !Number.isInteger(deliveredFactCount) ||
+    deliveredFactCount < 2 ||
+    !Array.isArray(deliveredFactIds) ||
+    !deliveredFactIds.every((factId) => typeof factId === "string") ||
+    deliveredFactIds.length !== deliveredFactCount
   )
     throw new Error(
-      "The installed SDK did not preserve the last delivered fact cursor on disconnect",
+      "The installed SDK did not preserve the last queued-and-delivered fact cursor on disconnect",
     );
+  const sdkDeliveredFactIds = deliveredFactIds as string[];
+  const cliDisconnectSocket = join(controlCliDirectory, "attach-proxy.sock");
+  const cliDisconnectProxy = await startUnixConnectionProxy({
+    socketPath: cliDisconnectSocket,
+    targetPath: controlCliSocket,
+  });
+  const cliDisconnectChild = spawn(
+    frozenCli,
+    [
+      "attach",
+      cliSpawnData.sessionHandle as string,
+      "--scope",
+      "session",
+      "--replay",
+      "available",
+    ],
+    {
+      cwd: applicationConsumerDirectory,
+      env: { ...controlCliEnv, REINS_SOCKET: cliDisconnectSocket },
+      stdio: ["ignore", "pipe", "pipe"],
+    },
+  );
+  const cliDisconnectLog = join(
+    logsDirectory,
+    "installed-cli-queued-disconnect.log",
+  );
+  const cliDisconnectObserved = observe(cliDisconnectChild, cliDisconnectLog);
+  try {
+    const readyDeadline = Date.now() + 10_000;
+    let observedFactCount = 0;
+    while (observedFactCount < deliveredFactCount) {
+      const partialFrames = cliDisconnectObserved
+        .stdout()
+        .toString("utf8")
+        .split("\n")
+        .filter((line) => line !== "")
+        .map((line) => JSON.parse(line) as Record<string, unknown>);
+      observedFactCount = partialFrames.filter(
+        (frame) => frame.kind === "record" && frame.variant === "fact",
+      ).length;
+      if (observedFactCount >= deliveredFactCount) break;
+      if (!cliDisconnectObserved.running())
+        throw new Error("The installed CLI exited before replaying its facts");
+      if (Date.now() >= readyDeadline)
+        throw new Error(
+          "The installed CLI did not replay queued facts in time",
+        );
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+    }
+    await cliDisconnectProxy.close();
+    const disconnectedCliExit = await cliDisconnectObserved.completion;
+    const cliDisconnectStdout = cliDisconnectObserved.stdout().toString("utf8");
+    const cliDisconnectStderr = cliDisconnectObserved.stderr().toString("utf8");
+    if (disconnectedCliExit.exitCode !== 70)
+      throw new Error(
+        `The installed CLI did not report a typed disconnect: exit=${disconnectedCliExit.exitCode}\n${cliDisconnectStderr}`,
+      );
+    const cliDisconnectFrames = readJsonLineRecords(
+      "installed CLI queued disconnect",
+      cliDisconnectStdout,
+    );
+    const cliDisconnectFacts = cliDisconnectFrames
+      .filter((frame) => frame.kind === "record" && frame.variant === "fact")
+      .map((frame) => {
+        if (!isRecord(frame.data) || !isRecord(frame.data.fact))
+          throw new Error("The installed CLI emitted a malformed fact record");
+        return frame.data.fact;
+      });
+    const cliDisconnectFailures = readJsonLineRecords(
+      "installed CLI queued disconnect failure",
+      cliDisconnectStderr,
+    );
+    const cliDisconnectFailure = cliDisconnectFailures.at(-1);
+    if (
+      JSON.stringify(cliDisconnectFacts.map((fact) => fact.factId)) !==
+        JSON.stringify(sdkDeliveredFactIds) ||
+      !isRecord(cliDisconnectFailure?.data) ||
+      !isRecord(cliDisconnectFailure.data.failure) ||
+      !isRecord(cliDisconnectFailure.data.failure.facts) ||
+      cliDisconnectFailure.data.failure.code !== "daemon_disconnected" ||
+      cliDisconnectFailure.data.failure.facts.resumeCursor !==
+        disconnectedSdk.checkpoint
+    )
+      throw new Error(
+        "The installed CLI failure cursor did not match its last queued-and-delivered fact",
+      );
+    recorder.record("installed_cli_queued_disconnect", {
+      exitCode: disconnectedCliExit.exitCode,
+      logPath: cliDisconnectLog,
+      deliveredFactCount: cliDisconnectFacts.length,
+      deliveredFactIds: cliDisconnectFacts.map((fact) => fact.factId),
+      checkpoint: disconnectedSdk.checkpoint,
+      failure: cliDisconnectFailure.data.failure,
+    });
+  } finally {
+    await cliDisconnectProxy.close();
+    if (cliDisconnectObserved.running())
+      await cliDisconnectObserved.stop(2_000);
+  }
+  await waitForPathRemoval(cliDisconnectSocket, 5_000);
   assertProcessRunning("The disconnected SDK worker", cliWorkerReady.workerPid);
   assertProcessRunning(
     "The disconnected SDK descendant",
@@ -2067,13 +2182,15 @@ async function smokePackedCli(
       ...controlCliEnv,
       REINS_TARGET_SESSION: cliSpawnData.sessionHandle as string,
       REINS_RESUME_CURSOR: disconnectedSdk.checkpoint,
+      REINS_RESUME_FACT_COUNT: String(deliveredFactCount),
     },
   );
   if (
     !Array.isArray(sdkFactReplay.facts) ||
     !Array.isArray(sdkFactReplay.resumedFacts) ||
     sdkFactReplay.facts.length < 2 ||
-    sdkFactReplay.replayed !== sdkFactReplay.facts.length - 1 ||
+    sdkFactReplay.replayed !==
+      sdkFactReplay.facts.length - deliveredFactCount ||
     sdkFactReplay.checkpointWasDelivered !== true ||
     sdkFactReplay.resumedAfterDisconnect !== true ||
     typeof sdkFactReplay.endReason !== "string"

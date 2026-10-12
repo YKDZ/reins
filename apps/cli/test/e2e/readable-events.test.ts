@@ -43,7 +43,7 @@ afterEach(async () => {
   for (const release of cleanup.splice(0).reverse()) await release();
 });
 
-async function fixture(rich = false) {
+async function fixture(rich = false, isolatedProcessGroup = false) {
   const root = await mkdtemp(join(tmpdir(), "reins-wrr17-cwd-"));
   const runtime = await mkdtemp("/dev/shm/reins-wrr17-runtime-");
   cleanup.push(async () => {
@@ -72,17 +72,30 @@ async function fixture(rich = false) {
         ? adapters.replace("wait-adapters.ts", "readable-events-adapters.ts")
         : adapters,
     ],
-    { cwd: daemonCwd, env, stdio: ["ignore", "pipe", "pipe"] },
+    {
+      cwd: daemonCwd,
+      env,
+      stdio: ["ignore", "pipe", "pipe"],
+      ...(isolatedProcessGroup ? { detached: true } : {}),
+    },
   );
   const errors: string[] = [];
   daemon.stderr?.on("data", (chunk) => errors.push(String(chunk)));
-  cleanup.push(async () => {
+  const stopDaemon = async (signal: NodeJS.Signals = "SIGTERM") => {
     if (daemon.exitCode !== null || daemon.signalCode !== null) return;
-    await new Promise<void>((resolve) => {
-      daemon.once("close", () => resolve());
-      daemon.kill("SIGTERM");
-    });
-  });
+    const closed = new Promise<void>((resolve) =>
+      daemon.once("close", () => resolve()),
+    );
+    if (
+      isolatedProcessGroup &&
+      process.platform !== "win32" &&
+      daemon.pid !== undefined
+    )
+      process.kill(-daemon.pid, signal);
+    else daemon.kill(signal);
+    await closed;
+  };
+  cleanup.push(() => stopDaemon());
   async function cli(args: string[], cwd = callerCwd) {
     const child = spawn(process.execPath, [cliBin, ...args], {
       env,
@@ -141,6 +154,7 @@ async function fixture(rich = false) {
     sdk,
     spawnSession,
     daemon,
+    stopDaemon,
   };
 }
 
@@ -277,6 +291,49 @@ test("public SDK facts keep their identity across none, available, and after, an
   expect(rendered.stdout).toContain("worker: hello world");
   expect(rendered.stdout).toContain("[tool] read-file completed");
   expect(rendered.stdout).not.toContain("native-result-name");
+});
+
+test("SDK abort preserves AbortError and closes observation without stopping its session", async () => {
+  const f = await fixture();
+  const gate = join(f.root, "abort-observation-release");
+  const spawned = await f.spawnSession(
+    "abort-observation",
+    JSON.stringify({ gate, reply: "still running" }),
+  );
+  const observer = await f.sdk();
+  const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
+  const preAborted = new AbortController();
+  preAborted.abort();
+
+  await expect(
+    observer.attach(target, { mode: "none" }, preAborted.signal),
+  ).rejects.toMatchObject({ name: "AbortError" });
+
+  const controller = new AbortController();
+  const subscription = await observer.attach(
+    target,
+    { mode: "none" },
+    controller.signal,
+  );
+  controller.abort();
+  await expect(subscription.done).resolves.toMatchObject({ reason: "closed" });
+
+  const control = await f.client();
+  expect(
+    await control.request("list", {
+      sessionId: decodeTurnHandle(spawned.turnHandle).sessionId,
+    }),
+  ).toMatchObject({
+    result: [expect.objectContaining({ state: "busy" })],
+  });
+  await writeFile(gate, "release");
+  const turn = decodeTurnHandle(spawned.turnHandle);
+  expect(
+    await control.request("wait", {
+      targets: [turn],
+      completion: "all",
+    }),
+  ).toMatchObject({ result: { completed: [{ finalReply: "still running" }] } });
 });
 
 test("interrupting a live CLI attach closes observation without killing its turn", async () => {
@@ -569,12 +626,27 @@ test.each(["failed", "cancelled"] as const)(
 );
 
 test("CLI preserves structured facts before a typed daemon_disconnected failure", async () => {
-  const f = await fixture(true);
+  const f = await fixture(true, true);
   const gate = join(f.root, "release");
   const spawned = await f.spawnSession(
     "disconnect",
     JSON.stringify({ gate, reply: "unused", permission: true }),
   );
+  const observer = await f.sdk();
+  const sdkSubscription = await observer.attach(
+    { scope: "turn", turnHandle: spawned.turnHandle },
+    { mode: "none" },
+  );
+  const sdkCheckpoints = new Map<string, string>();
+  let sdkIteratorFailure: unknown;
+  const sdkDrain = (async () => {
+    try {
+      for await (const fact of sdkSubscription)
+        sdkCheckpoints.set(fact.factId, sdkSubscription.checkpoint);
+    } catch (error) {
+      sdkIteratorFailure = error;
+    }
+  })();
   const child = spawn(
     process.execPath,
     [
@@ -603,33 +675,59 @@ test("CLI preserves structured facts before a typed daemon_disconnected failure"
   const exited = new Promise<number | null>((resolve) =>
     child.once("close", resolve),
   );
+  const cliFacts = () =>
+    output
+      .join("")
+      .split("\n")
+      .filter((line) => line !== "")
+      .map((line) => JSON.parse(line) as Record<string, unknown>)
+      .filter((frame) => frame.kind === "record" && frame.variant === "fact");
   await vi.waitFor(() =>
     expect(output.join("")).toContain('"variant":"established"'),
   );
   await writeFile(gate, "release");
-  await vi.waitFor(() => expect(output.join("")).toContain('"variant":"fact"'));
-  f.daemon.kill("SIGKILL");
+  await vi.waitFor(() => expect(cliFacts().length).toBeGreaterThanOrEqual(2));
+  await f.stopDaemon("SIGKILL");
   expect(await exited, stderr.join("")).toBe(70);
+  await sdkDrain;
   const records = output
     .join("")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
-  expect(
-    records.some(
-      (record) => record.kind === "record" && record.variant === "fact",
-    ),
-  ).toBe(true);
+  const deliveredFacts = records.filter(
+    (record) => record.kind === "record" && record.variant === "fact",
+  );
+  expect(deliveredFacts.length).toBeGreaterThanOrEqual(2);
   const failures = stderr
     .join("")
     .trim()
     .split("\n")
     .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const lastFactFrame = deliveredFacts.at(-1);
+  expect(lastFactFrame).toBeDefined();
+  const lastFact = (
+    lastFactFrame?.data as { fact: { factId: string } } | undefined
+  )?.fact;
+  const expectedCheckpoint =
+    lastFact === undefined ? undefined : sdkCheckpoints.get(lastFact.factId);
+  expect(expectedCheckpoint).toEqual(expect.any(String));
+  expect(sdkIteratorFailure).toMatchObject({
+    failure: {
+      code: "daemon_disconnected",
+      facts: { resumeCursor: expectedCheckpoint },
+    },
+  });
   expect(failures.at(-1)).toMatchObject({
     kind: "failure",
     command: "attach",
     variant: "attachFailed",
-    data: { failure: { code: "daemon_disconnected" } },
+    data: {
+      failure: {
+        code: "daemon_disconnected",
+        facts: { resumeCursor: expectedCheckpoint },
+      },
+    },
   });
   for (const frame of [...records, ...failures])
     expect(frame).not.toHaveProperty("sessionId");
