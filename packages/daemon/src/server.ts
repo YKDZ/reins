@@ -922,6 +922,41 @@ export function createProtocolServerInternal(
             feature: "capture_harness_stderr",
           } satisfies MachineError;
         }
+        const currentCapabilities = await aggregateCapabilities();
+        const knownHarnesses = new Set([
+          ...currentCapabilities.capabilities.map(({ harness }) => harness),
+          ...currentCapabilities.failures.map(({ harness }) => harness),
+        ]);
+        if (!knownHarnesses.has(spawnParams.harness)) {
+          throw {
+            code: "unknown_harness",
+            harness: spawnParams.harness,
+            availableHarnesses: [...knownHarnesses],
+          } satisfies MachineError;
+        }
+        const capability = currentCapabilities.capabilities.find(
+          ({ harness }) => harness === spawnParams.harness,
+        );
+        if (capability !== undefined && spawnParams.model !== undefined) {
+          const model = capability.models.find(
+            ({ id }) => id === spawnParams.model,
+          );
+          if (model === undefined) {
+            throw {
+              code: "invalid_params",
+              issues: [{ issue: "invalid_value", path: "model" }],
+            } satisfies MachineError;
+          }
+          if (
+            spawnParams.reasoning !== undefined &&
+            !model.reasoningEfforts.includes(spawnParams.reasoning)
+          ) {
+            throw {
+              code: "invalid_params",
+              issues: [{ issue: "invalid_value", path: "reasoning" }],
+            } satisfies MachineError;
+          }
+        }
         return await options.machine.spawn(spawnParams);
       case "send": {
         const params = request.params as SendParams;

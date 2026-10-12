@@ -106,6 +106,7 @@ function startDaemon(
     idleTimeoutMs?: number;
     eventLogLimit?: number;
     beforeAttachReplay?: (sessionId: SessionId) => void;
+    onEvent?: (event: DomainEvent) => void;
   },
 ): {
   server: ReturnType<typeof createInMemoryTransportServer<ProtocolMessage>>;
@@ -124,6 +125,7 @@ function startDaemon(
     ...(options?.beforeAttachReplay === undefined
       ? {}
       : { beforeAttachReplay: options.beforeAttachReplay }),
+    ...(options?.onEvent === undefined ? {} : { onEvent: options.onEvent }),
   });
   daemons.push(daemon);
   void daemon.start();
@@ -2710,6 +2712,174 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
   expect(fake.calls.terminated).toHaveLength(1);
   a.close();
   b.close();
+});
+
+test("操作账本只在首次 spawn 时校验动态能力", async () => {
+  let capability: HarnessCapability = {
+    harness: "fake",
+    models: [
+      { id: "available", displayName: "Available", reasoningEfforts: ["high"] },
+    ],
+  };
+  let capabilityQueries = 0;
+  const fake = createFakeHarness({ harness: "fake", capability });
+  fake.adapter.capabilities = async () => {
+    capabilityQueries += 1;
+    return capability;
+  };
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const connection = server.connect();
+  await makeRequester(connection)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "test-consumer",
+  });
+  const params = {
+    harness: "fake",
+    cwd: "/tmp",
+    sessionName: "capability-ledger",
+    message: "original intent",
+    model: "not-yet-available",
+  };
+  const rejected = {
+    kind: "request",
+    method: "spawn",
+    commandId: "test:00000001-0123-4123-8123-0123456789ab",
+    params,
+  };
+  const first = await sendRaw(connection, {
+    ...rejected,
+    requestId: "invalid-original",
+  });
+  expect(first).toMatchObject({
+    error: {
+      code: "invalid_params",
+      issues: [{ issue: "invalid_value", path: "model" }],
+    },
+  });
+  expect(fake.calls.starts).toBe(0);
+
+  capability = {
+    harness: "fake",
+    models: [
+      {
+        id: "not-yet-available",
+        displayName: "New model",
+        reasoningEfforts: ["high"],
+      },
+    ],
+  };
+  expect(
+    await sendRaw(connection, {
+      ...rejected,
+      requestId: "invalid-recovered",
+    }),
+  ).toEqual({ ...first, requestId: "invalid-recovered" });
+  expect(capabilityQueries).toBe(1);
+  expect(fake.calls.starts).toBe(0);
+
+  const accepted = {
+    ...rejected,
+    commandId: "test:00000002-0123-4123-8123-0123456789ab",
+    requestId: "accepted-original",
+  };
+  const created = await sendRaw(connection, accepted);
+  expect(created).toMatchObject({
+    result: { sessionId: "capability-ledger@gdaemontest" },
+  });
+  expect(fake.calls.starts).toBe(1);
+
+  capability = { harness: "fake", models: [] };
+  expect(
+    await sendRaw(connection, { ...accepted, requestId: "accepted-recovered" }),
+  ).toEqual({ ...created, requestId: "accepted-recovered" });
+  expect(capabilityQueries).toBe(2);
+  expect(fake.calls.starts).toBe(1);
+  connection.close();
+});
+
+test("能力查询失败时不把 harness 误判为未知或拒绝模型", async () => {
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: emptyCapability("fake"),
+  });
+  fake.adapter.capabilities = async () => {
+    throw new Error("capabilities unavailable");
+  };
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const connection = server.connect();
+  const response = await makeRequester(connection)("spawn", {
+    sessionName: "capability-query-failed",
+    harness: "fake",
+    model: "live-model",
+    message: "continue with explicitly supplied model",
+  });
+  expect(resultOf(response)).toMatchObject({
+    sessionId: "capability-query-failed@gdaemontest",
+  });
+  expect(fake.calls.starts).toBe(1);
+  expect(fake.calls.specs[0]).toMatchObject({ model: "live-model" });
+  connection.close();
+});
+
+test("kill 恢复返回原清理失败，新身份才会重试", async () => {
+  let attempts = 0;
+  const fake = createFakeHarness({
+    harness: "fake",
+    capability: emptyCapability("fake"),
+    terminate: async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("cleanup rejected");
+    },
+  });
+  const events: DomainEvent[] = [];
+  const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    onEvent: (event) => events.push(event),
+  });
+  const connection = server.connect();
+  const request = makeRequester(connection);
+  const spawned = resultOf(
+    await request("spawn", {
+      sessionName: "kill-recovery",
+      harness: "fake",
+      message: "keep the worker until cleanup succeeds",
+    }),
+  ) as { sessionId: string };
+  const original = {
+    kind: "request",
+    method: "kill",
+    commandId: "test:00000001-0123-4123-8123-0123456789ab",
+    params: { sessionId: spawned.sessionId },
+  };
+  const failed = await sendRaw(connection, {
+    ...original,
+    requestId: "kill-original",
+  });
+  expect(failed).toMatchObject({ error: { code: "internal_error" } });
+  expect(attempts).toBe(1);
+  expect(events.some((event) => event.type === "session.killed")).toBe(false);
+
+  expect(
+    await sendRaw(connection, { ...original, requestId: "kill-recovered" }),
+  ).toEqual({ ...failed, requestId: "kill-recovered" });
+  expect(attempts).toBe(1);
+
+  const retried = await sendRaw(connection, {
+    ...original,
+    commandId: "test:00000002-0123-4123-8123-0123456789ab",
+    requestId: "kill-new-operation",
+  });
+  expect(retried).toMatchObject({
+    result: { sessionId: spawned.sessionId, status: "killed" },
+  });
+  await flush();
+  expect(attempts).toBe(2);
+  expect(
+    events.filter((event) => event.type === "turn.completed"),
+  ).toHaveLength(1);
+  expect(
+    events.filter((event) => event.type === "session.killed"),
+  ).toHaveLength(1);
+  connection.close();
 });
 
 test("命令结果恢复：参数拒绝也是已知结果，不能用修改后的参数复用身份", async () => {
