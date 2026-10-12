@@ -2,7 +2,6 @@ import { statSync } from "node:fs";
 import { resolve } from "node:path";
 
 import {
-  createReinsClient,
   parseRetryToken,
   type ProtocolResponseFor,
   type ReinsClient,
@@ -25,6 +24,7 @@ import {
 } from "@reins/protocol";
 import * as v from "valibot";
 
+import { connectReins } from "./application.ts";
 import { runAttach } from "./attach.ts";
 import { CapabilityStore } from "./capabilities.ts";
 import type {
@@ -32,7 +32,6 @@ import type {
   CommandInvocationFor,
   CommandName,
 } from "./command-spec.ts";
-import { ensureDaemon } from "./daemon.ts";
 import { ExitError, EXIT_TIMEOUT, machineError, usageError } from "./errors.ts";
 import type { OutputMode } from "./output.ts";
 import {
@@ -48,8 +47,8 @@ import {
 } from "./output.ts";
 import { openWorkspaceControl } from "./workspace.ts";
 
-// 握手属于"daemon 可用"判定的一部分，与 ensureDaemon 的 5s 就绪预算同源。
-const HANDSHAKE_TIMEOUT_MS = 5_000;
+// 启动与协议握手共享五秒就绪预算。
+const DAEMON_READY_TIMEOUT_MS = 5_000;
 
 async function withClient<T>(
   ctx: { mode: OutputMode; contextCwd?: string },
@@ -65,17 +64,22 @@ async function withClient<T>(
   if (!consumerContext.success) {
     throw machineError({ code: "consumer_context_required" });
   }
-  const client =
-    ctx.contextCwd !== undefined || !process.env.REINS_SOCKET
-      ? await openWorkspaceControl(
-          resolve(ctx.contextCwd ?? executionCwd ?? process.cwd()),
-        )
-      : createReinsClient((await ensureDaemon(process.env)).connection, {
-          consumerContext: consumerContext.output,
-        });
+  const usesWorkspaceControl =
+    ctx.contextCwd !== undefined || !process.env.REINS_SOCKET;
+  const client = usesWorkspaceControl
+    ? await openWorkspaceControl(
+        resolve(ctx.contextCwd ?? executionCwd ?? process.cwd()),
+      )
+    : await connectReins({
+        consumerContext: consumerContext.output,
+        env: process.env,
+        timeoutMs: DAEMON_READY_TIMEOUT_MS,
+      });
   try {
-    const handshake = await client.initialize(HANDSHAKE_TIMEOUT_MS);
-    if ("error" in handshake) throw handshake.error;
+    if (usesWorkspaceControl) {
+      const handshake = await client.initialize(DAEMON_READY_TIMEOUT_MS);
+      if ("error" in handshake) throw handshake.error;
+    }
     return await run(client);
   } finally {
     client.close();

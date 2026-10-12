@@ -4,11 +4,14 @@ import {
 } from "@reins/client";
 import type { MachineError } from "@reins/protocol";
 import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
+import type { TransportErrorCode } from "@reins/transport";
 import {
   workspaceErrorSchema,
   type WorkspaceError,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
+
+import { isReinsStartupTransportFailure } from "./application.ts";
 export function isWorkspaceError(value: unknown): value is WorkspaceError {
   return v.safeParse(workspaceErrorSchema, value).success;
 }
@@ -83,13 +86,19 @@ export type OutputError = {
   readonly systemCode?: string;
 };
 
+type StartupTransportCliError = {
+  readonly code: "daemon_start_failed";
+  readonly transportCode: TransportErrorCode;
+};
+
 export type CliError =
   | MachineError
   | WorkspaceError
   | Omit<CommandOutcomeUnknown, "commandId" | "daemonGeneration">
   | UsageError
   | InputError
-  | OutputError;
+  | OutputError
+  | StartupTransportCliError;
 
 export function outputError(systemCode?: string): OutputError {
   return {
@@ -145,6 +154,9 @@ export function isUsageError(value: unknown): value is UsageError {
 }
 
 export function toCliError(error: unknown): CliError {
+  if (isReinsStartupTransportFailure(error)) {
+    return { code: "daemon_start_failed", transportCode: error.code };
+  }
   if (isCommandOutcomeUnknown(error))
     return {
       code: error.code,

@@ -1,4 +1,4 @@
-import { encodePermissionHandle } from "@reins/protocol";
+import { encodePermissionHandle, makeErrorCause } from "@reins/protocol";
 import type {
   CapabilitiesResult,
   DiagnosticsResult,
@@ -17,6 +17,7 @@ import {
   isUsageClassError,
   jsonErrorMessage,
   renderCliError,
+  transportErrorMessage,
 } from "./grammar.ts";
 import { harnessFailureMessage } from "./harness-failure.ts";
 
@@ -40,10 +41,7 @@ export function printError(
   const rendered = renderCliError(error, spec);
   if (mode === "json") {
     const message = jsonErrorMessage(rendered);
-    const projected =
-      "permissionId" in error
-        ? { code: error.code, sessionId: error.sessionId }
-        : error;
+    const projected = jsonErrorProjection(error);
     printJsonLine({
       ...projected,
       message:
@@ -71,6 +69,19 @@ export function printError(
   if (isUsageClassError(error)) {
     process.stderr.write(`usage: reins ${fullUsageFor(spec)}\n`);
   }
+}
+
+function jsonErrorProjection(error: CliError): object {
+  if ("permissionId" in error) {
+    return { code: error.code, sessionId: error.sessionId };
+  }
+  if (error.code === "daemon_start_failed" && "transportCode" in error) {
+    return {
+      code: error.code,
+      cause: makeErrorCause("io", transportErrorMessage(error.transportCode)),
+    };
+  }
+  return error;
 }
 
 export function printSpawnResult(result: SpawnAck, mode: OutputMode): void {
