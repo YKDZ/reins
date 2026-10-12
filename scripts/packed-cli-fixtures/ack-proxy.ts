@@ -10,7 +10,13 @@ export type AcknowledgementDrop = {
   readonly method: "spawn" | "kill";
   readonly requestId: string;
   readonly commandId: string;
+  readonly result: unknown;
 };
+
+type TargetRequest = Pick<
+  AcknowledgementDrop,
+  "method" | "requestId" | "commandId"
+>;
 
 export type UnixAcknowledgementProxy = {
   readonly socketPath: string;
@@ -44,7 +50,7 @@ export async function startUnixAcknowledgementProxy(
     const upstream = createConnection(options.targetPath);
     sockets.add(downstream);
     sockets.add(upstream);
-    const targetRequests = new Map<string, AcknowledgementDrop>();
+    const targetRequests = new Map<string, TargetRequest>();
     let requestBuffer = "";
     let responseBuffer = "";
 
@@ -116,7 +122,7 @@ export async function startUnixAcknowledgementProxy(
               targetRequests.delete(response.requestId);
               if ("result" in response && response.result !== undefined) {
                 dropped = true;
-                resolveDropped(target);
+                resolveDropped({ ...target, result: response.result });
                 stopPair();
                 return;
               }
