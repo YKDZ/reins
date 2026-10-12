@@ -4647,6 +4647,8 @@ async function smokePackedCli(
     harnessDiagnostic.diagnosticId !== completedFailure.diagnosticId ||
     harnessDiagnostic.source !== "adapter" ||
     harnessDiagnostic.kind !== "turn_failure" ||
+    typeof harnessFailure.sessionHandle !== "string" ||
+    typeof harnessFailure.turnHandle !== "string" ||
     harnessDiagnostic.sessionHandle !== harnessFailure.sessionHandle ||
     harnessDiagnostic.turnHandle !== harnessFailure.turnHandle ||
     "sessionId" in harnessDiagnostic ||
@@ -4671,6 +4673,87 @@ async function smokePackedCli(
   )
     throw new Error(
       "The installed CLI did not query the SDK's exact diagnostic record",
+    );
+  const harnessSessionHandle = String(harnessFailure.sessionHandle);
+  const harnessTurnHandle = String(harnessFailure.turnHandle);
+  const cliTurnDiagnostic = await runPermissionCli(
+    ["diagnostics", "--turn", harnessTurnHandle],
+    "installed-cli-query-diagnostic-by-turn",
+  );
+  const cliTurnDiagnosticData = readDataEnvelope(
+    "installed CLI diagnostic query by turn",
+    cliTurnDiagnostic.stdout,
+    "diagnostics",
+  );
+  if (
+    !Array.isArray(cliTurnDiagnosticData.records) ||
+    !cliTurnDiagnosticData.records.some(
+      (record) =>
+        isRecord(record) &&
+        record.diagnosticId === completedFailure.diagnosticId,
+    )
+  )
+    throw new Error(
+      "The installed CLI did not query diagnostics with only a turn handle",
+    );
+  const invalidTurnCli = await runPermissionCliResult(
+    ["diagnostics", "--session", harnessSessionHandle, "--turn", "invalid"],
+    "installed-cli-invalid-diagnostic-turn",
+  );
+  const invalidTurnCliData = readFailureEnvelope(
+    "installed CLI invalid diagnostic turn",
+    invalidTurnCli,
+    "diagnostics",
+    "queryFailed",
+  );
+  const invalidTurnFailure = invalidTurnCliData.failure;
+  if (
+    invalidTurnCli.status !== 70 ||
+    `${invalidTurnCli.stdout}\n${invalidTurnCli.stderr}`.match(
+      /ValiError|projectDiagnosticsParams|at .*\.js:/u,
+    ) !== null ||
+    !isRecord(invalidTurnFailure) ||
+    invalidTurnFailure.code !== "invalid_params" ||
+    !isRecord(invalidTurnFailure.facts) ||
+    !Array.isArray(invalidTurnFailure.facts.issues) ||
+    !invalidTurnFailure.facts.issues.some(
+      (issue) =>
+        isRecord(issue) &&
+        issue.issue === "invalid_value" &&
+        issue.path === "turnHandle",
+    )
+  )
+    throw new Error(
+      "The installed CLI did not type an invalid diagnostic turn handle",
+    );
+  const mismatchedTurnCli = await runPermissionCliResult(
+    ["diagnostics", "--session", "different@g1", "--turn", harnessTurnHandle],
+    "installed-cli-mismatched-diagnostic-session",
+  );
+  const mismatchedTurnCliData = readFailureEnvelope(
+    "installed CLI mismatched diagnostic session",
+    mismatchedTurnCli,
+    "diagnostics",
+    "queryFailed",
+  );
+  const mismatchedTurnFailure = mismatchedTurnCliData.failure;
+  if (
+    mismatchedTurnCli.status !== 70 ||
+    !isRecord(mismatchedTurnFailure) ||
+    mismatchedTurnFailure.code !== "invalid_params" ||
+    !isRecord(mismatchedTurnFailure.facts) ||
+    !Array.isArray(mismatchedTurnFailure.facts.issues) ||
+    !mismatchedTurnFailure.facts.issues.some(
+      (issue) =>
+        isRecord(issue) &&
+        issue.issue === "invalid_combination" &&
+        Array.isArray(issue.paths) &&
+        issue.paths.includes("sessionHandle") &&
+        issue.paths.includes("turnHandle"),
+    )
+  )
+    throw new Error(
+      "The installed CLI accepted a mismatched diagnostic session handle",
     );
 
   const rejectedPermissionSession = await spawnPermissionSession(
@@ -4784,6 +4867,11 @@ async function smokePackedCli(
     harnessFailure: completedFailure,
     sdkDiagnostic: harnessDiagnostic,
     cliDiagnostic: cliHarnessDiagnosticData.record,
+    cliTurnDiagnosticCount: Array.isArray(cliTurnDiagnosticData.records)
+      ? cliTurnDiagnosticData.records.length
+      : 0,
+    invalidDiagnosticTurn: invalidTurnFailure,
+    mismatchedDiagnosticSession: mismatchedTurnFailure,
     diagnosticWriteFailure: rejectedPermission.failure,
     diagnosticReplay: rejectedPermission.replay,
     sdkQueryFailure: rejectedPermission.query,

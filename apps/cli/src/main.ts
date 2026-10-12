@@ -307,7 +307,6 @@ const diagnosticsInputSchema = standardSchema(
           limit !== undefined;
         return (
           !(id !== undefined && hasFilters) &&
-          !(turn !== undefined && session === undefined) &&
           (since === undefined || until === undefined || since <= until) &&
           (limit === undefined ||
             (/^\d+$/u.test(limit) &&

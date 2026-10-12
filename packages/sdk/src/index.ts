@@ -553,7 +553,7 @@ function projectDiagnosticsParams(
     };
   const { sessionHandle, turnHandle, ...filters } = query;
   if (turnHandle !== undefined) {
-    const target = decodeTurnHandle(turnHandle);
+    const target = targetFromHandle(turnHandle, "turnHandle", "query");
     if (
       sessionHandle !== undefined &&
       sessionHandle !== (target.sessionId as unknown as SessionHandle)

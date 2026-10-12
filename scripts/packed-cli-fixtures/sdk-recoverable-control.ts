@@ -950,6 +950,50 @@ async function harnessFailureDiagnostics(): Promise<void> {
       throw new Error(
         "The installed SDK did not query its projected diagnostic",
       );
+    const turnQuery = await connection.diagnostics({
+      turnHandle: spawned.turnHandle,
+    });
+    if (
+      !("records" in turnQuery) ||
+      !turnQuery.records.some(
+        (record) => record.diagnosticId === failedTurn.diagnosticId,
+      )
+    )
+      throw new Error(
+        "The installed SDK did not query diagnostics with only a turn handle",
+      );
+    const malformedTurn = await expectFailure(() =>
+      connection.diagnostics({ turnHandle: "invalid" as TurnHandle }),
+    );
+    if (
+      malformedTurn.stage !== "query" ||
+      malformedTurn.failure.code !== "invalid_params" ||
+      !malformedTurn.failure.facts.issues.some(
+        (issue) =>
+          issue.issue === "invalid_value" && issue.path === "turnHandle",
+      )
+    )
+      throw new Error(
+        "The installed SDK did not type an invalid diagnostic turn handle",
+      );
+    const mismatchedSession = await expectFailure(() =>
+      connection.diagnostics({
+        sessionHandle: "different@g1" as SessionHandle,
+        turnHandle: spawned.turnHandle,
+      }),
+    );
+    if (
+      mismatchedSession.failure.code !== "invalid_params" ||
+      !mismatchedSession.failure.facts.issues.some(
+        (issue) =>
+          issue.issue === "invalid_combination" &&
+          issue.paths.includes("sessionHandle") &&
+          issue.paths.includes("turnHandle"),
+      )
+    )
+      throw new Error(
+        "The installed SDK accepted a mismatched diagnostic session handle",
+      );
     const killed = await connection.kill(
       { sessionHandle: spawned.sessionHandle },
       connection.prepareOperation("kill"),
@@ -962,6 +1006,9 @@ async function harnessFailureDiagnostics(): Promise<void> {
         turnHandle: spawned.turnHandle,
         completed: failedTurn,
         diagnostic: result.record,
+        turnQueryCount: "records" in turnQuery ? turnQuery.records.length : 0,
+        malformedTurnCode: malformedTurn.failure.code,
+        mismatchedSessionCode: mismatchedSession.failure.code,
       })}\n`,
     );
   } finally {

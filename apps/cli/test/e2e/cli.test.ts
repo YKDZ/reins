@@ -26,6 +26,7 @@ import {
   type AgentFact,
   type PermissionHandle,
   type ReinsConnection,
+  type SessionHandle,
   type TurnHandle,
 } from "@ykdz/reins-sdk";
 import * as v from "valibot";
@@ -763,7 +764,6 @@ describe("CLI 进程边界（缝 D）", () => {
   });
 
   test.each([
-    ["turn requires session", ["diagnostics", "--turn", "t1"]],
     [
       "since must not follow until",
       [
@@ -860,17 +860,97 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(dataFrom(exact)).toMatchObject({
       record: { diagnosticId: first.diagnosticId },
     });
+    const turnOnly = await runCli(
+      ["diagnostics", "--turn", first.turnHandle],
+      env,
+    );
+    expect(turnOnly.exitCode).toBe(0);
+    expect(dataFrom(turnOnly).records?.length).toBeGreaterThan(0);
+    const connection = await connectSdkForEnv(env);
+    try {
+      const turnRecords = await connection.diagnostics({
+        turnHandle: first.turnHandle as TurnHandle,
+      });
+      expect(
+        "records" in turnRecords ? turnRecords.records.length : 0,
+      ).toBeGreaterThan(0);
+      const malformedHandle = await sdkFailureFor(() =>
+        connection.diagnostics({ turnHandle: "invalid" as TurnHandle }),
+      );
+      expect(malformedHandle.stage).toBe("query");
+      expect(malformedHandle.failure).toMatchObject({
+        code: "invalid_params",
+        facts: { issues: [{ issue: "invalid_value", path: "turnHandle" }] },
+      });
+      const mismatchedSession = await sdkFailureFor(() =>
+        connection.diagnostics({
+          sessionHandle: missingSessionId as unknown as SessionHandle,
+          turnHandle: first.turnHandle as TurnHandle,
+        }),
+      );
+      expect(mismatchedSession.failure).toMatchObject({
+        code: "invalid_params",
+        facts: {
+          issues: [
+            {
+              issue: "invalid_combination",
+              paths: ["sessionHandle", "turnHandle"],
+            },
+          ],
+        },
+      });
+    } finally {
+      connection.close();
+    }
+    const malformedCli = await runCli(
+      ["diagnostics", "--session", sessionId, "--turn", "invalid"],
+      env,
+    );
+    expect(malformedCli.exitCode).toBe(70);
+    expect(`${malformedCli.stdout}\n${malformedCli.stderr}`).not.toMatch(
+      /ValiError|projectDiagnosticsParams|at .*\.js:/u,
+    );
+    expect(dataFrom(malformedCli).failure).toMatchObject({
+      code: "invalid_params",
+      facts: { issues: [{ issue: "invalid_value", path: "turnHandle" }] },
+    });
+    const mismatchedCli = await runCli(
+      [
+        "diagnostics",
+        "--session",
+        missingSessionId,
+        "--turn",
+        first.turnHandle,
+      ],
+      env,
+    );
+    expect(mismatchedCli.exitCode).toBe(70);
+    expect(dataFrom(mismatchedCli).failure).toMatchObject({
+      code: "invalid_params",
+      facts: {
+        issues: [
+          {
+            issue: "invalid_combination",
+            paths: ["sessionHandle", "turnHandle"],
+          },
+        ],
+      },
+    });
     for (const args of [
       ["--session", sessionId],
       ["--session", sessionId, "--turn", first.turnHandle],
       ["--session", sessionId, "--harness", "capture", "--source", "harness"],
       ["--harness", "capture"],
-      ["--source", "harness", "adapter"],
+      ["--source", "harness", "--source", "adapter"],
       ["--kind", "harness_stderr"],
       ["--min-severity", "info"],
       ["--since", first.recordedAt, "--until", first.recordedAt],
     ]) {
       const filtered = await runCli(["diagnostics", ...args], env);
+      expect(
+        filtered.exitCode,
+        `${JSON.stringify(args)}\n${filtered.stdout}\n${filtered.stderr}`,
+      ).toBe(0);
       expect(dataFrom(filtered).records?.length).toBeGreaterThan(0);
     }
     const excludedByAnd = await runCli(
