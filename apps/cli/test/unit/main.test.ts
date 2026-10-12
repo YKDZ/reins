@@ -3,8 +3,14 @@ import type {
   AgentFact,
   AgentSubscriptionEnd,
   FactSubscription,
+  KillInput,
+  KillResult,
+  OperationCredential,
+  OperationKind,
   ReinsConnection,
   SessionHandle,
+  SpawnInput,
+  SpawnResult,
   TurnHandle,
 } from "@ykdz/reins-sdk";
 import { expect, test } from "vitest";
@@ -68,6 +74,25 @@ test("attach waits for each write before reading again and closes on writer fail
     },
     async attach() {
       return subscription;
+    },
+    prepareOperation<Kind extends OperationKind>(kind: Kind) {
+      return `credential-${kind}` as OperationCredential<Kind>;
+    },
+    async spawn(
+      _input: SpawnInput,
+      _credential: OperationCredential<"spawn">,
+    ): Promise<SpawnResult> {
+      return {
+        sessionHandle: target.sessionHandle,
+        turnHandle: fact.turnHandle,
+        cwd: "/tmp",
+      };
+    },
+    async kill(
+      input: KillInput,
+      _credential: OperationCredential<"kill">,
+    ): Promise<KillResult> {
+      return { sessionHandle: input.sessionHandle, status: "killed" };
     },
     close() {
       connectionClosed = true;

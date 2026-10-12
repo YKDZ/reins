@@ -79,6 +79,13 @@ export type ReinsClient = {
     params: unknown,
     timeoutMs?: number,
   ): Promise<ProtocolResponseFor<SideEffectMethod>>;
+  prepareOperation(method: SideEffectMethod): string;
+  executeOperation<M extends SideEffectMethod>(
+    method: M,
+    params: ProtocolParams<M>,
+    token: string,
+    timeoutMs?: number,
+  ): Promise<ProtocolResponseFor<M>>;
   onNotification(listener: NotificationListener): () => void;
   onClosed(listener: (reason: MachineError) => void): () => void;
   subscribe: Subscribe;
@@ -158,6 +165,13 @@ export class ReinsClientError extends Error {
   }
 }
 
+export class OperationCredentialError extends Error {
+  constructor() {
+    super("Invalid operation credential");
+    this.name = "OperationCredentialError";
+  }
+}
+
 type ClientMachineErrorCode =
   | "invalid_daemon_response"
   | "daemon_disconnected"
@@ -232,6 +246,7 @@ export function createReinsClient(
     params: ProtocolParams<M>,
     timeoutMs = 30_000,
     originalId?: CommandId,
+    originalRetryToken?: string,
   ): Promise<ProtocolResponseFor<M>> => {
     if (closed) {
       return Promise.reject(
@@ -270,16 +285,17 @@ export function createReinsClient(
         daemonGeneration: commandId?.split(":")[0],
       };
       const retryToken =
+        originalRetryToken ??
         "retry1_" +
-        Buffer.from(
-          JSON.stringify({
-            ...identity,
-            ...(spawnContext?.success &&
-            Object.keys(spawnContext.output).length > 0
-              ? { spawnContext: spawnContext.output }
-              : {}),
-          }),
-        ).toString("base64url");
+          Buffer.from(
+            JSON.stringify({
+              ...identity,
+              ...(spawnContext?.success &&
+              Object.keys(spawnContext.output).length > 0
+                ? { spawnContext: spawnContext.output }
+                : {}),
+            }),
+          ).toString("base64url");
       return new ReinsClientError(
         v.parse(commandOutcomeUnknownSchema, {
           code: "command_outcome_unknown",
@@ -699,6 +715,26 @@ export function createReinsClient(
         timeoutMs,
         identity.commandId,
       );
+    },
+    prepareOperation(method) {
+      if (generation === undefined)
+        throw new ReinsClientError({ code: "protocol_error" });
+      const identity = {
+        method,
+        commandId: v.parse(commandIdSchema, generation + ":" + randomUUID()),
+        daemonGeneration: generation,
+      };
+      return `retry1_${Buffer.from(JSON.stringify(identity)).toString("base64url")}`;
+    },
+    executeOperation(method, params, token, timeoutMs) {
+      let identity: ReturnType<typeof parseRetryToken>;
+      try {
+        identity = parseRetryToken(token);
+      } catch {
+        throw new OperationCredentialError();
+      }
+      if (identity.method !== method) throw new OperationCredentialError();
+      return request(method, params, timeoutMs, identity.commandId, token);
     },
     onNotification(listener) {
       listeners.add(listener);

@@ -1,6 +1,8 @@
 import {
   createReinsClient,
   AgentSubscriptionError,
+  isCommandOutcomeUnknown,
+  OperationCredentialError,
   ReinsClientError,
   createPresentationProjector as createClientPresentationProjector,
   type ReinsClient as ControlClient,
@@ -11,6 +13,7 @@ import type {
   ProtocolMessage,
   ProtocolParams,
   ProtocolResult,
+  SideEffectMethod,
   SessionInfo as ProtocolSessionInfo,
   SessionId,
   ResumeCursor as ProtocolResumeCursor,
@@ -26,6 +29,8 @@ import * as v from "valibot";
 
 import {
   type ConnectOptions,
+  type OperationCredential,
+  type OperationKind,
   type ReinsConnection,
   type ReinsFailure,
   type AgentFact,
@@ -48,6 +53,10 @@ export type {
   CapabilityFailure,
   CapabilityModel,
   ConnectOptions,
+  KillInput,
+  KillResult,
+  OperationCredential,
+  OperationKind,
   HarnessCapability,
   HarnessFailure,
   LastCompletedTurn,
@@ -59,6 +68,8 @@ export type {
   SessionHandle,
   SessionInfo,
   SessionState,
+  SpawnInput,
+  SpawnResult,
   StopReason,
   TurnHandle,
   AgentFact,
@@ -204,6 +215,53 @@ export async function connect(
         };
         return subscription;
       },
+      prepareOperation(kind) {
+        try {
+          return client!.prepareOperation(kind) as OperationCredential<
+            typeof kind
+          >;
+        } catch (error) {
+          if (error instanceof ReinsClientError)
+            throw new ReinsSdkError(
+              projectClientFailure(error.failure),
+              "operation",
+            );
+          throw new ReinsSdkError(
+            { code: "unexpected_failure", facts: {} },
+            "operation",
+          );
+        }
+      },
+      async spawn(input, credential) {
+        const result = await perform(
+          client!,
+          "spawn",
+          input as unknown as ProtocolParams<"spawn">,
+          credential,
+        );
+        return {
+          sessionHandle: result.sessionId as unknown as SessionHandle,
+          turnHandle: encodeTurnHandle({
+            sessionId: result.sessionId,
+            turnId: result.turnId,
+          }) as unknown as TurnHandle,
+          cwd: result.cwd,
+        };
+      },
+      async kill(input, credential) {
+        const result = await perform(
+          client!,
+          "kill",
+          {
+            sessionId: input.sessionHandle as unknown as SessionId,
+          },
+          credential,
+        );
+        return {
+          sessionHandle: result.sessionId as unknown as SessionHandle,
+          status: result.status,
+        };
+      },
       close() {
         client?.close();
       },
@@ -285,6 +343,32 @@ function projectSubscriptionError(error: unknown): ReinsSdkError {
     return new ReinsSdkError({ code: "daemon_disconnected", facts: {} });
   return new ReinsSdkError({ code: "unexpected_failure", facts: {} });
 }
+async function perform<M extends SideEffectMethod>(
+  client: ControlClient,
+  method: M,
+  params: ProtocolParams<M>,
+  credential: OperationCredential<M & OperationKind>,
+): Promise<ProtocolResult<M>> {
+  try {
+    const response = await client.executeOperation(method, params, credential);
+    if ("error" in response)
+      throw new ReinsSdkError(projectFailure(response.error), "operation");
+    return response.result;
+  } catch (error) {
+    if (error instanceof ReinsSdkError) throw error;
+    if (error instanceof OperationCredentialError)
+      throw new ReinsSdkError(
+        { code: "operation_credential_invalid", facts: {} },
+        "operation",
+      );
+    if (error instanceof ReinsClientError)
+      throw new ReinsSdkError(projectClientFailure(error.failure), "operation");
+    throw new ReinsSdkError(
+      { code: "unexpected_failure", facts: {} },
+      "operation",
+    );
+  }
+}
 
 async function query<M extends "capabilities" | "list">(
   client: ControlClient,
@@ -307,11 +391,17 @@ async function query<M extends "capabilities" | "list">(
 function projectClientFailure(
   failure: ReinsClientError["failure"],
 ): ReinsFailure {
-  if ("retryToken" in failure)
+  if (isCommandOutcomeUnknown(failure)) {
+    if (failure.method !== "spawn" && failure.method !== "kill")
+      return {
+        code: "unexpected_failure",
+        facts: { remoteCode: failure.code },
+      };
     return {
-      code: "unexpected_failure",
-      facts: { remoteCode: failure.code },
+      code: "command_outcome_unknown",
+      facts: { cause: failure.cause, operation: failure.method },
     };
+  }
   return projectFailure(failure);
 }
 
@@ -331,6 +421,9 @@ function projectFailure(failure: MachineError): ReinsFailure {
         code: failure.code,
         facts: { oldest: failure.oldest, head: failure.head },
       };
+    case "command_id_conflict":
+    case "stale_command_id":
+      return { code: failure.code, facts: {} };
     case "protocol_version_mismatch":
       return {
         code: failure.code,
@@ -362,6 +455,13 @@ function projectFailure(failure: MachineError): ReinsFailure {
           harness: failure.harness,
           availableHarnesses: failure.availableHarnesses,
         },
+      };
+    case "unsupported_feature":
+      return { code: failure.code, facts: { feature: failure.feature } };
+    case "session_name_conflict":
+      return {
+        code: failure.code,
+        facts: { sessionName: failure.sessionName },
       };
     case "session_not_found":
     case "session_killed":

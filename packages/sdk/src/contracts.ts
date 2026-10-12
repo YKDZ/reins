@@ -4,6 +4,7 @@ declare const agentFactIdBrand: unique symbol;
 declare const messageKeyBrand: unique symbol;
 declare const toolKeyBrand: unique symbol;
 declare const resumeCursorBrand: unique symbol;
+declare const operationCredentialBrand: unique symbol;
 
 export type SessionHandle = string & {
   readonly [sessionHandleBrand]: "SessionHandle";
@@ -18,6 +19,33 @@ export type MessageKey = string & { readonly [messageKeyBrand]: "MessageKey" };
 export type ToolKey = string & { readonly [toolKeyBrand]: "ToolKey" };
 export type ResumeCursor = string & {
   readonly [resumeCursorBrand]: "ResumeCursor";
+};
+export type OperationKind = "spawn" | "kill";
+export type OperationCredential<Kind extends OperationKind> = string & {
+  readonly [operationCredentialBrand]: Kind;
+};
+
+export type SpawnInput = {
+  sessionName: string;
+  harness: string;
+  message: string;
+  cwd: string;
+  agent?: string;
+  model?: string;
+  reasoning?: string;
+  authorizationMode?: "interactive" | "allowAll";
+  sandbox?: string;
+  captureHarnessStderr?: boolean;
+};
+export type SpawnResult = {
+  sessionHandle: SessionHandle;
+  turnHandle: TurnHandle;
+  cwd: string;
+};
+export type KillInput = { sessionHandle: SessionHandle };
+export type KillResult = {
+  sessionHandle: SessionHandle;
+  status: "killed" | "not_found";
 };
 
 export type StopReason = "end_turn" | "cancelled" | "failed" | "killed";
@@ -250,7 +278,16 @@ type FailureFactsByCode = {
   daemon_disconnected: { resumeCursor?: ResumeCursor };
   daemon_shutting_down: Record<never, never>;
   workspace_detaching: Record<never, never>;
+  command_id_conflict: Record<never, never>;
+  stale_command_id: Record<never, never>;
+  command_outcome_unknown: {
+    cause: "timeout" | "disconnected" | "invalid_daemon_response";
+    operation: OperationKind;
+  };
+  operation_credential_invalid: Record<never, never>;
   unknown_harness: { harness: string; availableHarnesses: string[] };
+  unsupported_feature: { feature: string };
+  session_name_conflict: { sessionName: string };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
@@ -293,5 +330,16 @@ export type ReinsConnection = {
     replay: ReplayPolicy,
     signal?: AbortSignal,
   ): Promise<FactSubscription>;
+  prepareOperation<Kind extends OperationKind>(
+    kind: Kind,
+  ): OperationCredential<Kind>;
+  spawn(
+    input: SpawnInput,
+    credential: OperationCredential<"spawn">,
+  ): Promise<SpawnResult>;
+  kill(
+    input: KillInput,
+    credential: OperationCredential<"kill">,
+  ): Promise<KillResult>;
   close(): void;
 };

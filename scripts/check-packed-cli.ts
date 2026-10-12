@@ -18,6 +18,10 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
+  startUnixAcknowledgementProxy,
+  type UnixAcknowledgementProxy,
+} from "./packed-cli-fixtures/ack-proxy.ts";
+import {
   isCleanStop,
   startDaemon,
   stopDaemon,
@@ -54,13 +58,20 @@ type OwnedResources = {
   temporaryRoot: string | undefined;
   runtimeRoot: string | undefined;
   directDaemon: DaemonHandle | undefined;
+  acknowledgementProxy: UnixAcknowledgementProxy | undefined;
 };
 
 const adapterFixtureSource = fileURLToPath(
   new URL("./packed-cli-fixtures/adapter-fixture.ts", import.meta.url),
 );
+const adapterWorkerSource = fileURLToPath(
+  new URL("./packed-cli-fixtures/adapter-worker.ts", import.meta.url),
+);
 const sdkQuerySource = fileURLToPath(
   new URL("./packed-cli-fixtures/sdk-query.ts", import.meta.url),
+);
+const sdkRecoverableControlSource = fileURLToPath(
+  new URL("./packed-cli-fixtures/sdk-recoverable-control.ts", import.meta.url),
 );
 const applicationQuerySource = fileURLToPath(
   new URL("./packed-cli-fixtures/application-query.ts", import.meta.url),
@@ -104,6 +115,90 @@ function readDataEnvelope(
     );
   }
   return envelope.data;
+}
+
+function readJsonRecord(
+  label: string,
+  stdout: string,
+): Record<string, unknown> {
+  const value: unknown = JSON.parse(stdout);
+  if (!isRecord(value))
+    throw new Error(`${label} did not return a JSON object`);
+  return value;
+}
+
+function readJsonLineRecords(
+  label: string,
+  stdout: string,
+): Record<string, unknown>[] {
+  const lines = stdout.trim().split("\n").filter(Boolean);
+  if (lines.length === 0)
+    throw new Error(`${label} returned no stream records`);
+  return lines.map((line) => {
+    const value: unknown = JSON.parse(line);
+    if (!isRecord(value))
+      throw new Error(`${label} returned a non-object record`);
+    return value;
+  });
+}
+
+function canonicalJson(value: unknown): string {
+  const normalize = (current: unknown): unknown => {
+    if (Array.isArray(current)) return current.map(normalize);
+    if (!isRecord(current)) return current;
+    return Object.fromEntries(
+      Object.keys(current)
+        .sort()
+        .map((key) => [key, normalize(current[key])]),
+    );
+  };
+  return JSON.stringify(normalize(value));
+}
+
+function readJsonLines(path: string): Record<string, unknown>[] {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const value: unknown = JSON.parse(line);
+      if (!isRecord(value)) throw new Error(`Invalid JSON record in ${path}`);
+      return value;
+    });
+}
+
+function assertProcessStopped(label: string, pid: number): void {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ESRCH") return;
+    throw error;
+  }
+  throw new Error(`${label} is still running: ${pid}`);
+}
+
+function assertProcessRunning(label: string, pid: number): void {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    throw new Error(`${label} is not running: ${pid} (${String(error)})`);
+  }
+}
+
+async function waitForFact(
+  label: string,
+  read: () => Record<string, unknown>[],
+  matches: (fact: Record<string, unknown>) => boolean,
+  timeoutMs = 5_000,
+): Promise<Record<string, unknown>> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const fact = read().find(matches);
+    if (fact !== undefined) return fact;
+    if (Date.now() >= deadline)
+      throw new Error(`Timed out waiting for ${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  }
 }
 
 function readFailureEnvelope(
@@ -446,6 +541,11 @@ async function smokePackedCli(
   );
   const sdkQueryFixture = join(sdkConsumerDirectory, "sdk-query.ts");
   copyFileSync(sdkQuerySource, sdkQueryFixture);
+  const sdkRecoverableControlFixture = join(
+    sdkConsumerDirectory,
+    "sdk-recoverable-control.ts",
+  );
+  copyFileSync(sdkRecoverableControlSource, sdkRecoverableControlFixture);
 
   const sdkLockGenerationLog = join(
     logsDirectory,
@@ -526,6 +626,7 @@ async function smokePackedCli(
         "--skipLibCheck",
         "false",
         sdkQueryFixture,
+        sdkRecoverableControlFixture,
       ],
       cwd: sdkConsumerDirectory,
       logPath: typecheckLog,
@@ -769,9 +870,13 @@ async function smokePackedCli(
   if (
     !help.stdout.includes("Usage\n  reins <command>") ||
     !help.stdout.includes("  capabilities\n") ||
-    !help.stdout.includes("  list\n")
+    !help.stdout.includes("  prepare-operation\n") ||
+    !help.stdout.includes("  spawn\n") ||
+    !help.stdout.includes("  kill\n") ||
+    !help.stdout.includes("  list\n") ||
+    !help.stdout.includes("  attach\n")
   )
-    throw new Error("Packed help omitted the query-only command contract");
+    throw new Error("Packed help omitted the control command contract");
 
   const versionLog = join(logsDirectory, "cli-version.log");
   const version = toCommandResult(
@@ -795,10 +900,23 @@ async function smokePackedCli(
   // 只有 type-only 输入，type import 由 Node 24 类型擦除，运行期不解析 workspace 包。
   const adaptersModule = join(runtimeDirectory, "adapter-fixture.ts");
   copyFileSync(adapterFixtureSource, adaptersModule);
+  copyFileSync(
+    adapterWorkerSource,
+    join(runtimeDirectory, "adapter-worker.ts"),
+  );
 
   const directDirectory = join(runtimeDirectory, "direct");
   mkdirSync(directDirectory);
+  const workerDirectory = join(directDirectory, "workspace");
+  mkdirSync(workerDirectory);
   const directSocket = join(directDirectory, "reins.sock");
+  const adapterObservations = join(
+    directDirectory,
+    "adapter-observations.ndjson",
+  );
+  const workerActivity = join(directDirectory, "worker-activity.ndjson");
+  const capabilityMode = join(directDirectory, "capability-mode.txt");
+  writeFileSync(capabilityMode, "with-model", "utf8");
   const directEnv: NodeJS.ProcessEnv = {
     ...process.env,
     REINS_SOCKET: directSocket,
@@ -806,6 +924,11 @@ async function smokePackedCli(
     REINS_ADAPTERS_MODULE: adaptersModule,
     REINS_CONSUMER_CONTEXT: "packed-cli-check",
     REINS_IDLE_TIMEOUT_MS: "10000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: adapterObservations,
+    REINS_PACKED_FIXTURE_ACTIVITY: workerActivity,
+    REINS_PACKED_FIXTURE_CAPABILITY_MODE: capabilityMode,
+    REINS_PACKED_FIXTURE_FAIL_FIRST_TERMINATE: "1",
+    REINS_WORKER_CWD: workerDirectory,
   };
   owned.directDaemon = await startDaemon({
     label: "direct packed daemon",
@@ -904,6 +1027,426 @@ async function smokePackedCli(
     exitCode: sdkQuery.status,
     logPath: sdkQueryLog,
     socketPath: directSocket,
+  });
+
+  const runSdkControl = async (
+    mode: string,
+    label: string,
+    extraEnv: NodeJS.ProcessEnv = {},
+  ): Promise<Record<string, unknown>> => {
+    const logPath = join(logsDirectory, `${label}.log`);
+    const result = toCommandResult(
+      await runLoggedCommand({
+        command: process.execPath,
+        args: [
+          "--experimental-strip-types",
+          sdkRecoverableControlFixture,
+          mode,
+        ],
+        cwd: sdkConsumerDirectory,
+        env: { ...directEnv, ...extraEnv },
+        logPath,
+        timeoutMs: 30_000,
+      }),
+    );
+    requireSuccess(label, result, logPath);
+    return readJsonRecord(label, result.stdout);
+  };
+
+  const spawnIntentPath = join(directDirectory, "accepted-spawn.json");
+  const preparedSpawn = await runSdkControl(
+    "prepare-spawn",
+    "sdk-prepare-spawn",
+  );
+  if (
+    preparedSpawn.prepared !== true ||
+    preparedSpawn.serialized !== true ||
+    preparedSpawn.sessionCount !== 0 ||
+    typeof preparedSpawn.daemonGeneration !== "string" ||
+    typeof preparedSpawn.intent !== "string"
+  )
+    throw new Error(
+      "The installed SDK did not expose a serializable pre-spawn intent",
+    );
+  writeFileSync(spawnIntentPath, preparedSpawn.intent, "utf8");
+  const persistedSpawnIntent = readFileSync(spawnIntentPath, "utf8");
+  const spawnValidation = await runSdkControl(
+    "spawn-validation",
+    "sdk-spawn-validation",
+  );
+  if (
+    JSON.stringify(spawnValidation.codes) !==
+    JSON.stringify([
+      "invalid_params",
+      "invalid_params",
+      "unsupported_feature",
+      "unknown_harness",
+    ])
+  )
+    throw new Error("The SDK and daemon did not reject invalid spawn inputs");
+  if (
+    readJsonLines(adapterObservations).some(
+      ({ type }) => type === "worker_started",
+    )
+  )
+    throw new Error("Rejected SDK spawn inputs started a native worker");
+
+  const spawnProxyPath = join(directDirectory, "spawn-ack-proxy.sock");
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: spawnProxyPath,
+    targetPath: directSocket,
+    method: "spawn",
+  });
+  const spawnUnknown = await runSdkControl("spawn-drop", "sdk-spawn-drop-ack", {
+    REINS_SOCKET: owned.acknowledgementProxy.socketPath,
+    REINS_OPERATION_INTENT_JSON: persistedSpawnIntent,
+  });
+  const spawnAcknowledgement =
+    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+  await owned.acknowledgementProxy.close();
+  owned.acknowledgementProxy = undefined;
+  if (
+    spawnUnknown.code !== "command_outcome_unknown" ||
+    spawnUnknown.stage !== "operation" ||
+    spawnAcknowledgement.method !== "spawn" ||
+    !isRecord(spawnAcknowledgement.result) ||
+    typeof spawnAcknowledgement.result.sessionId !== "string" ||
+    typeof spawnAcknowledgement.result.turnId !== "string"
+  )
+    throw new Error("The SDK spawn response-loss scenario missed its real ACK");
+
+  const capabilityQueriesBeforeRecovery = readJsonLines(
+    adapterObservations,
+  ).filter(({ type }) => type === "capabilities_queried").length;
+  writeFileSync(capabilityMode, "without-model", "utf8");
+  const recoveredSpawn = await runSdkControl(
+    "spawn-recover",
+    "sdk-spawn-recover",
+    { REINS_OPERATION_INTENT_JSON: persistedSpawnIntent },
+  );
+  if (
+    !isRecord(recoveredSpawn.result) ||
+    recoveredSpawn.result.sessionHandle !==
+      spawnAcknowledgement.result.sessionId ||
+    recoveredSpawn.result.cwd !== workerDirectory ||
+    typeof recoveredSpawn.result.turnHandle !== "string" ||
+    !recoveredSpawn.result.turnHandle.startsWith(
+      `${spawnAcknowledgement.result.sessionId}/${spawnAcknowledgement.result.turnId}.`,
+    )
+  )
+    throw new Error("The SDK did not project the exact daemon spawn ACK");
+  const capabilityQueriesAfterRecovery = readJsonLines(
+    adapterObservations,
+  ).filter(({ type }) => type === "capabilities_queried").length;
+  if (capabilityQueriesAfterRecovery !== capabilityQueriesBeforeRecovery)
+    throw new Error(
+      "Recovering an accepted spawn rechecked dynamic capabilities",
+    );
+  const newCredentialSpawn = await runSdkControl(
+    "spawn-new-credential",
+    "sdk-spawn-new-credential-capability-check",
+    { REINS_OPERATION_INTENT_JSON: persistedSpawnIntent },
+  );
+  if (
+    newCredentialSpawn.code !== "invalid_params" ||
+    newCredentialSpawn.path !== "model"
+  )
+    throw new Error(
+      "A new spawn credential did not revalidate changed capabilities",
+    );
+  const capabilityQueriesAfterNewCredential = readJsonLines(
+    adapterObservations,
+  ).filter(({ type }) => type === "capabilities_queried").length;
+  if (
+    capabilityQueriesAfterNewCredential !==
+    capabilityQueriesAfterRecovery + 1
+  )
+    throw new Error("A new spawn credential skipped capability validation");
+  const workerStarted = await waitForFact(
+    "the real fixture worker",
+    () => readJsonLines(adapterObservations),
+    (fact) => fact.type === "worker_started",
+  );
+  const workerReady = await waitForFact(
+    "the real fixture descendant",
+    () => readJsonLines(adapterObservations),
+    (fact) => fact.type === "worker_ready",
+  );
+  if (
+    !isRecord(workerStarted.spec) ||
+    typeof workerReady.workerPid !== "number" ||
+    typeof workerReady.descendantPid !== "number" ||
+    workerReady.workerCwd !== workerDirectory
+  )
+    throw new Error("The real worker fixture omitted its process observations");
+  const actualSpec = workerStarted.spec;
+  const expectedSpecKeys = [
+    "agent",
+    "authorizationMode",
+    "cwd",
+    "harness",
+    "message",
+    "model",
+    "reasoning",
+    "sandbox",
+    "sessionName",
+    "sessionId",
+    "turnId",
+  ].sort();
+  const expectedSpec = {
+    agent: "fixture-agent",
+    authorizationMode: "interactive",
+    cwd: workerDirectory,
+    harness: "fixture",
+    message: "  exact task\nkeep spacing  ",
+    model: "fixture-model",
+    reasoning: "high",
+    sandbox: "workspace-write",
+    sessionName: "packed-recover",
+    sessionId: spawnAcknowledgement.result.sessionId,
+    turnId: spawnAcknowledgement.result.turnId,
+  };
+  if (
+    JSON.stringify(Object.keys(actualSpec).sort()) !==
+      JSON.stringify(expectedSpecKeys) ||
+    Object.entries(expectedSpec).some(
+      ([key, value]) => actualSpec[key] !== value,
+    )
+  )
+    throw new Error(
+      "The SDK did not preserve the original spawn input and omitted fields",
+    );
+  if (
+    readJsonLines(adapterObservations).filter(
+      ({ type }) => type === "worker_started",
+    ).length !== 1
+  )
+    throw new Error("Recovering spawn started more than one worker");
+  const spawnConflict = await runSdkControl(
+    "spawn-conflict",
+    "sdk-spawn-conflict",
+    { REINS_OPERATION_INTENT_JSON: persistedSpawnIntent },
+  );
+  if (spawnConflict.code !== "command_id_conflict")
+    throw new Error(
+      "The SDK did not expose the daemon's changed-parameter conflict",
+    );
+
+  const killIntentPath = join(directDirectory, "accepted-kill.json");
+  const preparedKill = await runSdkControl("prepare-kill", "sdk-prepare-kill", {
+    REINS_TARGET_SESSION: recoveredSpawn.result.sessionHandle as string,
+  });
+  if (preparedKill.prepared !== true || typeof preparedKill.intent !== "string")
+    throw new Error("The installed SDK did not prepare a kill credential");
+  writeFileSync(killIntentPath, preparedKill.intent, "utf8");
+  const persistedKillIntent = readFileSync(killIntentPath, "utf8");
+  if (
+    readJsonLines(adapterObservations).some(
+      ({ type }) => type === "terminate_called",
+    )
+  )
+    throw new Error("Preparing the SDK kill operation performed cleanup");
+  const failedKill = await runSdkControl(
+    "kill-failure-replay",
+    "sdk-kill-failure-replay",
+    { REINS_OPERATION_INTENT_JSON: persistedKillIntent },
+  );
+  if (
+    !isRecord(failedKill.failure) ||
+    failedKill.failure.code !== "internal_error"
+  )
+    throw new Error("The SDK did not retain the original cleanup failure");
+  await waitForFact(
+    "the failed cleanup observation",
+    () => readJsonLines(adapterObservations),
+    (fact) => fact.type === "terminate_rejected" && fact.attempt === 1,
+  );
+  const activeBeforeWait = readJsonLines(workerActivity);
+  await new Promise((resolve) => setTimeout(resolve, 150));
+  const activeAfterWait = readJsonLines(workerActivity);
+  if (
+    activeAfterWait.filter(({ type }) => type === "heartbeat").length <=
+    activeBeforeWait.filter(({ type }) => type === "heartbeat").length
+  )
+    throw new Error(
+      "The failed cleanup did not leave its real worker tree running",
+    );
+  assertProcessRunning("The failed worker process", workerReady.workerPid);
+  assertProcessRunning(
+    "The failed descendant process",
+    workerReady.descendantPid,
+  );
+
+  const preparedKillRetry = await runSdkControl(
+    "prepare-kill-retry",
+    "sdk-prepare-kill-retry",
+    { REINS_OPERATION_INTENT_JSON: persistedKillIntent },
+  );
+  if (
+    preparedKillRetry.prepared !== true ||
+    typeof preparedKillRetry.intent !== "string"
+  )
+    throw new Error("A new explicit kill retry credential was not prepared");
+  if (
+    readJsonLines(adapterObservations).filter(
+      ({ type }) => type === "terminate_called",
+    ).length !== 1
+  )
+    throw new Error("Preparing a new kill credential repeated cleanup");
+  writeFileSync(killIntentPath, preparedKillRetry.intent, "utf8");
+  const persistedKillRetry = readFileSync(killIntentPath, "utf8");
+  const killProxyPath = join(directDirectory, "kill-ack-proxy.sock");
+  owned.acknowledgementProxy = await startUnixAcknowledgementProxy({
+    socketPath: killProxyPath,
+    targetPath: directSocket,
+    method: "kill",
+  });
+  const killUnknown = await runSdkControl("kill-drop", "sdk-kill-drop-ack", {
+    REINS_SOCKET: owned.acknowledgementProxy.socketPath,
+    REINS_OPERATION_INTENT_JSON: persistedKillRetry,
+  });
+  const killAcknowledgement =
+    await owned.acknowledgementProxy.waitForDroppedAcknowledgement();
+  await owned.acknowledgementProxy.close();
+  owned.acknowledgementProxy = undefined;
+  if (
+    killUnknown.code !== "command_outcome_unknown" ||
+    !isRecord(killAcknowledgement.result) ||
+    killAcknowledgement.result.sessionId !==
+      recoveredSpawn.result.sessionHandle ||
+    killAcknowledgement.result.status !== "killed"
+  )
+    throw new Error(
+      "The daemon did not return kill success after real cleanup",
+    );
+  const cleanupFactsAtAcknowledgement = readJsonLines(adapterObservations);
+  if (
+    !cleanupFactsAtAcknowledgement.some(
+      (fact) => fact.type === "terminate_finished" && fact.attempt === 2,
+    )
+  )
+    throw new Error(
+      "The daemon acknowledged kill before real cleanup finished",
+    );
+  const activityAtAcknowledgement = readJsonLines(workerActivity);
+  for (const role of ["worker", "descendant"]) {
+    if (
+      activityAtAcknowledgement.filter(
+        (fact) => fact.type === "closed" && fact.role === role,
+      ).length !== 1
+    )
+      throw new Error(`The ${role} descriptor was still open at the kill ACK`);
+  }
+  assertProcessStopped(
+    "The acknowledged worker process",
+    workerReady.workerPid,
+  );
+  assertProcessStopped(
+    "The acknowledged descendant process",
+    workerReady.descendantPid,
+  );
+  const recoveredKill = await runSdkControl(
+    "kill-recover",
+    "sdk-kill-recover",
+    {
+      REINS_OPERATION_INTENT_JSON: persistedKillRetry,
+      REINS_EXPECTED_TURN_HANDLE: recoveredSpawn.result.turnHandle as string,
+    },
+  );
+  if (
+    !isRecord(recoveredKill.result) ||
+    recoveredKill.result.sessionHandle !==
+      recoveredSpawn.result.sessionHandle ||
+    recoveredKill.result.status !== "killed" ||
+    !isRecord(recoveredKill.session) ||
+    recoveredKill.session.state !== "killed" ||
+    !isRecord(recoveredKill.session.lastCompletedTurn) ||
+    recoveredKill.session.lastCompletedTurn.stopReason !== "killed" ||
+    recoveredKill.session.lastCompletedTurn.turnHandle !==
+      recoveredSpawn.result.turnHandle
+  )
+    throw new Error("The SDK did not recover the exact successful kill result");
+  const finalActivity = readJsonLines(workerActivity);
+  for (const role of ["worker", "descendant"]) {
+    if (
+      finalActivity.filter(
+        (fact) => fact.type === "opened" && fact.role === role,
+      ).length !== 1 ||
+      finalActivity.filter(
+        (fact) => fact.type === "closed" && fact.role === role,
+      ).length !== 1
+    )
+      throw new Error(`The ${role} file descriptor did not close exactly once`);
+  }
+  await new Promise((resolve) => setTimeout(resolve, 100));
+  if (readJsonLines(workerActivity).length !== finalActivity.length)
+    throw new Error("The killed worker tree continued writing after cleanup");
+  assertProcessStopped("The worker process", workerReady.workerPid);
+  assertProcessStopped("The descendant process", workerReady.descendantPid);
+
+  const generationBeforeRestart = preparedSpawn.daemonGeneration;
+  const previousDaemon = owned.directDaemon;
+  const previousStop = await stopDaemon(previousDaemon, 5_000);
+  owned.directDaemon = undefined;
+  recorder.record("recoverable_control_daemon_restart_stop", previousStop);
+  if (!isCleanStop(previousStop))
+    throw new Error(
+      `The recoverable-control daemon did not stop cleanly: ${JSON.stringify(previousStop)}`,
+    );
+  await waitForPathRemoval(directSocket, 5_000);
+  await waitForPathRemoval(`${directSocket}.lock`, 5_000);
+  owned.directDaemon = await startDaemon({
+    label: "restarted packed daemon",
+    executable: daemon,
+    args: [],
+    env: directEnv,
+    socketPath: directSocket,
+    logPath: join(logsDirectory, "restarted-daemon.log"),
+    readyTimeoutMs: 5_000,
+  });
+  const staleSpawn = await runSdkControl(
+    "spawn-stale",
+    "sdk-stale-generation",
+    {
+      REINS_OPERATION_INTENT_JSON: persistedSpawnIntent,
+    },
+  );
+  const staleHandle = await runSdkControl(
+    "handle-stale",
+    "sdk-stale-session-handle",
+    { REINS_TARGET_SESSION: recoveredSpawn.result.sessionHandle as string },
+  );
+  if (
+    staleSpawn.code !== "stale_command_id" ||
+    staleSpawn.daemonGeneration === generationBeforeRestart ||
+    staleHandle.status !== "not_found" ||
+    staleHandle.sessionHandle !== recoveredSpawn.result.sessionHandle ||
+    readJsonLines(adapterObservations).filter(
+      ({ type }) => type === "worker_started",
+    ).length !== 1
+  )
+    throw new Error(
+      "The SDK replayed a stale credential in a new daemon generation",
+    );
+  recorder.record("sdk_recoverable_session_control", {
+    generationBeforeRestart,
+    generationAfterRestart: staleSpawn.daemonGeneration,
+    spawnAcknowledgement: spawnAcknowledgement.result,
+    spawnResult: recoveredSpawn.result,
+    spawnConflict: spawnConflict.code,
+    capabilityQueriesBeforeRecovery,
+    capabilityQueriesAfterRecovery,
+    capabilityQueriesAfterNewCredential,
+    newCredentialSpawn: newCredentialSpawn.code,
+    spawnValidation: spawnValidation.codes,
+    killFailure: failedKill.failure,
+    killAcknowledgement: killAcknowledgement.result,
+    killResult: recoveredKill.result,
+    workerStartedCount: 1,
+    workerPids: [workerReady.workerPid, workerReady.descendantPid],
+    descriptorsClosed: ["worker", "descendant"],
+    staleCredential: staleSpawn.code,
+    staleHandle: staleHandle.status,
   });
 
   const directHandle = owned.directDaemon;
@@ -1079,6 +1622,357 @@ async function smokePackedCli(
     logPath: killedListQueryLog,
     seedLogPath: seedSessionLog,
     result: killedListResult,
+  });
+
+  const controlCliDirectory = join(runtimeDirectory, "control-cli");
+  mkdirSync(controlCliDirectory);
+  const controlCliSocket = join(controlCliDirectory, "reins.sock");
+  const controlCliWorkspace = join(controlCliDirectory, "workspace");
+  mkdirSync(controlCliWorkspace);
+  const controlCliObservations = join(
+    controlCliDirectory,
+    "adapter-observations.ndjson",
+  );
+  const controlCliActivity = join(
+    controlCliDirectory,
+    "worker-activity.ndjson",
+  );
+  const controlCliEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: controlCliSocket,
+    REINS_STATE_DIR: join(controlCliDirectory, "state"),
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_CONSUMER_CONTEXT: "packed-installed-cli-control",
+    REINS_IDLE_TIMEOUT_MS: "10000",
+    REINS_DAEMON_BIN: daemon,
+    REINS_PACKED_FIXTURE_OBSERVATIONS: controlCliObservations,
+    REINS_PACKED_FIXTURE_ACTIVITY: controlCliActivity,
+  };
+  const frozenCli = join(
+    applicationConsumerDirectory,
+    "node_modules",
+    ".bin",
+    "reins",
+  );
+  const runInstalledCli = async (
+    args: string[],
+    label: string,
+  ): Promise<CommandResult> => {
+    const logPath = join(logsDirectory, `${label}.log`);
+    const result = toCommandResult(
+      await runLoggedCommand({
+        command: frozenCli,
+        args,
+        cwd: applicationConsumerDirectory,
+        env: controlCliEnv,
+        logPath,
+        timeoutMs: 30_000,
+      }),
+    );
+    requireSuccess(label, result, logPath);
+    return result;
+  };
+
+  const cliPreparedSpawnOutput = await runInstalledCli(
+    ["prepare-operation", "spawn"],
+    "installed-cli-prepare-spawn",
+  );
+  const cliPreparedSpawnData = readDataEnvelope(
+    "installed CLI prepare spawn",
+    cliPreparedSpawnOutput.stdout,
+    "prepareOperation",
+  );
+  if (
+    cliPreparedSpawnData.operation !== "spawn" ||
+    typeof cliPreparedSpawnData.credential !== "string"
+  )
+    throw new Error("The installed CLI did not expose its prepared credential");
+  if (
+    readJsonLines(controlCliObservations).some(
+      ({ type }) => type === "worker_started",
+    )
+  )
+    throw new Error("The installed CLI started a worker while preparing spawn");
+  const cliIntentPath = join(controlCliDirectory, "accepted-operation.json");
+  writeFileSync(
+    cliIntentPath,
+    JSON.stringify({
+      operation: "spawn",
+      credential: cliPreparedSpawnData.credential,
+      input: {
+        name: "packed-cli-session",
+        harness: "fixture",
+        message: "CLI raw task text",
+        cwd: controlCliWorkspace,
+      },
+    }),
+    "utf8",
+  );
+  const cliIntent = readJsonRecord(
+    "persisted CLI operation",
+    readFileSync(cliIntentPath, "utf8"),
+  );
+  if (!isRecord(cliIntent.input))
+    throw new Error("The CLI operation intent was not persisted before spawn");
+  const cliSpawnOutput = await runInstalledCli(
+    [
+      "spawn",
+      "--operation",
+      cliIntent.credential as string,
+      "--name",
+      cliIntent.input.name as string,
+      "--harness",
+      cliIntent.input.harness as string,
+      "--message",
+      cliIntent.input.message as string,
+      "--cwd",
+      cliIntent.input.cwd as string,
+    ],
+    "installed-cli-spawn",
+  );
+  const cliSpawnData = readDataEnvelope(
+    "installed CLI spawn",
+    cliSpawnOutput.stdout,
+    "spawn",
+  );
+  if (
+    typeof cliSpawnData.sessionHandle !== "string" ||
+    typeof cliSpawnData.turnHandle !== "string" ||
+    cliSpawnData.cwd !== controlCliWorkspace
+  )
+    throw new Error("The installed CLI omitted exact spawn handles");
+  const cliWorkerStarted = await waitForFact(
+    "the installed CLI worker input",
+    () => readJsonLines(controlCliObservations),
+    (fact) => fact.type === "worker_started",
+  );
+  if (!isRecord(cliWorkerStarted.spec))
+    throw new Error("The installed CLI worker omitted its input facts");
+  const expectedCliSpecKeys = [
+    "cwd",
+    "harness",
+    "message",
+    "sessionId",
+    "sessionName",
+    "turnId",
+  ].sort();
+  if (
+    JSON.stringify(Object.keys(cliWorkerStarted.spec).sort()) !==
+      JSON.stringify(expectedCliSpecKeys) ||
+    cliWorkerStarted.spec.cwd !== controlCliWorkspace ||
+    cliWorkerStarted.spec.harness !== "fixture" ||
+    cliWorkerStarted.spec.message !== "CLI raw task text" ||
+    cliWorkerStarted.spec.sessionId !== cliSpawnData.sessionHandle ||
+    cliWorkerStarted.spec.sessionName !== "packed-cli-session" ||
+    typeof cliWorkerStarted.spec.turnId !== "string"
+  )
+    throw new Error(
+      "The installed CLI changed input text or materialized omitted options",
+    );
+  const cliWorkerReady = await waitForFact(
+    "the installed CLI worker process tree",
+    () => readJsonLines(controlCliObservations),
+    (fact) =>
+      fact.type === "worker_ready" &&
+      fact.sessionId === cliSpawnData.sessionHandle,
+  );
+  if (
+    typeof cliWorkerReady.workerPid !== "number" ||
+    typeof cliWorkerReady.descendantPid !== "number" ||
+    cliWorkerReady.workerCwd !== controlCliWorkspace
+  )
+    throw new Error("The installed CLI worker omitted process ids");
+  const cliListOutput = await runInstalledCli(
+    ["list", "--session", cliSpawnData.sessionHandle],
+    "installed-cli-list",
+  );
+  const cliListData = readDataEnvelope(
+    "installed CLI list",
+    cliListOutput.stdout,
+    "list",
+  );
+  if (
+    !Array.isArray(cliListData.sessions) ||
+    cliListData.sessions.length !== 1 ||
+    !isRecord(cliListData.sessions[0]) ||
+    cliListData.sessions[0].state !== "busy" ||
+    cliListData.sessions[0].activeTurn !== cliSpawnData.turnHandle
+  )
+    throw new Error("The installed CLI did not list its exact active turn");
+  const cliPreparedKillOutput = await runInstalledCli(
+    ["prepare-operation", "kill"],
+    "installed-cli-prepare-kill",
+  );
+  const cliPreparedKillData = readDataEnvelope(
+    "installed CLI prepare kill",
+    cliPreparedKillOutput.stdout,
+    "prepareOperation",
+  );
+  if (
+    cliPreparedKillData.operation !== "kill" ||
+    typeof cliPreparedKillData.credential !== "string"
+  )
+    throw new Error("The installed CLI did not prepare a kill credential");
+  assertProcessRunning("The prepared CLI worker", cliWorkerReady.workerPid);
+  assertProcessRunning(
+    "The prepared CLI descendant",
+    cliWorkerReady.descendantPid,
+  );
+  if (
+    readJsonLines(controlCliObservations).some(
+      ({ type }) => type === "terminate_called",
+    )
+  )
+    throw new Error("The installed CLI performed cleanup while preparing kill");
+  const cliKillOutput = await runInstalledCli(
+    [
+      "kill",
+      "--session",
+      cliSpawnData.sessionHandle,
+      "--operation",
+      cliPreparedKillData.credential,
+    ],
+    "installed-cli-kill",
+  );
+  const cliKillData = readDataEnvelope(
+    "installed CLI kill",
+    cliKillOutput.stdout,
+    "kill",
+  );
+  if (
+    cliKillData.sessionHandle !== cliSpawnData.sessionHandle ||
+    cliKillData.status !== "killed"
+  )
+    throw new Error("The installed CLI did not confirm real session cleanup");
+  if (
+    !readJsonLines(controlCliObservations).some(
+      ({ attempt, type }) => type === "terminate_finished" && attempt === 1,
+    )
+  )
+    throw new Error(
+      "The installed CLI acknowledged kill before cleanup finished",
+    );
+  assertProcessStopped("The installed CLI worker", cliWorkerReady.workerPid);
+  assertProcessStopped(
+    "The installed CLI descendant",
+    cliWorkerReady.descendantPid,
+  );
+  const cliActivityAtKill = readJsonLines(controlCliActivity);
+  for (const role of ["worker", "descendant"]) {
+    if (
+      cliActivityAtKill.filter(
+        (fact) =>
+          fact.type === "closed" &&
+          fact.role === role &&
+          (fact.pid === cliWorkerReady.workerPid ||
+            fact.pid === cliWorkerReady.descendantPid),
+      ).length !== 1
+    )
+      throw new Error(
+        `The installed CLI did not close the ${role} descriptor before kill success`,
+      );
+  }
+  const sdkFactReplay = await runSdkControl(
+    "replay-facts",
+    "installed-sdk-fact-replay",
+    {
+      ...controlCliEnv,
+      REINS_TARGET_SESSION: cliSpawnData.sessionHandle as string,
+    },
+  );
+  if (
+    !Array.isArray(sdkFactReplay.facts) ||
+    !Array.isArray(sdkFactReplay.resumedFacts) ||
+    sdkFactReplay.facts.length < 2 ||
+    sdkFactReplay.replayed !== sdkFactReplay.facts.length - 1 ||
+    sdkFactReplay.checkpointWasDelivered !== true ||
+    typeof sdkFactReplay.endReason !== "string"
+  )
+    throw new Error("The installed SDK did not establish exact fact replay");
+  const cliAttachOutput = await runInstalledCli(
+    [
+      "attach",
+      cliSpawnData.sessionHandle as string,
+      "--scope",
+      "session",
+      "--replay",
+      "available",
+    ],
+    "installed-cli-attach-available",
+  );
+  const cliAttachFrames = readJsonLineRecords(
+    "installed CLI attach",
+    cliAttachOutput.stdout,
+  );
+  const cliFacts = cliAttachFrames
+    .filter((frame) => frame.kind === "record" && frame.variant === "fact")
+    .map((frame) => {
+      if (!isRecord(frame.data) || !isRecord(frame.data.fact))
+        throw new Error("The installed CLI emitted a malformed fact record");
+      return frame.data.fact;
+    });
+  const cliEstablished = cliAttachFrames.find(
+    (frame) => frame.kind === "record" && frame.variant === "established",
+  );
+  const cliEnded = cliAttachFrames.find(
+    (frame) => frame.kind === "record" && frame.variant === "ended",
+  );
+  if (
+    canonicalJson(cliFacts) !== canonicalJson(sdkFactReplay.facts) ||
+    !isRecord(cliEstablished?.data) ||
+    !isRecord(cliEstablished.data.establishment) ||
+    !isRecord(cliEstablished.data.establishment.window) ||
+    cliEstablished.data.establishment.replayed !== cliFacts.length ||
+    !isRecord(cliEnded?.data) ||
+    !isRecord(cliEnded.data.end) ||
+    cliEnded.data.end.reason !== sdkFactReplay.endReason ||
+    cliFacts.some((fact) =>
+      ["sessionId", "turnId", "eventId", "messageId", "toolCallId"].some(
+        (key) => key in fact,
+      ),
+    )
+  )
+    throw new Error(
+      "The installed CLI did not expose the same stable domain facts as the SDK",
+    );
+  const cliTextAttach = await runInstalledCli(
+    [
+      "attach",
+      cliSpawnData.sessionHandle as string,
+      "--scope",
+      "session",
+      "--replay",
+      "available",
+      "--output-format",
+      "text",
+    ],
+    "installed-cli-attach-text",
+  );
+  if (
+    !cliTextAttach.stdout.includes("Created session ") ||
+    !cliTextAttach.stdout.includes("[turn started] ") ||
+    !cliTextAttach.stdout.includes("[session killed] ") ||
+    cliTextAttach.stdout.includes('"factId"')
+  )
+    throw new Error(
+      "The installed CLI did not render replayed facts through its text projection",
+    );
+  await waitForPathRemoval(controlCliSocket, 15_000);
+  await waitForPathRemoval(`${controlCliSocket}.lock`, 5_000);
+  recorder.record("frozen_consumer_cli_session_control", {
+    spawn: cliSpawnData,
+    list: cliListData,
+    kill: cliKillData,
+    factCount: cliFacts.length,
+    factIds: cliFacts.map((fact) => fact.factId),
+    replayedAfterCheckpoint: sdkFactReplay.replayed,
+    endReason: sdkFactReplay.endReason,
+    structuredAttachRecords: cliAttachFrames.length,
+    textAttachBytes: Buffer.byteLength(cliTextAttach.stdout),
+    workerSpec: cliWorkerStarted.spec,
+    workerPids: [cliWorkerReady.workerPid, cliWorkerReady.descendantPid],
+    descriptorsClosed: ["worker", "descendant"],
+    daemonSocketRemoved: true,
   });
 
   const automaticDirectory = join(runtimeDirectory, "automatic");
@@ -1265,6 +2159,7 @@ async function main(): Promise<void> {
     temporaryRoot: undefined,
     runtimeRoot: undefined,
     directDaemon: undefined,
+    acknowledgementProxy: undefined,
   };
   const cleanupFailures: string[] = [];
   let primaryFailure: { readonly message: string } | undefined;
@@ -1276,6 +2171,17 @@ async function main(): Promise<void> {
         ? { message: error.message }
         : { message: `smoke threw a non-Error value (typeof ${typeof error})` };
   } finally {
+    const proxy = owned.acknowledgementProxy;
+    if (proxy !== undefined) {
+      try {
+        await proxy.close();
+      } catch (error) {
+        cleanupFailures.push(
+          `acknowledgement proxy cleanup failed: ${String(error)}`,
+        );
+      }
+      owned.acknowledgementProxy = undefined;
+    }
     const handle = owned.directDaemon;
     if (handle !== undefined) {
       try {

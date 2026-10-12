@@ -15,6 +15,9 @@ import {
   ReinsSdkError,
   createPresentationProjector,
   type CapabilitiesResult,
+  type OperationCredential,
+  type OperationKind,
+  type SpawnInput,
   type AgentFact,
   type AgentPresentation,
   type AgentSubscriptionEstablishment,
@@ -126,6 +129,20 @@ const sessionInfoSchema = v.union([
 
 const sessionListSchema = v.strictObject({
   sessions: v.array(sessionInfoSchema),
+});
+
+const preparedOperationSchema = v.strictObject({
+  operation: v.picklist(["spawn", "kill"]),
+  credential: v.string(),
+});
+const spawnResultSchema = v.strictObject({
+  sessionHandle: v.string(),
+  turnHandle: v.string(),
+  cwd: v.string(),
+});
+const killResultSchema = v.strictObject({
+  sessionHandle: v.string(),
+  status: v.picklist(["killed", "not_found"]),
 });
 
 const sdkFailureSchema = v.strictObject({
@@ -254,6 +271,206 @@ function createCli(version: string) {
           }
         },
       }),
+      ...define.command("prepareOperation")({
+        kind: "command",
+        parent: "reins",
+        name: "prepare-operation",
+        description:
+          "Create a serializable credential before a control operation.",
+        fields: {
+          operation: {
+            kind: "positional",
+            description: "Operation to prepare: spawn or kill.",
+          },
+        },
+        input: standardSchema(
+          v.object({ operation: v.picklist(["spawn", "kill"]) }),
+        ),
+        success: {
+          kind: "data",
+          variants: {
+            result: {
+              description: "Prepared operation credential",
+              exitCode: 0,
+              schema: standardSchema(preparedOperationSchema),
+              text: ({ credential }) => text.line(credential),
+            },
+          },
+        },
+        failures: {
+          operationFailed: {
+            description: "The operation credential could not be prepared",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) =>
+              text.line(`Operation preparation failed: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const credential: OperationCredential<OperationKind> =
+              connection.prepareOperation(input.operation);
+            return outcome.data.result({
+              operation: input.operation,
+              credential,
+            });
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.operationFailed({
+                failure: error.failure,
+              });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
+      ...define.command("spawn")({
+        kind: "command",
+        parent: "reins",
+        name: "spawn",
+        description: "Start a session using a prepared operation credential.",
+        fields: {
+          operation: {
+            kind: "valueOption",
+            longOption: "--operation",
+            description: "Credential returned by prepare-operation spawn.",
+          },
+          name: {
+            kind: "valueOption",
+            longOption: "--name",
+            description: "Session name.",
+          },
+          harness: {
+            kind: "valueOption",
+            longOption: "--harness",
+            description: "Runtime Harness id.",
+          },
+          message: {
+            kind: "valueOption",
+            longOption: "--message",
+            description: "Original task text for the new session.",
+          },
+          cwd: {
+            kind: "valueOption",
+            longOption: "--cwd",
+            description:
+              "Absolute working directory in the daemon environment.",
+          },
+          agent: {
+            kind: "valueOption",
+            longOption: "--agent",
+            description: "Explicit Harness agent.",
+          },
+          model: {
+            kind: "valueOption",
+            longOption: "--model",
+            description: "Explicit model id.",
+          },
+          reasoning: {
+            kind: "valueOption",
+            longOption: "--reasoning",
+            description: "Explicit reasoning effort.",
+          },
+          authorizationMode: {
+            kind: "valueOption",
+            longOption: "--authorization-mode",
+            description: "Explicit authorization mode.",
+          },
+          sandbox: {
+            kind: "valueOption",
+            longOption: "--sandbox",
+            description: "Explicit Harness sandbox.",
+          },
+          captureHarnessStderr: {
+            kind: "flag",
+            longOption: "--capture-harness-stderr",
+            description: "Capture Harness stderr when supported.",
+          },
+        },
+        input: standardSchema(
+          v.object({
+            operation: v.string(),
+            name: v.string(),
+            harness: v.string(),
+            message: v.string(),
+            cwd: v.string(),
+            agent: v.optional(v.string()),
+            model: v.optional(v.string()),
+            reasoning: v.optional(v.string()),
+            authorizationMode: v.optional(
+              v.picklist(["interactive", "allowAll"]),
+            ),
+            sandbox: v.optional(v.string()),
+            captureHarnessStderr: v.optional(v.boolean()),
+          }),
+        ),
+        success: {
+          kind: "data",
+          variants: {
+            result: {
+              description: "Started session and active turn handles",
+              exitCode: 0,
+              schema: standardSchema(spawnResultSchema),
+              text: ({ sessionHandle, turnHandle }) =>
+                text.line(`Started ${sessionHandle} at ${turnHandle}`),
+            },
+          },
+        },
+        failures: {
+          operationFailed: {
+            description: "The session could not be started or recovered",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) => text.line(`Spawn failed: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const spawnInput: SpawnInput = {
+              sessionName: input.name,
+              harness: input.harness,
+              message: input.message,
+              cwd: input.cwd,
+              ...(input.agent === undefined ? {} : { agent: input.agent }),
+              ...(input.model === undefined ? {} : { model: input.model }),
+              ...(input.reasoning === undefined
+                ? {}
+                : { reasoning: input.reasoning }),
+              ...(input.authorizationMode === undefined
+                ? {}
+                : { authorizationMode: input.authorizationMode }),
+              ...(input.sandbox === undefined
+                ? {}
+                : { sandbox: input.sandbox }),
+              ...(input.captureHarnessStderr === undefined
+                ? {}
+                : { captureHarnessStderr: input.captureHarnessStderr }),
+            };
+            const result = await connection.spawn(
+              spawnInput,
+              input.operation as OperationCredential<"spawn">,
+            );
+            return outcome.data.result(result);
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.operationFailed({
+                failure: error.failure,
+              });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
       ...define.command("list")({
         kind: "command",
         parent: "reins",
@@ -346,6 +563,68 @@ function createCli(version: string) {
           } catch (error) {
             if (error instanceof ReinsSdkError)
               return outcome.failure.queryFailed({ failure: error.failure });
+            throw error;
+          } finally {
+            connection?.close();
+          }
+        },
+      }),
+      ...define.command("kill")({
+        kind: "command",
+        parent: "reins",
+        name: "kill",
+        description: "Stop a session using a prepared operation credential.",
+        fields: {
+          session: {
+            kind: "valueOption",
+            longOption: "--session",
+            description: "Exact session handle to stop.",
+          },
+          operation: {
+            kind: "valueOption",
+            longOption: "--operation",
+            description: "Credential returned by prepare-operation kill.",
+          },
+        },
+        input: standardSchema(
+          v.object({ session: v.string(), operation: v.string() }),
+        ),
+        success: {
+          kind: "data",
+          variants: {
+            result: {
+              description: "Session cleanup result",
+              exitCode: 0,
+              schema: standardSchema(killResultSchema),
+              text: ({ sessionHandle, status }) =>
+                text.line(`${sessionHandle}: ${status}`),
+            },
+          },
+        },
+        failures: {
+          operationFailed: {
+            description: "The session could not be stopped or recovered",
+            exitCode: 70,
+            schema: standardSchema(
+              v.strictObject({ failure: sdkFailureSchema }),
+            ),
+            text: ({ failure }) => text.line(`Kill failed: ${failure.code}`),
+          },
+        },
+        async handler({ dependencies, input, outcome }) {
+          let connection: ReinsConnection | undefined;
+          try {
+            connection = await dependencies.connect();
+            const result = await connection.kill(
+              { sessionHandle: input.session as SessionHandle },
+              input.operation as OperationCredential<"kill">,
+            );
+            return outcome.data.result(result);
+          } catch (error) {
+            if (error instanceof ReinsSdkError)
+              return outcome.failure.operationFailed({
+                failure: error.failure,
+              });
             throw error;
           } finally {
             connection?.close();

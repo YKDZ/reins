@@ -56,7 +56,10 @@ export type ProtocolResponseFor<M extends ProtocolMethod> =
       readonly result: ClientResult<M>;
     });
 
-export type ReinsClient = Omit<ControlReinsClient, "request" | "subscribe"> & {
+export type ReinsClient = Omit<
+  ControlReinsClient,
+  "request" | "subscribe" | "prepareOperation" | "executeOperation"
+> & {
   request<M extends ProtocolMethod>(
     method: M,
     params: ProtocolParams<M>,
