@@ -150,7 +150,7 @@ export const workspaceCommandSpecs = [
   defineCommand({
     name: "workspace handoff",
     description:
-      "Transfer a fixed commit and explicitly selected files to a new Git worktree",
+      "Transfer explicitly selected source files to a new Git worktree",
     args: [],
     options: [
       {

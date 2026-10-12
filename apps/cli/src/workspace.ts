@@ -19,10 +19,7 @@ import {
   type WorkspaceResults,
   type ManagedWorkspaceInfo,
 } from "@reins/workspace-protocol";
-import {
-  captureFixedCommit,
-  captureSelectedWorkingFiles,
-} from "@reins/workspace-source";
+import { captureSelectedWorkingFiles } from "@reins/workspace-source";
 import { Command, CommanderError } from "commander";
 import * as v from "valibot";
 
@@ -284,19 +281,16 @@ async function runWorkspaceCommand(
       const indexFile = option<string[] | undefined>("indexFile");
       const worktreeFile = option<string[] | undefined>("worktreeFile");
       return invoke(spec, mode, "workspace.handoff", async () => ({
-        material:
-          indexFile === undefined && worktreeFile === undefined
-            ? await captureFixedCommit(repository, commit)
-            : await captureSelectedWorkingFiles(repository, commit, [
-                ...(indexFile ?? []).map((path) => ({
-                  path,
-                  source: "index" as const,
-                })),
-                ...(worktreeFile ?? []).map((path) => ({
-                  path,
-                  source: "worktree" as const,
-                })),
-              ]),
+        material: await captureSelectedWorkingFiles(repository, commit, [
+          ...(indexFile ?? []).map((path) => ({
+            path,
+            source: "index" as const,
+          })),
+          ...(worktreeFile ?? []).map((path) => ({
+            path,
+            source: "worktree" as const,
+          })),
+        ]),
         subdirectory: option<string>("subdirectory"),
         bindings: option<string[]>("binding"),
       }));
