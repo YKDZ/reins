@@ -173,6 +173,7 @@ test("public SDK facts keep their identity across none, available, and after, an
       gate,
       reply: "done",
       permission: true,
+      callerMessage: "next",
       resolutionFile,
     }),
   );
@@ -206,6 +207,7 @@ test("public SDK facts keep their identity across none, available, and after, an
   const liveFacts = await liveFactsPromise;
   expect(await live.done).toMatchObject({ reason: "end_turn" });
   expect(liveFacts.map((fact) => fact.type)).toEqual([
+    "message",
     "text.delta",
     "text.delta",
     "message",
@@ -274,9 +276,20 @@ test("public SDK facts keep their identity across none, available, and after, an
   expect(cliFacts.map((fact) => fact.factId)).toEqual(
     availableFacts.map((fact) => fact.factId),
   );
-  expect(cliFacts.find((fact) => fact.type === "message")).toMatchObject({
-    content: "hello world",
-  });
+  expect(cliFacts).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "message",
+        role: "caller",
+        content: "next",
+      }),
+      expect.objectContaining({
+        type: "message",
+        role: "worker",
+        content: "hello world",
+      }),
+    ]),
+  );
   for (const fact of cliFacts)
     for (const key of ["sessionId", "turnId", "messageId", "toolCallId"])
       expect(fact).not.toHaveProperty(key);
@@ -292,6 +305,7 @@ test("public SDK facts keep their identity across none, available, and after, an
     "text",
   ]);
   expect(rendered.exitCode, rendered.stdout + rendered.stderr).toBe(0);
+  expect(rendered.stdout).toContain("caller: next");
   expect(rendered.stdout).toContain("worker: hello world");
   expect(rendered.stdout).toContain("[tool] read-file completed");
   expect(rendered.stdout).not.toContain("native-result-name");

@@ -17,6 +17,7 @@ async function run(input: {
     gate: string;
     completionGate?: string;
     reply: string;
+    callerMessage?: string;
     permission?: boolean;
     messages?: number;
     deltas?: number;
@@ -34,6 +35,13 @@ async function run(input: {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   const emit = (event: object): void =>
     output({ kind: "event", event: { sessionId, turnId, ...event } });
+  if (task.callerMessage !== undefined)
+    emit({
+      type: "message",
+      messageId: "caller-message",
+      role: "caller",
+      content: task.callerMessage,
+    });
   for (let index = 0; index < (task.deltas ?? 0); index += 1)
     emit({ type: "text.delta", messageId: "unclosed", delta: "x" });
   for (let index = 0; index < (task.messages ?? 0); index += 1)
