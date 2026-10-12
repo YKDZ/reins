@@ -5,10 +5,6 @@ import { join, relative } from "node:path";
 // 豁免：注释（词法扫描直接跳过）、测试目录（/test/）、测试文件、fixture 数据。
 // 规则来源：CLI 产品面 spec（Q1）与 AGENTS.md「运行时语言」章节。
 const SOURCE_ROOTS = ["adapters", "apps", "packages", "scripts"] as const;
-const LOCALIZED_UI_TEXT_FILES = new Set([
-  "apps/cli/src/cli-copy.ts",
-  "scripts/check-packed-cli.ts",
-]);
 const SKIP_DIRS = new Set([
   "node_modules",
   "dist",
@@ -210,14 +206,12 @@ function main(): void {
   const violations: string[] = [];
   for (const file of files) {
     const source = readFileSync(file, "utf8");
-    const relativePath = relative(process.cwd(), file);
     findLiterals(source, (start, raw) => {
       const text = decodeEscapes(raw);
       if (!CJK.test(text)) return;
-      if (LOCALIZED_UI_TEXT_FILES.has(relativePath)) return;
       const { line, column } = countLineAndColumn(source, start);
       violations.push(
-        `${relativePath}:${line + 1}:${column + 1}: Chinese runtime string: ${JSON.stringify(raw)}`,
+        `${relative(process.cwd(), file)}:${line + 1}:${column + 1}: Chinese runtime string: ${JSON.stringify(raw)}`,
       );
     });
   }
