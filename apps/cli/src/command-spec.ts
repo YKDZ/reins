@@ -1,5 +1,3 @@
-import { PUBLISHER_CAPABILITIES } from "@reins/workspace-protocol";
-
 import {
   usageError,
   usageErrors,
@@ -149,36 +147,6 @@ export const workspaceCommandSpecs: readonly CommandSpec[] = [
     ],
   }),
 ] as const satisfies readonly CommandSpec[];
-
-export const publisherCommandSpecs: readonly CommandSpec[] =
-  PUBLISHER_CAPABILITIES.map((capability) =>
-    defineCommand({
-      name: capability.name,
-      description: capability.description,
-      args: [{ name: "file", description: "selected file", kind: text }],
-      options: [],
-    }),
-  );
-
-export const publisherGroupSpec: CommandSpec = {
-  name: "",
-  description: "Publisher operations",
-  args: [],
-  options: [],
-  usage: "[options] <command>",
-  children: publisherCommandSpecs.map((spec) => spec.name),
-};
-
-export function publisherCommandSpecForToken(
-  argv: readonly string[],
-): CommandSpec | undefined {
-  const commandIndex = commandTokenIndex(argv);
-  if (commandIndex === -1) return undefined;
-  const commandToken = argv[commandIndex];
-  return commandToken === undefined
-    ? undefined
-    : publisherCommandSpecs.find((spec) => spec.name === commandToken);
-}
 
 export function flagDisplay(flags: string): string {
   const first = flags.split(/\s+/u)[0];
@@ -340,18 +308,6 @@ function missingIssue(
     field,
     hint: valueHint(declaration.kind) ?? declaration.description,
   };
-}
-
-function commandTokenIndex(argv: readonly string[]): number {
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index]!;
-    if (token === "--") return index + 1;
-    if (token === "--pretty" || token === "--version" || token === "-V")
-      continue;
-    if (token.startsWith("-")) return -1;
-    return index;
-  }
-  return -1;
 }
 
 function validateValue(

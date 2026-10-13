@@ -32,10 +32,7 @@ import {
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
-import {
-  publisherCommandSpecs,
-  workspaceCommandSpecs,
-} from "../../src/command-spec.ts";
+import { workspaceCommandSpecs } from "../../src/command-spec.ts";
 
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 const cliBin = join(repoRoot, "apps/cli/dist/reins.js");
@@ -122,29 +119,6 @@ function runCli(
     child.on("close", (code) => {
       finish(timedOut ? -1 : (code ?? -1));
     });
-  });
-}
-
-function runPublisher(args: readonly string[]): Promise<CliResult> {
-  return new Promise((resolve, reject) => {
-    const child = spawn(
-      process.execPath,
-      [join(repoRoot, "apps/cli/dist/publisher-cli.js"), ...args],
-      { env: { ...process.env, REINS_CONSUMER_CONTEXT: "" }, stdio: "pipe" },
-    );
-    const stdout: string[] = [];
-    const stderr: string[] = [];
-    child.stdout.on("data", (chunk) => stdout.push(String(chunk)));
-    child.stderr.on("data", (chunk) => stderr.push(String(chunk)));
-    child.once("error", reject);
-    child.once("close", (code) =>
-      resolve({
-        stdout: stdout.join(""),
-        stderr: stderr.join(""),
-        exitCode: code ?? -1,
-        pid: child.pid ?? -1,
-      }),
-    );
   });
 }
 
@@ -1548,7 +1522,7 @@ describe("CLI 进程边界（缝 D）", () => {
   });
 });
 
-describe("workspace 与 publisher 声明入口", () => {
+describe("workspace 声明入口", () => {
   test("handoff 一次返回全部必填问题和子命令 canonical usage", async () => {
     const result = await runCli(["workspace", "handoff"], {
       REINS_CONSUMER_CONTEXT: "",
@@ -1611,45 +1585,6 @@ describe("workspace 与 publisher 声明入口", () => {
         },
       ],
       usage: "reins workspace [options] <command>",
-    });
-  });
-
-  test("publisher 缺 file 使用相同完整 issue 与 canonical usage", async () => {
-    const result = await runPublisher(["publish"]);
-    expect(result.exitCode).toBe(64);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      code: "usage_error",
-      issues: [
-        { issue: "missing_argument", target: "argument", field: "file" },
-      ],
-      usage: `reins ${publisherCommandSpecs[0]!.name} <file> [options]`,
-    });
-  });
-
-  test("publisher 错误反馈只使用实际声明的 publisher 命令", async () => {
-    const unknown = await runPublisher(["workspace"]);
-    expect(unknown.exitCode).toBe(64);
-    expect(JSON.parse(unknown.stdout)).toMatchObject({
-      issues: [
-        {
-          issue: "unknown_command",
-          value: "workspace",
-          valid: publisherCommandSpecs.map((spec) => spec.name),
-        },
-      ],
-      usage: "reins [options] <command>",
-    });
-
-    const invalidOption = await runPublisher([
-      "publish",
-      "workspace",
-      "--invalid",
-    ]);
-    expect(invalidOption.exitCode).toBe(64);
-    expect(JSON.parse(invalidOption.stdout)).toMatchObject({
-      issues: [{ issue: "unknown_option", value: "--invalid" }],
-      usage: "reins publish <file> [options]",
     });
   });
 });

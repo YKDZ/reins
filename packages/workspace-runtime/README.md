@@ -66,15 +66,6 @@ daemon 与容器重启是不同的部署动作。重新进入工作区时，Mana
 
 正式发行包包含 sibling `reins-workspace-manager`。默认状态位于 `$XDG_STATE_HOME/reins/workspace-manager`（未设置时为 `$HOME/.local/state/reins/workspace-manager`）。部署与测试可显式设置 `REINS_WORKSPACE_MANAGER_BIN`、`REINS_WORKSPACE_MANAGER_SOCKET` 和 `REINS_WORKSPACE_MANAGER_STATE_DIR`。开发 launcher 为当前 checkout/build 隔离这些路径。Docker 连接与公开镜像拉取使用 launcher 的现有 Docker 配置，产品不改用户配置。
 
-工作区部署还需提供同一发行包的 `/opt/reins/dist/reins-publisher.js`。runtime 的 `PATH` 绑定专用 `reins` 入口，只注册发布能力；帮助、错误候选和 publisher socket 的受理来自同一部署能力集合。该入口不能启动 Manager 或创建环境，不通过容器探测或角色选项切换职责。worker 自行选择普通文件或整理好的成果包后执行：
-
-```sh
-reins publish -- selected-file.tar
-reins publish -- --option-like-name.txt
-```
-
-发布入口读取选定文件，将完整字节交给 Manager；Manager 在 runtime 之外的持久目录提交固定副本后返回 `ready`、独立发布标识、源工作目录、源路径、大小和摘要。后续修改或删除原路径不改副本，同路径的多次发布可以分别选择。没有自动扫描、发布提示词、成果齐全或任务完成判断。
-
 丢失消费者绑定时，先停止同一状态目录的 Manager，再使用同一独占 lease 的必要管理入口检查原 attachment、真实容器存在状态和 daemon 会话：
 
 ```sh

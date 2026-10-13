@@ -198,8 +198,6 @@ async function main() {
         if (consumer === undefined)
           throw workspaceFailure("initialization_required");
         switch (request.method) {
-          case "publication.publish":
-            throw workspaceFailure("invalid_request");
           case "workspace.handoff": {
             const incoming = await sourceBridge.receive(
               request.params.material,
