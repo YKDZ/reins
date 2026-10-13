@@ -20,7 +20,6 @@ import {
   parseCodexAuthBindings,
   parseQoderAuthBindings,
 } from "@reins/workspace-runtime";
-import { openWorkspaceSourceBridge } from "@reins/workspace-source";
 import lockfile from "proper-lockfile";
 import * as v from "valibot";
 
@@ -113,7 +112,6 @@ async function main() {
     await release();
     throw error;
   }
-  const sourceBridge = openWorkspaceSourceBridge(stateDirectory);
   const transport = createUnixSocketServer<WorkspaceMessage>({ path: socket });
   let connections = 0;
   let idle: NodeJS.Timeout | undefined;
@@ -238,26 +236,6 @@ async function main() {
               consumer,
               request.params.publicationId,
             );
-          case "workspace.handoff": {
-            const incoming = await sourceBridge.receive(
-              request.params.material,
-              request.params.subdirectory,
-              consumer,
-            );
-            const workspace = await runtime.attach(
-              incoming.cwd,
-              request.params.bindings,
-              consumer,
-            );
-            return { workspaceHandle: incoming.workspaceHandle, workspace };
-          }
-          case "workspace.locate":
-            return {
-              cwd: await sourceBridge.locate(
-                request.params.workspaceHandle,
-                consumer,
-              ),
-            };
           case "workspace.harnesses":
             return workspaceHarnesses(
               request.params.cwd,

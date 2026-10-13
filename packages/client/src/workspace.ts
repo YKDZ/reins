@@ -25,7 +25,6 @@ import {
   type WorkspaceMethod,
   type WorkspaceParams,
   type WorkspaceResults,
-  type WorkspaceHandle,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
@@ -227,13 +226,7 @@ export function createWorkspaceClient(
         destination,
       );
     },
-    async control(
-      context: string | { workspaceHandle: WorkspaceHandle },
-    ): Promise<WorkspaceControlClient> {
-      const cwd =
-        typeof context === "string"
-          ? context
-          : (await request("workspace.locate", context)).cwd;
+    async control(cwd: string): Promise<WorkspaceControlClient> {
       const route = await request("workspace.route", { cwd });
       const client = createReinsClient(
         await createUnixSocketClient<ProtocolMessage>(route.socket),

@@ -24,7 +24,6 @@ const workspacePackageDirectories = [
   "packages/typescript-config",
   "packages/workspace-protocol",
   "packages/workspace-runtime",
-  "packages/workspace-source",
   "adapters/codex",
   "adapters/dsh",
   "adapters/qoder",
