@@ -1,9 +1,9 @@
 import { test } from "vitest";
 
-import { runDurableWorkspaceScenario } from "./durable-workspace-scenario.ts";
+import { runConsumerRecoveryScenario } from "./consumer-recovery-scenario.ts";
 
 test("recovers the original consumer or releases its actual runtime before a new lineage", async () => {
-  await runDurableWorkspaceScenario({
+  await runConsumerRecoveryScenario({
     name: "reins-wrr23",
     client: "apps/cli/test/docker/consumer-recovery-client.ts",
     environmentPrefix: "REINS_WRR23_",

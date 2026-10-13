@@ -4,11 +4,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  createWorkspaceClient,
-  projectWorkspaceHistory,
-  type ReinsClient,
-} from "@reins/client";
+import { createWorkspaceClient, type ReinsClient } from "@reins/client";
 import { consumerContextSchema } from "@reins/protocol";
 import { createUnixSocketClient } from "@reins/transport";
 import {
@@ -106,14 +102,7 @@ export function registerWorkspaceCommands(program: Command): void {
                 }
               : preparation;
         }
-        printResult(
-          method === "workspace.history"
-            ? projectWorkspaceHistory(
-                result as WorkspaceResults["workspace.history"],
-              )
-            : result,
-          mode,
-        );
+        printResult(result, mode);
         if (preparation?.runtime.status === "failed")
           throw new ExitError(1, "workspace_failed");
         if (
@@ -303,13 +292,6 @@ async function runWorkspaceCommand(
       return invoke(spec, mode, "workspace.attach", {
         cwd: nativeCwd(option<string | undefined>("C")),
         bindings: option<string[]>("binding"),
-      });
-    case "history":
-      return invoke(spec, mode, "workspace.history", {
-        cwd: nativeCwd(option<string | undefined>("C")),
-        ...(options.allWorktrees === undefined
-          ? {}
-          : { allWorktrees: option<boolean>("allWorktrees") }),
       });
     case "status":
       return invoke(spec, mode, "workspace.status", {

@@ -180,6 +180,6 @@ export async function workspaceHarnesses(
     bindings,
   };
 }
-export { openWorkspaceRuntime, deleteWorkspaceHistory } from "./runtime.ts";
+export { openWorkspaceRuntime } from "./runtime.ts";
 export { parseQoderAuthBindings } from "./qoder-auth.ts";
 export { parseCodexAuthBindings } from "./codex-auth.ts";
