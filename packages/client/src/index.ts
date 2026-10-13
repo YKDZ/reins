@@ -24,7 +24,6 @@ import type {
 } from "./subscription.ts";
 import {
   createWorkspaceClient,
-  projectWorkspaceHistory,
   type WorkspaceAgentEvent,
   type WorkspaceAgentSubscription,
   type WorkspaceAgentSubscriptionEnd,
@@ -42,7 +41,7 @@ export type {
   AgentEstablishment,
   AgentTarget,
 };
-export { createWorkspaceClient, projectWorkspaceHistory };
+export { createWorkspaceClient };
 export type { GitImportChanges, GitImportResult } from "./git-import.ts";
 
 export type ClientResult<M extends ProtocolMethod> = ControlClientResult<M> &

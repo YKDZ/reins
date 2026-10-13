@@ -222,20 +222,6 @@ export const workspaceCommandSpecs = [
     ],
   }),
   defineCommand({
-    name: "workspace history",
-    description: "Query durable consumed events across worktree attachments",
-    args: [],
-    options: [
-      nativeCwd,
-      {
-        name: "allWorktrees",
-        flags: "--all-worktrees",
-        description: "query this consumer's worktrees",
-        kind: { type: "boolean" },
-      },
-    ],
-  }),
-  defineCommand({
     name: "workspace status",
     description: "Inspect native worktree preparation facts",
     args: [],

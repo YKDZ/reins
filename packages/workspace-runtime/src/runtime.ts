@@ -46,9 +46,6 @@ import {
 } from "@reins/transport";
 import {
   workspaceErrorSchema,
-  type WorkspaceHistory,
-  type WorkspaceHistoryHealth,
-  type WorkspaceHistoryEvent,
   type ManagedWorkspaceInfo,
   type WorkspaceError,
   type NativeViewLoss,
@@ -62,11 +59,6 @@ import {
   projectCodexAuth,
   type CodexAuthBindings,
 } from "./codex-auth.ts";
-import {
-  readWorkspaceHistory,
-  appendWorkspaceHistory,
-  historyEventKey,
-} from "./history.ts";
 import {
   fingerprint,
   resolveWorktree,
@@ -137,13 +129,8 @@ async function loadRecords(root: string): Promise<RecordState[]> {
       const record = JSON.parse(
         await readFile(join(root, entry.name, "attachment.json"), "utf8"),
       ) as RecordState;
-      // 旧清理快照不含权威事件日志，不能从 completed 投影补造原事件。
-      if (!("integrity" in record.info.history))
-        record.info.history = {
-          status: "unavailable",
-          integrity: "unknown",
-          errors: [],
-        };
+      delete (record.info as ManagedWorkspaceInfo & { history?: unknown })
+        .history;
       records.push(record);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") continue;
@@ -151,57 +138,6 @@ async function loadRecords(root: string): Promise<RecordState[]> {
     }
   }
   return records;
-}
-async function historyRecords(
-  records: RecordState[],
-  owner: ConsumerContext,
-  cwd?: string,
-): Promise<RecordState[]> {
-  v.parse(consumerContextSchema, owner);
-  const tree = cwd === undefined ? undefined : await resolveWorktree(cwd);
-  const identities =
-    tree === undefined
-      ? []
-      : await Promise.all(
-          [tree.root, tree.gitDir, tree.commonDir].map(identity),
-        );
-  // 只比对真实 root 与 Git metadata 的身份；路径、提交和分支不构成沿袭。
-  return records.filter(
-    (record) =>
-      record.owner === owner &&
-      (tree === undefined ||
-        [record.tree.root, record.tree.gitDir, record.tree.commonDir].every(
-          (path, index) => {
-            const saved = record.identities.find((item) => item.path === path);
-            return (
-              saved?.dev === identities[index]?.dev &&
-              saved?.ino === identities[index]?.ino
-            );
-          },
-        )),
-  );
-}
-// 管理入口持有与在线 Manager 相同的 lease；不打开运行时或改写清理账本。
-export async function deleteWorkspaceHistory(options: {
-  stateDirectory: string;
-  owner: ConsumerContext;
-  cwd?: string;
-}): Promise<{ deleted: number }> {
-  const selected = await historyRecords(
-    await loadRecords(options.stateDirectory),
-    options.owner,
-    options.cwd,
-  );
-  for (const record of selected) {
-    await rm(join(record.directory, "history.ndjson"), { force: true });
-    record.info.history = {
-      status: "deleted",
-      integrity: "unknown",
-      errors: [],
-    };
-    await persist(record);
-  }
-  return { deleted: selected.length };
 }
 const writes = new WeakMap<RecordState, Promise<void>>();
 function persist(record: RecordState): Promise<void> {
@@ -350,44 +286,6 @@ export async function openWorkspaceRuntime(options: {
       await persist(record);
     }
   }
-  const historyKeys = new Map<string, Set<string>>();
-  const recordEvent = async (
-    record: RecordState,
-    event: WorkspaceHistoryEvent,
-  ) => {
-    let keys = historyKeys.get(record.directory);
-    if (keys === undefined) {
-      const prior = await readWorkspaceHistory(
-        record.directory,
-        record.info.history,
-      );
-      keys = new Set(prior.events.map(historyEventKey));
-      historyKeys.set(record.directory, keys);
-    }
-    const key = historyEventKey(event);
-    if (keys.has(key)) return;
-    try {
-      await appendWorkspaceHistory(record.directory, event);
-      keys.add(key);
-      if (
-        record.info.history.status === "unavailable" ||
-        record.info.history.status === "deleted"
-      ) {
-        record.info.history.status = "available";
-        await persist(record);
-      }
-    } catch {
-      record.info.history.status = "failed";
-      if (!record.info.history.errors.includes("write_failed"))
-        record.info.history.errors.push("write_failed");
-      // 历史故障只更新自己的事实轴，不阻止原帧或已确定的回合结果交付。
-      await persist(record).catch(() => {});
-    }
-  };
-  const historyHealth = async (
-    record: RecordState,
-  ): Promise<WorkspaceHistoryHealth> =>
-    (await readWorkspaceHistory(record.directory, record.info.history)).health;
   const clients = new Map<string, ReinsClient>();
   const clientGenerations = new WeakMap<ReinsClient, DaemonGeneration>();
   const routes = new Map<string, Promise<TransportServer<ProtocolMessage>>>();
@@ -893,15 +791,9 @@ export async function openWorkspaceRuntime(options: {
                       event.message,
                     );
                     if (notification.success && generation !== undefined) {
-                      const { eventId, event: fact } =
-                        notification.output.params;
+                      const { event: fact } = notification.output.params;
                       const daemonGeneration = generation;
                       await exclusive(async () => {
-                        await recordEvent(record, {
-                          daemonGeneration,
-                          eventId,
-                          event: fact,
-                        });
                         await trackSessionEvent(record, fact, daemonGeneration);
                       });
                     }
@@ -1424,7 +1316,6 @@ export async function openWorkspaceRuntime(options: {
       ...record.info,
       cwd: tree.cwd,
       definition,
-      history: await historyHealth(record),
     };
   };
   const prepare = async (record: RecordState) => {
@@ -1795,46 +1686,10 @@ export async function openWorkspaceRuntime(options: {
         ownership: active(record)
           ? ("attached" as const)
           : ("released" as const),
-        attachment: { ...record.info, history: await historyHealth(record) },
+        attachment: record.info,
         runtime,
         sessions,
-        history: await this.history(cwd, record.owner),
       };
-    },
-    async history(
-      cwd: string,
-      owner: ConsumerContext,
-      allWorktrees = false,
-    ): Promise<WorkspaceHistory> {
-      return exclusive(async () => {
-        const entries: WorkspaceHistory["entries"] = [];
-        const selected = await historyRecords(
-          records,
-          owner,
-          allWorktrees ? undefined : cwd,
-        );
-        for (const record of selected) {
-          const { health, events } = await readWorkspaceHistory(
-            record.directory,
-            record.info.history,
-          );
-          entries.push({
-            cwd: record.tree.cwd,
-            root: record.tree.root,
-            environment: record.info.environment,
-            environmentFingerprint: record.info.environmentFingerprint,
-            harnesses: record.info.harnesses.map(
-              ({ harness, runtimeFingerprint }) => ({
-                harness,
-                runtimeFingerprint,
-              }),
-            ),
-            health,
-            events,
-          });
-        }
-        return { entries, integrity: "unknown" };
-      });
     },
     async attach(cwd: string, bindingRefs: string[], owner: ConsumerContext) {
       v.parse(consumerContextSchema, owner);
@@ -1932,11 +1787,6 @@ export async function openWorkspaceRuntime(options: {
               ...binding,
               stage: "pending",
             })),
-            history: {
-              status: "unavailable",
-              integrity: "unknown",
-              errors: [],
-            },
             preparation: { attempts: [{ status: "preparing" }] },
           },
         };
