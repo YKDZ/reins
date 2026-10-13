@@ -75,16 +75,6 @@ reins publish -- --option-like-name.txt
 
 发布入口读取选定文件，将完整字节交给 Manager；Manager 在 runtime 之外的持久目录提交固定副本后返回 `ready`、独立发布标识、源工作目录、源路径、大小和摘要。后续修改或删除原路径不改副本，同路径的多次发布可以分别选择。没有自动扫描、发布提示词、成果齐全或任务完成判断。
 
-消费者查询当前工作目录来源的发布，再显式接收到自己指定的活动树外接收区：
-
-```sh
-reins workspace publications -C /absolute/worktree
-reins workspace receive pub-<uuid> --directory /absolute/receipts --active-root /absolute/worktree
-reins workspace receipts --directory /absolute/receipts
-```
-
-共享客户端提供相同的 `publication.list` 查询、`receivePublication` 和 `receipts`。接收提交本地可用文件后才返回 `arrived`、来源、大小及实际 `localPath`；失败返回 `receipt_failed`，保留已成功发布的副本。发布和接收查询均限 launcher 绑定的消费者，跨消费者发布标识按不存在处理。本链可直接用于原生工作树附着，无需源码交接。回合完成、回复中的路径和发布成功都不会自动接收文件。
-
 丢失消费者绑定时，先停止同一状态目录的 Manager，再使用同一独占 lease 的必要管理入口检查原 attachment、真实容器存在状态和 daemon 会话：
 
 ```sh
@@ -103,12 +93,3 @@ reins-workspace-manager release --cwd /absolute/worktree --session-disposition k
 ```
 
 释放沿用普通 detach 的实际停止证明与逐步续行；存活会话使 `require_none` 拒绝，`kill` 不能证明停止时也不释放归属。管理员明确解决 provider 故障后，可以重复相同 release 只续剩余步骤。返回 `released` 后，新消费者才通过正常 `workspace attach` 建立自己的沿袭；旧会话仍属于原消费者，不能改名收养。管理入口不登记到普通 agent 能力、帮助或错误候选，不提供 force rebind，也不建立通用管理平台。
-
-已发布副本跨环境脱离保留；脱离后仍以原工作目录查询并显式接收。发布记录的 `storagePath` 是 Manager 上的实际固定副本位置；接收记录的 `localPath` 是消费者可使用的文件，`receiptId` 用于明确选择该次接收。同一发布可接收多次，接收不会删除发布。
-
-```sh
-reins workspace remove-publication pub-<uuid>
-reins workspace remove-receipt receipt-<uuid> --directory /absolute/receipts
-```
-
-共享客户端分别使用 `request("publication.remove", { publicationId })` 与 `removeReceipt(directory, receiptId)`。每次只清理明确选中的当前消费者副本；另一端、未选副本、原生 Git 引用／对象和活动工作树均独立保留。结果报告 `released` 或 `failed`，并列出目录、元数据和 payload 的实际 `present`／`absent`／`unknown` 状态；失败不冒充已经释放，CLI 非零退出。调用方修正原因后可再次明确清理同一副本；重复清理已经消失的副本返回实际为空的释放结果。产品副本清理不包含平台回收或 Git GC。

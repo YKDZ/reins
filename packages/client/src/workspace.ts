@@ -27,7 +27,6 @@ import {
   type ReinsClient,
   type ProtocolResponseFor,
 } from "./control.ts";
-import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
 export type WorkspaceControlClient = Omit<
   ReinsClient,
   "request" | "subscribe" | "prepareOperation" | "executeOperation"
@@ -135,20 +134,6 @@ export function createWorkspaceClient(
         consumerContext: options.consumerContext,
       }),
     request,
-    async receivePublication(
-      publicationId: string,
-      destination: { directory: string; activeRoot: string },
-    ) {
-      return receivePublication(
-        options.consumerContext,
-        await request("publication.read", { publicationId }),
-        destination,
-      );
-    },
-    receipts: (directory: string) =>
-      listReceipts(options.consumerContext, directory),
-    removeReceipt: (directory: string, receiptId: string) =>
-      removeReceipt(options.consumerContext, directory, receiptId),
     async control(
       context: string | { workspaceHandle: WorkspaceHandle },
     ): Promise<WorkspaceControlClient> {

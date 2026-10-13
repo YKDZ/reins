@@ -47,16 +47,6 @@ export async function resolveWorktree(cwd: string) {
 export function fingerprint(value: unknown): string {
   return `sha256:${createHash("sha256").update(JSON.stringify(value)).digest("hex")}`;
 }
-export async function worktreeScopeKey(cwd: string): Promise<string> {
-  const tree = await resolveWorktree(cwd);
-  const identities = await Promise.all(
-    [tree.root, tree.gitDir, tree.commonDir].map(async (path) => {
-      const value = await stat(path, { bigint: true });
-      return [String(value.dev), String(value.ino)];
-    }),
-  );
-  return fingerprint(identities);
-}
 async function readConfiguration(cwd: string) {
   const tree = await resolveWorktree(cwd);
   let contents: string;

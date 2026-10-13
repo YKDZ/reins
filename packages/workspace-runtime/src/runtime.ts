@@ -66,7 +66,6 @@ import {
   workspaceBindingDeclarations,
   workspaceEnvironment,
   workspaceHarnesses,
-  worktreeScopeKey,
 } from "./index.ts";
 import { openPublications, servePublisher } from "./publications.ts";
 import {
@@ -307,9 +306,7 @@ export async function openWorkspaceRuntime(options: {
     publishers.set(
       record.directory,
       await servePublisher(join(control, "f.sock"), (params) =>
-        worktreeScopeKey(record.tree.cwd).then((scopeKey) =>
-          publications.publish(record.owner, scopeKey, params),
-        ),
+        publications.publish(record.owner, params),
       ),
     );
   };
@@ -1630,10 +1627,6 @@ export async function openWorkspaceRuntime(options: {
   monitor.unref();
   return {
     publications,
-    async publicationScope(cwd: string) {
-      const tree = await resolveWorktree(cwd);
-      return worktreeScopeKey(tree.cwd);
-    },
     hasAttachments: () => records.some(active),
     // 独立管理程序在同一 state lease 下调用；不登记到 agent 协议。
     async inspectAttachment(cwd: string) {

@@ -166,7 +166,6 @@ export function registerWorkspaceCommands(program: Command): void {
         const parsed = parseDeclaredInput(spec, args, options);
         await runWorkspaceCommand(
           leaf,
-          parsed.args,
           parsed.options,
           spec,
           mode,
@@ -199,7 +198,6 @@ function unsafeCommanderCallbackInput(values: readonly unknown[]): {
 
 async function runWorkspaceCommand(
   name: string,
-  args: readonly unknown[],
   options: Record<string, unknown>,
   spec: CommandSpec,
   mode: "json" | "pretty",
@@ -215,45 +213,7 @@ async function runWorkspaceCommand(
   nativeCwd: (path?: string) => string,
 ): Promise<void> {
   const option = <T>(field: string) => options[field] as T;
-  const [first] = args as [string?];
   switch (name) {
-    case "publications":
-      return invoke(spec, mode, "publication.list", {
-        cwd: nativeCwd(option<string | undefined>("C")),
-      });
-    case "receive":
-      return invoke(
-        spec,
-        mode,
-        "publication.read",
-        { publicationId: first! },
-        (client) =>
-          client.receivePublication(first!, {
-            directory: resolve(option<string>("directory")),
-            activeRoot: resolve(option<string>("activeRoot")),
-          }),
-      );
-    case "receipts":
-      return invoke(
-        spec,
-        mode,
-        "publication.list",
-        { cwd: nativeCwd() },
-        (client) => client.receipts(resolve(option<string>("directory"))),
-      );
-    case "remove-publication":
-      return invoke(spec, mode, "publication.remove", {
-        publicationId: first!,
-      });
-    case "remove-receipt":
-      return invoke(
-        spec,
-        mode,
-        "publication.list",
-        { cwd: nativeCwd() },
-        (client) =>
-          client.removeReceipt(resolve(option<string>("directory")), first!),
-      );
     case "handoff": {
       const repository = resolve(option<string>("repository"));
       const commit = option<string>("commit");

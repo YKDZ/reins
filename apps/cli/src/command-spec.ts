@@ -52,72 +52,7 @@ const nativeCwd = {
   kind: text,
 } as const;
 
-export const workspaceCommandSpecs = [
-  defineCommand({
-    name: "workspace publications",
-    description: "Query files explicitly published from this worktree",
-    args: [],
-    options: [nativeCwd],
-  }),
-  defineCommand({
-    name: "workspace receive",
-    description:
-      "Explicitly receive one fixed publication outside the active tree",
-    args: [{ name: "publication", description: "publication id", kind: text }],
-    options: [
-      {
-        name: "directory",
-        flags: "--directory <path>",
-        required: true,
-        description: "local receipt directory",
-        kind: text,
-      },
-      {
-        name: "activeRoot",
-        flags: "--active-root <path>",
-        required: true,
-        description: "active Git worktree root",
-        kind: text,
-      },
-    ],
-  }),
-  defineCommand({
-    name: "workspace receipts",
-    description:
-      "List this consumer's received files, sources and actual locations",
-    args: [],
-    options: [
-      {
-        name: "directory",
-        flags: "--directory <path>",
-        required: true,
-        description: "local receipt directory",
-        kind: text,
-      },
-    ],
-  }),
-  defineCommand({
-    name: "workspace remove-publication",
-    description:
-      "Explicitly remove one published copy without removing receipts",
-    args: [{ name: "publication", description: "publication id", kind: text }],
-    options: [],
-  }),
-  defineCommand({
-    name: "workspace remove-receipt",
-    description:
-      "Explicitly remove one local receipt without removing its publication",
-    args: [{ name: "receipt", description: "receipt id", kind: text }],
-    options: [
-      {
-        name: "directory",
-        flags: "--directory <path>",
-        required: true,
-        description: "local receipt directory",
-        kind: text,
-      },
-    ],
-  }),
+export const workspaceCommandSpecs: readonly CommandSpec[] = [
   defineCommand({
     name: "workspace handoff",
     description:

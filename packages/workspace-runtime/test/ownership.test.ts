@@ -9,12 +9,7 @@ import { promisify } from "node:util";
 import { consumerContextSchema } from "@reins/protocol";
 import * as v from "valibot";
 
-import {
-  fingerprint,
-  resolveWorktree,
-  worktreeScopeKey,
-} from "../src/index.ts";
-import { openPublications } from "../src/publications.ts";
+import { fingerprint, resolveWorktree } from "../src/index.ts";
 import { openWorkspaceRuntime } from "../src/runtime.ts";
 
 const execute = promisify(execFile);
@@ -106,60 +101,6 @@ test("ordinary actions hide another consumer's attachment, including stale paths
     await assert.rejects(runtime.status(nested, otherOwner), {
       code: "attachment_not_found",
     });
-  } finally {
-    await runtime.close();
-  }
-});
-
-test("publication discovery follows worktree scope and preserves execution location", async () => {
-  const fixture = await mkdtemp(
-    join(tmpdir(), "reins-workspace-publication-scope-"),
-  );
-  directories.push(fixture);
-  const first = join(fixture, "first");
-  const second = join(fixture, "second");
-  const nested = join(first, "src");
-  await mkdir(nested, { recursive: true });
-  await mkdir(second);
-  await execute("git", ["init", "--quiet", first]);
-  await execute("git", ["init", "--quiet", second]);
-  const rootScope = await worktreeScopeKey(first);
-  const nestedScope = await worktreeScopeKey(nested);
-  const otherScope = await worktreeScopeKey(second);
-  assert.equal(nestedScope, rootScope);
-  assert.notEqual(otherScope, rootScope);
-
-  const publications = openPublications(join(fixture, "state"));
-  const result = await publications.publish(owner, nestedScope, {
-    cwd: nested,
-    path: "result.txt",
-    contentBase64: Buffer.from("published").toString("base64"),
-  });
-  assert.deepEqual(result.source, {
-    cwd: nested,
-    path: join(nested, "result.txt"),
-  });
-  assert.equal((await publications.list(owner, rootScope)).length, 1);
-  assert.equal((await publications.list(owner, otherScope)).length, 0);
-});
-
-test("publication scope is resolvable without an active owner attachment", async () => {
-  const fixture = await mkdtemp(
-    join(tmpdir(), "reins-workspace-publication-unattached-scope-"),
-  );
-  directories.push(fixture);
-  const worktree = join(fixture, "worktree");
-  const nested = join(worktree, "src");
-  const stateDirectory = join(fixture, "state");
-  await mkdir(nested, { recursive: true });
-  await mkdir(stateDirectory);
-  await execute("git", ["init", "--quiet", worktree]);
-
-  const runtime = await openWorkspaceRuntime({ stateDirectory });
-  try {
-    const scope = await runtime.publicationScope(nested);
-    assert.equal(scope, await worktreeScopeKey(worktree));
-    assert.deepEqual(await runtime.publications.list(otherOwner, scope), []);
   } finally {
     await runtime.close();
   }

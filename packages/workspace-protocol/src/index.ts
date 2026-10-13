@@ -49,8 +49,6 @@ export type HarnessBinding = v.InferOutput<typeof harnessBindingSchema>;
 const ordinaryWorkspaceErrorSchema = v.strictObject({
   code: v.picklist([
     "publication_failed",
-    "publication_not_found",
-    "receipt_failed",
     "consumer_context_required",
     "consumer_context_conflict",
     "initialization_required",
@@ -313,21 +311,6 @@ export const publicationSchema = v.strictObject({
   storagePath: v.optional(v.string()),
 });
 export type Publication = v.InferOutput<typeof publicationSchema>;
-export const copyCleanupSchema = v.strictObject({
-  state: v.picklist(["released", "failed"]),
-  storagePath: v.string(),
-  remaining: v.strictObject({
-    directory: v.picklist(["present", "absent", "unknown"]),
-    metadata: v.picklist(["present", "absent", "unknown"]),
-    payload: v.picklist(["present", "absent", "unknown"]),
-  }),
-  detail: v.optional(v.string()),
-});
-export type CopyCleanup = v.InferOutput<typeof copyCleanupSchema>;
-export const publicationPayloadSchema = v.strictObject({
-  publication: publicationSchema,
-  contentBase64: v.string(),
-});
 export const publishParamsSchema = v.strictObject({
   cwd: v.string(),
   path: v.string(),
@@ -335,9 +318,6 @@ export const publishParamsSchema = v.strictObject({
 });
 export const workspaceMethods = [
   "publication.publish",
-  "publication.list",
-  "publication.read",
-  "publication.remove",
   "workspace.handoff",
   "workspace.locate",
   "initialize",
@@ -351,9 +331,6 @@ export const workspaceMethods = [
 export type WorkspaceMethod = (typeof workspaceMethods)[number];
 export type WorkspaceParams = {
   "publication.publish": v.InferOutput<typeof publishParamsSchema>;
-  "publication.list": { cwd: string };
-  "publication.read": { publicationId: string };
-  "publication.remove": { publicationId: string };
   "workspace.handoff": v.InferOutput<typeof sourceHandoffSchema>;
   "workspace.locate": { workspaceHandle: WorkspaceHandle };
   initialize: {
@@ -377,9 +354,6 @@ export type WorkspaceParams = {
 };
 export type WorkspaceResults = {
   "publication.publish": Publication;
-  "publication.list": Publication[];
-  "publication.read": v.InferOutput<typeof publicationPayloadSchema>;
-  "publication.remove": CopyCleanup;
   "workspace.handoff": {
     workspaceHandle: WorkspaceHandle;
     workspace: ManagedWorkspaceInfo;
@@ -400,24 +374,6 @@ export const workspaceRequestSchema = v.variant("method", [
     requestId: v.string(),
     method: v.literal("publication.publish"),
     params: publishParamsSchema,
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.list"),
-    params: v.strictObject({ cwd: v.string() }),
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.read"),
-    params: v.strictObject({ publicationId: publicationIdSchema }),
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.remove"),
-    params: v.strictObject({ publicationId: publicationIdSchema }),
   }),
   v.strictObject({
     kind: v.literal("request"),
@@ -504,10 +460,7 @@ export const workspaceResponseSchema = v.union([
 export type WorkspaceResponse = v.InferOutput<typeof workspaceResponseSchema>;
 export type WorkspaceMessage = WorkspaceRequest | WorkspaceResponse;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
-  if (method === "publication.remove") return copyCleanupSchema;
   if (method === "publication.publish") return publicationSchema;
-  if (method === "publication.list") return v.array(publicationSchema);
-  if (method === "publication.read") return publicationPayloadSchema;
   return method === "workspace.handoff"
     ? v.strictObject({
         workspaceHandle: workspaceHandleSchema,
