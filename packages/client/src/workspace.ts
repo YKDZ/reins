@@ -27,7 +27,6 @@ import {
   type ReinsClient,
   type ProtocolResponseFor,
 } from "./control.ts";
-import { importGitPublication } from "./git-import.ts";
 import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
 export type WorkspaceControlClient = Omit<
   ReinsClient,
@@ -150,15 +149,6 @@ export function createWorkspaceClient(
       listReceipts(options.consumerContext, directory),
     removeReceipt: (directory: string, receiptId: string) =>
       removeReceipt(options.consumerContext, directory, receiptId),
-    async importGitPublication(
-      publicationId: string,
-      destination: { repository: string; reference: string; commit: string },
-    ) {
-      return importGitPublication(
-        await request("publication.read", { publicationId }),
-        destination,
-      );
-    },
     async control(
       context: string | { workspaceHandle: WorkspaceHandle },
     ): Promise<WorkspaceControlClient> {

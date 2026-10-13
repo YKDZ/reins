@@ -43,7 +43,6 @@ export type ReinsClient = Omit<
 export type ControlEvent = AgentEvent;
 export type ControlSubscriptionEnd = AgentSubscriptionEnd;
 export { createWorkspaceClient };
-export type { GitImportChanges, GitImportResult } from "./git-import.ts";
 
 export function createReinsClient(
   connection: TransportConnection<ProtocolMessage>,

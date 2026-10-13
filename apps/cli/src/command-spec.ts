@@ -54,35 +54,6 @@ const nativeCwd = {
 
 export const workspaceCommandSpecs = [
   defineCommand({
-    name: "workspace import-git",
-    description:
-      "Import a published Git bundle into a new reference without checkout or merge",
-    args: [{ name: "publication", description: "publication id", kind: text }],
-    options: [
-      {
-        name: "repository",
-        flags: "--repository <path>",
-        required: true,
-        description: "target Git repository",
-        kind: text,
-      },
-      {
-        name: "ref",
-        flags: "--ref <reference>",
-        required: true,
-        description: "new fully qualified Git reference",
-        kind: text,
-      },
-      {
-        name: "commit",
-        flags: "--commit <object>",
-        required: true,
-        description: "full commit object name advertised by the bundle",
-        kind: text,
-      },
-    ],
-  }),
-  defineCommand({
     name: "workspace publications",
     description: "Query files explicitly published from this worktree",
     args: [],

@@ -217,19 +217,6 @@ async function runWorkspaceCommand(
   const option = <T>(field: string) => options[field] as T;
   const [first] = args as [string?];
   switch (name) {
-    case "import-git":
-      return invoke(
-        spec,
-        mode,
-        "publication.read",
-        { publicationId: first! },
-        (client) =>
-          client.importGitPublication(first!, {
-            repository: resolve(option<string>("repository")),
-            reference: option<string>("ref"),
-            commit: option<string>("commit"),
-          }),
-      );
     case "publications":
       return invoke(spec, mode, "publication.list", {
         cwd: nativeCwd(option<string | undefined>("C")),
