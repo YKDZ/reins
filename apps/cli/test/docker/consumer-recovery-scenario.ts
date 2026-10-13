@@ -10,7 +10,7 @@ import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
-export async function runDurableWorkspaceScenario(options: {
+export async function runConsumerRecoveryScenario(options: {
   name: string;
   client: string;
   environmentPrefix: string;
@@ -40,8 +40,8 @@ export async function runDurableWorkspaceScenario(options: {
       "candidate.tgz",
     ],
     [
-      join(repository, "apps/cli/test/docker/durable-history-round.ts"),
-      "durable-history-round.ts",
+      join(repository, "apps/cli/test/docker/consumer-recovery-round.ts"),
+      "consumer-recovery-round.ts",
     ],
     [
       join(repository, "apps/cli/test/docker/durable-detach-adapter.ts"),
@@ -55,12 +55,12 @@ export async function runDurableWorkspaceScenario(options: {
   const fingerprints: { name: string; sha256: string }[] = [];
   await bundleWorkspaceClient(
     join(repository, options.client),
-    join(input, "durable-history-client.js"),
+    join(input, "consumer-recovery-client.js"),
   );
   fingerprints.push({
-    name: "durable-history-client.js",
+    name: "consumer-recovery-client.js",
     sha256: createHash("sha256")
-      .update(await readFile(join(input, "durable-history-client.js")))
+      .update(await readFile(join(input, "consumer-recovery-client.js")))
       .digest("hex"),
   });
   await copyFile(
@@ -203,7 +203,7 @@ export async function runDurableWorkspaceScenario(options: {
     "evidence",
     "--",
     "node",
-    "durable-history-round.ts",
+    "consumer-recovery-round.ts",
   ];
   await writeFile(
     join(directory, "command.json"),
