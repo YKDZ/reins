@@ -378,8 +378,6 @@ export const publishParamsSchema = v.strictObject({
 });
 export const workspaceMethods = [
   "publication.publish",
-  "publication.observe",
-  "publication.unobserve",
   "publication.list",
   "publication.read",
   "publication.remove",
@@ -397,8 +395,6 @@ export const workspaceMethods = [
 export type WorkspaceMethod = (typeof workspaceMethods)[number];
 export type WorkspaceParams = {
   "publication.publish": v.InferOutput<typeof publishParamsSchema>;
-  "publication.observe": { cwd: string; observationId: string };
-  "publication.unobserve": { observationId: string };
   "publication.list": { cwd: string };
   "publication.read": { publicationId: string };
   "publication.remove": { publicationId: string };
@@ -446,8 +442,6 @@ export const workspaceHistorySchema = v.strictObject({
 export type WorkspaceHistory = v.InferOutput<typeof workspaceHistorySchema>;
 export type WorkspaceResults = {
   "publication.publish": Publication;
-  "publication.observe": Publication[];
-  "publication.unobserve": null;
   "publication.list": Publication[];
   "publication.read": v.InferOutput<typeof publicationPayloadSchema>;
   "publication.remove": CopyCleanup;
@@ -467,18 +461,6 @@ export type WorkspaceResults = {
 };
 const pathParamsSchema = v.strictObject({ cwd: v.string() });
 export const workspaceRequestSchema = v.variant("method", [
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.observe"),
-    params: v.strictObject({ cwd: v.string(), observationId: v.string() }),
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.unobserve"),
-    params: v.strictObject({ observationId: v.string() }),
-  }),
   v.strictObject({
     kind: v.literal("request"),
     requestId: v.string(),
@@ -595,28 +577,12 @@ export const workspaceResponseSchema = v.union([
   }),
 ]);
 export type WorkspaceResponse = v.InferOutput<typeof workspaceResponseSchema>;
-export const workspaceNotificationSchema = v.strictObject({
-  kind: v.literal("notification"),
-  method: v.literal("publication.ready"),
-  params: v.strictObject({
-    observationId: v.string(),
-    publication: publicationSchema,
-  }),
-});
-export type WorkspaceNotification = v.InferOutput<
-  typeof workspaceNotificationSchema
->;
-export type WorkspaceMessage =
-  | WorkspaceRequest
-  | WorkspaceResponse
-  | WorkspaceNotification;
+export type WorkspaceMessage = WorkspaceRequest | WorkspaceResponse;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
   if (method === "publication.remove") return copyCleanupSchema;
   if (method === "workspace.history") return workspaceHistorySchema;
   if (method === "publication.publish") return publicationSchema;
-  if (method === "publication.list" || method === "publication.observe")
-    return v.array(publicationSchema);
-  if (method === "publication.unobserve") return v.null();
+  if (method === "publication.list") return v.array(publicationSchema);
   if (method === "publication.read") return publicationPayloadSchema;
   return method === "workspace.handoff"
     ? v.strictObject({
