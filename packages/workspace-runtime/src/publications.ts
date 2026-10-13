@@ -29,9 +29,6 @@ const digest = (content: Buffer | string) =>
   createHash("sha256").update(content).digest("hex");
 export function openPublications(stateDirectory: string) {
   const root = join(stateDirectory, "publications");
-  const observers = new Set<
-    (owner: ConsumerContext, publication: Publication, scopeKey: string) => void
-  >();
   const directory = (owner: ConsumerContext) => join(root, digest(owner));
   const read = async (owner: ConsumerContext, publicationId: string) => {
     try {
@@ -109,18 +106,6 @@ export function openPublications(stateDirectory: string) {
         ...(detail === undefined ? {} : { detail }),
       };
     },
-    observe(
-      listener: (
-        owner: ConsumerContext,
-        publication: Publication,
-        scopeKey: string,
-      ) => void,
-    ) {
-      observers.add(listener);
-      return () => {
-        observers.delete(listener);
-      };
-    },
     async list(owner: ConsumerContext, scopeKey: string) {
       let names: string[];
       try {
@@ -179,14 +164,6 @@ export function openPublications(stateDirectory: string) {
         await rm(staging, { recursive: true, force: true }).catch(() => {});
         await rm(committed, { recursive: true, force: true }).catch(() => {});
         throw workspaceFailure("publication_failed");
-      }
-      // 观察只跟随已提交副本；消费端断连不能撤销发布。
-      for (const listener of observers) {
-        try {
-          listener(owner, publication, scopeKey);
-        } catch {
-          /* 观察连接可独立失效。 */
-        }
       }
       return publication;
     },

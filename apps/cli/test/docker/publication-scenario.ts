@@ -10,13 +10,14 @@ import { bundleWorkspaceClient } from "./bundle-workspace-client.ts";
 
 const repository = fileURLToPath(new URL("../../../../", import.meta.url));
 
-export async function runPublicationScenario(
-  observation = false,
-  variant?: { ticket: number; client: string; worker: string },
-) {
-  const ticket = variant?.ticket ?? (observation ? 27 : 26);
+export async function runPublicationScenario(variant: {
+  ticket: number;
+  client: string;
+  worker: string;
+}) {
+  const ticket = variant.ticket;
   const setting = (name: string) =>
-    process.env[`REINS_WRR${variant?.ticket ?? 26}_${name}`];
+    process.env[`REINS_WRR${variant.ticket}_${name}`];
   const directory = join(
     repository,
     ".artifacts",
@@ -51,11 +52,7 @@ export async function runPublicationScenario(
   ] as const;
   const fingerprints: { name: string; sha256: string }[] = [];
   await copyFile(
-    join(
-      repository,
-      "apps/cli/test/docker",
-      variant?.worker ?? "publishing-worker.ts",
-    ),
+    join(repository, "apps/cli/test/docker", variant.worker),
     join(input, "publishing-worker.ts"),
   );
   fingerprints.push({
@@ -65,12 +62,7 @@ export async function runPublicationScenario(
       .digest("hex"),
   });
   await bundleWorkspaceClient(
-    join(
-      repository,
-      "apps/cli/test/docker",
-      variant?.client ??
-        `${observation ? "publication-observation-client" : "publication-client"}.ts`,
-    ),
+    join(repository, "apps/cli/test/docker", variant.client),
     join(input, "publication-client.js"),
   );
   fingerprints.push({
