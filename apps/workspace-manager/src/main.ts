@@ -4,7 +4,7 @@ import { createConnection } from "node:net";
 import { dirname } from "node:path";
 import { parseArgs } from "node:util";
 
-import { consumerContextSchema, type ConsumerContext } from "@reins/protocol";
+import type { ConsumerContext } from "@reins/protocol";
 import { createUnixSocketServer } from "@reins/transport";
 import {
   WORKSPACE_PROTOCOL_MAJOR_VERSION,
@@ -17,7 +17,6 @@ import {
   workspaceHarnesses,
   workspaceFailure,
   openWorkspaceRuntime,
-  deleteWorkspaceHistory,
   parseCodexAuthBindings,
   parseQoderAuthBindings,
 } from "@reins/workspace-runtime";
@@ -28,28 +27,17 @@ import * as v from "valibot";
 async function main() {
   if (process.argv.length > 2) {
     const action = process.argv[2];
-    if (!["history-delete", "inspect", "recover", "release"].includes(action!))
+    if (!["inspect", "recover", "release"].includes(action!))
       throw new Error("Unknown Workspace Manager administration command");
     const { values } = parseArgs({
       args: process.argv.slice(3),
       options: {
         "consumer-context": { type: "string" },
         cwd: { type: "string" },
-        "all-worktrees": { type: "boolean" },
         "session-disposition": { type: "string" },
       },
     });
-    if (
-      action === "history-delete" &&
-      (values.cwd !== undefined) === (values["all-worktrees"] === true)
-    )
-      throw new Error("Specify either --cwd or --all-worktrees");
-    if (
-      action !== "history-delete" &&
-      (values.cwd === undefined ||
-        values["all-worktrees"] !== undefined ||
-        values["consumer-context"] !== undefined)
-    )
+    if (values.cwd === undefined || values["consumer-context"] !== undefined)
       throw new Error("Specify --cwd for attachment administration");
     const disposition = values["session-disposition"];
     if (
@@ -66,43 +54,30 @@ async function main() {
     await mkdir(stateDirectory, { recursive: true, mode: 0o700 });
     const release = await lockfile.lock(stateDirectory);
     try {
-      if (action !== "history-delete") {
-        const runtime = await openWorkspaceRuntime({ stateDirectory });
-        try {
-          const inspected = await runtime.inspectAttachment(values.cwd!);
-          if (action === "recover" && inspected.ownership !== "attached")
-            throw workspaceFailure("attachment_not_found");
-          const result =
-            action === "release"
-              ? await runtime.detach(
-                  values.cwd!,
-                  inspected.consumerContext,
-                  disposition as "kill" | "require_none",
-                )
-              : action === "recover"
-                ? {
-                    ...inspected,
-                    binding: {
-                      REINS_CONSUMER_CONTEXT: inspected.consumerContext,
-                    },
-                  }
-                : inspected;
-          console.log(JSON.stringify(result));
-        } finally {
-          await runtime.close();
-        }
-        return;
+      const runtime = await openWorkspaceRuntime({ stateDirectory });
+      try {
+        const inspected = await runtime.inspectAttachment(values.cwd);
+        if (action === "recover" && inspected.ownership !== "attached")
+          throw workspaceFailure("attachment_not_found");
+        const result =
+          action === "release"
+            ? await runtime.detach(
+                values.cwd,
+                inspected.consumerContext,
+                disposition as "kill" | "require_none",
+              )
+            : action === "recover"
+              ? {
+                  ...inspected,
+                  binding: {
+                    REINS_CONSUMER_CONTEXT: inspected.consumerContext,
+                  },
+                }
+              : inspected;
+        console.log(JSON.stringify(result));
+      } finally {
+        await runtime.close();
       }
-      const owner = v.parse(consumerContextSchema, values["consumer-context"]);
-      console.log(
-        JSON.stringify(
-          await deleteWorkspaceHistory({
-            stateDirectory,
-            owner,
-            ...(values.cwd === undefined ? {} : { cwd: values.cwd }),
-          }),
-        ),
-      );
     } finally {
       await release();
     }
@@ -262,12 +237,6 @@ async function main() {
             return runtime.publications.remove(
               consumer,
               request.params.publicationId,
-            );
-          case "workspace.history":
-            return runtime.history(
-              request.params.cwd,
-              consumer,
-              request.params.allWorktrees,
             );
           case "workspace.handoff": {
             const incoming = await sourceBridge.receive(
