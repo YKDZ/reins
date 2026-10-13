@@ -1,8 +1,5 @@
 import {
   consumerContextSchema,
-  daemonGenerationSchema,
-  eventIdSchema,
-  domainEventSchema,
   nativeViewLossSchema,
   sessionIdSchema,
   machineErrorSchema,
@@ -220,22 +217,6 @@ export const workspaceDetachmentSchema = v.strictObject({
 export type WorkspaceDetachment = v.InferOutput<
   typeof workspaceDetachmentSchema
 >;
-export const workspaceHistoryHealthSchema = v.strictObject({
-  status: v.picklist(["available", "unavailable", "failed", "deleted"]),
-  integrity: v.literal("unknown"),
-  errors: v.array(v.picklist(["write_failed", "read_failed"])),
-});
-export type WorkspaceHistoryHealth = v.InferOutput<
-  typeof workspaceHistoryHealthSchema
->;
-export const workspaceHistoryEventSchema = v.strictObject({
-  daemonGeneration: daemonGenerationSchema,
-  eventId: eventIdSchema,
-  event: domainEventSchema,
-});
-export type WorkspaceHistoryEvent = v.InferOutput<
-  typeof workspaceHistoryEventSchema
->;
 export const preparationSchema = v.strictObject({
   cwd: v.string(),
   root: v.string(),
@@ -292,7 +273,6 @@ export const preparationSchema = v.strictObject({
     ]),
   ),
   detachment: v.optional(workspaceDetachmentSchema),
-  history: workspaceHistoryHealthSchema,
   preparation: v.strictObject({
     attempts: v.array(
       v.strictObject({
@@ -381,7 +361,6 @@ export const workspaceMethods = [
   "publication.list",
   "publication.read",
   "publication.remove",
-  "workspace.history",
   "workspace.handoff",
   "workspace.locate",
   "initialize",
@@ -398,7 +377,6 @@ export type WorkspaceParams = {
   "publication.list": { cwd: string };
   "publication.read": { publicationId: string };
   "publication.remove": { publicationId: string };
-  "workspace.history": { cwd: string; allWorktrees?: boolean };
   "workspace.handoff": v.InferOutput<typeof sourceHandoffSchema>;
   "workspace.locate": { workspaceHandle: WorkspaceHandle };
   initialize: {
@@ -420,32 +398,11 @@ export type WorkspaceParams = {
     sessionDisposition: "require_none" | "kill";
   };
 };
-export const workspaceHistorySchema = v.strictObject({
-  entries: v.array(
-    v.strictObject({
-      cwd: v.string(),
-      root: v.string(),
-      environment: environmentDefinitionSchema,
-      environmentFingerprint: v.string(),
-      harnesses: v.array(
-        v.strictObject({
-          harness: harnessSchema,
-          runtimeFingerprint: v.string(),
-        }),
-      ),
-      health: workspaceHistoryHealthSchema,
-      events: v.array(workspaceHistoryEventSchema),
-    }),
-  ),
-  integrity: v.literal("unknown"),
-});
-export type WorkspaceHistory = v.InferOutput<typeof workspaceHistorySchema>;
 export type WorkspaceResults = {
   "publication.publish": Publication;
   "publication.list": Publication[];
   "publication.read": v.InferOutput<typeof publicationPayloadSchema>;
   "publication.remove": CopyCleanup;
-  "workspace.history": v.InferOutput<typeof workspaceHistorySchema>;
   "workspace.handoff": {
     workspaceHandle: WorkspaceHandle;
     workspace: ManagedWorkspaceInfo;
@@ -484,15 +441,6 @@ export const workspaceRequestSchema = v.variant("method", [
     requestId: v.string(),
     method: v.literal("publication.remove"),
     params: v.strictObject({ publicationId: publicationIdSchema }),
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("workspace.history"),
-    params: v.strictObject({
-      cwd: v.string(),
-      allWorktrees: v.optional(v.boolean()),
-    }),
   }),
   v.strictObject({
     kind: v.literal("request"),
@@ -580,7 +528,6 @@ export type WorkspaceResponse = v.InferOutput<typeof workspaceResponseSchema>;
 export type WorkspaceMessage = WorkspaceRequest | WorkspaceResponse;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
   if (method === "publication.remove") return copyCleanupSchema;
-  if (method === "workspace.history") return workspaceHistorySchema;
   if (method === "publication.publish") return publicationSchema;
   if (method === "publication.list") return v.array(publicationSchema);
   if (method === "publication.read") return publicationPayloadSchema;

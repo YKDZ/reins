@@ -1,6 +1,6 @@
 # 原生工作树准备
 
-`reins workspace harnesses|attach|status|history|detach` 以当前目录或 `-C` 选定已经存在的 Git worktree。调用方 launcher 继续显式提供 `REINS_CONSUMER_CONTEXT`；这不是 CLI 动作参数，也不会进入结果。附着不会创建 worker 或回合。
+`reins workspace harnesses|attach|status|detach` 以当前目录或 `-C` 选定已经存在的 Git worktree。调用方 launcher 继续显式提供 `REINS_CONSUMER_CONTEXT`；这不是 CLI 动作参数，也不会进入结果。附着不会创建 worker 或回合。
 
 项目在 worktree 根目录的 `.reins/workspace.json` 显式绑定部署材料：
 
@@ -34,7 +34,7 @@ reins workspace status -C /absolute/worktree/src
 reins workspace detach -C /absolute/worktree --session-disposition require_none
 ```
 
-Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略，不猜测凭据来源。Manager／shared client 的附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。CLI `attach` 等待同一次准备终态，失败时输出完整准备事实并非零退出；合法准备中不会成为失败，只读状态请求超时会重新查询。逐 harness 阶段、源码身份验证、runtime 状态和本地历史健康分别投影；`preparation.attempts` 保留每次准备的状态及原错误。
+Manager 将原生 worktree、专属 Git metadata 和公共 Git metadata 直接绑定到相同绝对路径，并核对底层 device/inode。它为附着创建独占可写 home 和 daemon state；没有宿主 home 挂载或扫描。省略凭据保持省略，不猜测凭据来源。Manager／shared client 的附着受理返回 `preparing`，不把完整 Docker 准备绑在短连接请求上；调用方通过 `status` 观察 `ready` 或具体失败。CLI `attach` 等待同一次准备终态，失败时输出完整准备事实并非零退出；合法准备中不会成为失败，只读状态请求超时会重新查询。逐 harness 阶段、源码身份验证和 runtime 状态分别投影；`preparation.attempts` 保留每次准备的状态及原错误。
 
 Codex 0.162.0 的 Docker 支持包提供单文件 ChatGPT 登录绑定。部署者在 Manager launcher 显式提供 `REINS_CODEX_AUTH_BINDINGS`，其值是凭据引用到绝对 `auth.json` 路径的 JSON 映射，例如 `{"selected-login":"/private/selected-auth.json"}`；项目绑定只写 `{"ref":"code","harness":"codex","credentialBindingRef":"selected-login"}`。路径和 secret 均不经过工作区动作协议；目录发现只返回非秘密引用及支持事实，不读取源文件或启动模型。
 
@@ -85,21 +85,7 @@ reins workspace receipts --directory /absolute/receipts
 
 共享客户端提供相同的 `publication.list` 查询、`receivePublication` 和 `receipts`。接收提交本地可用文件后才返回 `arrived`、来源、大小及实际 `localPath`；失败返回 `receipt_failed`，保留已成功发布的副本。发布和接收查询均限 launcher 绑定的消费者，跨消费者发布标识按不存在处理。本链可直接用于原生工作树附着，无需源码交接。回合完成、回复中的路径和发布成功都不会自动接收文件。
 
-`reins workspace history -C /absolute/worktree` 显式查询当前消费者在该真实工作树各次附着中实际收到的类型化历史；`--all-worktrees` 聚合当前消费者的工作树。它与当前代的会话列表、有界 `attach` 回放窗口分别存在。记录回显当时的环境与 harness 运行指纹，不暴露内部沿袭或附着代际标识。同一真实工作树脱离再附着可以查到前代；删除后在同一路径新建的工作树具有新的沿袭。
-
-历史日志在 Manager 状态目录中，位于可销毁环境之外，按收到的原始类型化事件追加并同步；同一 daemon 世代及会话内，重复订阅收到的同一事件只保存一次。查询的 `integrity: unknown` 明确表示这些记录不能证明尚未收到的事件或断连期间的事实齐全。历史健康单独投影写入、读取故障及未保存状态；故障不会改变已有回合终态，也不会为缺失记录编造事件。
-
-脱离始终保留历史。管理员需要删除历史时，先停止使用同一状态目录的 Manager，再通过发行的独立管理入口执行：
-
-```sh
-REINS_WORKSPACE_MANAGER_STATE_DIR=/absolute/manager-state \
-  reins-workspace-manager history-delete \
-  --consumer-context explicit-owner --cwd /absolute/worktree
-```
-
-管理命令使用同一状态目录的独占 lease，只删除明确消费者与真实工作树沿袭的历史，不删除源码、已发布副本或附着事实。它不进入普通消费者 CLI 候选。没有第二台真实管理器的复制协议、隐含保留期限或自动历史回收。
-
-丢失消费者绑定时，先停止同一状态目录的 Manager，再使用同一独占 lease 的必要管理入口检查原 attachment、真实容器存在状态、daemon 会话和保留历史：
+丢失消费者绑定时，先停止同一状态目录的 Manager，再使用同一独占 lease 的必要管理入口检查原 attachment、真实容器存在状态和 daemon 会话：
 
 ```sh
 export REINS_WORKSPACE_MANAGER_STATE_DIR=/absolute/manager-state
@@ -116,7 +102,7 @@ reins-workspace-manager release --cwd /absolute/worktree --session-disposition r
 reins-workspace-manager release --cwd /absolute/worktree --session-disposition kill
 ```
 
-释放沿用普通 detach 的实际停止证明与逐步续行；存活会话使 `require_none` 拒绝，`kill` 不能证明停止时也不释放归属。管理员明确解决 provider 故障后，可以重复相同 release 只续剩余步骤。返回 `released` 后，新消费者才通过正常 `workspace attach` 建立自己的沿袭；旧会话与历史仍属于原消费者，不能改名收养。管理入口不登记到普通 agent 能力、帮助或错误候选，不提供 force rebind，也不建立通用管理平台。
+释放沿用普通 detach 的实际停止证明与逐步续行；存活会话使 `require_none` 拒绝，`kill` 不能证明停止时也不释放归属。管理员明确解决 provider 故障后，可以重复相同 release 只续剩余步骤。返回 `released` 后，新消费者才通过正常 `workspace attach` 建立自己的沿袭；旧会话仍属于原消费者，不能改名收养。管理入口不登记到普通 agent 能力、帮助或错误候选，不提供 force rebind，也不建立通用管理平台。
 
 已发布副本跨环境脱离保留；脱离后仍以原工作目录查询并显式接收。发布记录的 `storagePath` 是 Manager 上的实际固定副本位置；接收记录的 `localPath` 是消费者可使用的文件，`receiptId` 用于明确选择该次接收。同一发布可接收多次，接收不会删除发布。
 
@@ -125,4 +111,4 @@ reins workspace remove-publication pub-<uuid>
 reins workspace remove-receipt receipt-<uuid> --directory /absolute/receipts
 ```
 
-共享客户端分别使用 `request("publication.remove", { publicationId })` 与 `removeReceipt(directory, receiptId)`。每次只清理明确选中的当前消费者副本；另一端、未选副本、原生 Git 引用／对象、活动工作树和本地历史均独立保留。结果报告 `released` 或 `failed`，并列出目录、元数据和 payload 的实际 `present`／`absent`／`unknown` 状态；失败不冒充已经释放，CLI 非零退出。调用方修正原因后可再次明确清理同一副本；重复清理已经消失的副本返回实际为空的释放结果。产品副本清理不包含平台回收或 Git GC。
+共享客户端分别使用 `request("publication.remove", { publicationId })` 与 `removeReceipt(directory, receiptId)`。每次只清理明确选中的当前消费者副本；另一端、未选副本、原生 Git 引用／对象和活动工作树均独立保留。结果报告 `released` 或 `failed`，并列出目录、元数据和 payload 的实际 `present`／`absent`／`unknown` 状态；失败不冒充已经释放，CLI 非零退出。调用方修正原因后可再次明确清理同一副本；重复清理已经消失的副本返回实际为空的释放结果。产品副本清理不包含平台回收或 Git GC。

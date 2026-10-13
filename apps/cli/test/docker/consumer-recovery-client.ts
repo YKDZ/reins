@@ -197,15 +197,6 @@ async function turn(
 try {
   const control = await attach();
   const first = await turn(control, "original-worker");
-  const beforeHistory = await manager.request("workspace.history", {
-    cwd: task.worktree,
-  });
-  assert.ok(
-    beforeHistory.entries.some((entry) =>
-      entry.events.some((event) => event.event.type === "turn.completed"),
-    ),
-  );
-  await record("originalHistory", beforeHistory);
   // 短命 CLI 完成并退出，不释放 attachment；另一消费者仍不能附着。
   const short = await command(process.execPath, [
     join(task.installed, "dist/reins.js"),
@@ -245,7 +236,6 @@ try {
         session.sessionId === first.target.sessionId,
     ),
   );
-  assert.deepEqual(facts.history, beforeHistory);
   const pidAlive = await command("docker", [
     "exec",
     facts.runtime.containerId,
@@ -279,11 +269,7 @@ try {
       (session) => session.sessionId === first.target.sessionId,
     ),
   );
-  assert.deepEqual(
-    await manager.request("workspace.history", { cwd: task.worktree }),
-    beforeHistory,
-  );
-  await record("originalBindingRestoredSameSessionAndHistory", listed);
+  await record("originalBindingRestoredSameSession", listed);
   const failing = await turn(restored, "unstoppable-worker", true);
   await stopManager();
   const busy = await admin("release", [
@@ -353,10 +339,6 @@ try {
   assert.equal(missing.stdout.trim(), "");
   const releasedInspect = JSON.parse((await admin("inspect")).stdout);
   assert.equal(releasedInspect.ownership, "released");
-  assert.deepEqual(
-    releasedInspect.history.entries[0].events,
-    retained.history.entries[0].events,
-  );
   const noRecovery = await admin("recover");
   assert.notEqual(noRecovery.status, 0);
   assert.match(noRecovery.stderr, /attachment_not_found/);
@@ -373,28 +355,9 @@ try {
   assert.ok("error" in hidden, JSON.stringify(hidden));
   assert.equal(hidden.error.code, "session_not_found");
   await record("oldSessionNotInherited", hidden);
-  const newHistory = await manager.request("workspace.history", {
-    cwd: task.worktree,
-  });
-  assert.equal(newHistory.entries.length, 1);
-  assert.deepEqual(newHistory.entries[0]!.events, []);
-  const oldReader = await connect(original);
-  const oldHistory = await oldReader.request("workspace.history", {
-    cwd: task.worktree,
-  });
-  assert.deepEqual(
-    oldHistory.entries[0]!.events,
-    retained.history.entries[0].events,
-  );
-  oldReader.close();
   const nextTurn = await turn(next, "new-consumer-worker");
   assert.notEqual(nextTurn.target.sessionId, first.target.sessionId);
-  await record("newConsumerIndependentLineage", {
-    empty,
-    newHistory,
-    oldHistory,
-    nextTurn,
-  });
+  await record("newConsumerIndependentLineage", { empty, nextTurn });
   const cleanup = await manager.request(
     "workspace.detach",
     { cwd: task.worktree, sessionDisposition: "kill" },

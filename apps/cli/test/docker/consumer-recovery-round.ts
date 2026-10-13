@@ -327,11 +327,11 @@ assert.equal(bootstrap.status, 0);
 const scenario = await command(
   process.execPath,
   [
-    join(base, "durable-history-client.js"),
+    join(base, "consumer-recovery-client.js"),
     JSON.stringify({ base, installed, worktree, git, env }),
   ],
   base,
   env,
 );
-await record("historyScenario", scenario);
+await record("consumerRecovery", scenario);
 assert.equal(scenario.status, 0, scenario.stderr);

@@ -17,7 +17,7 @@ import type {
   AgentSubscription,
   AgentSubscriptionEnd,
 } from "./subscription.ts";
-import { createWorkspaceClient, projectWorkspaceHistory } from "./workspace.ts";
+import { createWorkspaceClient } from "./workspace.ts";
 
 export {
   commandOutcomeUnknownSchema,
@@ -42,7 +42,7 @@ export type ReinsClient = Omit<
 >;
 export type ControlEvent = AgentEvent;
 export type ControlSubscriptionEnd = AgentSubscriptionEnd;
-export { createWorkspaceClient, projectWorkspaceHistory };
+export { createWorkspaceClient };
 export type { GitImportChanges, GitImportResult } from "./git-import.ts";
 
 export function createReinsClient(

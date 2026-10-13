@@ -18,7 +18,6 @@ import {
   type WorkspaceParams,
   type WorkspaceResults,
   type WorkspaceHandle,
-  type WorkspaceHistory,
 } from "@reins/workspace-protocol";
 import * as v from "valibot";
 
@@ -30,10 +29,6 @@ import {
 } from "./control.ts";
 import { importGitPublication } from "./git-import.ts";
 import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
-import {
-  createAgentFact,
-  createPresentationProjector,
-} from "./subscription.ts";
 export type WorkspaceControlClient = Omit<
   ReinsClient,
   "request" | "subscribe" | "prepareOperation" | "executeOperation"
@@ -50,21 +45,6 @@ export type WorkspaceControlClient = Omit<
   ): Promise<ProtocolResponseFor<SideEffectMethod>>;
   subscribe: ReinsClient["subscribe"];
 };
-
-export function projectWorkspaceHistory(history: WorkspaceHistory) {
-  return {
-    ...history,
-    entries: history.entries.map(({ events, ...attachment }) => {
-      const project = createPresentationProjector();
-      return {
-        ...attachment,
-        events: events.flatMap(({ daemonGeneration, eventId, event }) =>
-          project(createAgentFact(event, eventId, daemonGeneration)),
-        ),
-      };
-    }),
-  };
-}
 
 export function createWorkspaceClient(
   connection: TransportConnection<WorkspaceMessage>,
@@ -170,11 +150,6 @@ export function createWorkspaceClient(
       listReceipts(options.consumerContext, directory),
     removeReceipt: (directory: string, receiptId: string) =>
       removeReceipt(options.consumerContext, directory, receiptId),
-    async history(params: WorkspaceParams["workspace.history"]) {
-      return projectWorkspaceHistory(
-        await request("workspace.history", params),
-      );
-    },
     async importGitPublication(
       publicationId: string,
       destination: { repository: string; reference: string; commit: string },
