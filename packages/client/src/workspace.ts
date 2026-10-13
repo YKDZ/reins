@@ -1,13 +1,9 @@
 import type {
   ConsumerContext,
-  WaitResult,
   ProtocolMessage,
   ProtocolMethod,
   ProtocolParams,
-  ProtocolResponse,
-  ProtocolResult,
   SideEffectMethod,
-  AttachParams,
 } from "@reins/protocol";
 import {
   createUnixSocketClient,
@@ -16,10 +12,6 @@ import {
 import {
   WORKSPACE_PROTOCOL_MAJOR_VERSION,
   workspaceResponseSchema,
-  workspaceErrorSchema,
-  type WorkspaceError,
-  workspaceNotificationSchema,
-  type Publication,
   workspaceResultSchemaFor,
   type WorkspaceMessage,
   type WorkspaceMethod,
@@ -37,34 +29,6 @@ import {
 } from "./control.ts";
 import { importGitPublication } from "./git-import.ts";
 import { receivePublication, listReceipts, removeReceipt } from "./receipts.ts";
-import {
-  type AgentEvent,
-  type AgentSubscription,
-  type AgentSubscriptionEnd,
-} from "./subscription.ts";
-
-export type WorkspaceAgentEvent =
-  | AgentEvent
-  | { type: "publication.ready"; publication: Publication };
-export type WorkspaceAgentSubscriptionEnd = AgentSubscriptionEnd & {
-  publicationError?: WorkspaceError;
-};
-export type WorkspaceAgentSubscription = Omit<
-  AgentSubscription,
-  "done" | "onEvent"
-> & {
-  readonly done: Promise<WorkspaceAgentSubscriptionEnd>;
-  onEvent(listener: (event: WorkspaceAgentEvent) => void): () => void;
-};
-type WorkspaceControlResult<M extends ProtocolMethod> = ProtocolResult<M> &
-  (M extends "wait"
-    ? { publications?: Publication[]; publicationError?: WorkspaceError }
-    : unknown);
-type WorkspaceProtocolResponseFor<M extends ProtocolMethod> =
-  | Extract<ProtocolResponse, { readonly error: unknown }>
-  | (Omit<Extract<ProtocolResponse, { readonly result: unknown }>, "result"> & {
-      readonly result: WorkspaceControlResult<M>;
-    });
 export type WorkspaceControlClient = Omit<
   ReinsClient,
   "request" | "subscribe" | "prepareOperation" | "executeOperation"
@@ -73,13 +37,13 @@ export type WorkspaceControlClient = Omit<
     method: M,
     params: ProtocolParams<M>,
     timeoutMs?: number,
-  ): Promise<WorkspaceProtocolResponseFor<M>>;
+  ): Promise<ProtocolResponseFor<M>>;
   retry(
     token: string,
     params: unknown,
     timeoutMs?: number,
   ): Promise<ProtocolResponseFor<SideEffectMethod>>;
-  subscribe(params: AttachParams): Promise<WorkspaceAgentSubscription>;
+  subscribe: ReinsClient["subscribe"];
 };
 
 export function createWorkspaceClient(
@@ -92,32 +56,16 @@ export function createWorkspaceClient(
     string,
     { resolve: (message: unknown) => void; reject: (reason: unknown) => void }
   >();
-  const observations = new Map<string, (publication: Publication) => void>();
   const managerClosed = new Set<() => void>();
   const fail = (code: string) => {
     closed = true;
     for (const entry of pending.values()) entry.reject({ code });
     pending.clear();
-    observations.clear();
     for (const listener of managerClosed) listener();
   };
   const unsubscribe = connection.onEvent((event) => {
     if (event.kind !== "message") {
       fail("manager_disconnected");
-      return;
-    }
-    if (event.message.kind === "notification") {
-      const notification = v.safeParse(
-        workspaceNotificationSchema,
-        event.message,
-      );
-      if (!notification.success) {
-        fail("invalid_manager_response");
-        return;
-      }
-      observations.get(notification.output.params.observationId)?.(
-        notification.output.params.publication,
-      );
       return;
     }
     const response = v.safeParse(workspaceResponseSchema, event.message);
@@ -181,22 +129,6 @@ export function createWorkspaceClient(
       }
     });
   };
-  const discover = async (
-    cwd: string,
-  ): Promise<
-    { publications: Publication[] } | { publicationError: WorkspaceError }
-  > => {
-    try {
-      return { publications: await request("publication.list", { cwd }) };
-    } catch (error) {
-      const failure = v.safeParse(workspaceErrorSchema, error);
-      return {
-        publicationError: failure.success
-          ? failure.output
-          : { code: "invalid_manager_response" },
-      };
-    }
-  };
   return {
     initialize: () =>
       request("initialize", {
@@ -251,89 +183,7 @@ export function createWorkspaceClient(
         ...client,
         async request(method, params, timeoutMs) {
           await admit(method, params);
-          const response = await client.request(method, params, timeoutMs);
-          if (method === "wait" && "result" in response)
-            return {
-              ...response,
-              result: {
-                ...(response.result as WaitResult),
-                ...(await discover(route.cwd)),
-              },
-            };
-          return response;
-        },
-        async subscribe(params) {
-          const observationId = `observation${++sequence}`;
-          const seen = new Set<string>();
-          const queued: WorkspaceAgentEvent[] = [];
-          const listeners = new Set<(event: WorkspaceAgentEvent) => void>();
-          let active = true;
-          const emit = (event: WorkspaceAgentEvent) => {
-            if (!active) return;
-            queued.push(event);
-            if (listeners.size === 0) return;
-            for (const item of queued.splice(0))
-              for (const listener of Array.from(listeners)) listener(item);
-          };
-          const receive = (publication: Publication) => {
-            if (seen.has(publication.publicationId)) return;
-            seen.add(publication.publicationId);
-            emit({ type: "publication.ready", publication });
-          };
-          const cleanup = () => {
-            active = false;
-            observations.delete(observationId);
-            void request("publication.unobserve", { observationId }).catch(
-              () => undefined,
-            );
-          };
-          observations.set(observationId, receive);
-          try {
-            // 成果是工作区快照与live事实，不借用daemon的有界事件游标。
-            for (const publication of await request("publication.observe", {
-              cwd: route.cwd,
-              observationId,
-            }))
-              receive(publication);
-            const subscription = await client.subscribe(params);
-            const unsubscribe = subscription.onEvent(emit);
-            const done = subscription.done
-              .then(async (end) => {
-                // 两条既有连接的到达顺序独立，结束前查询补齐已保存成果。
-                const discovered = await discover(route.cwd);
-                if ("publicationError" in discovered)
-                  return {
-                    ...end,
-                    publicationError: discovered.publicationError,
-                  };
-                for (const publication of discovered.publications)
-                  receive(publication);
-                return end;
-              })
-              .finally(() => {
-                unsubscribe();
-                cleanup();
-              });
-            void done.catch(() => undefined);
-            return {
-              establishment: subscription.establishment,
-              done,
-              onEvent(listener) {
-                listeners.add(listener);
-                for (const event of queued.splice(0))
-                  for (const current of Array.from(listeners)) current(event);
-                return () => {
-                  listeners.delete(listener);
-                };
-              },
-              close() {
-                subscription.close();
-              },
-            };
-          } catch (error) {
-            cleanup();
-            throw error;
-          }
+          return client.request(method, params, timeoutMs);
         },
         close() {
           managerClosed.delete(onManagerClosed);
