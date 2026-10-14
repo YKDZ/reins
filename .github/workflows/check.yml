@@ -76,7 +76,7 @@ jobs:
           --log-prefix=task
 
   package-smoke:
-    name: Package and Disposable Platform
+    name: 发行包烟测
     runs-on: ubuntu-24.04
     timeout-minutes: 150
     steps:
@@ -97,13 +97,13 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Verify the release package and disposable platform
+      - name: 验证发行候选包并执行正式 npm 烟测
         env:
           TURBO_LOG_ORDER: grouped
           TURBO_LOG_PREFIX: task
           TURBO_OUTPUT_LOGS: errors-only
-        run: pnpm exec turbo run test:docker --filter=@reins/test-platform --filter=./apps/cli
-      - name: Upload the verified release package
+        run: pnpm exec turbo run //#release:npm-smoke
+      - name: 上传已验证的发行候选包
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: release-package
@@ -113,18 +113,12 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 3
-      - name: Upload test evidence
+      - name: 上传 npm 烟测证据
         if: always()
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: test-platform-evidence
-          path: |
-            .artifacts/packed-cli-smoke/**
-            .artifacts/acceptance-input/**
-            .artifacts/reins-wrr*/**
-            .artifacts/s1-docker/**/evidence/**
-            .artifacts/acceptance-docker/evidence/**
-            .artifacts/recovery-docker/evidence/**
+          name: npm-smoke-evidence
+          path: .artifacts/packed-cli-smoke/**
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7

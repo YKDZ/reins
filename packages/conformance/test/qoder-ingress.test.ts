@@ -138,7 +138,6 @@ async function runFixture(
       harness: "qoder",
       message: "fixture replay",
       cwd: "/tmp",
-      model: "qwen3.7-flash",
       authorizationMode: "interactive",
     });
     if ("error" in spawned) throw new Error(JSON.stringify(spawned.error));

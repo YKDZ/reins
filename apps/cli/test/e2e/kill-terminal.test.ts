@@ -1,5 +1,5 @@
 import { spawn, type ChildProcess } from "node:child_process";
-import { readFileSync, watch } from "node:fs";
+import { readFileSync } from "node:fs";
 import {
   access,
   mkdir,
@@ -59,29 +59,20 @@ function processState(pid: number): string {
 }
 
 async function nativeReady(cwd: string): Promise<void> {
-  // 等真实原生接收回执；只使用测试自身的截止时间，不为每个启动阶段另设一秒门槛。
-  await new Promise<void>((resolve, reject) => {
-    const ready = () => {
-      void readFile(join(cwd, "turn-started.txt"), "utf8").then(
-        (message) => {
-          if (message.length > 0) {
-            watcher.close();
-            resolve();
-          }
-        },
-        (error: NodeJS.ErrnoException) => {
-          if (error.code !== "ENOENT") {
-            watcher.close();
-            reject(error);
-          }
-        },
-      );
-    };
-    const watcher = watch(cwd, ready);
-    watcher.on("error", reject);
-    cleanup.push(async () => watcher.close());
-    ready();
-  });
+  // 读取原生 worker 的调用回执，避免把宿主 watcher 配额作为用例前置条件。
+  const deadline = Date.now() + 5_000;
+  while (true) {
+    try {
+      if ((await readFile(join(cwd, "turn-started.txt"), "utf8")).length > 0)
+        return;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    }
+    const remaining = deadline - Date.now();
+    if (remaining <= 0)
+      throw new Error("原生 worker 未在用例时限内记录回合启动");
+    await new Promise((resolve) => setTimeout(resolve, Math.min(10, remaining)));
+  }
 }
 
 async function fixture() {

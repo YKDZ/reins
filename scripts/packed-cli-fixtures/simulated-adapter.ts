@@ -99,9 +99,7 @@ const simulatedDriverFactory: AdapterDriverFactory = ({ emit }) => {
           ...(typeof parsed.messages === "number"
             ? { messages: parsed.messages }
             : {}),
-          ...(typeof parsed.reply === "string"
-            ? { reply: parsed.reply }
-            : {}),
+          ...(typeof parsed.reply === "string" ? { reply: parsed.reply } : {}),
           ...(replacement !== undefined &&
           typeof replacement.draft === "string" &&
           typeof replacement.corrected === "string"

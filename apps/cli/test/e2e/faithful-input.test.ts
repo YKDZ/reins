@@ -415,12 +415,22 @@ test.each(["permission", "session-permission"])(
     if (requested.type !== "permission.requested")
       throw new Error("Missing permission");
     const feedback = "  caller feedback\nsecond line  ";
+    const resolve = async (args: readonly string[]) => {
+      const prepared = await cli(["prepare-operation", "resolve-permission"]);
+      expect(prepared.exitCode, `${prepared.stdout}\n${prepared.stderr}`).toBe(
+        0,
+      );
+      const credential = controlData(prepared).credential;
+      if (typeof credential !== "string")
+        throw new Error("执行凭据缺失");
+      return cli([...args, "--operation", credential]);
+    };
     if (message === "permission") {
       expect(requested.options).toEqual([
         { outcome: "allow", scope: "once" },
         { outcome: "deny", feedback: true },
       ]);
-      const wrong = await cli([
+      const wrong = await resolve([
         "resolve-permission",
         encodePermissionHandle({
           sessionId: target.sessionId,
@@ -432,11 +442,11 @@ test.each(["permission", "session-permission"])(
         "--scope",
         "session",
       ]);
-      expect(wrong.exitCode).toBe(65);
-      expect(JSON.parse(wrong.stdout)).toMatchObject({
+      expect(wrong.exitCode).toBe(70);
+      expect(controlData(wrong).failure).toMatchObject({
         code: "permission_resolution_mismatch",
       });
-      const missing = await cli([
+      const missing = await resolve([
         "resolve-permission",
         encodePermissionHandle({
           sessionId: target.sessionId,
@@ -446,11 +456,11 @@ test.each(["permission", "session-permission"])(
         "--outcome",
         "deny",
       ]);
-      expect(missing.exitCode).toBe(65);
-      expect(JSON.parse(missing.stdout)).toMatchObject({
+      expect(missing.exitCode).toBe(70);
+      expect(controlData(missing).failure).toMatchObject({
         code: "permission_resolution_mismatch",
       });
-      const denied = await cli([
+      const denied = await resolve([
         "resolve-permission",
         encodePermissionHandle({
           sessionId: target.sessionId,
@@ -470,7 +480,7 @@ test.each(["permission", "session-permission"])(
       });
       expect(
         (
-          await cli([
+          await resolve([
             "resolve-permission",
             encodePermissionHandle({
               sessionId: target.sessionId,

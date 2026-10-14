@@ -325,7 +325,7 @@ function dataFrom(result: CliResult): OperationData {
 
 async function preparedCredential(
   env: NodeJS.ProcessEnv,
-  operation: "spawn" | "kill" | "resolve-permission",
+  operation: "spawn" | "send" | "kill" | "resolve-permission",
 ): Promise<string> {
   const result = await runCli(["prepare-operation", operation], env);
   expect(result.exitCode, `${result.stdout}\n${result.stderr}`).toBe(0);
@@ -685,7 +685,7 @@ describe("CLI 进程边界（缝 D）", () => {
         env,
       );
       expect(pretty.exitCode).toBe(0);
-      expect(pretty.stdout).toBe(`${JSON.stringify(safeRecord, null, 2)}\n`);
+      expect(JSON.parse(pretty.stdout)).toEqual({ record: safeRecord });
       expect(
         [json.stdout, json.stderr, pretty.stdout, pretty.stderr].map((text) =>
           text.includes(secretSentinel),
@@ -1084,13 +1084,15 @@ describe("CLI 进程边界（缝 D）", () => {
       expect(await waitForExit(attached.child, 5_000)).toBe(0);
       expect(attached.stderr.join("")).toBe("");
       const prefix = "Permission response prepared (not executed): ";
-      const preparedLine = attached.stdout
-        .join("")
-        .split(/\r?\n/u)
-        .find((line) => line.startsWith(prefix));
+      const preparedOutput = attached.stdout.join("");
+      const prefixIndex = preparedOutput.indexOf(prefix);
+      const preparedLine =
+        prefixIndex === -1
+          ? undefined
+          : preparedOutput.slice(prefixIndex + prefix.length).split(/\r?\n/u)[0];
       if (preparedLine === undefined)
         throw new Error("permission intent was not returned");
-      const prepared: unknown = JSON.parse(preparedLine.slice(prefix.length));
+      const prepared: unknown = JSON.parse(preparedLine);
       if (
         prepared === null ||
         typeof prepared !== "object" ||
@@ -1310,10 +1312,18 @@ describe("CLI 进程边界（缝 D）", () => {
       env,
     );
     expect(waited.exitCode).toBe(4);
-    expect(JSON.parse(waited.stdout)).toEqual({
-      status: "timeout",
-      completed: [],
-      pending: [{ turnHandle: turnHandleFrom(spawned) }],
+    expect(JSON.parse(waited.stdout)).toMatchObject({
+      schemaVersion: "1",
+      command: "wait",
+      kind: "data",
+      variant: "timeout",
+      data: {
+        result: {
+          status: "timeout",
+          completed: [],
+          pending: [{ turnHandle: turnHandleFrom(spawned) }],
+        },
+      },
     });
     await killWithCli(env, sessionId);
   });
@@ -1768,13 +1778,24 @@ describe("CLI 域错误（不夹带 usage）", () => {
 
   test("send 未知会话返回 session_not_found", async () => {
     const { env } = await freshEnv();
+    const credential = await preparedCredential(env, "send");
     const result = await runCli(
-      ["send", missingSessionId, "hi", "--placement", "new_turn"],
+      [
+        "send",
+        missingSessionId,
+        "--placement",
+        "new_turn",
+        "--message",
+        "hi",
+        "--operation",
+        credential,
+      ],
       env,
     );
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "session_not_found",
+      facts: { sessionHandle: missingSessionId },
     });
   });
 
@@ -1792,9 +1813,10 @@ describe("CLI 域错误（不夹带 usage）", () => {
       ],
       env,
     );
-    expect(result.exitCode).toBe(65);
-    expect(JSON.parse(result.stdout)).toMatchObject({
+    expect(result.exitCode).toBe(70);
+    expect(dataFrom(result).failure).toMatchObject({
       code: "session_not_found",
+      facts: { sessionHandle: missingSessionId },
     });
   });
 
@@ -1980,14 +2002,24 @@ describe("CLI 消费者绑定握手（01 票）", () => {
     expect(spawned.exitCode).toBe(0);
     const sessionId = sessionIdFrom(spawned);
 
+    const betaSendCredential = await preparedCredential(beta, "send");
     const foreignSend = await runCli(
-      ["send", sessionId, "intrude", "--placement", "new_turn"],
+      [
+        "send",
+        sessionId,
+        "--message",
+        "intrude",
+        "--placement",
+        "new_turn",
+        "--operation",
+        betaSendCredential,
+      ],
       beta,
     );
-    expect(foreignSend.exitCode).toBe(65);
-    expect(JSON.parse(foreignSend.stdout)).toMatchObject({
+    expect(foreignSend.exitCode).toBe(70);
+    expect(dataFrom(foreignSend).failure).toMatchObject({
       code: "session_not_found",
-      sessionId,
+      facts: { sessionHandle: sessionId },
     });
 
     const foreignWait = await runCli(
@@ -2001,9 +2033,10 @@ describe("CLI 消费者绑定握手（01 票）", () => {
       ],
       beta,
     );
-    expect(foreignWait.exitCode).toBe(65);
-    expect(JSON.parse(foreignWait.stdout)).toMatchObject({
+    expect(foreignWait.exitCode).toBe(70);
+    expect(dataFrom(foreignWait).failure).toMatchObject({
       code: "session_not_found",
+      facts: { sessionHandle: sessionId },
     });
 
     await killWithCli(alpha, sessionId);
