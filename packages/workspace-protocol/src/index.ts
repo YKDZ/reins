@@ -54,7 +54,6 @@ const ordinaryWorkspaceErrorSchema = v.strictObject({
     "protocol_version_mismatch",
     "invalid_request",
     "invalid_directory",
-    "source_invalid",
     "configuration_missing",
     "configuration_invalid",
     "environment_binding_missing",
@@ -257,39 +256,8 @@ export const preparationSchema = v.strictObject({
   }),
 });
 export type ManagedWorkspaceInfo = v.InferOutput<typeof preparationSchema>;
-export const workspaceHandleSchema = v.pipe(
-  v.string(),
-  v.regex(/^workspace-[a-f0-9-]{36}$/u),
-);
-export type WorkspaceHandle = v.InferOutput<typeof workspaceHandleSchema>;
-export const selectedFileSchema = v.variant("mode", [
-  v.strictObject({ path: v.string(), mode: v.literal("delete") }),
-  v.strictObject({
-    path: v.string(),
-    mode: v.picklist(["100644", "100755", "120000"]),
-    contentBase64: v.pipe(v.string(), v.maxLength(44_739_244)),
-  }),
-]);
-export type SelectedFile = v.InferOutput<typeof selectedFileSchema>;
-export const fixedCommitMaterialSchema = v.strictObject({
-  commit: v.pipe(v.string(), v.regex(/^[a-f0-9]{40}$/u)),
-  packBase64: v.pipe(v.string(), v.maxLength(44_739_244)),
-  selectedFiles: v.optional(
-    v.pipe(v.array(selectedFileSchema), v.maxLength(1024)),
-  ),
-  sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
-});
-export type FixedCommitMaterial = v.InferOutput<
-  typeof fixedCommitMaterialSchema
->;
-export const sourceHandoffSchema = v.strictObject({
-  material: fixedCommitMaterialSchema,
-  subdirectory: v.string(),
-  bindings: v.pipe(v.array(v.string()), v.minLength(1)),
-});
+
 export const workspaceMethods = [
-  "workspace.handoff",
-  "workspace.locate",
   "initialize",
   "workspace.harnesses",
   "workspace.attach",
@@ -300,8 +268,6 @@ export const workspaceMethods = [
 ] as const;
 export type WorkspaceMethod = (typeof workspaceMethods)[number];
 export type WorkspaceParams = {
-  "workspace.handoff": v.InferOutput<typeof sourceHandoffSchema>;
-  "workspace.locate": { workspaceHandle: WorkspaceHandle };
   initialize: {
     protocolMajorVersion: number;
     consumerContext: v.InferOutput<typeof consumerContextSchema>;
@@ -322,11 +288,6 @@ export type WorkspaceParams = {
   };
 };
 export type WorkspaceResults = {
-  "workspace.handoff": {
-    workspaceHandle: WorkspaceHandle;
-    workspace: ManagedWorkspaceInfo;
-  };
-  "workspace.locate": { cwd: string };
   initialize: { protocolMajorVersion: number };
   "workspace.harnesses": WorkspaceHarnessCatalog;
   "workspace.attach": ManagedWorkspaceInfo;
@@ -337,18 +298,6 @@ export type WorkspaceResults = {
 };
 const pathParamsSchema = v.strictObject({ cwd: v.string() });
 export const workspaceRequestSchema = v.variant("method", [
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("workspace.handoff"),
-    params: sourceHandoffSchema,
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("workspace.locate"),
-    params: v.strictObject({ workspaceHandle: workspaceHandleSchema }),
-  }),
   v.strictObject({
     kind: v.literal("request"),
     requestId: v.string(),
@@ -422,22 +371,15 @@ export const workspaceResponseSchema = v.union([
 export type WorkspaceResponse = v.InferOutput<typeof workspaceResponseSchema>;
 export type WorkspaceMessage = WorkspaceRequest | WorkspaceResponse;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
-  return method === "workspace.handoff"
+  return method === "initialize"
     ? v.strictObject({
-        workspaceHandle: workspaceHandleSchema,
-        workspace: preparationSchema,
+        protocolMajorVersion: v.literal(WORKSPACE_PROTOCOL_MAJOR_VERSION),
       })
-    : method === "workspace.locate"
-      ? v.strictObject({ cwd: v.string() })
-      : method === "initialize"
-        ? v.strictObject({
-            protocolMajorVersion: v.literal(WORKSPACE_PROTOCOL_MAJOR_VERSION),
-          })
-        : method === "workspace.route"
-          ? v.strictObject({ cwd: v.string(), socket: v.string() })
-          : method === "workspace.admit"
-            ? v.strictObject({ cwd: v.string() })
-            : method === "workspace.harnesses"
-              ? catalogSchema
-              : preparationSchema;
+    : method === "workspace.route"
+      ? v.strictObject({ cwd: v.string(), socket: v.string() })
+      : method === "workspace.admit"
+        ? v.strictObject({ cwd: v.string() })
+        : method === "workspace.harnesses"
+          ? catalogSchema
+          : preparationSchema;
 }

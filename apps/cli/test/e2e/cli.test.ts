@@ -1521,27 +1521,7 @@ describe("CLI 进程边界（缝 D）", () => {
     }
   });
 });
-
 describe("workspace 声明入口", () => {
-  test("handoff 一次返回全部必填问题和子命令 canonical usage", async () => {
-    const result = await runCli(["workspace", "handoff"], {
-      REINS_CONSUMER_CONTEXT: "",
-    });
-    expect(result.exitCode).toBe(64);
-    expect(result.stderr).toBe("");
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      code: "usage_error",
-      issues: [
-        { issue: "missing_argument", field: "--repository <path>" },
-        { issue: "missing_argument", field: "--commit <sha>" },
-        { issue: "missing_argument", field: "--subdirectory <path>" },
-        { issue: "missing_argument", field: "--binding <refs...>" },
-      ],
-      usage:
-        "reins workspace handoff --repository <path> --commit <sha> --subdirectory <path> --binding <refs...> [options]",
-    });
-  });
-
   test("detach 枚举错误在 JSON 与 pretty 中都走声明语法", async () => {
     const json = await runCli(
       ["workspace", "detach", "--session-disposition", "invalid"],
