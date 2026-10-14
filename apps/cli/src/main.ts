@@ -1506,13 +1506,23 @@ function createCli(version: string) {
             });
             const project = createPresentationProjector();
             const replayedFacts: AgentFact[] = [];
+            let replayFailed = false;
+            let replayFailure: ReinsSdkError | undefined;
             if (dependencies.outputFormat === "text") {
               for (
                 let index = 0;
                 index < attached.establishment.replayed;
                 index += 1
               ) {
-                const item = await attached.next();
+                let item: IteratorResult<AgentFact>;
+                try {
+                  item = await attached.next();
+                } catch (error) {
+                  if (!(error instanceof ReinsSdkError)) throw error;
+                  replayFailed = true;
+                  replayFailure = error;
+                  break;
+                }
                 if (item.done) break;
                 replayedFacts.push(item.value);
               }
@@ -1527,17 +1537,19 @@ function createCli(version: string) {
               for (const fact of replayedFacts) {
                 if (
                   fact.type === "permission.requested" &&
-                  (resolvedPermissions.has(fact.permissionHandle) ||
+                  (replayFailed ||
+                    resolvedPermissions.has(fact.permissionHandle) ||
                     completedTurns.has(fact.turnHandle))
                 )
                   nonInteractiveReplayFacts.add(fact.factId);
               }
             }
             const facts =
-              replayedFacts.length === 0
+              replayedFacts.length === 0 && !replayFailed
                 ? attached
                 : (async function* () {
                     yield* replayedFacts;
+                    if (replayFailed) throw replayFailure;
                     for await (const fact of attached) yield fact;
                   })();
             for await (const fact of facts) {

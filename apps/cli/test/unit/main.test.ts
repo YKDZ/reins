@@ -1,4 +1,5 @@
 import { CliWriteError } from "@ykdz/cli-contract";
+import { ReinsSdkError } from "@ykdz/reins-sdk";
 import type {
   AgentFact,
   AgentSubscriptionEnd,
@@ -12,6 +13,7 @@ import type {
   PermissionHandle,
   PermissionResolution,
   ReinsConnection,
+  MessageKey,
   SessionHandle,
   SpawnInput,
   SpawnResult,
@@ -355,6 +357,155 @@ test("SIGINT releases a blocked attach write and closes its connection", async (
     await running;
   }
   expect(process.listenerCount("SIGINT")).toBe(listenersBefore);
+});
+
+test("部分回放断线仍呈现已交付事实", async () => {
+  const sessionHandle = "session@g1" as SessionHandle;
+  const turnHandle = "turn1_hash" as TurnHandle;
+  const target = { scope: "session" as const, sessionHandle };
+  const deliveredFact: AgentFact = {
+    type: "text.delta",
+    factId: "fact1_hash" as AgentFact["factId"],
+    sessionHandle,
+    turnHandle,
+    messageKey: "message1_hash" as MessageKey,
+    delta: "delivered prefix",
+  };
+  let nextCalls = 0;
+  let checkpoint = "resume0_hash" as FactSubscription["checkpoint"];
+  let closeCalls = 0;
+  let connectionCloses = 0;
+  let readLineCalls = 0;
+  let rejectDone!: (error: ReinsSdkError) => void;
+  const failure = new ReinsSdkError({
+    code: "daemon_disconnected",
+    facts: {},
+  });
+  const done = new Promise<AgentSubscriptionEnd>((_resolve, reject) => {
+    rejectDone = reject;
+  });
+  const subscription: FactSubscription = {
+    establishment: {
+      target,
+      window: { oldest: 1, head: 2, truncated: false },
+      replayed: 2,
+    },
+    done,
+    get checkpoint() {
+      return checkpoint;
+    },
+    async next() {
+      nextCalls += 1;
+      if (nextCalls === 1) {
+        checkpoint = "resume1_hash" as FactSubscription["checkpoint"];
+        return { value: deliveredFact, done: false };
+      }
+      rejectDone(failure);
+      throw failure;
+    },
+    async return() {
+      this.close();
+      return { value: undefined, done: true };
+    },
+    async throw(error?: unknown) {
+      this.close();
+      throw error;
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    close() {
+      closeCalls += 1;
+    },
+  };
+  const connection = {
+    handshake: { protocolMajorVersion: 1, daemonGeneration: "g1" },
+    async capabilities() {
+      return { capabilities: [], failures: [] };
+    },
+    async list() {
+      return [];
+    },
+    async diagnostics() {
+      return { records: [], truncated: false };
+    },
+    async attach() {
+      return subscription;
+    },
+    prepareOperation<Kind extends OperationKind>(kind: Kind) {
+      return `credential-${kind}` as OperationCredential<Kind>;
+    },
+    async spawn(
+      _input: SpawnInput,
+      _credential: OperationCredential<"spawn">,
+    ): Promise<SpawnResult> {
+      return { sessionHandle, turnHandle, cwd: "/tmp" };
+    },
+    async kill(input: KillInput): Promise<KillResult> {
+      return { sessionHandle: input.sessionHandle, status: "killed" };
+    },
+    async resolvePermission(
+      permissionHandle: PermissionHandle,
+      _resolution: PermissionResolution,
+    ) {
+      return { permissionHandle, status: "resolved" as const };
+    },
+    async send(input: SendInput): Promise<SendResult> {
+      return {
+        sessionHandle:
+          input.placement === "new_turn" ? input.sessionHandle : sessionHandle,
+        turnHandle,
+        messageId: "message-test",
+        deliveryPoint: input.placement,
+      };
+    },
+    async wait(): Promise<WaitResult> {
+      return { status: "satisfied", completed: [], pending: [] };
+    },
+    async interrupt(input: InterruptInput): Promise<InterruptResult> {
+      return { turnHandle: input.turnHandle, status: "accepted" };
+    },
+    close() {
+      connectionCloses += 1;
+    },
+  } satisfies ReinsConnection;
+  const output: string[] = [];
+  const runtime: CliRuntime = {
+    argv: [
+      "node",
+      "reins",
+      "attach",
+      sessionHandle,
+      "--scope",
+      "session",
+      "--replay",
+      "available",
+      "--output-format",
+      "text",
+    ],
+    version: "test",
+    dependencies: {
+      connect: async () => connection,
+      readLine: async () => {
+        readLineCalls += 1;
+        return undefined;
+      },
+    },
+    cancelOutput() {},
+    write(item) {
+      output.push(item.chunk);
+      return Promise.resolve();
+    },
+  };
+
+  await expect(main(runtime)).resolves.toBe(70);
+  expect(output.join("")).toContain("delivered prefix");
+  expect(output.join("")).toContain("Attach failed: daemon_disconnected");
+  expect(readLineCalls).toBe(0);
+  expect(nextCalls).toBe(2);
+  expect(subscription.checkpoint).toBe("resume1_hash");
+  expect(closeCalls).toBe(1);
+  expect(connectionCloses).toBe(1);
 });
 
 test("文本观察完整呈现已解决权限历史且不重复提示", async () => {
