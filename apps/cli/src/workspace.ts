@@ -12,13 +12,8 @@ import {
   type WorkspaceMessage,
   type WorkspaceMethod,
   type WorkspaceParams,
-  type WorkspaceResults,
   type ManagedWorkspaceInfo,
 } from "@reins/workspace-protocol";
-import {
-  captureFixedCommit,
-  captureSelectedWorkingFiles,
-} from "@reins/workspace-source";
 import { Command, CommanderError } from "commander";
 import * as v from "valibot";
 
@@ -36,9 +31,7 @@ import { printError, printResult } from "./output.ts";
 export function registerWorkspaceCommands(program: Command): void {
   const workspace = program
     .command("workspace")
-    .description(
-      "Prepare native Git worktrees and receive explicit source inputs",
-    )
+    .description("管理 Reins 受控工作区中的 Harness 会话")
     .option("--pretty", "human-readable output (default: NDJSON)");
   const nativeCwd = (path?: string) =>
     resolve(path ?? (program.opts().C as string | undefined) ?? process.cwd());
@@ -79,12 +72,9 @@ export function registerWorkspaceCommands(program: Command): void {
             ? await client.request(method, params)
             : await operation(client);
         let preparation: ManagedWorkspaceInfo | undefined;
-        // CLI 等待被受理的准备；handoff 的目标 cwd 来自物化结果。
-        if (method === "workspace.attach" || method === "workspace.handoff") {
-          preparation =
-            method === "workspace.handoff"
-              ? (result as WorkspaceResults["workspace.handoff"]).workspace
-              : (result as ManagedWorkspaceInfo);
+        // CLI 等待已受理的环境准备完成。
+        if (method === "workspace.attach") {
+          preparation = result as ManagedWorkspaceInfo;
           while (preparation.runtime.status === "preparing") {
             await new Promise((resolve) => setTimeout(resolve, 2000));
             try {
@@ -97,13 +87,7 @@ export function registerWorkspaceCommands(program: Command): void {
                 throw error;
             }
           }
-          result =
-            method === "workspace.handoff"
-              ? {
-                  ...(result as WorkspaceResults["workspace.handoff"]),
-                  workspace: preparation,
-                }
-              : preparation;
+          result = preparation;
         }
         printResult(result, mode);
         if (preparation?.runtime.status === "failed")
@@ -254,29 +238,6 @@ async function runWorkspaceCommand(
         (client) =>
           client.removeReceipt(resolve(option<string>("directory")), first!),
       );
-    case "handoff": {
-      const repository = resolve(option<string>("repository"));
-      const commit = option<string>("commit");
-      const indexFile = option<string[] | undefined>("indexFile");
-      const worktreeFile = option<string[] | undefined>("worktreeFile");
-      return invoke(spec, mode, "workspace.handoff", async () => ({
-        material:
-          indexFile === undefined && worktreeFile === undefined
-            ? await captureFixedCommit(repository, commit)
-            : await captureSelectedWorkingFiles(repository, commit, [
-                ...(indexFile ?? []).map((path) => ({
-                  path,
-                  source: "index" as const,
-                })),
-                ...(worktreeFile ?? []).map((path) => ({
-                  path,
-                  source: "worktree" as const,
-                })),
-              ]),
-        subdirectory: option<string>("subdirectory"),
-        bindings: option<string[]>("binding"),
-      }));
-    }
     case "harnesses":
       return invoke(spec, mode, "workspace.harnesses", {
         cwd: nativeCwd(option<string | undefined>("C")),
