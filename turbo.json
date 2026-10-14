@@ -4,13 +4,7 @@
     "tags": {
       "app": {
         "dependencies": {
-          "allow": [
-            "client",
-            "protocol",
-            "transport",
-            "workspace-protocol",
-            "library"
-          ]
+          "allow": ["client", "protocol", "transport", "library"]
         }
       },
       "adapter": {
@@ -30,13 +24,7 @@
       },
       "client": {
         "dependencies": {
-          "allow": [
-            "client",
-            "protocol",
-            "workspace-protocol",
-            "transport",
-            "library"
-          ]
+          "allow": ["client", "protocol", "transport", "library"]
         }
       },
       "conformance": {
@@ -49,7 +37,6 @@
             "daemon",
             "event-journal",
             "protocol",
-            "workspace-protocol",
             "transport",
             "library"
           ]
@@ -86,36 +73,6 @@
       "transport": {
         "dependencies": {
           "allow": ["protocol", "library"]
-        }
-      },
-      "workspace-app": {
-        "dependencies": {
-          "allow": [
-            "client",
-            "event-journal",
-            "protocol",
-            "workspace-runtime",
-            "workspace-protocol",
-            "transport",
-            "library"
-          ]
-        }
-      },
-      "workspace-protocol": {
-        "dependencies": {
-          "allow": ["protocol", "library"]
-        }
-      },
-      "workspace-runtime": {
-        "dependencies": {
-          "allow": [
-            "workspace-protocol",
-            "client",
-            "event-journal",
-            "protocol",
-            "transport",
-            "library"
-          ]
         }
       }
     }
@@ -187,20 +144,6 @@
     "//#release:npm-smoke": {
       "cache": false,
       "dependsOn": ["//#release:verify"]
-    },
-    "//#acceptance:prepare": {
-      "cache": false,
-      "dependsOn": ["//#release:verify"]
-    },
-    "test:docker": {
-      "cache": false,
-      "passThroughEnv": [
-        "DOCKER_*",
-        "SSH_AUTH_SOCK",
-        "REMOTE_CONTAINERS_IPC",
-        "REINS_TEST_PLATFORM_IMAGE"
-      ],
-      "dependsOn": ["build", "//#release:npm-smoke", "//#acceptance:prepare"]
     }
   }
 }

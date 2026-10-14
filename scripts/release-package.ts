@@ -12,7 +12,6 @@ const sdkDistributionEntryDirectories = ["packages/sdk"] as const;
 const sdkPackageName = "@ykdz/reins-sdk";
 const workspacePackageDirectories = [
   releaseAuthorityDirectory,
-  "apps/workspace-manager",
   "packages/protocol",
   "packages/adapter-kit",
   "packages/client",
@@ -22,8 +21,6 @@ const workspacePackageDirectories = [
   "packages/transport",
   "packages/daemon",
   "packages/typescript-config",
-  "packages/workspace-protocol",
-  "packages/workspace-runtime",
   "adapters/codex",
   "adapters/dsh",
   "adapters/qoder",

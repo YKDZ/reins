@@ -506,10 +506,9 @@ async function smokePackedCli(
   if (
     !isRecord(installedManifest.bin) ||
     JSON.stringify(Object.keys(installedManifest.bin).sort()) !==
-      JSON.stringify(["reins", "reins-daemon"]) ||
-    existsSync(join(installedPackage, "dist", "reins-workspace-manager.js"))
+      JSON.stringify(["reins", "reins-daemon"])
   ) {
-    throw new Error("Packed runtime included an unpublished workspace manager");
+    throw new Error("Packed runtime CLI bins do not match the public contract");
   }
   const applicationDistribution = join(installedPackage, "dist");
   for (const name of ["application.js", "application.d.ts"] as const) {

@@ -28,11 +28,9 @@
     "scripts/packed-cli-fixtures/sdk-recoverable-control.ts",
     "scripts/packed-cli-fixtures/simulated-adapter.ts",
     "scripts/packed-cli-fixtures/types.ts",
-    "scripts/prepare-test-platform-input.ts",
     "scripts/release-package.ts",
     "scripts/run-development-cli.ts",
     "scripts/run-root-owned-task.ts",
-    "scripts/run-workspace-test-platform.ts",
     "scripts/validate-release-package.ts"
   ]
 }

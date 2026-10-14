@@ -17,7 +17,6 @@ import type {
   AgentSubscription,
   AgentSubscriptionEnd,
 } from "./subscription.ts";
-import { createWorkspaceClient } from "./workspace.ts";
 
 export {
   commandOutcomeUnknownSchema,
@@ -42,8 +41,6 @@ export type ReinsClient = Omit<
 >;
 export type ControlEvent = AgentEvent;
 export type ControlSubscriptionEnd = AgentSubscriptionEnd;
-export { createWorkspaceClient };
-
 export function createReinsClient(
   connection: TransportConnection<ProtocolMessage>,
   options: ReinsClientOptions,

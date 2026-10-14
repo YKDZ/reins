@@ -32,8 +32,6 @@ import {
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
-import { workspaceCommandSpecs } from "../../src/command-spec.ts";
-
 const repoRoot = fileURLToPath(new URL("../../../../", import.meta.url));
 const cliBin = join(repoRoot, "apps/cli/dist/reins.js");
 const daemonBin = join(repoRoot, "packages/daemon/dist/main.js");
@@ -1521,54 +1519,6 @@ describe("CLI 进程边界（缝 D）", () => {
     }
   });
 });
-describe("workspace 声明入口", () => {
-  test("detach 枚举错误在 JSON 与 pretty 中都走声明语法", async () => {
-    const json = await runCli(
-      ["workspace", "detach", "--session-disposition", "invalid"],
-      { REINS_CONSUMER_CONTEXT: "" },
-    );
-    expect(json.exitCode).toBe(64);
-    expect(JSON.parse(json.stdout)).toMatchObject({
-      code: "usage_error",
-      issues: [
-        {
-          issue: "invalid_value",
-          field: "--session-disposition",
-          value: "invalid",
-        },
-      ],
-      usage: "reins workspace detach --session-disposition <value> [options]",
-    });
-
-    const pretty = await runCli(
-      ["--pretty", "workspace", "detach", "--session-disposition", "invalid"],
-      { REINS_CONSUMER_CONTEXT: "" },
-    );
-    expect(pretty.exitCode).toBe(64);
-    expect(pretty.stdout).toBe("");
-    expect(pretty.stderr).toContain("suggestion: Allowed: require_none, kill");
-    expect(pretty.stderr).toContain("usage: reins workspace detach");
-  });
-
-  test("未知 workspace 子命令只列出实际子命令", async () => {
-    const result = await runCli(["workspace", "typo"], {
-      REINS_CONSUMER_CONTEXT: "",
-    });
-    expect(result.exitCode).toBe(64);
-    expect(JSON.parse(result.stdout)).toMatchObject({
-      issues: [
-        {
-          issue: "unknown_command",
-          valid: workspaceCommandSpecs.map((spec) =>
-            spec.name.slice("workspace ".length),
-          ),
-        },
-      ],
-      usage: "reins workspace [options] <command>",
-    });
-  });
-});
-
 describe("CLI 域错误（不夹带 usage）", () => {
   test.each([
     "invalid-envelope",

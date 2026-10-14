@@ -1,7 +1,0 @@
-{
-  "extends": ["//"],
-  "tags": ["workspace-app"],
-  "tasks": {
-    "build": { "outputs": ["dist/**"] }
-  }
-}

@@ -36,7 +36,6 @@
   "dependencies": {
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
-    "@reins/workspace-protocol": "workspace:*",
     "valibot": "catalog:"
   },
   "devDependencies": {
@@ -53,9 +52,6 @@
       "injected": false
     },
     "@reins/transport": {
-      "injected": false
-    },
-    "@reins/workspace-protocol": {
       "injected": false
     }
   },

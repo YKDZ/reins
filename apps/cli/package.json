@@ -45,14 +45,12 @@
     "postbuild": "node -e \"const fs = require('node:fs'); fs.copyFileSync('dist/cli.js', 'dist/reins.js'); if (process.platform !== 'win32') fs.chmodSync('dist/reins.js', 0o755)\"",
     "test": "vitest run test/unit --reporter=agent",
     "test:e2e": "vitest run test/e2e --reporter=agent",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
-    "test:docker": "vitest run test/docker --reporter=agent"
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
     "@reins/client": "workspace:*",
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
-    "@reins/workspace-protocol": "workspace:*",
     "@valibot/to-json-schema": "catalog:",
     "@ykdz/cli-contract": "catalog:",
     "@ykdz/reins-sdk": "workspace:*",
@@ -63,7 +61,6 @@
     "@reins/typescript-config": "workspace:*",
     "@types/node": "catalog:",
     "@types/proper-lockfile": "catalog:",
-    "commander": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
@@ -79,9 +76,6 @@
       "injected": false
     },
     "@reins/transport": {
-      "injected": false
-    },
-    "@reins/workspace-protocol": {
       "injected": false
     },
     "@ykdz/reins-sdk": {
