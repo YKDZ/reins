@@ -18,7 +18,6 @@
     "@reins/transport": "workspace:*",
     "@reins/workspace-protocol": "workspace:*",
     "@reins/workspace-runtime": "workspace:*",
-    "@reins/workspace-source": "workspace:*",
     "proper-lockfile": "catalog:",
     "valibot": "catalog:"
   },
@@ -42,9 +41,6 @@
       "injected": false
     },
     "@reins/protocol": {
-      "injected": false
-    },
-    "@reins/workspace-source": {
       "injected": false
     }
   },
