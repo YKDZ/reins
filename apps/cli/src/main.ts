@@ -1474,6 +1474,7 @@ function createCli(version: string) {
           let subscription:
             | Awaited<ReturnType<ReinsConnection["attach"]>>
             | undefined;
+          const nonInteractiveReplayFacts = new Set<AgentFact["factId"]>();
           let subscriptionEnded = false;
           let promptAbort: AbortController | undefined;
           let interrupt: (() => void) | undefined;
@@ -1481,7 +1482,8 @@ function createCli(version: string) {
           try {
             connection = await dependencies.connect();
             subscription = await connection.attach(target, replay);
-            void subscription.done.then(
+            const attached = subscription;
+            void attached.done.then(
               () => {
                 subscriptionEnded = true;
                 promptAbort?.abort();
@@ -1500,18 +1502,57 @@ function createCli(version: string) {
             };
             process.once("SIGINT", interrupt);
             yield outcome.record.established({
-              establishment: subscription.establishment,
+              establishment: attached.establishment,
             });
             const project = createPresentationProjector();
-            for await (const fact of subscription) {
+            const replayedFacts: AgentFact[] = [];
+            if (dependencies.outputFormat === "text") {
+              for (
+                let index = 0;
+                index < attached.establishment.replayed;
+                index += 1
+              ) {
+                const item = await attached.next();
+                if (item.done) break;
+                replayedFacts.push(item.value);
+              }
+              const resolvedPermissions = new Set<PermissionHandle>();
+              const completedTurns = new Set<TurnHandle>();
+              for (const fact of replayedFacts) {
+                if (fact.type === "permission.resolved")
+                  resolvedPermissions.add(fact.permissionHandle);
+                else if (fact.type === "turn.completed")
+                  completedTurns.add(fact.turnHandle);
+              }
+              for (const fact of replayedFacts) {
+                if (
+                  fact.type === "permission.requested" &&
+                  (resolvedPermissions.has(fact.permissionHandle) ||
+                    completedTurns.has(fact.turnHandle))
+                )
+                  nonInteractiveReplayFacts.add(fact.factId);
+              }
+            }
+            const facts =
+              replayedFacts.length === 0
+                ? attached
+                : (async function* () {
+                    yield* replayedFacts;
+                    for await (const fact of attached) yield fact;
+                  })();
+            for await (const fact of facts) {
               if (dependencies.outputFormat === "structured") {
                 yield outcome.record.fact({ fact });
               } else {
                 for (const presentation of project(fact))
                   yield outcome.record.presentation({ presentation });
                 if (fact.type === "permission.requested") {
-                  if (interrupted) continue;
-                  if (subscriptionEnded) continue;
+                  if (
+                    interrupted ||
+                    subscriptionEnded ||
+                    nonInteractiveReplayFacts.has(fact.factId)
+                  )
+                    continue;
                   if (fact.options.length === 0)
                     return outcome.failure.permissionChoiceInvalid({
                       code: "permission_choice_invalid",

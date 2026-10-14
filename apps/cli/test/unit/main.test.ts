@@ -356,3 +356,154 @@ test("SIGINT releases a blocked attach write and closes its connection", async (
   }
   expect(process.listenerCount("SIGINT")).toBe(listenersBefore);
 });
+
+test("文本观察完整呈现已解决权限历史且不重复提示", async () => {
+  const sessionHandle = "session@g1" as SessionHandle;
+  const turnHandle = "turn1_hash" as TurnHandle;
+  const target = { scope: "turn" as const, turnHandle };
+  const permissionHandle = "permission1_hash" as PermissionHandle;
+  const facts: AgentFact[] = [
+    {
+      type: "permission.requested",
+      factId: "fact1_hash" as AgentFact["factId"],
+      sessionHandle,
+      turnHandle,
+      permissionHandle,
+      kind: "write",
+      input: { path: "caller.txt" },
+      options: [
+        { outcome: "allow", scope: "once" },
+        { outcome: "deny", feedback: true },
+      ],
+    },
+    {
+      type: "permission.resolved",
+      factId: "fact2_hash" as AgentFact["factId"],
+      sessionHandle,
+      turnHandle,
+      permissionHandle,
+      resolution: { outcome: "deny", feedback: "not approved" },
+    },
+    {
+      type: "turn.completed",
+      factId: "fact3_hash" as AgentFact["factId"],
+      sessionHandle,
+      turnHandle,
+      stopReason: "end_turn",
+      finalReply: "done",
+    },
+  ];
+  let index = 0;
+  let resolveDone!: (end: AgentSubscriptionEnd) => void;
+  const done = new Promise<AgentSubscriptionEnd>((resolve) => {
+    resolveDone = resolve;
+  });
+  const subscription: FactSubscription = {
+    establishment: {
+      target,
+      window: { oldest: 1, head: facts.length, truncated: false },
+      replayed: facts.length,
+    },
+    done,
+    checkpoint: "resume1_hash" as FactSubscription["checkpoint"],
+    async next() {
+      const fact = facts[index++];
+      if (fact !== undefined) return { value: fact, done: false };
+      resolveDone({ target, reason: "end_turn" });
+      return { value: undefined, done: true };
+    },
+    async return() {
+      this.close();
+      return { value: undefined, done: true };
+    },
+    async throw(error?: unknown) {
+      this.close();
+      throw error;
+    },
+    [Symbol.asyncIterator]() {
+      return this;
+    },
+    close() {
+      resolveDone({ target, reason: "end_turn" });
+    },
+  };
+  const connection = {
+    handshake: { protocolMajorVersion: 1, daemonGeneration: "g1" },
+    async capabilities() {
+      return { capabilities: [], failures: [] };
+    },
+    async list() {
+      return [];
+    },
+    async diagnostics() {
+      return { records: [], truncated: false };
+    },
+    async attach() {
+      return subscription;
+    },
+    prepareOperation<Kind extends OperationKind>(kind: Kind) {
+      return `credential-${kind}` as OperationCredential<Kind>;
+    },
+    async spawn(
+      _input: SpawnInput,
+      _credential: OperationCredential<"spawn">,
+    ): Promise<SpawnResult> {
+      return { sessionHandle, turnHandle, cwd: "/tmp" };
+    },
+    async kill(input: KillInput): Promise<KillResult> {
+      return { sessionHandle: input.sessionHandle, status: "killed" };
+    },
+    async resolvePermission(
+      permissionHandle: PermissionHandle,
+      _resolution: PermissionResolution,
+    ) {
+      return { permissionHandle, status: "resolved" as const };
+    },
+    async send(input: SendInput): Promise<SendResult> {
+      return {
+        sessionHandle:
+          input.placement === "new_turn" ? input.sessionHandle : sessionHandle,
+        turnHandle,
+        messageId: "message-test",
+        deliveryPoint: input.placement,
+      };
+    },
+    async wait(): Promise<WaitResult> {
+      return { status: "satisfied", completed: [], pending: [] };
+    },
+    async interrupt(input: InterruptInput): Promise<InterruptResult> {
+      return { turnHandle: input.turnHandle, status: "accepted" };
+    },
+    close() {},
+  } satisfies ReinsConnection;
+  const output: string[] = [];
+  const runtime: CliRuntime = {
+    argv: [
+      "node",
+      "reins",
+      "attach",
+      turnHandle,
+      "--scope",
+      "turn",
+      "--replay",
+      "available",
+      "--output-format",
+      "text",
+    ],
+    version: "test",
+    dependencies: {
+      connect: async () => connection,
+      readLine: async () => undefined,
+    },
+    cancelOutput() {},
+    write(item) {
+      output.push(item.chunk);
+      return Promise.resolve();
+    },
+  };
+
+  await expect(main(runtime)).resolves.toBe(0);
+  expect(output.join("")).toContain(
+    "[permission requested] write\n[permission resolved] permission1_hash\n[turn completed] end_turn\n",
+  );
+});
