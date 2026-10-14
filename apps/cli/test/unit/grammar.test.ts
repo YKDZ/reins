@@ -38,16 +38,6 @@ test("pretty grammar retains typed workspace correction and outcome facts", () =
     code: "binding_unknown",
     availableBindings: ["code", "review"],
   } satisfies WorkspaceError;
-  const importFailure = {
-    code: "git_import_failed",
-    gitImport: {
-      repository: "/repo",
-      reference: "refs/heads/main",
-      objectWriteAttempted: false,
-      referenceCreated: false,
-      objectDatabaseBefore: { loose: 2, packed: 3, packs: 1 },
-    },
-  } satisfies WorkspaceError;
   const nativeViewFailure = {
     code: "native_view_lost",
     nativeView: { reason: "moved", currentRoot: "/moved/worktree" },
@@ -58,11 +48,6 @@ test("pretty grammar retains typed workspace correction and outcome facts", () =
   expect(jsonErrorMessage({ items: [{ message: bindingOutput }] })).toContain(
     "Available bindings: code, review",
   );
-
-  const importOutput = renderCliError(importFailure).items[0]!.message;
-  expect(importOutput).toContain("reference: refs/heads/main");
-  expect(importOutput).toContain("object write attempted: no");
-  expect(importOutput).toContain("object database before: 2 loose objects");
 
   expect(renderCliError(nativeViewFailure).items[0]!.message).toContain(
     "Native view reason: moved; current root: /moved/worktree",

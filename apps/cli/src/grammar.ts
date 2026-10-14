@@ -58,35 +58,6 @@ export function renderCliError(
         `Available bindings: ${error.availableBindings.length === 0 ? "(none)" : error.availableBindings.join(", ")}`,
       );
     }
-    if ("gitImport" in error && error.gitImport !== undefined) {
-      const result = error.gitImport;
-      const objectDatabase = (
-        value:
-          | {
-              readonly loose: number;
-              readonly packed: number;
-              readonly packs: number;
-            }
-          | undefined,
-      ): string | undefined =>
-        value === undefined
-          ? undefined
-          : `${value.loose} loose objects, ${value.packed} packed objects, ${value.packs} packs`;
-      const before = objectDatabase(result.objectDatabaseBefore);
-      const after = objectDatabase(result.objectDatabaseAfter);
-      facts.push(
-        [
-          `Git import repository: ${result.repository}`,
-          `reference: ${result.reference}`,
-          `object write attempted: ${result.objectWriteAttempted ? "yes" : "no"}`,
-          `reference created: ${result.referenceCreated ? "yes" : "no"}`,
-          ...(before === undefined
-            ? []
-            : [`object database before: ${before}`]),
-          ...(after === undefined ? [] : [`object database after: ${after}`]),
-        ].join("; "),
-      );
-    }
     if (error.code === "native_view_lost") {
       facts.push(
         [
