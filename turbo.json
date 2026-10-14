@@ -77,7 +77,12 @@
       }
     }
   },
-  "globalPassThroughEnv": ["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"],
+  "globalPassThroughEnv": [
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "TMPDIR"
+  ],
   "tasks": {
     "//#boundaries": {
       "cache": false
