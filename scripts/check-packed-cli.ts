@@ -642,6 +642,7 @@ async function smokePackedCli(
     await runLoggedCommand({
       command: join(repository, "node_modules", ".bin", "tsc"),
       args: [
+        "--ignoreConfig",
         "--noEmit",
         "--strict",
         "--noUnusedLocals",
@@ -829,6 +830,7 @@ async function smokePackedCli(
     await runLoggedCommand({
       command: join(repository, "node_modules", ".bin", "tsc"),
       args: [
+        "--ignoreConfig",
         "--noEmit",
         "--strict",
         "--noUnusedLocals",
