@@ -60,7 +60,6 @@ export type AgentPresentation =
       start: boolean;
     };
 
-export type AgentEvent = AgentPresentation & { eventId: EventId };
 export type AgentTarget =
   | { scope: "session"; sessionHandle: SessionHandle }
   | { scope: "turn"; turnHandle: TurnHandle };
@@ -69,10 +68,9 @@ export type AgentEstablishment = {
   window: AttachResult["window"];
   replayed: number;
 };
-export type AgentSubscriptionEnd = {
+export type FactSubscriptionEnd = {
   target: AgentTarget;
   reason: AttachEnded["reason"];
-  lastEventId: EventId | null;
 };
 export function projectSubscriptionTarget(
   target: SubscriptionTarget,
@@ -87,15 +85,6 @@ export function projectSubscriptionTarget(
         }),
       };
 }
-export type AgentSubscription = {
-  readonly establishment: AgentEstablishment;
-  onEvent(listener: (event: AgentEvent) => void): () => void;
-  readonly done: Promise<AgentSubscriptionEnd>;
-  close(): void;
-};
-export type Subscribe = (params: AttachParams) => Promise<AgentSubscription>;
-
-export type FactSubscriptionEnd = Omit<AgentSubscriptionEnd, "lastEventId">;
 export type FactSubscription = AsyncIterableIterator<AgentFact> & {
   readonly establishment: AgentEstablishment;
   readonly done: Promise<FactSubscriptionEnd>;

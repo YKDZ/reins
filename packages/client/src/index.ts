@@ -13,9 +13,9 @@ import {
 import type {
   AgentEstablishment,
   AgentTarget,
-  AgentEvent,
-  AgentSubscription,
-  AgentSubscriptionEnd,
+  AgentFact,
+  FactSubscription,
+  FactSubscriptionEnd,
 } from "./subscription.ts";
 
 export {
@@ -29,18 +29,16 @@ export type {
   NotificationListener,
   ProtocolResponseFor,
   ReinsClientOptions,
-  AgentEvent,
-  AgentSubscription,
-  AgentSubscriptionEnd,
   AgentEstablishment,
   AgentTarget,
+  AgentFact,
+  FactSubscription,
+  FactSubscriptionEnd,
 };
 export type ReinsClient = Omit<
   ControlReinsClient,
   "prepareOperation" | "executeOperation"
 >;
-export type ControlEvent = AgentEvent;
-export type ControlSubscriptionEnd = AgentSubscriptionEnd;
 export function createReinsClient(
   connection: TransportConnection<ProtocolMessage>,
   options: ReinsClientOptions,

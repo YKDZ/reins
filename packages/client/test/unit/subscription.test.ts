@@ -10,7 +10,7 @@ import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { AgentSubscriptionError } from "../../src/control.ts";
-import { createReinsClient, type AgentEvent } from "../../src/index.ts";
+import { createReinsClient } from "../../src/index.ts";
 import {
   createAgentFact,
   createPresentationProjector,
@@ -182,41 +182,59 @@ test("facts keep raw content and identity independent of presentation history", 
     expect(facts[1]).not.toHaveProperty(key);
 });
 
-test("shared subscriptions merge deltas with full snapshots and pair tool completions", async () => {
-  const f = await fixture();
-  const subscription = await f.client.subscribe(params as never);
-  const events: AgentEvent[] = [];
-  subscription.onEvent((event) => events.push(event));
-  f.emit({ type: "text.delta", messageId: "m1", delta: "hel" });
-  f.emit({ type: "text.delta", messageId: "m1", delta: "lo" });
-  f.emit({
-    type: "message",
-    messageId: "m1",
-    role: "worker",
-    content: "hello world",
-  });
-  f.emit({ type: "text.delta", messageId: "m1", delta: "late duplicate" });
-  f.emit({
-    type: "message",
-    messageId: "m1",
-    role: "worker",
-    content: "hello world",
-  });
-  f.emit({
-    type: "message",
-    messageId: "m2",
-    role: "worker",
-    content: "hello world",
-  });
-  f.emit({ type: "tool.requested", toolCallId: "call-1", name: "Read" });
-  f.emit({
-    type: "tool.completed",
-    toolCallId: "call-1",
-    name: "native-name",
-    result: "contents",
-    isError: false,
-  });
-  await flush();
+test("事实投影合并增量与快照并匹配工具完成", () => {
+  const project = createPresentationProjector();
+  const makeFact = (eventId: number, event: object) =>
+    createAgentFact(
+      v.parse(domainEventSchema, {
+        sessionId: "readable@g1",
+        turnId: "t1",
+        ...event,
+      }),
+      eventId as never,
+      "gtest" as never,
+    );
+  const facts = [
+    makeFact(1, { type: "text.delta", messageId: "m1", delta: "hel" }),
+    makeFact(2, { type: "text.delta", messageId: "m1", delta: "lo" }),
+    makeFact(3, {
+      type: "message",
+      messageId: "m1",
+      role: "worker",
+      content: "hello world",
+    }),
+    makeFact(4, {
+      type: "text.delta",
+      messageId: "m1",
+      delta: "late duplicate",
+    }),
+    makeFact(5, {
+      type: "message",
+      messageId: "m1",
+      role: "worker",
+      content: "hello world",
+    }),
+    makeFact(6, {
+      type: "message",
+      messageId: "m2",
+      role: "worker",
+      content: "hello world",
+    }),
+    makeFact(7, {
+      type: "tool.requested",
+      toolCallId: "call-1",
+      name: "Read",
+    }),
+    makeFact(8, {
+      type: "tool.completed",
+      toolCallId: "call-1",
+      name: "native-name",
+      result: "contents",
+      isError: false,
+    }),
+  ];
+  const events = facts.flatMap(project);
+
   expect(
     events
       .filter((event) => event.type === "text")
@@ -237,26 +255,35 @@ test("shared subscriptions merge deltas with full snapshots and pair tool comple
       expect(event).not.toHaveProperty(key);
 });
 
-test("a snapshot received before deltas is emitted once; an incompatible snapshot carries an explicit replacement", async () => {
-  const f = await fixture();
-  const subscription = await f.client.subscribe(params as never);
-  const events: AgentEvent[] = [];
-  subscription.onEvent((event) => events.push(event));
-  f.emit({
-    type: "message",
-    messageId: "m1",
-    role: "worker",
-    content: "complete",
-  });
-  f.emit({ type: "text.delta", messageId: "m1", delta: "complete" });
-  f.emit({ type: "text.delta", messageId: "m2", delta: "draft" });
-  f.emit({
-    type: "message",
-    messageId: "m2",
-    role: "worker",
-    content: "corrected",
-  });
-  await flush();
+test("事实投影处理先到快照与显式替换", () => {
+  const project = createPresentationProjector();
+  const makeFact = (eventId: number, event: object) =>
+    createAgentFact(
+      v.parse(domainEventSchema, {
+        sessionId: "readable@g1",
+        turnId: "t1",
+        ...event,
+      }),
+      eventId as never,
+      "gtest" as never,
+    );
+  const events = [
+    makeFact(1, {
+      type: "message",
+      messageId: "m1",
+      role: "worker",
+      content: "complete",
+    }),
+    makeFact(2, { type: "text.delta", messageId: "m1", delta: "complete" }),
+    makeFact(3, { type: "text.delta", messageId: "m2", delta: "draft" }),
+    makeFact(4, {
+      type: "message",
+      messageId: "m2",
+      role: "worker",
+      content: "corrected",
+    }),
+  ].flatMap(project);
+
   expect(
     events
       .filter((event) => event.type === "text")
@@ -397,13 +424,17 @@ test("attach establishment has no inherited thirty-second request deadline", asy
   const f = await fixture(false);
   vi.useFakeTimers();
   let settled = false;
-  const subscription = f.client.subscribe(params as never).then((value) => {
-    settled = true;
-    return value;
-  });
+  const subscription = f.client
+    .subscribeFacts(params as never)
+    .then((value) => {
+      settled = true;
+      return value;
+    });
   await vi.advanceTimersByTimeAsync(60_000);
   expect(settled).toBe(false);
   f.ack();
   await vi.advanceTimersByTimeAsync(0);
-  expect(await subscription).toHaveProperty("establishment");
+  const established = await subscription;
+  expect(established).toHaveProperty("establishment");
+  established.close();
 });

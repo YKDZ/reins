@@ -2,18 +2,15 @@ import {
   createAgentFact,
   createPresentationProjector,
   projectSubscriptionTarget,
-  type AgentSubscriptionEnd,
-  type AgentEvent,
-  type Subscribe,
   type SubscribeFacts,
   type FactSubscription,
 } from "./subscription.ts";
 export type {
-  AgentSubscription,
-  AgentEvent,
   AgentEstablishment,
-  AgentSubscriptionEnd,
   AgentTarget,
+  AgentFact,
+  FactSubscription,
+  FactSubscriptionEnd,
 } from "./subscription.ts";
 export { createPresentationProjector };
 import { randomUUID } from "node:crypto";
@@ -24,6 +21,7 @@ import type {
   DaemonGeneration,
   DomainEvent,
   EventId,
+  AttachEnded,
   ResumeCursor,
   SideEffectMethod,
   MachineError,
@@ -88,7 +86,6 @@ export type ReinsClient = {
   ): Promise<ProtocolResponseFor<M>>;
   onNotification(listener: NotificationListener): () => void;
   onClosed(listener: (reason: MachineError) => void): () => void;
-  subscribe: Subscribe;
   subscribeFacts: SubscribeFacts;
   close(): void;
 };
@@ -412,12 +409,15 @@ export function createReinsClient(
   };
 
   type RawEvent = { event: DomainEvent; eventId: EventId };
+  type RawSubscriptionEnd = {
+    target: ReturnType<typeof projectSubscriptionTarget>;
+    reason: AttachEnded["reason"];
+    lastEventId: EventId | null;
+  };
   type RawSubscription = AsyncIterableIterator<RawEvent> & {
     readonly establishment: NonNullable<ProtocolResult<"attach">>;
-    readonly done: Promise<AgentSubscriptionEnd>;
+    readonly done: Promise<RawSubscriptionEnd>;
     readonly checkpoint: ResumeCursor;
-    readonly permissionResolutionsBeforeReady: ReadonlySet<string>;
-    readonly turnCompletionsBeforeReady: ReadonlySet<string>;
     close(): void;
   };
 
@@ -431,13 +431,11 @@ export function createReinsClient(
     let ended = false;
     let localClose = false;
     let lastDeliveredPosition = 0;
-    const permissionResolutionsBeforeReady = new Set<string>();
-    const turnCompletionsBeforeReady = new Set<string>();
     let failure: Error | undefined;
     const waiters: Array<() => void> = [];
-    let resolveDone!: (end: AgentSubscriptionEnd) => void;
+    let resolveDone!: (end: RawSubscriptionEnd) => void;
     let rejectDone!: (error: Error) => void;
-    const done = new Promise<AgentSubscriptionEnd>((resolve, reject) => {
+    const done = new Promise<RawSubscriptionEnd>((resolve, reject) => {
       resolveDone = resolve;
       rejectDone = reject;
     });
@@ -551,15 +549,6 @@ export function createReinsClient(
             ? (establishment.window.head ?? 0)
             : (establishment.window.oldest ?? 1) - 1;
       const beforeReady = initial.splice(0);
-      for (const notification of beforeReady) {
-        if (notification.method !== "event") continue;
-        if (notification.params.event.type === "permission.resolved")
-          permissionResolutionsBeforeReady.add(
-            notification.params.event.permissionId,
-          );
-        if (notification.params.event.type === "turn.completed")
-          turnCompletionsBeforeReady.add(notification.params.event.turnId);
-      }
       for (const notification of beforeReady) receive(notification);
     } catch (error) {
       cleanup();
@@ -568,8 +557,6 @@ export function createReinsClient(
     const raw: RawSubscription = {
       establishment,
       done,
-      permissionResolutionsBeforeReady,
-      turnCompletionsBeforeReady,
       get checkpoint() {
         return cursorAt(lastDeliveredPosition);
       },
@@ -702,79 +689,6 @@ export function createReinsClient(
     return subscription;
   };
 
-  const subscribe: Subscribe = async (params) => {
-    const raw = await subscribeRaw(params);
-    const queued: AgentEvent[] = [];
-    const eventListeners = new Set<(event: AgentEvent) => void>();
-    const project = createPresentationProjector();
-    let started = false;
-    const wake = () => {
-      if (eventListeners.size === 0) return;
-      for (const event of queued.splice(0))
-        for (const listener of Array.from(eventListeners)) listener(event);
-    };
-    const emit = (event: AgentEvent) => {
-      if (
-        event.type === "permission.resolved" ||
-        event.type === "turn.completed"
-      ) {
-        for (let index = queued.length - 1; index >= 0; index -= 1) {
-          const previous = queued[index];
-          if (
-            previous?.type === "permission.requested" &&
-            (event.type === "permission.resolved"
-              ? previous.permissionHandle === event.permissionHandle
-              : previous.turnHandle === event.turnHandle)
-          )
-            queued.splice(index, 1);
-        }
-      }
-      queued.push(event);
-      wake();
-    };
-    const pump = async () => {
-      if (started) return;
-      started = true;
-      try {
-        for await (const item of raw) {
-          if (generation === undefined) break;
-          if (
-            item.event.type === "permission.requested" &&
-            (raw.permissionResolutionsBeforeReady.has(
-              item.event.permissionId,
-            ) ||
-              raw.turnCompletionsBeforeReady.has(item.event.turnId))
-          )
-            continue;
-          const fact = createAgentFact(item.event, item.eventId, generation);
-          for (const event of project(fact))
-            emit({ ...event, eventId: item.eventId });
-        }
-      } catch {
-        // 原有推送式消费者通过 done 观察订阅错误。
-      }
-    };
-    return {
-      establishment: {
-        target: projectSubscriptionTarget(raw.establishment.target),
-        window: raw.establishment.window,
-        replayed: raw.establishment.replayed,
-      },
-      done: raw.done,
-      onEvent(listener) {
-        eventListeners.add(listener);
-        wake();
-        void pump();
-        return () => {
-          eventListeners.delete(listener);
-        };
-      },
-      close() {
-        raw.close();
-      },
-    };
-  };
-
   return {
     initialize(timeoutMs) {
       return request(
@@ -787,7 +701,6 @@ export function createReinsClient(
       );
     },
     request,
-    subscribe,
     subscribeFacts,
     retry(token, params, timeoutMs) {
       const identity = parseRetryToken(token);

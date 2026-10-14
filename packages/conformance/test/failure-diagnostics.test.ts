@@ -1,4 +1,4 @@
-import { createReinsClient, type AgentEvent } from "@reins/client";
+import { createReinsClient, type AgentFact } from "@reins/client";
 import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
 import type { ConsumerContext, SessionName } from "@reins/protocol";
 import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
@@ -272,16 +272,16 @@ test("结构化限流优先于含额度字样的正文，诊断引用在返回�
     if ("error" in wait) throw new Error(JSON.stringify(wait.error));
     const diagnosticId = wait.result.completed[0]?.diagnosticId;
     expect(diagnosticId).toBeDefined();
-    const subscription = await client.subscribe({
+    const subscription = await client.subscribeFacts({
       scope: "turn",
       sessionId: spawn.result.sessionId,
       turnId: spawn.result.turnId,
       replay: { mode: "available" },
     });
-    const events: AgentEvent[] = [];
-    subscription.onEvent((event) => events.push(event));
+    const facts: AgentFact[] = [];
+    for await (const fact of subscription) facts.push(fact);
     expect(await subscription.done).toMatchObject({ reason: "failed" });
-    const completed = events.filter((event) => event.type === "turn.completed");
+    const completed = facts.filter((fact) => fact.type === "turn.completed");
     expect(completed).toHaveLength(1);
     expect(completed[0]).toMatchObject({
       stopReason: "failed",
