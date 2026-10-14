@@ -358,6 +358,7 @@ async function smokePackedCli(
   )
     throw new Error("SHA256SUMS does not match the release tarball");
 
+  // npm 会预取 runtime 声明的 SDK registry 版本；引用命令中的直接 SDK spec，使验收 consumer 复用本地候选。
   writeFileSync(
     join(installDirectory, "package.json"),
     `${JSON.stringify(
@@ -366,6 +367,7 @@ async function smokePackedCli(
         version: "0.0.0",
         private: true,
         allowScripts: { "@qodercn-ai/qodercn-agent-sdk": true },
+        overrides: { "@ykdz/reins-sdk": "$@ykdz/reins-sdk" },
       },
       null,
       2,
