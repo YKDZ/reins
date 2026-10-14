@@ -5,7 +5,7 @@ import { runPublicationScenario } from "./publication-scenario.ts";
 test(
   "retains publications after detach and explicitly cleans selected independent copies",
   () =>
-    runPublicationScenario(false, {
+    runPublicationScenario({
       ticket: 29,
       client: "publication-retention-client.ts",
       worker: "publishing-worker.ts",

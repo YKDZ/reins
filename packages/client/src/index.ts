@@ -1,33 +1,23 @@
-import type {
-  AttachParams,
-  ProtocolMessage,
-  ProtocolMethod,
-  ProtocolParams,
-  ProtocolResponse,
-} from "@reins/protocol";
+import type { ProtocolMessage } from "@reins/protocol";
 import type { TransportConnection } from "@reins/transport";
-import type { Publication, WorkspaceError } from "@reins/workspace-protocol";
 
 import {
   createReinsClient as createControlClient,
-  type ClientResult as ControlClientResult,
+  type ClientResult,
   type CommandOutcomeUnknown,
   type NotificationListener,
   type ReinsClient as ControlReinsClient,
+  type ProtocolResponseFor,
   type ReinsClientOptions,
 } from "./control.ts";
 import type {
   AgentEstablishment,
   AgentTarget,
-  AgentEvent as ControlAgentEvent,
-  AgentSubscriptionEnd as ControlAgentSubscriptionEnd,
+  AgentEvent,
+  AgentSubscription,
+  AgentSubscriptionEnd,
 } from "./subscription.ts";
-import {
-  createWorkspaceClient,
-  type WorkspaceAgentEvent,
-  type WorkspaceAgentSubscription,
-  type WorkspaceAgentSubscriptionEnd,
-} from "./workspace.ts";
+import { createWorkspaceClient } from "./workspace.ts";
 
 export {
   commandOutcomeUnknownSchema,
@@ -35,47 +25,29 @@ export {
   parseRetryToken,
 } from "./control.ts";
 export type {
+  ClientResult,
   CommandOutcomeUnknown,
   NotificationListener,
+  ProtocolResponseFor,
   ReinsClientOptions,
+  AgentEvent,
+  AgentSubscription,
+  AgentSubscriptionEnd,
   AgentEstablishment,
   AgentTarget,
 };
-export { createWorkspaceClient };
-export type { GitImportChanges, GitImportResult } from "./git-import.ts";
-
-export type ClientResult<M extends ProtocolMethod> = ControlClientResult<M> &
-  (M extends "wait"
-    ? { publications?: Publication[]; publicationError?: WorkspaceError }
-    : unknown);
-
-export type ProtocolResponseFor<M extends ProtocolMethod> =
-  | Extract<ProtocolResponse, { readonly error: unknown }>
-  | (Omit<Extract<ProtocolResponse, { readonly result: unknown }>, "result"> & {
-      readonly result: ClientResult<M>;
-    });
-
 export type ReinsClient = Omit<
   ControlReinsClient,
-  "request" | "subscribe" | "prepareOperation" | "executeOperation"
-> & {
-  request<M extends ProtocolMethod>(
-    method: M,
-    params: ProtocolParams<M>,
-    timeoutMs?: number,
-  ): Promise<ProtocolResponseFor<M>>;
-  subscribe(params: AttachParams): Promise<WorkspaceAgentSubscription>;
-};
-
-export type AgentEvent = WorkspaceAgentEvent;
-export type AgentSubscription = WorkspaceAgentSubscription;
-export type AgentSubscriptionEnd = WorkspaceAgentSubscriptionEnd;
-export type ControlEvent = ControlAgentEvent;
-export type ControlSubscriptionEnd = ControlAgentSubscriptionEnd;
+  "prepareOperation" | "executeOperation"
+>;
+export type ControlEvent = AgentEvent;
+export type ControlSubscriptionEnd = AgentSubscriptionEnd;
+export { createWorkspaceClient };
+export type { GitImportChanges, GitImportResult } from "./git-import.ts";
 
 export function createReinsClient(
   connection: TransportConnection<ProtocolMessage>,
   options: ReinsClientOptions,
 ): ReinsClient {
-  return createControlClient(connection, options) as unknown as ReinsClient;
+  return createControlClient(connection, options);
 }

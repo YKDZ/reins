@@ -148,57 +148,6 @@ export const workspaceCommandSpecs = [
     ],
   }),
   defineCommand({
-    name: "workspace handoff",
-    description:
-      "Transfer explicitly selected source files to a new Git worktree",
-    args: [],
-    options: [
-      {
-        name: "repository",
-        flags: "--repository <path>",
-        required: true,
-        description: "one caller-native Git root",
-        kind: text,
-      },
-      {
-        name: "commit",
-        flags: "--commit <sha>",
-        required: true,
-        description: "full fixed commit object name",
-        kind: text,
-      },
-      {
-        name: "subdirectory",
-        flags: "--subdirectory <path>",
-        required: true,
-        description: "relative target working directory",
-        kind: text,
-      },
-      {
-        name: "binding",
-        flags: "--binding <refs...>",
-        required: true,
-        variadic: true,
-        description: "explicit harness binding references",
-        kind: text,
-      },
-      {
-        name: "indexFile",
-        flags: "--index-file <paths...>",
-        variadic: true,
-        description: "explicit repository-relative staged file versions",
-        kind: text,
-      },
-      {
-        name: "worktreeFile",
-        flags: "--worktree-file <paths...>",
-        variadic: true,
-        description: "explicit repository-relative working file versions",
-        kind: text,
-      },
-    ],
-  }),
-  defineCommand({
     name: "workspace harnesses",
     description: "Discover explicit project harness bindings",
     args: [],

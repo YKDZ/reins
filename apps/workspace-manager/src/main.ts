@@ -20,7 +20,6 @@ import {
   parseCodexAuthBindings,
   parseQoderAuthBindings,
 } from "@reins/workspace-runtime";
-import { openWorkspaceSourceBridge } from "@reins/workspace-source";
 import lockfile from "proper-lockfile";
 import * as v from "valibot";
 
@@ -113,7 +112,6 @@ async function main() {
     await release();
     throw error;
   }
-  const sourceBridge = openWorkspaceSourceBridge(stateDirectory);
   const transport = createUnixSocketServer<WorkspaceMessage>({ path: socket });
   let connections = 0;
   let idle: NodeJS.Timeout | undefined;
@@ -143,7 +141,6 @@ async function main() {
     connections += 1;
     clearTimeout(idle);
     let consumer: ConsumerContext | undefined;
-    const observations = new Map<string, string>();
     const send = (message: WorkspaceMessage) => {
       try {
         connection.send(message);
@@ -151,23 +148,9 @@ async function main() {
         connection.close();
       }
     };
-    const stopObserving = runtime.publications.observe(
-      (owner, publication, scopeKey) => {
-        if (consumer !== owner) return;
-        for (const [observationId, observedScope] of observations)
-          if (observedScope === scopeKey)
-            send({
-              kind: "notification",
-              method: "publication.ready",
-              params: { observationId, publication },
-            });
-      },
-    );
     connection.onEvent((event) => {
       if (event.kind !== "message") {
         if (event.kind === "closed") {
-          stopObserving();
-          observations.clear();
           connections -= 1;
           scheduleIdle();
         }
@@ -215,14 +198,6 @@ async function main() {
         switch (request.method) {
           case "publication.publish":
             throw workspaceFailure("invalid_request");
-          case "publication.observe": {
-            const scopeKey = await runtime.publicationScope(request.params.cwd);
-            observations.set(request.params.observationId, scopeKey);
-            return runtime.publications.list(consumer, scopeKey);
-          }
-          case "publication.unobserve":
-            observations.delete(request.params.observationId);
-            return null;
           case "publication.list":
             return runtime.publications.list(
               consumer,
@@ -238,26 +213,6 @@ async function main() {
               consumer,
               request.params.publicationId,
             );
-          case "workspace.handoff": {
-            const incoming = await sourceBridge.receive(
-              request.params.material,
-              request.params.subdirectory,
-              consumer,
-            );
-            const workspace = await runtime.attach(
-              incoming.cwd,
-              request.params.bindings,
-              consumer,
-            );
-            return { workspaceHandle: incoming.workspaceHandle, workspace };
-          }
-          case "workspace.locate":
-            return {
-              cwd: await sourceBridge.locate(
-                request.params.workspaceHandle,
-                consumer,
-              ),
-            };
           case "workspace.harnesses":
             return workspaceHarnesses(
               request.params.cwd,
