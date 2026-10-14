@@ -421,8 +421,7 @@ test.each(["permission", "session-permission"])(
         0,
       );
       const credential = controlData(prepared).credential;
-      if (typeof credential !== "string")
-        throw new Error("执行凭据缺失");
+      if (typeof credential !== "string") throw new Error("执行凭据缺失");
       return cli([...args, "--operation", credential]);
     };
     if (message === "permission") {

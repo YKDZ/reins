@@ -1089,7 +1089,9 @@ describe("CLI 进程边界（缝 D）", () => {
       const preparedLine =
         prefixIndex === -1
           ? undefined
-          : preparedOutput.slice(prefixIndex + prefix.length).split(/\r?\n/u)[0];
+          : preparedOutput
+              .slice(prefixIndex + prefix.length)
+              .split(/\r?\n/u)[0];
       if (preparedLine === undefined)
         throw new Error("permission intent was not returned");
       const prepared: unknown = JSON.parse(preparedLine);

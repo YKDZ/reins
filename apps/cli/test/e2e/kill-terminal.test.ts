@@ -71,7 +71,9 @@ async function nativeReady(cwd: string): Promise<void> {
     const remaining = deadline - Date.now();
     if (remaining <= 0)
       throw new Error("原生 worker 未在用例时限内记录回合启动");
-    await new Promise((resolve) => setTimeout(resolve, Math.min(10, remaining)));
+    await new Promise((resolve) =>
+      setTimeout(resolve, Math.min(10, remaining)),
+    );
   }
 }
 
