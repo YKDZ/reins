@@ -1,5 +1,3 @@
-import { PUBLISHER_CAPABILITIES } from "@reins/workspace-protocol";
-
 import {
   usageError,
   usageErrors,
@@ -52,72 +50,7 @@ const nativeCwd = {
   kind: text,
 } as const;
 
-export const workspaceCommandSpecs = [
-  defineCommand({
-    name: "workspace publications",
-    description: "Query files explicitly published from this worktree",
-    args: [],
-    options: [nativeCwd],
-  }),
-  defineCommand({
-    name: "workspace receive",
-    description:
-      "Explicitly receive one fixed publication outside the active tree",
-    args: [{ name: "publication", description: "publication id", kind: text }],
-    options: [
-      {
-        name: "directory",
-        flags: "--directory <path>",
-        required: true,
-        description: "local receipt directory",
-        kind: text,
-      },
-      {
-        name: "activeRoot",
-        flags: "--active-root <path>",
-        required: true,
-        description: "active Git worktree root",
-        kind: text,
-      },
-    ],
-  }),
-  defineCommand({
-    name: "workspace receipts",
-    description:
-      "List this consumer's received files, sources and actual locations",
-    args: [],
-    options: [
-      {
-        name: "directory",
-        flags: "--directory <path>",
-        required: true,
-        description: "local receipt directory",
-        kind: text,
-      },
-    ],
-  }),
-  defineCommand({
-    name: "workspace remove-publication",
-    description:
-      "Explicitly remove one published copy without removing receipts",
-    args: [{ name: "publication", description: "publication id", kind: text }],
-    options: [],
-  }),
-  defineCommand({
-    name: "workspace remove-receipt",
-    description:
-      "Explicitly remove one local receipt without removing its publication",
-    args: [{ name: "receipt", description: "receipt id", kind: text }],
-    options: [
-      {
-        name: "directory",
-        flags: "--directory <path>",
-        required: true,
-        description: "local receipt directory",
-        kind: text,
-      },
-    ],
-  }),
+export const workspaceCommandSpecs: readonly CommandSpec[] = [
   defineCommand({
     name: "workspace harnesses",
     description: "Discover explicit project harness bindings",
@@ -163,36 +96,6 @@ export const workspaceCommandSpecs = [
     ],
   }),
 ] as const satisfies readonly CommandSpec[];
-
-export const publisherCommandSpecs: readonly CommandSpec[] =
-  PUBLISHER_CAPABILITIES.map((capability) =>
-    defineCommand({
-      name: capability.name,
-      description: capability.description,
-      args: [{ name: "file", description: "selected file", kind: text }],
-      options: [],
-    }),
-  );
-
-export const publisherGroupSpec: CommandSpec = {
-  name: "",
-  description: "Publisher operations",
-  args: [],
-  options: [],
-  usage: "[options] <command>",
-  children: publisherCommandSpecs.map((spec) => spec.name),
-};
-
-export function publisherCommandSpecForToken(
-  argv: readonly string[],
-): CommandSpec | undefined {
-  const commandIndex = commandTokenIndex(argv);
-  if (commandIndex === -1) return undefined;
-  const commandToken = argv[commandIndex];
-  return commandToken === undefined
-    ? undefined
-    : publisherCommandSpecs.find((spec) => spec.name === commandToken);
-}
 
 export function flagDisplay(flags: string): string {
   const first = flags.split(/\s+/u)[0];
@@ -354,18 +257,6 @@ function missingIssue(
     field,
     hint: valueHint(declaration.kind) ?? declaration.description,
   };
-}
-
-function commandTokenIndex(argv: readonly string[]): number {
-  for (let index = 0; index < argv.length; index += 1) {
-    const token = argv[index]!;
-    if (token === "--") return index + 1;
-    if (token === "--pretty" || token === "--version" || token === "-V")
-      continue;
-    if (token.startsWith("-")) return -1;
-    return index;
-  }
-  return -1;
 }
 
 function validateValue(

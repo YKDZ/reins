@@ -48,9 +48,6 @@ export type RuntimeDefinition = v.InferOutput<typeof runtimeDefinitionSchema>;
 export type HarnessBinding = v.InferOutput<typeof harnessBindingSchema>;
 const ordinaryWorkspaceErrorSchema = v.strictObject({
   code: v.picklist([
-    "publication_failed",
-    "publication_not_found",
-    "receipt_failed",
     "consumer_context_required",
     "consumer_context_conflict",
     "initialization_required",
@@ -259,54 +256,8 @@ export const preparationSchema = v.strictObject({
   }),
 });
 export type ManagedWorkspaceInfo = v.InferOutput<typeof preparationSchema>;
-export const PUBLISHER_CAPABILITIES = [
-  {
-    name: "publish",
-    method: "publication.publish",
-    description: "Save an explicitly selected file as a fixed publication",
-  },
-] as const;
-export const publicationIdSchema = v.pipe(
-  v.string(),
-  v.regex(/^pub-[a-f0-9-]{36}$/u),
-);
-export const publicationSchema = v.strictObject({
-  publicationId: publicationIdSchema,
-  source: v.strictObject({
-    cwd: v.string(),
-    path: v.string(),
-  }),
-  bytes: v.pipe(v.number(), v.integer(), v.minValue(0)),
-  sha256: v.pipe(v.string(), v.regex(/^[a-f0-9]{64}$/u)),
-  state: v.literal("ready"),
-  storagePath: v.optional(v.string()),
-});
-export type Publication = v.InferOutput<typeof publicationSchema>;
-export const copyCleanupSchema = v.strictObject({
-  state: v.picklist(["released", "failed"]),
-  storagePath: v.string(),
-  remaining: v.strictObject({
-    directory: v.picklist(["present", "absent", "unknown"]),
-    metadata: v.picklist(["present", "absent", "unknown"]),
-    payload: v.picklist(["present", "absent", "unknown"]),
-  }),
-  detail: v.optional(v.string()),
-});
-export type CopyCleanup = v.InferOutput<typeof copyCleanupSchema>;
-export const publicationPayloadSchema = v.strictObject({
-  publication: publicationSchema,
-  contentBase64: v.string(),
-});
-export const publishParamsSchema = v.strictObject({
-  cwd: v.string(),
-  path: v.string(),
-  contentBase64: v.string(),
-});
+
 export const workspaceMethods = [
-  "publication.publish",
-  "publication.list",
-  "publication.read",
-  "publication.remove",
   "initialize",
   "workspace.harnesses",
   "workspace.attach",
@@ -317,10 +268,6 @@ export const workspaceMethods = [
 ] as const;
 export type WorkspaceMethod = (typeof workspaceMethods)[number];
 export type WorkspaceParams = {
-  "publication.publish": v.InferOutput<typeof publishParamsSchema>;
-  "publication.list": { cwd: string };
-  "publication.read": { publicationId: string };
-  "publication.remove": { publicationId: string };
   initialize: {
     protocolMajorVersion: number;
     consumerContext: v.InferOutput<typeof consumerContextSchema>;
@@ -341,10 +288,6 @@ export type WorkspaceParams = {
   };
 };
 export type WorkspaceResults = {
-  "publication.publish": Publication;
-  "publication.list": Publication[];
-  "publication.read": v.InferOutput<typeof publicationPayloadSchema>;
-  "publication.remove": CopyCleanup;
   initialize: { protocolMajorVersion: number };
   "workspace.harnesses": WorkspaceHarnessCatalog;
   "workspace.attach": ManagedWorkspaceInfo;
@@ -355,30 +298,6 @@ export type WorkspaceResults = {
 };
 const pathParamsSchema = v.strictObject({ cwd: v.string() });
 export const workspaceRequestSchema = v.variant("method", [
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.publish"),
-    params: publishParamsSchema,
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.list"),
-    params: v.strictObject({ cwd: v.string() }),
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.read"),
-    params: v.strictObject({ publicationId: publicationIdSchema }),
-  }),
-  v.strictObject({
-    kind: v.literal("request"),
-    requestId: v.string(),
-    method: v.literal("publication.remove"),
-    params: v.strictObject({ publicationId: publicationIdSchema }),
-  }),
   v.strictObject({
     kind: v.literal("request"),
     requestId: v.string(),
@@ -452,17 +371,15 @@ export const workspaceResponseSchema = v.union([
 export type WorkspaceResponse = v.InferOutput<typeof workspaceResponseSchema>;
 export type WorkspaceMessage = WorkspaceRequest | WorkspaceResponse;
 export function workspaceResultSchemaFor(method: WorkspaceMethod) {
-  if (method === "publication.remove") return copyCleanupSchema;
-  if (method === "publication.publish") return publicationSchema;
-  if (method === "publication.list") return v.array(publicationSchema);
-  if (method === "publication.read") return publicationPayloadSchema;
-  if (method === "initialize")
-    return v.strictObject({
-      protocolMajorVersion: v.literal(WORKSPACE_PROTOCOL_MAJOR_VERSION),
-    });
-  if (method === "workspace.route")
-    return v.strictObject({ cwd: v.string(), socket: v.string() });
-  if (method === "workspace.admit") return v.strictObject({ cwd: v.string() });
-  if (method === "workspace.harnesses") return catalogSchema;
-  return preparationSchema;
+  return method === "initialize"
+    ? v.strictObject({
+        protocolMajorVersion: v.literal(WORKSPACE_PROTOCOL_MAJOR_VERSION),
+      })
+    : method === "workspace.route"
+      ? v.strictObject({ cwd: v.string(), socket: v.string() })
+      : method === "workspace.admit"
+        ? v.strictObject({ cwd: v.string() })
+        : method === "workspace.harnesses"
+          ? catalogSchema
+          : preparationSchema;
 }
