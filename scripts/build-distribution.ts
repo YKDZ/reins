@@ -12,8 +12,12 @@ import {
   writeFileSync,
 } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 
+import {
+  copyQoderRuntimeResources,
+  resolveQoderResourceHolderPath,
+} from "@reins/qoder/runtime-resources";
 import { rolldown, type OutputChunk } from "rolldown";
 
 import {
@@ -238,14 +242,52 @@ const runtimeOutput = await runtimeBundle.write({
 });
 await runtimeBundle.close();
 
+const runtimeChunks = runtimeOutput.output.filter(
+  (entry): entry is OutputChunk => entry.type === "chunk",
+);
 verifyBundle(
-  runtimeOutput.output.filter(
-    (entry): entry is OutputChunk => entry.type === "chunk",
-  ),
+  runtimeChunks,
   Object.keys(runtimeDependencies),
   ["reins.js", "reins-daemon.js", "application.js"],
   true,
 );
+const qoderHolderPath = await copyQoderRuntimeResources(
+  runtimeDistributionDirectory,
+);
+const daemonEntryUrl = pathToFileURL(
+  join(runtimeDistributionDirectory, "reins-daemon.js"),
+).href;
+const sharedRuntimeChunk = runtimeChunks.find((chunk) => !chunk.isEntry);
+if (sharedRuntimeChunk === undefined) {
+  throw new Error("Runtime bundle omitted the shared chunk");
+}
+const sharedChunkUrl = pathToFileURL(
+  join(runtimeDistributionDirectory, sharedRuntimeChunk.fileName),
+).href;
+const qoderModuleChunk = runtimeChunks.find((chunk) =>
+  Object.keys(chunk.modules).some((moduleId) =>
+    moduleId
+      .replaceAll("\\", "/")
+      .endsWith("/adapters/qoder/src/holder-path.ts"),
+  ),
+);
+if (qoderModuleChunk === undefined) {
+  throw new Error("Runtime bundle omitted the Qoder holder resolver");
+}
+const actualQoderModuleUrl = pathToFileURL(
+  join(runtimeDistributionDirectory, qoderModuleChunk.fileName),
+).href;
+for (const moduleUrl of [
+  daemonEntryUrl,
+  sharedChunkUrl,
+  actualQoderModuleUrl,
+]) {
+  if (resolveQoderResourceHolderPath(moduleUrl) !== qoderHolderPath) {
+    throw new Error(
+      `Qoder holder resource path does not resolve from ${moduleUrl}`,
+    );
+  }
+}
 for (const name of ["reins.js", "reins-daemon.js"] as const) {
   const path = join(runtimeDistributionDirectory, name);
   if (!readFileSync(path, "utf8").startsWith("#!/usr/bin/env node\n")) {

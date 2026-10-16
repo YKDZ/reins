@@ -80,6 +80,8 @@ if (process.argv[2] === "__helper") {
     JSON.stringify({
       rootPid: process.pid,
       rootStartTime: processStartTime(process.pid),
+      ownerPid: process.ppid,
+      ownerStartTime: processStartTime(process.ppid),
       helperPid,
       helperStartTime,
       helperReadyPath,
@@ -177,5 +179,46 @@ if (process.argv[2] === "__helper") {
     process.on("SIGTERM", () => {});
     process.stdout.end();
     await delay(8_000);
+  }
+  if (process.env.QODER_LIFECYCLE_ROOT_MODE === "late-child-on-eof") {
+    const readyPath = `${directory}/late-helper.ready`;
+    const helper = spawn(
+      process.execPath,
+      [runtimePath, "__helper", readyPath, "ignore-term"],
+      { detached: true, stdio: "ignore" },
+    );
+    helper.unref();
+    let ready: { pid: number; startTime: string } | undefined;
+    const readyDeadline = Date.now() + 2_000;
+    while (ready === undefined && Date.now() < readyDeadline) {
+      try {
+        ready = JSON.parse(await readFile(readyPath, "utf8")) as {
+          pid: number;
+          startTime: string;
+        };
+      } catch (error) {
+        if (
+          typeof error !== "object" ||
+          error === null ||
+          !("code" in error) ||
+          error.code !== "ENOENT"
+        ) {
+          throw error;
+        }
+        await delay(5);
+      }
+    }
+    if (ready === undefined) throw new Error("late helper readiness timed out");
+    await writeFile(
+      `${directory}/session-${process.pid}.json`,
+      JSON.stringify({
+        rootPid: process.pid,
+        rootStartTime: processStartTime(process.pid),
+        ownerPid: process.ppid,
+        ownerStartTime: processStartTime(process.ppid),
+        lateHelperPid: ready.pid,
+        lateHelperStartTime: ready.startTime,
+      }),
+    );
   }
 }

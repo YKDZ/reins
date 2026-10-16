@@ -13,7 +13,6 @@ import {
   mapSdkMessage,
 } from "./mapper.ts";
 import {
-  captureOwnedProcessTree,
   terminateOwnedDescendants,
   waitForOwnedRootExit,
 } from "./owned-process.ts";
@@ -294,22 +293,20 @@ export function createQoderDriver(deps: {
         if (terminationPromise !== null) return terminationPromise;
 
         const pending = (async () => {
-          // 在 interrupt 确认可能令 worker 根进程退出并遗留已捕获的辅助进程前，
-          // 先保存当前拥有的进程树。
           terminating = true;
-          if (query !== null) await captureOwnedProcessTree(query);
-
-          // interrupt 只确认 SDK 控制请求。所有已捕获的后代进程退出前，
-          // 保持输入和进程存活。
-          if (query !== null && !interruptAcknowledged) {
+          if (query !== null && interruptAcknowledged) {
+            // 首次关闭已失败时，保留的同一 holder 可由显式重试升级到 KILL。
+            await terminateOwnedDescendants(query, true);
+          } else if (query !== null) {
             await query.interrupt();
             interruptAcknowledged = true;
           }
-          if (query !== null) await terminateOwnedDescendants(query);
 
+          // SDK abort 先结束原输入，再由公开 ProcessTransport 的 TERM/KILL
+          // 回调控制 holder；这样 runtime 可以完成 EOF 处理并交出后来代子进程。
           abortController?.abort();
-          await runPromise;
           if (query !== null) await waitForOwnedRootExit(query);
+          await runPromise;
           if (session !== null && !closedDiagnosticEmitted) {
             await session.diagnostic({
               kind: "lifecycle",

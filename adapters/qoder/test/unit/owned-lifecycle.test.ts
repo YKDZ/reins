@@ -4,7 +4,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import type { DriverDiagnosticFact } from "@reins/protocol";
-import { afterEach, describe, expect, test, vi } from "vitest";
+import { afterEach, describe, expect, test } from "vitest";
 
 import { createQoderDriver } from "#/qoder-driver";
 import { createRealQoderSdk } from "#/sdk-binding";
@@ -58,9 +58,13 @@ async function waitFor<T>(
 type FixtureSession = {
   rootPid: number;
   rootStartTime: string;
+  ownerPid: number;
+  ownerStartTime: string;
   helperPid?: number;
   helperStartTime?: string;
   helperReadyPath?: string;
+  lateHelperPid?: number;
+  lateHelperStartTime?: string;
 };
 
 async function fixtureSessions(directory: string): Promise<FixtureSession[]> {
@@ -85,7 +89,9 @@ async function fixtureSessions(directory: string): Promise<FixtureSession[]> {
 
 async function processInfo(
   pid: number,
-): Promise<{ startTime: string; state: string } | undefined> {
+): Promise<
+  { parentPid: number; startTime: string; state: string } | undefined
+> {
   try {
     const stat = await readFile(`/proc/${pid}/stat`, "utf8");
     const fields = stat
@@ -93,9 +99,16 @@ async function processInfo(
       .trim()
       .split(/\s+/u);
     const state = fields[0];
+    const parentPid = Number(fields[1]);
     const startTime = fields[19];
-    if (state === undefined || startTime === undefined) return undefined;
-    return { startTime, state };
+    if (
+      state === undefined ||
+      !Number.isSafeInteger(parentPid) ||
+      startTime === undefined
+    ) {
+      return undefined;
+    }
+    return { parentPid, startTime, state };
   } catch {
     return undefined;
   }
@@ -133,10 +146,21 @@ async function waitForExit(pid: number, startTime: string): Promise<void> {
 }
 
 async function forceFixtureCleanup(directory: string): Promise<void> {
-  for (const session of await fixtureSessions(directory)) {
+  const sessions = await fixtureSessions(directory);
+  for (const session of sessions) {
+    if (await isRunning(session.ownerPid, session.ownerStartTime)) {
+      try {
+        process.kill(session.ownerPid, "SIGCONT");
+      } catch {
+        // holder 可能在身份检查后自然退出。
+      }
+    }
+  }
+  for (const session of sessions) {
     const identities = [
       [session.rootPid, session.rootStartTime],
       [session.helperPid, session.helperStartTime],
+      [session.lateHelperPid, session.lateHelperStartTime],
     ] as const;
     for (const [pid, startTime] of identities) {
       if (
@@ -153,20 +177,33 @@ async function forceFixtureCleanup(directory: string): Promise<void> {
       }
     }
   }
-  const sessions = await fixtureSessions(directory);
+  for (const session of sessions) {
+    if (await isRunning(session.ownerPid, session.ownerStartTime)) {
+      try {
+        process.kill(session.ownerPid, "SIGTERM");
+      } catch {
+        // holder 可能在身份检查后自然退出。
+      }
+    }
+  }
   await Promise.all(
     sessions.flatMap((session) => [
       waitForExit(session.rootPid, session.rootStartTime),
+      waitForExit(session.ownerPid, session.ownerStartTime),
       ...(session.helperPid === undefined ||
       session.helperStartTime === undefined
         ? []
         : [waitForExit(session.helperPid, session.helperStartTime)]),
+      ...(session.lateHelperPid === undefined ||
+      session.lateHelperStartTime === undefined
+        ? []
+        : [waitForExit(session.lateHelperPid, session.lateHelperStartTime)]),
     ]),
   );
 }
 
 describe("Qoder SDK process ownership", () => {
-  test("termination escalates once, retains a refused owned signal for retry, and isolates sessions", async () => {
+  test("termination escalates to resistant descendants and isolates sessions", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-qoder-owned-"));
     configureEnvironment(directory);
     const sdk = createRealQoderSdk();
@@ -239,34 +276,6 @@ describe("Qoder SDK process ownership", () => {
               ),
         "session B helper readiness",
       );
-
-      const realKill = process.kill.bind(process);
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation((pid, signal) => {
-          if (pid === sessionA.helperPid && signal === "SIGKILL") {
-            const error = Object.assign(new Error("injected signal refusal"), {
-              code: "EPERM",
-            });
-            throw error;
-          }
-          return realKill(pid, signal);
-        });
-      try {
-        await expect(driverA.terminate("owned-a" as never)).rejects.toThrow(
-          "could not send SIGKILL",
-        );
-        expect(killSpy).toHaveBeenCalledWith(sessionA.helperPid, "SIGKILL");
-      } finally {
-        killSpy.mockRestore();
-      }
-      expect(await isRunning(sessionA.rootPid, sessionA.rootStartTime)).toBe(
-        true,
-      );
-      expect(
-        await isRunning(sessionA.helperPid!, sessionA.helperStartTime!),
-      ).toBe(true);
-      expect(diagnosticsA.some((fact) => fact.reason === "closed")).toBe(false);
 
       await driverA.terminate("owned-a" as never);
       await waitForExit(sessionA.rootPid, sessionA.rootStartTime);
@@ -395,6 +404,128 @@ describe("Qoder SDK process ownership", () => {
     }
   }, 10_000);
 
+  test("cleans a helper first spawned while the runtime handles stdin EOF", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-qoder-late-child-"));
+    configureEnvironment(directory);
+    process.env.QODER_LIFECYCLE_ROOT_MODE = "late-child-on-eof";
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const driver = createQoderDriver({ sdk: createRealQoderSdk() })({
+      emit: () => {},
+      diagnostics: async (fact) => {
+        diagnostics.push(fact);
+        return undefined;
+      },
+    });
+    driver.start({
+      sessionId: "late-child" as never,
+      turnId: "turn" as never,
+      sessionName: "late-child" as never,
+      harness: "qoder",
+      message: "keep this real SDK input stream open",
+      cwd: directory,
+      authorizationMode: "allowAll",
+    });
+
+    try {
+      const initial = await waitFor(
+        async () => (await fixtureSessions(directory))[0],
+        "late-child session",
+      );
+      await waitFor(async () => {
+        try {
+          return (
+            await readFile(
+              join(directory, `events-${initial.rootPid}.jsonl`),
+              "utf8",
+            )
+          ).includes("initialize_request")
+            ? true
+            : undefined;
+        } catch {
+          return undefined;
+        }
+      }, "late-child initialize request");
+
+      await driver.terminate("late-child" as never);
+
+      const closed = diagnostics.some((fact) => fact.reason === "closed");
+      expect(closed).toBe(true);
+      const session = await waitFor(
+        async () =>
+          (await fixtureSessions(directory)).find(
+            (entry) => entry.lateHelperPid !== undefined,
+          ),
+        "EOF-spawned helper identity",
+      );
+      expect(await isRunning(session.rootPid, session.rootStartTime)).toBe(
+        false,
+      );
+      expect(await isRunning(initial.ownerPid, initial.ownerStartTime)).toBe(
+        false,
+      );
+      expect(
+        await isRunning(session.lateHelperPid!, session.lateHelperStartTime!),
+      ).toBe(false);
+    } finally {
+      await forceFixtureCleanup(directory);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 10_000);
+
+  test("does not treat an unexpected holder exit as tree closure", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-qoder-dead-holder-"));
+    configureEnvironment(directory);
+    process.env.QODER_LIFECYCLE_HELPER_MODE = "ignore-term";
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const driver = createQoderDriver({ sdk: createRealQoderSdk() })({
+      emit: () => {},
+      diagnostics: async (fact) => {
+        diagnostics.push(fact);
+        return undefined;
+      },
+    });
+    driver.start({
+      sessionId: "dead-holder" as never,
+      turnId: "turn" as never,
+      sessionName: "dead-holder" as never,
+      harness: "qoder",
+      message: "keep this real SDK input stream open",
+      cwd: directory,
+      authorizationMode: "allowAll",
+    });
+
+    try {
+      const session = await waitFor(
+        async () => (await fixtureSessions(directory))[0],
+        "unexpected-holder-exit session",
+      );
+      await waitFor(
+        async () =>
+          session.helperReadyPath === undefined
+            ? undefined
+            : access(session.helperReadyPath).then(
+                () => true,
+                () => undefined,
+              ),
+        "unexpected-holder-exit helper readiness",
+      );
+      expect(await isRunning(session.ownerPid, session.ownerStartTime)).toBe(
+        true,
+      );
+      process.kill(session.ownerPid, "SIGKILL");
+      await waitForExit(session.ownerPid, session.ownerStartTime);
+
+      await expect(driver.terminate("dead-holder" as never)).rejects.toThrow();
+      expect(diagnostics.some((fact) => fact.reason === "closed")).toBe(false);
+      expect(
+        await isRunning(session.helperPid!, session.helperStartTime!),
+      ).toBe(true);
+    } finally {
+      await forceFixtureCleanup(directory);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 8_000);
+
   test("failed live model lookup still closes its temporary query and propagates the error", async () => {
     const directory = await mkdtemp(
       join(tmpdir(), "reins-qoder-model-failure-"),
@@ -441,34 +572,16 @@ describe("Qoder SDK process ownership", () => {
               ),
         "first model-query helper",
       );
-
-      const realKill = process.kill.bind(process);
-      let refusedSignalCount = 0;
-      const killSpy = vi
-        .spyOn(process, "kill")
-        .mockImplementation((pid, signal) => {
-          if (
-            pid === original.helperPid &&
-            signal === "SIGKILL" &&
-            refusedSignalCount === 0
-          ) {
-            refusedSignalCount += 1;
-            throw Object.assign(new Error("injected signal refusal"), {
-              code: "EPERM",
-            });
-          }
-          return realKill(pid, signal);
-        });
+      const owner = await processInfo(original.ownerPid);
+      expect(owner?.startTime).toBe(original.ownerStartTime);
+      process.kill(original.ownerPid, "SIGSTOP");
 
       let firstFailure: unknown;
       try {
         await firstLookup;
       } catch (error) {
         firstFailure = error;
-      } finally {
-        killSpy.mockRestore();
       }
-      expect(refusedSignalCount).toBe(1);
       expect(firstFailure).toBeInstanceOf(AggregateError);
       const firstErrors = (firstFailure as AggregateError).errors;
       expect(
@@ -478,16 +591,22 @@ describe("Qoder SDK process ownership", () => {
       ).toBe(true);
       expect(
         firstErrors.some((error) =>
-          String(error).includes("could not send SIGKILL"),
+          String(error).includes("resource holder did not confirm"),
         ),
       ).toBe(true);
-      await waitForExit(original.rootPid, original.rootStartTime);
       expect(
         await isRunning(original.helperPid!, original.helperStartTime!),
       ).toBe(true);
 
       delete process.env.QODER_LIFECYCLE_MODEL_MODE;
-      const models = await sdk.getAvailableModels({ fetchStrategy: "live" });
+      const nextLookup = sdk.getAvailableModels({ fetchStrategy: "live" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await fixtureSessions(directory)).toHaveLength(1);
+      const currentOwner = await processInfo(original.ownerPid);
+      if (currentOwner?.startTime === original.ownerStartTime) {
+        process.kill(original.ownerPid, "SIGCONT");
+      }
+      const models = await nextLookup;
       expect(models).toEqual([
         {
           value: "fixture-model",
@@ -521,12 +640,16 @@ describe("Qoder SDK process ownership", () => {
     const sdk = createRealQoderSdk();
 
     try {
-      await expect(
-        sdk.getAvailableModels({ fetchStrategy: "live" }),
-      ).rejects.toThrow("spawned runtime did not exit");
+      const firstLookup = sdk.getAvailableModels({ fetchStrategy: "live" });
       const original = await waitFor(
         async () => (await fixtureSessions(directory))[0],
         "root-close failure process",
+      );
+      const owner = await processInfo(original.ownerPid);
+      expect(owner?.startTime).toBe(original.ownerStartTime);
+      process.kill(original.ownerPid, "SIGSTOP");
+      await expect(firstLookup).rejects.toThrow(
+        "resource holder did not confirm process-tree closure",
       );
       expect(await isRunning(original.rootPid, original.rootStartTime)).toBe(
         true,
@@ -534,7 +657,14 @@ describe("Qoder SDK process ownership", () => {
       expect(await fixtureSessions(directory)).toHaveLength(1);
 
       delete process.env.QODER_LIFECYCLE_ROOT_MODE;
-      const models = await sdk.getAvailableModels({ fetchStrategy: "live" });
+      const nextLookup = sdk.getAvailableModels({ fetchStrategy: "live" });
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      expect(await fixtureSessions(directory)).toHaveLength(1);
+      const currentOwner = await processInfo(original.ownerPid);
+      if (currentOwner?.startTime === original.ownerStartTime) {
+        process.kill(original.ownerPid, "SIGCONT");
+      }
+      const models = await nextLookup;
       expect(models).toEqual([
         {
           value: "fixture-model",

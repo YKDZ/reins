@@ -27,7 +27,7 @@ function createSession(
   prompt: AsyncIterable<SDKUserMessage>,
   options: Parameters<typeof query>[0]["options"],
 ) {
-  if (process.platform !== "linux") {
+  if (process.platform !== "linux" || process.arch !== "x64") {
     const runtime =
       process.env.QODERCLI_PATH === undefined
         ? {}
@@ -71,14 +71,17 @@ export function createRealQoderSdk(): QoderSdk {
   async function cleanupModelSession(
     session: ReturnType<typeof query>,
     promptAbort?: AbortController,
+    retry = false,
   ): Promise<void> {
     let failure: unknown;
-    try {
-      await terminateOwnedDescendants(session, true);
-    } catch (error) {
-      failure = error;
-    } finally {
-      promptAbort?.abort();
+    promptAbort?.abort();
+
+    if (retry) {
+      try {
+        await terminateOwnedDescendants(session, true);
+      } catch (error) {
+        failure = error;
+      }
     }
 
     try {
@@ -107,7 +110,7 @@ export function createRealQoderSdk(): QoderSdk {
       if (pendingSession === undefined) return;
 
       const attempt = (async () => {
-        await cleanupModelSession(pendingSession);
+        await cleanupModelSession(pendingSession, undefined, true);
         if (pendingModelCleanups[0] === pendingSession) {
           pendingModelCleanups.shift();
         }
