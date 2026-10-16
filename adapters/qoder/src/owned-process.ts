@@ -362,7 +362,7 @@ class OwnedProcessTree {
       record.children.add(key);
     }
 
-    // Include identities captured before their parent exited or detached.
+    // 纳入在父进程退出或脱离前已捕获的进程身份。
     for (const childKey of record.children) {
       await this.captureNode(childKey, visited);
     }
@@ -575,8 +575,8 @@ class OwnedProcessTree {
       this.verifyParentEdge(second, parent, parentTaskIds);
     }
 
-    // Confirm this PID still belongs to the same owned task after reading its
-    // start time; this prevents a stale children entry from admitting a reused PID.
+    // 读取启动时间后，确认此 PID 仍属于同一个已拥有的任务，
+    // 避免过期的 children 记录接纳已复用的 PID。
     const stillListed = await this.readChildren(parent);
     const stillListedBy = stillListed.get(childPid);
     if (stillListedBy === undefined) {

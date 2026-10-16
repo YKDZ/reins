@@ -294,13 +294,13 @@ export function createQoderDriver(deps: {
         if (terminationPromise !== null) return terminationPromise;
 
         const pending = (async () => {
-          // Save the current owned tree before the interrupt ACK can let the
-          // worker root exit and orphan a captured helper.
+          // 在 interrupt 确认可能令 worker 根进程退出并遗留已捕获的辅助进程前，
+          // 先保存当前拥有的进程树。
           terminating = true;
           if (query !== null) await captureOwnedProcessTree(query);
 
-          // interrupt only acknowledges the SDK control request. Keep its
-          // input/process alive until every captured descendant is gone.
+          // interrupt 只确认 SDK 控制请求。所有已捕获的后代进程退出前，
+          // 保持输入和进程存活。
           if (query !== null && !interruptAcknowledged) {
             await query.interrupt();
             interruptAcknowledged = true;

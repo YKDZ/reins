@@ -127,7 +127,7 @@ if (process.argv[2] === "__helper") {
       try {
         count = Number(await readFile(counterPath, "utf8"));
       } catch {
-        // First interrupt.
+        // 首次中断请求。
       }
       await writeFile(counterPath, String(count + 1));
       response = { still_queued: [] };

@@ -77,7 +77,7 @@ async function fixtureSessions(directory: string): Promise<FixtureSession[]> {
         ) as FixtureSession,
       );
     } catch {
-      // The fixture writes its ready record atomically from the test's perspective.
+      // 对测试而言，fixture 会以原子方式写入就绪记录。
     }
   }
   return sessions;
@@ -149,7 +149,7 @@ async function forceFixtureCleanup(directory: string): Promise<void> {
       try {
         process.kill(pid, "SIGKILL");
       } catch {
-        // The fixture process may exit between the liveness check and the signal.
+        // fixture 进程可能在存活检查与发送信号之间退出。
       }
     }
   }
@@ -415,4 +415,100 @@ describe("Qoder SDK process ownership", () => {
       await rm(directory, { recursive: true, force: true });
     }
   }, 8_000);
+
+  test("retries a failed model-query cleanup before opening the next query", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "reins-qoder-model-cleanup-retry-"),
+    );
+    configureEnvironment(directory);
+    process.env.QODER_LIFECYCLE_HELPER_MODE = "ignore-term";
+    process.env.QODER_LIFECYCLE_MODEL_MODE = "reject";
+    const sdk = createRealQoderSdk();
+
+    try {
+      const firstLookup = sdk.getAvailableModels({ fetchStrategy: "live" });
+      const original = await waitFor(
+        async () => (await fixtureSessions(directory))[0],
+        "first model-query process",
+      );
+      await waitFor(
+        async () =>
+          original.helperReadyPath === undefined
+            ? undefined
+            : access(original.helperReadyPath).then(
+                () => true,
+                () => undefined,
+              ),
+        "first model-query helper",
+      );
+
+      const realKill = process.kill.bind(process);
+      let refusedSignalCount = 0;
+      const killSpy = vi
+        .spyOn(process, "kill")
+        .mockImplementation((pid, signal) => {
+          if (
+            pid === original.helperPid &&
+            signal === "SIGKILL" &&
+            refusedSignalCount === 0
+          ) {
+            refusedSignalCount += 1;
+            throw Object.assign(new Error("injected signal refusal"), {
+              code: "EPERM",
+            });
+          }
+          return realKill(pid, signal);
+        });
+
+      let firstFailure: unknown;
+      try {
+        await firstLookup;
+      } catch (error) {
+        firstFailure = error;
+      } finally {
+        killSpy.mockRestore();
+      }
+      expect(refusedSignalCount).toBe(1);
+      expect(firstFailure).toBeInstanceOf(AggregateError);
+      const firstErrors = (firstFailure as AggregateError).errors;
+      expect(
+        firstErrors.some((error) =>
+          String(error).includes("fixture model lookup failure"),
+        ),
+      ).toBe(true);
+      expect(
+        firstErrors.some((error) =>
+          String(error).includes("could not send SIGKILL"),
+        ),
+      ).toBe(true);
+      await waitForExit(original.rootPid, original.rootStartTime);
+      expect(
+        await isRunning(original.helperPid!, original.helperStartTime!),
+      ).toBe(true);
+
+      delete process.env.QODER_LIFECYCLE_MODEL_MODE;
+      const models = await sdk.getAvailableModels({ fetchStrategy: "live" });
+      expect(models).toEqual([
+        {
+          value: "fixture-model",
+          displayName: "Fixture model",
+          description: "Local control fixture",
+        },
+      ]);
+      const sessions = await fixtureSessions(directory);
+      expect(sessions).toHaveLength(2);
+      expect(
+        await isRunning(original.helperPid!, original.helperStartTime!),
+      ).toBe(false);
+      const next = sessions.find(
+        (session) => session.rootPid !== original.rootPid,
+      );
+      expect(next).toBeDefined();
+      await waitForExit(next!.rootPid, next!.rootStartTime);
+      await waitForExit(next!.helperPid!, next!.helperStartTime!);
+    } finally {
+      await forceFixtureCleanup(directory);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
 });

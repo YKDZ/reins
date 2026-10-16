@@ -65,11 +65,41 @@ function combineErrors(primary: unknown, cleanup: unknown): unknown {
 
 // 真实绑定：进程内 SDK + 复用本机 qodercli 登录态（ADR-0011）。
 export function createRealQoderSdk(): QoderSdk {
+  const pendingModelCleanups: Array<ReturnType<typeof query>> = [];
+  let pendingCleanupPromise: Promise<void> | null = null;
+
+  async function retryPendingModelCleanups(): Promise<void> {
+    while (true) {
+      if (pendingCleanupPromise !== null) {
+        await pendingCleanupPromise;
+        continue;
+      }
+
+      const pendingSession = pendingModelCleanups[0];
+      if (pendingSession === undefined) return;
+
+      const attempt = (async () => {
+        await terminateOwnedDescendants(pendingSession, true);
+        if (pendingModelCleanups[0] === pendingSession) {
+          pendingModelCleanups.shift();
+        }
+      })();
+      pendingCleanupPromise = attempt;
+      try {
+        await attempt;
+      } finally {
+        if (pendingCleanupPromise === attempt) pendingCleanupPromise = null;
+      }
+    }
+  }
+
   return {
     query({ prompt, options }) {
       return createSession(prompt, options);
     },
     async getAvailableModels(modelOptions) {
+      await retryPendingModelCleanups();
+
       const promptAbort = new AbortController();
       const session = createSession(noPrompt(promptAbort.signal), {
         persistSession: false,
@@ -88,6 +118,7 @@ export function createRealQoderSdk(): QoderSdk {
       try {
         await terminateOwnedDescendants(session, true);
       } catch (error) {
+        pendingModelCleanups.push(session);
         failure = combineErrors(failure, error);
       } finally {
         promptAbort.abort();
