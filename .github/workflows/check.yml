@@ -30,6 +30,7 @@ jobs:
         with:
           run_install: false
       - name: Set up Node.js
+        id: node-setup
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: package.json
@@ -37,14 +38,14 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Restore Turbo cache
+      - name: 恢复 Turbo 缓存
         id: turbo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo/cache
-          key: turbo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ github.sha }}
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-${{ github.sha }}
           restore-keys: |
-            turbo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+            turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-
       - name: Run quality checks
         run: >-
           pnpm exec turbo run boundaries language format:check lint typecheck build test
@@ -52,7 +53,7 @@ jobs:
           --output-logs=errors-only
           --log-order=grouped
           --log-prefix=task
-      - name: Save Turbo cache
+      - name: 保存 Turbo 缓存
         if: success() && steps.turbo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -74,6 +75,7 @@ jobs:
         with:
           run_install: false
       - name: Set up Node.js
+        id: node-setup
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: package.json
@@ -81,14 +83,14 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Restore Turbo cache
+      - name: 恢复 Turbo 缓存
         id: turbo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo/cache
-          key: turbo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ github.sha }}
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-${{ github.sha }}
           restore-keys: |
-            turbo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+            turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-
       - name: Run CLI end-to-end tests
         run: >-
           pnpm exec turbo run test:e2e
@@ -96,7 +98,7 @@ jobs:
           --output-logs=errors-only
           --log-order=grouped
           --log-prefix=task
-      - name: Save Turbo cache
+      - name: 保存 Turbo 缓存
         if: success() && steps.turbo-cache.outputs.cache-hit != 'true'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -118,6 +120,7 @@ jobs:
         with:
           run_install: false
       - name: Set up Node.js
+        id: node-setup
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: package.json
@@ -125,14 +128,14 @@ jobs:
           cache-dependency-path: pnpm-lock.yaml
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
-      - name: Restore Turbo cache
+      - name: 恢复 Turbo 缓存
         id: turbo-cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: .turbo/cache
-          key: turbo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-${{ github.sha }}
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-${{ github.sha }}
           restore-keys: |
-            turbo-${{ runner.os }}-${{ runner.arch }}-${{ github.job }}-
+            turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-
       - name: 验证发行候选包并执行正式 npm 烟测
         env:
           TURBO_LOG_ORDER: grouped
