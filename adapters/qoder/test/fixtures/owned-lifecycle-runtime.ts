@@ -173,4 +173,9 @@ if (process.argv[2] === "__helper") {
     }
   }
   record("stdin_eof");
+  if (process.env.QODER_LIFECYCLE_ROOT_MODE === "delayed-exit-after-eof") {
+    process.on("SIGTERM", () => {});
+    process.stdout.end();
+    await delay(8_000);
+  }
 }

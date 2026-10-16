@@ -68,6 +68,29 @@ export function createRealQoderSdk(): QoderSdk {
   const pendingModelCleanups: Array<ReturnType<typeof query>> = [];
   let pendingCleanupPromise: Promise<void> | null = null;
 
+  async function cleanupModelSession(
+    session: ReturnType<typeof query>,
+    promptAbort?: AbortController,
+  ): Promise<void> {
+    let failure: unknown;
+    try {
+      await terminateOwnedDescendants(session, true);
+    } catch (error) {
+      failure = error;
+    } finally {
+      promptAbort?.abort();
+    }
+
+    try {
+      await session.close();
+      await waitForOwnedRootExit(session);
+    } catch (error) {
+      failure = combineErrors(failure, error);
+    }
+
+    if (failure !== undefined) throw failure;
+  }
+
   async function retryPendingModelCleanups(): Promise<void> {
     while (true) {
       if (pendingCleanupPromise !== null) {
@@ -79,7 +102,7 @@ export function createRealQoderSdk(): QoderSdk {
       if (pendingSession === undefined) return;
 
       const attempt = (async () => {
-        await terminateOwnedDescendants(pendingSession, true);
+        await cleanupModelSession(pendingSession);
         if (pendingModelCleanups[0] === pendingSession) {
           pendingModelCleanups.shift();
         }
@@ -116,18 +139,9 @@ export function createRealQoderSdk(): QoderSdk {
       }
 
       try {
-        await terminateOwnedDescendants(session, true);
+        await cleanupModelSession(session, promptAbort);
       } catch (error) {
         pendingModelCleanups.push(session);
-        failure = combineErrors(failure, error);
-      } finally {
-        promptAbort.abort();
-      }
-
-      try {
-        await session.close();
-        await waitForOwnedRootExit(session);
-      } catch (error) {
         failure = combineErrors(failure, error);
       }
 

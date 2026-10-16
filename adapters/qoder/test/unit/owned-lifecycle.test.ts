@@ -511,4 +511,50 @@ describe("Qoder SDK process ownership", () => {
       await rm(directory, { recursive: true, force: true });
     }
   }, 15_000);
+
+  test("waits for a failed model-query root before opening the next query", async () => {
+    const directory = await mkdtemp(
+      join(tmpdir(), "reins-qoder-model-root-cleanup-retry-"),
+    );
+    configureEnvironment(directory);
+    process.env.QODER_LIFECYCLE_ROOT_MODE = "delayed-exit-after-eof";
+    const sdk = createRealQoderSdk();
+
+    try {
+      await expect(
+        sdk.getAvailableModels({ fetchStrategy: "live" }),
+      ).rejects.toThrow("spawned runtime did not exit");
+      const original = await waitFor(
+        async () => (await fixtureSessions(directory))[0],
+        "root-close failure process",
+      );
+      expect(await isRunning(original.rootPid, original.rootStartTime)).toBe(
+        true,
+      );
+      expect(await fixtureSessions(directory)).toHaveLength(1);
+
+      delete process.env.QODER_LIFECYCLE_ROOT_MODE;
+      const models = await sdk.getAvailableModels({ fetchStrategy: "live" });
+      expect(models).toEqual([
+        {
+          value: "fixture-model",
+          displayName: "Fixture model",
+          description: "Local control fixture",
+        },
+      ]);
+      expect(await isRunning(original.rootPid, original.rootStartTime)).toBe(
+        false,
+      );
+      const sessions = await fixtureSessions(directory);
+      expect(sessions).toHaveLength(2);
+      const next = sessions.find(
+        (session) => session.rootPid !== original.rootPid,
+      );
+      expect(next).toBeDefined();
+      await waitForExit(next!.rootPid, next!.rootStartTime);
+    } finally {
+      await forceFixtureCleanup(directory);
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 15_000);
 });
