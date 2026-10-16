@@ -43,7 +43,8 @@ class OwnedRuntimeProcess {
   private nextRequestId = 1;
   private completeReceived = false;
   private holderExited = false;
-  private holderExitCode: number | null = null;
+  private controlClosed = false;
+  private holderExitFailure: Error | undefined;
   private failure: Error | undefined;
   private closed = false;
   private readonly abortSignal: AbortSignal;
@@ -92,19 +93,11 @@ class OwnedRuntimeProcess {
     });
     this.child.once("exit", (code, signal) => {
       this.holderExited = true;
-      this.holderExitCode = code;
       this.abortSignal.removeEventListener("abort", this.abortListener);
-      if (!this.completeReceived) {
-        this.reportFailure(
-          cleanupError(
-            `resource holder exited without a closure receipt (code=${code}, signal=${signal ?? "none"})`,
-          ),
-        );
-        return;
-      }
-      this.closed = true;
-      this.failure = undefined;
-      this.resolveWaiters();
+      this.holderExitFailure = cleanupError(
+        `resource holder exited without a closure receipt (code=${code}, signal=${signal ?? "none"})`,
+      );
+      this.finishHolderExit();
     });
   }
 
@@ -175,11 +168,13 @@ class OwnedRuntimeProcess {
     const lines = createInterface({ input: this.control });
     lines.on("line", (line) => this.handleControlMessage(line));
     lines.on("close", () => {
+      this.controlClosed = true;
       if (!this.holderExited && !this.completeReceived) {
         this.reportFailure(
           cleanupError("resource holder control channel closed unexpectedly"),
         );
       }
+      this.finishHolderExit();
     });
     this.control.on("error", (error) => {
       this.reportFailure(
@@ -202,7 +197,19 @@ class OwnedRuntimeProcess {
       return;
     }
     if (kind === "COMPLETE") {
+      if (
+        line !== `COMPLETE ${requestText}` ||
+        requestText === undefined ||
+        !/^(?:0|[1-9]\d*)$/u.test(requestText) ||
+        !Number.isSafeInteger(Number(requestText))
+      ) {
+        this.reportFailure(
+          cleanupError(`invalid holder closure receipt: ${line}`),
+        );
+        return;
+      }
       this.completeReceived = true;
+      this.finishHolderExit();
       return;
     }
     if (kind === "FAILED") {
@@ -226,6 +233,20 @@ class OwnedRuntimeProcess {
     );
   }
 
+  private finishHolderExit(): void {
+    if (!this.holderExited || !this.controlClosed) return;
+    if (!this.completeReceived) {
+      this.reportFailure(
+        this.holderExitFailure ??
+          cleanupError("resource holder exited without a closure receipt"),
+      );
+      return;
+    }
+    this.closed = true;
+    this.failure = undefined;
+    this.resolveWaiters();
+  }
+
   private sendAbortRequest(): void {
     const requestId = this.nextRequestId++;
     this.control.write(`ABORT ${requestId}\n`, (error) => {
@@ -242,6 +263,7 @@ class OwnedRuntimeProcess {
     deadline = Date.now() + processExitTimeoutMs,
   ): Promise<void> {
     if (this.closed) return Promise.resolve();
+    if (this.holderExited) return this.waitForRootExit(deadline);
     if (this.completeReceived) return this.waitForRootExit(deadline);
     this.failure = undefined;
     const requestId = this.nextRequestId++;

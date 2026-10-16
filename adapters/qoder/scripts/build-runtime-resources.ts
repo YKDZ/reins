@@ -56,7 +56,7 @@ function compilerArgs(): string[] {
   return [
     "run",
     "--rm",
-    "--pull=never",
+    "--pull=missing",
     "--network=none",
     "--platform=linux/amd64",
     "--label",
