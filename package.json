@@ -4,7 +4,6 @@
   "type": "module",
   "scripts": {
     "boundaries": "node --conditions=source scripts/check-boundaries.ts",
-    "acceptance:round": "node --conditions=source scripts/check-pnpm-consumer-round.ts",
     "language": "node --conditions=source scripts/check-runtime-language.ts",
     "check": "turbo run boundaries language format:check lint typecheck build test test:e2e --continue=dependencies-successful --output-logs=errors-only --log-order=grouped --log-prefix=task",
     "deployment": "pnpm exec turbo run //#release:npm-smoke",

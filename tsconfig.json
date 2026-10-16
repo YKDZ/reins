@@ -15,7 +15,6 @@
     "scripts/build-distribution.ts",
     "scripts/check-boundaries.ts",
     "scripts/check-packed-cli.ts",
-    "scripts/check-pnpm-consumer-round.ts",
     "scripts/check-runtime-language.ts",
     "scripts/packed-cli-fixtures/adapter-fixture.ts",
     "scripts/packed-cli-fixtures/adapter-worker.ts",
