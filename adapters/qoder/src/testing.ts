@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
+import { createAsyncQueue } from "@reins/adapter-kit";
 
 import { parseRecordedQoderFixtureAnchors } from "./fixture-anchors.ts";
 import { assertMatchesKnownCredentialPolicy } from "./fixture-policy.ts";
@@ -267,12 +268,14 @@ export function createQoderFixtureSdk(
 ): QoderSdk {
   return {
     query() {
+      const replies = createAsyncQueue<SDKMessage>();
+      for (const message of messages) replies.push(message);
       const query: QoderQuery = {
-        async *[Symbol.asyncIterator]() {
-          for (const message of messages) yield message;
-        },
+        [Symbol.asyncIterator]: () => replies[Symbol.asyncIterator](),
         async interrupt() {},
-        async close() {},
+        async close() {
+          replies.end();
+        },
       };
       return query;
     },

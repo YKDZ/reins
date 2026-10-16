@@ -42,9 +42,10 @@ export function createFakeSdk(
   const sdk: QoderSdk = {
     query({ prompt, options }) {
       lastOptions = options ?? null;
-      void (async () => {
+      const promptReader = (async () => {
         for await (const message of prompt) delivered.push(message);
       })();
+      void promptReader.catch(() => {});
       const q: QoderQuery = {
         [Symbol.asyncIterator]() {
           const iterator = queue[Symbol.asyncIterator]();
@@ -68,6 +69,7 @@ export function createFakeSdk(
           closePromise = (async () => {
             await behavior.close?.();
             queue.end();
+            await promptReader;
           })();
           return closePromise;
         },

@@ -19,9 +19,9 @@ const qoderFactory: ReturnType<typeof createQoderDriver> = (options) => {
             keys: Object.keys(params.options ?? {}),
           }) + "\n",
         );
-        params.options?.abortController?.signal.addEventListener("abort", () =>
-          replies.end(),
-        );
+        const abortSignal = params.options?.abortController?.signal;
+        const endReplies = () => replies.end();
+        abortSignal?.addEventListener("abort", endReplies, { once: true });
         const prompt = (async function* () {
           for await (const message of params.prompt) {
             appendFileSync(
@@ -67,12 +67,21 @@ const qoderFactory: ReturnType<typeof createQoderDriver> = (options) => {
             yield message;
           }
         })();
-        void (async () => {
+        const promptReader = (async () => {
           for await (const message of prompt) void message;
         })();
+        void promptReader.catch(() => {});
+        let closePromise: Promise<void> | undefined;
         return {
           [Symbol.asyncIterator]: () => replies[Symbol.asyncIterator](),
           interrupt: async () => {},
+          close: () => {
+            if (closePromise !== undefined) return closePromise;
+            endReplies();
+            abortSignal?.removeEventListener("abort", endReplies);
+            closePromise = promptReader;
+            return closePromise;
+          },
         };
       },
     },
