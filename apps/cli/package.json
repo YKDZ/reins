@@ -44,7 +44,7 @@
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
     "postbuild": "node -e \"const fs = require('node:fs'); fs.copyFileSync('dist/cli.js', 'dist/reins.js'); if (process.platform !== 'win32') fs.chmodSync('dist/reins.js', 0o755)\"",
     "test": "vitest run test/unit --reporter=agent",
-    "test:e2e": "vitest run test/e2e --reporter=agent",
+    "test:e2e": "vitest run test/e2e --reporter=agent --no-file-parallelism",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
