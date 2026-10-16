@@ -83,6 +83,11 @@ export function createRealQoderSdk(): QoderSdk {
 
     try {
       await session.close();
+    } catch (error) {
+      failure = combineErrors(failure, error);
+    }
+
+    try {
       await waitForOwnedRootExit(session);
     } catch (error) {
       failure = combineErrors(failure, error);
