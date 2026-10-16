@@ -34,10 +34,7 @@
   ],
   "type": "module",
   "publishConfig": {
-    "access": "public",
-    "executableFiles": [
-      "./dist/native/qoder-resource-holder"
-    ]
+    "access": "public"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json --pretty false",

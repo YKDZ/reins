@@ -12,10 +12,6 @@ import {
   derivePermissionOptions,
   mapSdkMessage,
 } from "./mapper.ts";
-import {
-  terminateOwnedDescendants,
-  waitForOwnedRootExit,
-} from "./owned-process.ts";
 import type {
   CanUseTool,
   PermissionResult,
@@ -60,9 +56,9 @@ export function createQoderDriver(deps: {
     let mappingState = createQoderMappingState();
     let terminating = false;
     let runPromise: Promise<void> | null = null;
-    let interruptAcknowledged = false;
     let terminationComplete = false;
     let terminationPromise: Promise<void> | null = null;
+    let queryClosePromise: Promise<void> | null = null;
     let closedDiagnosticEmitted = false;
 
     function makeCanUseTool(): CanUseTool {
@@ -164,9 +160,9 @@ export function createQoderDriver(deps: {
             feature: unsupported,
           } satisfies MachineError;
         terminating = false;
-        interruptAcknowledged = false;
         terminationComplete = false;
         terminationPromise = null;
+        queryClosePromise = null;
         closedDiagnosticEmitted = false;
         session = new HarnessSession<PendingEntry>({
           sessionId: spec.sessionId,
@@ -294,18 +290,19 @@ export function createQoderDriver(deps: {
 
         const pending = (async () => {
           terminating = true;
-          if (query !== null && interruptAcknowledged) {
-            // 首次关闭已失败时，保留的同一 holder 可由显式重试升级到 KILL。
-            await terminateOwnedDescendants(query, true);
-          } else if (query !== null) {
-            await query.interrupt();
-            interruptAcknowledged = true;
+          // 先结束 Reins 提供的 prompt，再主动调用并保存 SDK 的首次 close。
+          // SDK 的 AbortSignal listener 会 fire-and-forget close；一旦它先置
+          // closed，后续 close() 会直接返回，无法等待首次关闭完成。
+          stream?.end();
+          if (query !== null && queryClosePromise === null) {
+            try {
+              queryClosePromise = Promise.resolve(query.close());
+            } catch (error) {
+              queryClosePromise = Promise.reject(error);
+            }
           }
-
-          // SDK abort 先结束原输入，再由公开 ProcessTransport 的 TERM/KILL
-          // 回调控制 holder；这样 runtime 可以完成 EOF 处理并交出后来代子进程。
           abortController?.abort();
-          if (query !== null) await waitForOwnedRootExit(query);
+          if (queryClosePromise !== null) await queryClosePromise;
           await runPromise;
           if (session !== null && !closedDiagnosticEmitted) {
             await session.diagnostic({
@@ -316,6 +313,12 @@ export function createQoderDriver(deps: {
             closedDiagnosticEmitted = true;
           }
           terminationComplete = true;
+          query = null;
+          queryClosePromise = null;
+          abortController = null;
+          stream = null;
+          runPromise = null;
+          session = null;
         })();
         terminationPromise = pending;
         try {

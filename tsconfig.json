@@ -6,9 +6,6 @@
     "paths": {
       "@reins/daemon": ["./packages/daemon/src/index.ts"],
       "@reins/protocol": ["./packages/protocol/src/index.ts"],
-      "@reins/qoder/runtime-resources": [
-        "./adapters/qoder/src/runtime-resources.ts"
-      ],
       "@ykdz/reins-sdk": ["./packages/sdk/src/index.ts"]
     }
   },

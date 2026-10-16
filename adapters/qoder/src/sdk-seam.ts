@@ -28,6 +28,7 @@ export type {
 
 export type QoderQuery = AsyncIterable<SDKMessage> & {
   interrupt(): Promise<unknown>;
+  close(): Promise<void>;
 };
 
 export type QoderOptions = {

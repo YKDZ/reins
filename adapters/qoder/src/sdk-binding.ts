@@ -1,17 +1,6 @@
-import {
-  ProcessTransport,
-  qodercliAuth,
-  query,
-  resolveQoderWorkerRuntimePath,
-} from "@qodercn-ai/qodercn-agent-sdk";
+import { qodercliAuth, query } from "@qodercn-ai/qodercn-agent-sdk";
 import type { ModelInfo } from "@qodercn-ai/qodercn-agent-sdk";
 
-import {
-  bindOwnedProcess,
-  createOwnedProcessTree,
-  terminateOwnedDescendants,
-  waitForOwnedRootExit,
-} from "./owned-process.ts";
 import type { QoderSdk, SDKUserMessage } from "./sdk-seam.ts";
 
 // 模型查询用空提示建立控制会话，不进入对话回合。
@@ -27,133 +16,59 @@ function createSession(
   prompt: AsyncIterable<SDKUserMessage>,
   options: Parameters<typeof query>[0]["options"],
 ) {
-  if (process.platform !== "linux" || process.arch !== "x64") {
-    const runtime =
-      process.env.QODERCLI_PATH === undefined
-        ? {}
-        : { pathToQoderCLIExecutable: process.env.QODERCLI_PATH };
-    return query({
-      prompt,
-      options: { ...runtime, ...options, auth: qodercliAuth() },
-    });
-  }
-
-  const owner = createOwnedProcessTree();
-  const session = query({
+  const runtime =
+    process.env.QODERCLI_PATH === undefined
+      ? {}
+      : { pathToQoderCLIExecutable: process.env.QODERCLI_PATH };
+  return query({
     prompt,
-    options: {
-      ...options,
-      pathToQoderCLIExecutable:
-        process.env.QODERCLI_PATH ?? resolveQoderWorkerRuntimePath(),
-      transport: ProcessTransport.default,
-      spawnQoderCLIProcess: (spawnOptions) => owner.spawn(spawnOptions),
-      auth: qodercliAuth(),
-    },
+    options: { ...runtime, ...options, auth: qodercliAuth() },
   });
-  bindOwnedProcess(session, owner);
-  return session;
-}
-
-function combineErrors(primary: unknown, cleanup: unknown): unknown {
-  if (primary === undefined) return cleanup;
-  if (cleanup === undefined) return primary;
-  return new AggregateError(
-    [primary, cleanup],
-    "Qoder model lookup and owned-process cleanup both failed",
-  );
 }
 
 // 真实绑定：进程内 SDK + 复用本机 qodercli 登录态（ADR-0011）。
 export function createRealQoderSdk(): QoderSdk {
-  const pendingModelCleanups: Array<ReturnType<typeof query>> = [];
-  let pendingCleanupPromise: Promise<void> | null = null;
-
-  async function cleanupModelSession(
-    session: ReturnType<typeof query>,
-    promptAbort?: AbortController,
-    retry = false,
-  ): Promise<void> {
-    let failure: unknown;
-    promptAbort?.abort();
-
-    if (retry) {
-      try {
-        await terminateOwnedDescendants(session, true);
-      } catch (error) {
-        failure = error;
-      }
-    }
-
-    try {
-      await session.close();
-    } catch (error) {
-      failure = combineErrors(failure, error);
-    }
-
-    try {
-      await waitForOwnedRootExit(session);
-    } catch (error) {
-      failure = combineErrors(failure, error);
-    }
-
-    if (failure !== undefined) throw failure;
-  }
-
-  async function retryPendingModelCleanups(): Promise<void> {
-    while (true) {
-      if (pendingCleanupPromise !== null) {
-        await pendingCleanupPromise;
-        continue;
-      }
-
-      const pendingSession = pendingModelCleanups[0];
-      if (pendingSession === undefined) return;
-
-      const attempt = (async () => {
-        await cleanupModelSession(pendingSession, undefined, true);
-        if (pendingModelCleanups[0] === pendingSession) {
-          pendingModelCleanups.shift();
-        }
-      })();
-      pendingCleanupPromise = attempt;
-      try {
-        await attempt;
-      } finally {
-        if (pendingCleanupPromise === attempt) pendingCleanupPromise = null;
-      }
-    }
-  }
-
   return {
     query({ prompt, options }) {
       return createSession(prompt, options);
     },
     async getAvailableModels(modelOptions) {
-      await retryPendingModelCleanups();
-
       const promptAbort = new AbortController();
       const session = createSession(noPrompt(promptAbort.signal), {
         persistSession: false,
       });
       let result: ModelInfo[] | undefined;
-      let failure: unknown;
+      let lookupFailure: unknown;
+      let lookupFailed = false;
       try {
         result = await session.getAvailableModels({
           ...modelOptions,
           fetchStrategy: "live",
         });
       } catch (error) {
-        failure = error;
+        lookupFailure = error;
+        lookupFailed = true;
       }
 
+      // 先释放 Reins 自建的提示输入迭代器，再等待 SDK 首次 close。
+      promptAbort.abort();
+      let closeFailure: unknown;
+      let closeFailed = false;
       try {
-        await cleanupModelSession(session, promptAbort);
+        await session.close();
       } catch (error) {
-        pendingModelCleanups.push(session);
-        failure = combineErrors(failure, error);
+        closeFailure = error;
+        closeFailed = true;
       }
 
-      if (failure !== undefined) throw failure;
+      if (lookupFailed && closeFailed) {
+        throw new AggregateError(
+          [lookupFailure, closeFailure],
+          "Qoder model lookup and SDK query close both failed",
+        );
+      }
+      if (lookupFailed) throw lookupFailure;
+      if (closeFailed) throw closeFailure;
       if (result === undefined) {
         throw new Error("Qoder model lookup completed without a result");
       }

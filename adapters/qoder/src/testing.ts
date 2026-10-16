@@ -272,6 +272,7 @@ export function createQoderFixtureSdk(
           for (const message of messages) yield message;
         },
         async interrupt() {},
+        async close() {},
       };
       return query;
     },

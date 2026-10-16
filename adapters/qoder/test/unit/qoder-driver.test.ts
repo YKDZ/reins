@@ -25,14 +25,14 @@ const sessionName = "reviewer" as SessionName;
 
 function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
-  interrupt?: () => Promise<unknown>,
+  close?: () => Promise<void>,
 ): {
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
 } {
-  const fake = createFakeSdk(interrupt === undefined ? {} : { interrupt });
+  const fake = createFakeSdk(close === undefined ? {} : { close });
   const diagnostics: DriverDiagnosticFact[] = [];
   const sink: DiagnosticSink = async (input) => {
     diagnostics.push(input);
@@ -1346,41 +1346,58 @@ describe("permission 桥", () => {
 });
 
 describe("interrupt 与 kill", () => {
-  test("terminate 在原生取消完成前保持传输可用且不报告关闭", async () => {
-    let cancel!: () => void;
-    const cancellation = new Promise<void>((resolve) => {
-      cancel = resolve;
+  test("terminate waits for the first official close promise before reporting closed", async () => {
+    let finishClose!: () => void;
+    let fakeForClose: ReturnType<typeof createFakeSdk> | undefined;
+    let signalWasAbortedWhenCloseStarted: boolean | undefined;
+    const closing = new Promise<void>((resolve) => {
+      finishClose = resolve;
     });
-    const { diagnostics, fake, driver } = setup(
-      "interactive",
-      () => cancellation,
-    );
-    const termination = driver.terminate(sessionId);
-    await flush();
-    expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
-      false,
-    );
-    expect(diagnostics.some((input) => input.reason === "closed")).toBe(false);
+    const { diagnostics, fake, driver } = setup("interactive", () => {
+      signalWasAbortedWhenCloseStarted =
+        fakeForClose?.controls.lastOptions()?.abortController?.signal.aborted;
+      return closing;
+    });
+    fakeForClose = fake;
+    const first = driver.terminate(sessionId);
+    const concurrent = driver.terminate(sessionId);
 
-    cancel();
-    await flush();
-    expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
-      true,
-    );
-    fake.controls.end();
-    await termination;
-    expect(diagnostics.some((input) => input.reason === "closed")).toBe(true);
+    try {
+      await flush();
+      expect(fake.controls.interruptCount()).toBe(0);
+      expect(fake.controls.closeCount()).toBe(1);
+      expect(signalWasAbortedWhenCloseStarted).toBe(false);
+      expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
+        true,
+      );
+      expect(diagnostics.some((input) => input.reason === "closed")).toBe(
+        false,
+      );
+
+      finishClose();
+      await Promise.all([first, concurrent]);
+      expect(
+        diagnostics.filter((input) => input.reason === "closed"),
+      ).toHaveLength(1);
+    } finally {
+      finishClose();
+      fake.controls.end();
+      await Promise.allSettled([first, concurrent]);
+    }
   });
 
-  test("原生取消失败时 terminate 拒绝且保留传输，不报告关闭", async () => {
-    const failure = new Error("native cancellation failed");
+  test("a rejected official close remains failed on explicit retry", async () => {
+    const closeFailure = new Error("official Qoder close failed");
     const { diagnostics, fake, driver } = setup("interactive", async () => {
-      throw failure;
+      throw closeFailure;
     });
-    await expect(driver.terminate(sessionId)).rejects.toBe(failure);
-    expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
-      false,
-    );
+
+    await expect(driver.terminate(sessionId)).rejects.toBe(closeFailure);
+    expect(fake.controls.closeCount()).toBe(1);
+    expect(diagnostics.some((input) => input.reason === "closed")).toBe(false);
+
+    await expect(driver.terminate(sessionId)).rejects.toBe(closeFailure);
+    expect(fake.controls.closeCount()).toBe(1);
     expect(diagnostics.some((input) => input.reason === "closed")).toBe(false);
     fake.controls.end();
   });

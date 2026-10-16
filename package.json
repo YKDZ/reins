@@ -19,7 +19,6 @@
     "release:npm-smoke": "node --conditions=source scripts/check-packed-cli.ts"
   },
   "devDependencies": {
-    "@reins/qoder": "workspace:*",
     "@types/node": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",

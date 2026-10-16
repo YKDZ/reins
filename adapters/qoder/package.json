@@ -22,15 +22,10 @@
       "source": "./src/testing.ts",
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
-    },
-    "./runtime-resources": {
-      "source": "./src/runtime-resources.ts",
-      "types": "./dist/runtime-resources.d.ts",
-      "default": "./dist/runtime-resources.js"
     }
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json --pretty false && node --conditions=source scripts/build-runtime-resources.ts",
+    "build": "tsc -p tsconfig.build.json --pretty false",
     "format:check": "oxfmt --list-different --config ../../oxfmt.config.ts .",
     "format:write": "oxfmt --write --config ../../oxfmt.config.ts .",
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",

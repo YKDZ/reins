@@ -14,6 +14,7 @@ export type FakeQoderControls = {
   delivered(): SDKUserMessage[];
   lastOptions(): QoderOptions | null;
   interruptCount(): number;
+  closeCount(): number;
   setAvailableModels(models: ModelInfo[]): void;
   modelsCalls(): number;
 };
@@ -21,6 +22,7 @@ export type FakeQoderControls = {
 export function createFakeSdk(
   behavior: {
     interrupt?: () => Promise<unknown>;
+    close?: () => Promise<void>;
   } = {},
 ): {
   sdk: QoderSdk;
@@ -32,6 +34,8 @@ export function createFakeSdk(
   const delivered: SDKUserMessage[] = [];
   let lastOptions: QoderOptions | null = null;
   let interruptCount = 0;
+  let closeCount = 0;
+  let closePromise: Promise<void> | undefined;
   let availableModels: ModelInfo[] = [];
   let modelsCallsCount = 0;
 
@@ -58,6 +62,15 @@ export function createFakeSdk(
           interruptCount += 1;
           return await behavior.interrupt?.();
         },
+        close: () => {
+          closeCount += 1;
+          if (closePromise !== undefined) return Promise.resolve();
+          closePromise = (async () => {
+            await behavior.close?.();
+            queue.end();
+          })();
+          return closePromise;
+        },
       };
       return q;
     },
@@ -79,6 +92,7 @@ export function createFakeSdk(
       delivered: () => [...delivered],
       lastOptions: () => lastOptions,
       interruptCount: () => interruptCount,
+      closeCount: () => closeCount,
       setAvailableModels: (models) => {
         availableModels = models;
       },

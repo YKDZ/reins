@@ -500,11 +500,7 @@ async function smokePackedCli(
       "Packed LICENSE did not come from the repository authority",
     );
   }
-  for (const name of [
-    "reins.js",
-    "reins-daemon.js",
-    "native/qoder-resource-holder",
-  ] as const) {
+  for (const name of ["reins.js", "reins-daemon.js"] as const) {
     const path = join(installedPackage, "dist", name);
     if ((statSync(path).mode & 0o777) !== 0o755)
       throw new Error(`Packed executable mode is not 0755: ${name}`);

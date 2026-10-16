@@ -53,9 +53,6 @@ importers:
 
   .:
     devDependencies:
-      '@reins/qoder':
-        specifier: workspace:*
-        version: link:adapters/qoder
       '@types/node':
         specifier: 'catalog:'
         version: 24.13.3
