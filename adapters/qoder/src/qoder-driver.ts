@@ -12,6 +12,11 @@ import {
   derivePermissionOptions,
   mapSdkMessage,
 } from "./mapper.ts";
+import {
+  captureOwnedProcessTree,
+  terminateOwnedDescendants,
+  waitForOwnedRootExit,
+} from "./owned-process.ts";
 import type {
   CanUseTool,
   PermissionResult,
@@ -56,6 +61,10 @@ export function createQoderDriver(deps: {
     let mappingState = createQoderMappingState();
     let terminating = false;
     let runPromise: Promise<void> | null = null;
+    let interruptAcknowledged = false;
+    let terminationComplete = false;
+    let terminationPromise: Promise<void> | null = null;
+    let closedDiagnosticEmitted = false;
 
     function makeCanUseTool(): CanUseTool {
       return async (toolName, input, options) => {
@@ -156,6 +165,10 @@ export function createQoderDriver(deps: {
             feature: unsupported,
           } satisfies MachineError;
         terminating = false;
+        interruptAcknowledged = false;
+        terminationComplete = false;
+        terminationPromise = null;
+        closedDiagnosticEmitted = false;
         session = new HarnessSession<PendingEntry>({
           sessionId: spec.sessionId,
           emit,
@@ -277,16 +290,42 @@ export function createQoderDriver(deps: {
       },
       async terminate(sessionId) {
         void sessionId;
-        // abort 会强制关闭 SDK 工作线程，先让原生会话取消仍在执行的工具。
-        await query?.interrupt();
-        terminating = true;
-        abortController?.abort();
-        await runPromise;
-        await session?.diagnostic({
-          kind: "lifecycle",
-          operation: "worker",
-          reason: "closed",
-        });
+        if (terminationComplete) return;
+        if (terminationPromise !== null) return terminationPromise;
+
+        const pending = (async () => {
+          // Save the current owned tree before the interrupt ACK can let the
+          // worker root exit and orphan a captured helper.
+          terminating = true;
+          if (query !== null) await captureOwnedProcessTree(query);
+
+          // interrupt only acknowledges the SDK control request. Keep its
+          // input/process alive until every captured descendant is gone.
+          if (query !== null && !interruptAcknowledged) {
+            await query.interrupt();
+            interruptAcknowledged = true;
+          }
+          if (query !== null) await terminateOwnedDescendants(query);
+
+          abortController?.abort();
+          await runPromise;
+          if (query !== null) await waitForOwnedRootExit(query);
+          if (session !== null && !closedDiagnosticEmitted) {
+            await session.diagnostic({
+              kind: "lifecycle",
+              operation: "worker",
+              reason: "closed",
+            });
+            closedDiagnosticEmitted = true;
+          }
+          terminationComplete = true;
+        })();
+        terminationPromise = pending;
+        try {
+          await pending;
+        } finally {
+          if (terminationPromise === pending) terminationPromise = null;
+        }
       },
     };
     return driver;
