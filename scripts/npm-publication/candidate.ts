@@ -27,6 +27,7 @@ export async function selectPublicationCandidate(options: {
   const run = options.run ?? runProcess;
   const ghEnv = {
     PATH: env.PATH,
+    HOME: env.HOME,
     GH_TOKEN: env.GH_TOKEN,
     GH_PROMPT_DISABLED: "1",
   };

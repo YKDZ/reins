@@ -600,6 +600,48 @@ void test("首发准备无外部写入，人工确认拒绝时不登录；缺原
   }
 });
 
+void test("选择原候选时真实 gh 的本地状态不会污染源码工作区", async () => {
+  const f = await fixture();
+  let selected: string | undefined;
+  try {
+    f.environment.HOME = join(f.repository, ".artifacts", "gh-home");
+    await mkdir(f.environment.HOME, { recursive: true });
+    const run: ProcessRunner = async (command, args, options) => {
+      assert.equal(command, "gh");
+      const configured = await runProcess(
+        command,
+        ["config", "get", "editor"],
+        options,
+      );
+      assert.equal(configured.exitCode, 0, configured.stderr);
+      if (args[1] === "list")
+        return {
+          exitCode: 0,
+          stdout: JSON.stringify([
+            {
+              databaseId: Number(f.group.receipt.producer.runId),
+              headSha: f.environment.GITHUB_SHA,
+              conclusion: "success",
+              event: "push",
+            },
+          ]),
+          stderr: "",
+        };
+      assert.equal(args[1], "download");
+      await cp(f.artifactDirectory, args[args.indexOf("--dir") + 1]!, {
+        recursive: true,
+      });
+      return { exitCode: 0, stdout: "", stderr: "" };
+    };
+    selected = await selectPublicationCandidate({ ...f, run });
+    assert.ok(selected);
+  } finally {
+    if (selected !== undefined)
+      await rm(selected, { recursive: true, force: true });
+    await f.cleanup();
+  }
+});
+
 void test("首发向导接受锁定 npm 的真实授权预览，并在维护者取消时停止写入", async () => {
   const f = await fixture();
   try {
