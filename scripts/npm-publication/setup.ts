@@ -260,21 +260,21 @@ if (import.meta.main) {
     if (process.argv.includes("--execute")) {
       if (!process.stdin.isTTY || !process.stdout.isTTY)
         fail("tty-required", "人工首发需要交互终端");
-      const prompt = createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-      try {
-        await runSdkBootstrap({
-          ...options,
-          confirm: async (phrase) => {
+      await runSdkBootstrap({
+        ...options,
+        confirm: async (phrase) => {
+          const prompt = createInterface({
+            input: process.stdin,
+            output: process.stdout,
+          });
+          try {
             if ((await prompt.question(`请输入「${phrase}」继续：`)) !== phrase)
               fail("cancelled", "维护者取消操作");
-          },
-        });
-      } finally {
-        prompt.close();
-      }
+          } finally {
+            prompt.close();
+          }
+        },
+      });
     } else await prepareSdkBootstrap(options);
   } catch (error) {
     if (!(error instanceof PublicationFailure)) throw error;
