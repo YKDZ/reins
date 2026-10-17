@@ -32,8 +32,9 @@
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
     "migrate:fixtures": "node --conditions=source test/scripts/migrate-fixtures.ts",
     "record:fixture": "node test/scripts/record-fixture.ts",
-    "test": "vitest run test",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+    "test": "vitest run test --exclude test/live-smoke.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "test:live": "REINS_LIVE_SMOKE=1 vitest run test/live-smoke.test.ts"
   },
   "dependencies": {
     "@qodercn-ai/qodercn-agent-sdk": "catalog:",

@@ -6,30 +6,9 @@
     "paths": {
       "@reins/daemon": ["./packages/daemon/src/index.ts"],
       "@reins/protocol": ["./packages/protocol/src/index.ts"],
-      "@ykdz/reins-sdk": ["./packages/sdk/src/index.ts"]
+      "@ykdz/reins-sdk": ["./packages/sdk/src/index.ts"],
+      "@ykdz/reins/application": ["./apps/cli/src/application.ts"]
     }
   },
-  "files": [
-    "oxfmt.config.ts",
-    "oxlint.config.ts",
-    "scripts/build-distribution.ts",
-    "scripts/check-boundaries.ts",
-    "scripts/check-packed-cli.ts",
-    "scripts/check-runtime-language.ts",
-    "scripts/packed-cli-fixtures/adapter-fixture.ts",
-    "scripts/packed-cli-fixtures/adapter-worker.ts",
-    "scripts/packed-cli-fixtures/ack-proxy.ts",
-    "scripts/packed-cli-fixtures/daemon.ts",
-    "scripts/packed-cli-fixtures/evidence.ts",
-    "scripts/packed-cli-fixtures/process.ts",
-    "scripts/packed-cli-fixtures/sdk.ts",
-    "scripts/packed-cli-fixtures/sdk-query.ts",
-    "scripts/packed-cli-fixtures/sdk-recoverable-control.ts",
-    "scripts/packed-cli-fixtures/simulated-adapter.ts",
-    "scripts/packed-cli-fixtures/types.ts",
-    "scripts/release-package.ts",
-    "scripts/run-development-cli.ts",
-    "scripts/run-root-owned-task.ts",
-    "scripts/validate-release-package.ts"
-  ]
+  "include": ["*.config.ts", "scripts/**/*.ts"]
 }

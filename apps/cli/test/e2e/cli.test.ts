@@ -50,9 +50,8 @@ const fixturesModule = join(
   repoRoot,
   "apps/cli/test/e2e/fixtures/fake-adapters.ts",
 );
-const fixtureDaemonBin = join(
-  repoRoot,
-  "apps/cli/test/e2e/fixtures/daemon-fixture.mjs",
+const fixtureDaemonBin = fileURLToPath(
+  new URL("./fixtures/daemon-fixture.mjs", import.meta.url),
 );
 type CliResult = {
   stdout: string;
@@ -251,9 +250,15 @@ function fixtureDaemonEnv(
   dir: string,
   mode: string,
 ): NodeJS.ProcessEnv {
+  const daemonFixture =
+    mode === "append-failure"
+      ? process.env.REINS_DAEMON_TEST_FIXTURE
+      : fixtureDaemonBin;
+  if (daemonFixture === undefined)
+    throw new Error("诊断故障夹具须由根端到端任务提供");
   return {
     ...env,
-    REINS_DAEMON_BIN: fixtureDaemonBin,
+    REINS_DAEMON_BIN: daemonFixture,
     REINS_FIXTURE_DAEMON_MODE: mode,
     REINS_FIXTURE_PID_FILE: join(dir, `${mode}.pid`),
     REINS_FIXTURE_EXIT_FILE: join(dir, `${mode}.exit`),
@@ -521,7 +526,7 @@ describe("CLI 进程边界（缝 D）", () => {
       expect(await Promise.all([firstExit, secondExit])).toEqual([0, 0]);
       for (const stdout of [first.stdout.join(""), second.stdout.join("")]) {
         expect(JSON.parse(stdout)).toMatchObject({
-          schemaVersion: "1",
+          schemaVersion: "2",
           command: "capabilities",
           kind: "data",
           variant: "result",
@@ -725,10 +730,10 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.exitCode).toBe(64);
     expect(result.stdout).toBe("");
     expect(JSON.parse(result.stderr)).toMatchObject({
-      schemaVersion: "1",
+      schemaVersion: "2",
       command: "diagnostics",
       kind: "usageFailure",
-      issues: [{ code: "inputRejected" }],
+      issues: [{ code: "conditionalConstraintViolation" }],
     });
     expect(await pathExists(fixtureEnv.REINS_FIXTURE_PID_FILE ?? "")).toBe(
       false,
@@ -756,7 +761,7 @@ describe("CLI 进程边界（缝 D）", () => {
     expect(result.exitCode).toBe(64);
     expect(result.stdout).toBe("");
     expect(JSON.parse(result.stderr)).toMatchObject({
-      schemaVersion: "1",
+      schemaVersion: "2",
       command: "diagnostics",
       kind: "usageFailure",
       issues: [{ code: "inputRejected" }],
@@ -1315,7 +1320,7 @@ describe("CLI 进程边界（缝 D）", () => {
     );
     expect(waited.exitCode).toBe(4);
     expect(JSON.parse(waited.stdout)).toMatchObject({
-      schemaVersion: "1",
+      schemaVersion: "2",
       command: "wait",
       kind: "data",
       variant: "timeout",

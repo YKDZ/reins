@@ -1,4 +1,13 @@
 {
   "extends": ["//"],
-  "tags": ["library"]
+  "tags": ["library"],
+  "tasks": {
+    "format:check": {
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "tags": ["work:repair"],
+      "cache": false
+    }
+  }
 }

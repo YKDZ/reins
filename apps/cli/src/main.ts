@@ -218,19 +218,13 @@ const diagnosticsResultSchema = v.union([
 ]);
 
 const permissionResolutionInputSchema = standardSchema(
-  v.pipe(
-    v.strictObject({
-      permission: v.string(),
-      operation: v.string(),
-      outcome: v.picklist(["allow", "deny"]),
-      scope: v.optional(v.picklist(["once", "session"])),
-      feedback: v.optional(v.string()),
-    }),
-    v.check(({ outcome, scope, feedback }) =>
-      outcome === "allow" ? feedback === undefined : scope === undefined,
-    ),
-  ),
-  ["check"],
+  v.strictObject({
+    permission: v.string(),
+    operation: v.string(),
+    outcome: v.picklist(["allow", "deny"]),
+    scope: v.optional(v.picklist(["once", "session"])),
+    feedback: v.optional(v.string()),
+  }),
 );
 
 const preparedPermissionResolutionSchema = v.strictObject({
@@ -282,39 +276,13 @@ const diagnosticsInputSchema = standardSchema(
       until: v.optional(v.string()),
       limit: v.optional(v.string()),
     }),
-    v.check(
-      ({
-        id,
-        session,
-        turn,
-        harness,
-        source,
-        kind,
-        minSeverity,
-        since,
-        until,
-        limit,
-      }) => {
-        const hasFilters =
-          session !== undefined ||
-          turn !== undefined ||
-          harness !== undefined ||
-          source !== undefined ||
-          kind !== undefined ||
-          minSeverity !== undefined ||
-          since !== undefined ||
-          until !== undefined ||
-          limit !== undefined;
-        return (
-          !(id !== undefined && hasFilters) &&
-          (since === undefined || until === undefined || since <= until) &&
-          (limit === undefined ||
-            (/^\d+$/u.test(limit) &&
-              Number(limit) >= 1 &&
-              Number(limit) <= 1000))
-        );
-      },
-    ),
+    v.check(({ since, until, limit }) => {
+      return (
+        (since === undefined || until === undefined || since <= until) &&
+        (limit === undefined ||
+          (/^\d+$/u.test(limit) && Number(limit) >= 1 && Number(limit) <= 1000))
+      );
+    }),
   ),
   ["check"],
 );
@@ -352,20 +320,12 @@ const attachFactSchema = v.looseObject({
 const attachPresentationSchema = v.looseObject({ type: v.string() });
 
 const attachInputSchema = standardSchema(
-  v.pipe(
-    v.strictObject({
-      target: v.string(),
-      scope: v.optional(v.picklist(["session", "turn"])),
-      replay: v.optional(v.picklist(["none", "available", "after"])),
-      cursor: v.optional(v.string()),
-    }),
-    v.check(
-      (input) =>
-        input.scope !== undefined &&
-        (input.replay === "after") === (input.cursor !== undefined),
-    ),
-  ),
-  ["check"],
+  v.strictObject({
+    target: v.string(),
+    scope: v.picklist(["session", "turn"]),
+    replay: v.optional(v.picklist(["none", "available", "after"])),
+    cursor: v.optional(v.string()),
+  }),
 );
 
 function createCli(version: string) {
@@ -378,11 +338,18 @@ function createCli(version: string) {
         commands: "Commands",
         arguments: "Arguments",
         options: "Options",
+        constraints: "Constraints",
       },
       wording: {
         commandPlaceholder: "command",
         choices: "Choices: {choices}",
         default: "Default: {value}",
+        whenOnMatch: "When {facts}, {onMatch}",
+        whenOnMatchOtherwise: "When {facts}, {onMatch}; otherwise, {otherwise}",
+        require: "require {fields}",
+        forbid: "forbid {fields}",
+        present: "{field} is provided",
+        equals: "{field} equals {value}",
       },
     }),
     version: versionCapability({
@@ -1142,6 +1109,14 @@ function createCli(version: string) {
           },
         },
         input: permissionResolutionInputSchema,
+        usageConstraints: [
+          {
+            kind: "when",
+            all: [{ kind: "equals", field: "outcome", value: "allow" }],
+            onMatch: { forbid: ["feedback"] },
+            otherwise: { forbid: ["scope"] },
+          },
+        ],
         success: {
           kind: "data",
           variants: {
@@ -1256,6 +1231,25 @@ function createCli(version: string) {
           },
         },
         input: diagnosticsInputSchema,
+        usageConstraints: [
+          {
+            kind: "when",
+            all: [{ kind: "present", field: "id" }],
+            onMatch: {
+              forbid: [
+                "session",
+                "turn",
+                "harness",
+                "source",
+                "kind",
+                "minSeverity",
+                "since",
+                "until",
+                "limit",
+              ],
+            },
+          },
+        ],
         success: {
           kind: "data",
           variants: {
@@ -1368,6 +1362,14 @@ function createCli(version: string) {
           },
         },
         input: attachInputSchema,
+        usageConstraints: [
+          {
+            kind: "when",
+            all: [{ kind: "equals", field: "replay", value: "after" }],
+            onMatch: { require: ["cursor"] },
+            otherwise: { forbid: ["cursor"] },
+          },
+        ],
         success: {
           kind: "stream",
           records: {

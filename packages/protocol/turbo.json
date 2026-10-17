@@ -1,4 +1,29 @@
 {
   "extends": ["//"],
-  "tags": ["protocol"]
+  "tags": ["protocol"],
+  "tasks": {
+    "build": {
+      "tags": ["quality:light"]
+    },
+    "format:check": {
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "tags": ["work:repair"],
+      "cache": false
+    },
+    "lint": {
+      "tags": ["quality:light"]
+    },
+    "lint:fix": {
+      "tags": ["work:repair"],
+      "cache": false
+    },
+    "test": {
+      "tags": ["quality:light"]
+    },
+    "typecheck": {
+      "tags": ["quality:light"]
+    }
+  }
 }

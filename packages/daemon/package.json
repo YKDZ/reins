@@ -29,7 +29,8 @@
       "source": "./src/testing.ts",
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
-    }
+    },
+    "./testing/fixture": "./test/fixtures/daemon-fixture.mjs"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json --pretty false",

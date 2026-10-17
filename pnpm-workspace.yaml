@@ -5,6 +5,7 @@ packages:
 
 nodeLinker: isolated
 preferSymlinkedExecutables: true
+shellEmulator: true
 autoInstallPeers: false
 injectWorkspacePackages: false
 dedupeInjectedDeps: false
@@ -23,17 +24,21 @@ allowBuilds:
   esbuild: true
 
 catalog:
-  "@valibot/to-json-schema": ^1.7.1
+  "@valibot/to-json-schema": ^1.8.0
   "@qodercn-ai/qodercn-agent-sdk": ^1.0.23
   "@types/node": ^24.13.3
   "@types/proper-lockfile": ^4.1.4
-  "oxfmt": ^0.58.0
-  "oxlint": ^1.73.0
+  "oxfmt": ^0.71.0
+  "oxlint": ^1.77.0
   "oxlint-tsgolint": ^7.0.2001
   "proper-lockfile": ^4.1.2
   "rolldown": ^1.2.4
-  "turbo": 2.10.5
+  "turbo": 2.11.7
   "typescript-7": npm:typescript@^7.0.2
   "valibot": ^1.4.2
   "vitest": ^4.1.10
-  "@ykdz/cli-contract": 0.2.1
+  "@ykdz/cli-contract": 0.3.0
+  "@types/semver": ^7.7.1
+  "npm": 12.2.0
+  "semver": ^7.8.5
+  "smol-toml": ^1.8.0

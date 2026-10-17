@@ -1,7 +1,7 @@
 // 正式发行包的 npm 干净安装 smoke：安装兼容性与既有业务场景断言留在本入口，
 // 环境准备之外的一切进程生命周期（启动、就绪、超时、停止、完整日志）走
 // scripts/packed-cli-fixtures 的窄共享接缝，供后续 Docker 正式包 smoke 复用。
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
   copyFileSync,
@@ -16,7 +16,7 @@ import {
   writeFileSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -112,6 +112,7 @@ function readDataEnvelope(
   const envelope: unknown = JSON.parse(stdout);
   if (
     !isRecord(envelope) ||
+    envelope.schemaVersion !== "2" ||
     envelope.kind !== "data" ||
     envelope.command !== command ||
     envelope.variant !== "result" ||
@@ -143,8 +144,8 @@ function readJsonLineRecords(
     throw new Error(`${label} returned no stream records`);
   return lines.map((line) => {
     const value: unknown = JSON.parse(line);
-    if (!isRecord(value))
-      throw new Error(`${label} returned a non-object record`);
+    if (!isRecord(value) || value.schemaVersion !== "2")
+      throw new Error(`${label} 未返回 v2 流记录`);
     return value;
   });
 }
@@ -242,6 +243,7 @@ function readFailureEnvelope(
   const envelope: unknown = JSON.parse(lines[0]!);
   if (
     !isRecord(envelope) ||
+    envelope.schemaVersion !== "2" ||
     envelope.kind !== "failure" ||
     envelope.command !== command ||
     envelope.variant !== variant ||
@@ -307,6 +309,26 @@ async function smokePackedCli(
   const expectedRuntimeDependencies =
     resolveReleaseRuntimeDependencies(repository);
   const expectedSdkDependencies = resolveReleaseSdkDependencies(repository);
+  const packageManagerPin = readManifest(repository).packageManager;
+  if (typeof packageManagerPin !== "string")
+    throw new Error(
+      "Consumer installation requires the workspace package manager pin",
+    );
+  const store = spawnSync("pnpm", ["store", "path"], {
+    cwd: repository,
+    encoding: "utf8",
+  });
+  if (store.error !== undefined) throw store.error;
+  if (store.status !== 0 || store.stdout.trim() === "")
+    throw new Error(
+      "Consumer installation could not locate the existing pnpm store",
+    );
+  const consumerCacheArguments = [
+    "--store-dir",
+    dirname(store.stdout.trim()),
+    "--package-import-method=copy",
+    "--prefer-offline",
+  ];
 
   // 环境准备：临时安装/runtime 目录归本入口所有；日志写入调用方证据目录。
   owned.temporaryRoot = mkdtempSync(join(tmpdir(), "reins-packed-cli-"));
@@ -337,7 +359,12 @@ async function smokePackedCli(
   // 证据目录由调用方指定且可能被复用：日志目录按幂等方式准备。
   mkdirSync(logsDirectory, { recursive: true });
 
-  const artifacts = readdirSync(artifactDirectory).sort();
+  const artifacts = readdirSync(artifactDirectory)
+    .filter(
+      (name) =>
+        name !== "SHA512SUMS" && name !== "verified-publication-artifact.json",
+    )
+    .sort();
   const expectedArtifacts = ["SHA256SUMS", sdkTarballName, tarballName].sort();
   if (JSON.stringify(artifacts) !== JSON.stringify(expectedArtifacts)) {
     throw new Error(`Unexpected release artifact set: ${artifacts.join(", ")}`);
@@ -357,6 +384,10 @@ async function smokePackedCli(
     expectedDigest
   )
     throw new Error("SHA256SUMS does not match the release tarball");
+  recorder.record("release_candidate", {
+    runtime: { file: tarballName, sha256: runtimeDigest },
+    sdk: { file: sdkTarballName, sha256: sdkDigest },
+  });
 
   // npm 会预取 runtime 声明的 SDK registry 版本；引用命令中的直接 SDK spec，使验收 consumer 复用本地候选。
   writeFileSync(
@@ -366,6 +397,7 @@ async function smokePackedCli(
         name: "reins-packed-cli-smoke",
         version: "0.0.0",
         private: true,
+        packageManager: packageManagerPin,
         allowScripts: { "@qodercn-ai/qodercn-agent-sdk": true },
         overrides: { "@ykdz/reins-sdk": "$@ykdz/reins-sdk" },
       },
@@ -383,6 +415,7 @@ async function smokePackedCli(
         "--no-audit",
         "--no-fund",
         "--package-lock=false",
+        "--prefer-offline",
         tarball,
         sdkTarball,
       ],
@@ -559,6 +592,7 @@ async function smokePackedCli(
         name: "reins-sdk-only-consumer",
         version: "0.0.0",
         private: true,
+        packageManager: packageManagerPin,
         type: "module",
         dependencies: {
           "@ykdz/reins-sdk": `file:candidate/${sdkTarballName}`,
@@ -583,7 +617,7 @@ async function smokePackedCli(
   const sdkLockGeneration = toCommandResult(
     await runLoggedCommand({
       command: "pnpm",
-      args: ["install", "--lockfile-only"],
+      args: ["install", "--lockfile-only", ...consumerCacheArguments],
       cwd: sdkConsumerDirectory,
       logPath: sdkLockGenerationLog,
       timeoutMs: 120_000,
@@ -609,7 +643,7 @@ async function smokePackedCli(
   const sdkInstall = toCommandResult(
     await runLoggedCommand({
       command: "pnpm",
-      args: ["install", "--frozen-lockfile"],
+      args: ["install", "--frozen-lockfile", ...consumerCacheArguments],
       cwd: sdkConsumerDirectory,
       logPath: sdkInstallLog,
       timeoutMs: 120_000,
@@ -706,6 +740,7 @@ async function smokePackedCli(
         name: "reins-runtime-sdk-consumer",
         version: "0.0.0",
         private: true,
+        packageManager: packageManagerPin,
         type: "module",
         dependencies: {
           "@ykdz/reins": `file:candidate/${tarballName}`,
@@ -738,7 +773,7 @@ async function smokePackedCli(
   const applicationLockGeneration = toCommandResult(
     await runLoggedCommand({
       command: "pnpm",
-      args: ["install", "--lockfile-only"],
+      args: ["install", "--lockfile-only", ...consumerCacheArguments],
       cwd: applicationConsumerDirectory,
       logPath: applicationLockGenerationLog,
       timeoutMs: 120_000,
@@ -771,7 +806,7 @@ async function smokePackedCli(
   const applicationInstall = toCommandResult(
     await runLoggedCommand({
       command: "pnpm",
-      args: ["install", "--frozen-lockfile"],
+      args: ["install", "--frozen-lockfile", ...consumerCacheArguments],
       cwd: applicationConsumerDirectory,
       logPath: applicationInstallLog,
       timeoutMs: 300_000,

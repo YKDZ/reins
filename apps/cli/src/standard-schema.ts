@@ -20,16 +20,6 @@ export function standardSchema<
             libraryOptions: { ...options.libraryOptions, ignoreActions },
           }),
       },
-      validate(value) {
-        const result = converted["~standard"].validate(value);
-        if (result instanceof Promise)
-          return result.then((resolved) =>
-            resolved.issues === undefined
-              ? resolved
-              : { issues: resolved.issues },
-          );
-        return result.issues === undefined ? result : { issues: result.issues };
-      },
     },
   };
   return adapted;

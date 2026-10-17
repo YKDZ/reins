@@ -33,13 +33,13 @@ const targetTags = new Map([
   ["@reins/qoder", ["adapter"]],
 ]);
 
-test("accepts the exact conformance dependency contract", () => {
+void test("accepts the exact conformance dependency contract", () => {
   assert.doesNotThrow(() =>
     assertConformanceDependencyContract(manifest, targetTags),
   );
 });
 
-test("rejects an extra direct core dependency", () => {
+void test("rejects an extra direct core dependency", () => {
   assert.throws(
     () =>
       assertConformanceDependencyContract(
@@ -56,7 +56,7 @@ test("rejects an extra direct core dependency", () => {
   );
 });
 
-test("rejects a missing qoder dependency", () => {
+void test("rejects a missing qoder dependency", () => {
   const { "@reins/qoder": _removed, ...missingQoder } = dependencies;
   assert.throws(
     () =>
@@ -68,7 +68,7 @@ test("rejects a missing qoder dependency", () => {
   );
 });
 
-test("rejects an unknown package target", () => {
+void test("rejects an unknown package target", () => {
   const { "@reins/qoder": _removed, ...withoutQoder } = dependencies;
   assert.throws(
     () =>
@@ -86,7 +86,7 @@ test("rejects an unknown package target", () => {
   );
 });
 
-test("rejects a non-workspace dependency specifier", () => {
+void test("rejects a non-workspace dependency specifier", () => {
   assert.throws(
     () =>
       assertConformanceDependencyContract(
@@ -100,7 +100,7 @@ test("rejects a non-workspace dependency specifier", () => {
   );
 });
 
-test("rejects an unexpected target tag", () => {
+void test("rejects an unexpected target tag", () => {
   assert.throws(
     () =>
       assertConformanceDependencyContract(
@@ -111,7 +111,7 @@ test("rejects an unexpected target tag", () => {
   );
 });
 
-test("rejects an invalid manifest shape", () => {
+void test("rejects an invalid manifest shape", () => {
   assert.throws(
     () => assertConformanceDependencyContract({ dependencies: [] }, targetTags),
     /Conformance manifest dependencies must be an object/u,
@@ -124,7 +124,7 @@ for (const [section, value] of [
   ["peerDependencies", { "@reins/core": "workspace:*" }],
   ["dependencies", { ...dependencies, chalk: "catalog:" }],
 ] as const) {
-  test(`rejects an unexpected ${section} edge`, () => {
+  void test(`rejects an unexpected ${section} edge`, () => {
     assert.throws(
       () =>
         assertConformanceDependencyContract(
@@ -136,7 +136,7 @@ for (const [section, value] of [
   });
 }
 
-test("rejects missing tooling and bad dev dependency specs", () => {
+void test("rejects missing tooling and bad dev dependency specs", () => {
   const { vitest: _missing, ...missingTooling } = devDependencies;
   assert.throws(
     () =>
@@ -162,7 +162,7 @@ test("rejects missing tooling and bad dev dependency specs", () => {
   );
 });
 
-test("rejects dependenciesMeta drift and bundled dependencies", () => {
+void test("rejects dependenciesMeta drift and bundled dependencies", () => {
   assert.throws(
     () =>
       assertConformanceDependencyContract(

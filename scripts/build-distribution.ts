@@ -16,6 +16,7 @@ import { fileURLToPath } from "node:url";
 
 import { rolldown, type OutputChunk } from "rolldown";
 
+import { acceptPublicationGroup } from "./npm-publication/handoff.ts";
 import {
   assertReleaseVersionAuthority,
   createReleaseStagingManifest,
@@ -27,13 +28,33 @@ import {
 } from "./release-package.ts";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const artifactsDirectory = join(repository, ".artifacts");
+const artifactsDirectory = resolve(
+  process.env.REINS_ARTIFACTS_DIR ?? join(repository, ".artifacts"),
+);
 const releaseDirectory = join(artifactsDirectory, "release");
 const stagingRoot = join(artifactsDirectory, "staging");
 const runtimeStagingDirectory = join(stagingRoot, "reins");
 const sdkStagingDirectory = join(stagingRoot, "reins-sdk");
 const runtimeDistributionDirectory = join(runtimeStagingDirectory, "dist");
 const sdkDistributionDirectory = join(sdkStagingDirectory, "dist");
+
+const retainedCandidate = process.env.REINS_RELEASE_CANDIDATE_DIR;
+if (retainedCandidate !== undefined && retainedCandidate !== "") {
+  const accepted = acceptPublicationGroup({
+    repository,
+    artifactDirectory: resolve(retainedCandidate),
+    requireClean: true,
+    ...(process.env.GITHUB_SHA === undefined
+      ? {}
+      : { expectedCommit: process.env.GITHUB_SHA }),
+  });
+  if (resolve(retainedCandidate) !== releaseDirectory) {
+    rmSync(releaseDirectory, { recursive: true, force: true });
+    cpSync(accepted.directory, releaseDirectory, { recursive: true });
+  }
+  process.stdout.write(`复用已验收候选 ${accepted.version}，不重新打包\n`);
+  process.exit(0);
+}
 
 function packageName(specifier: string): string {
   if (!specifier.startsWith("@"))

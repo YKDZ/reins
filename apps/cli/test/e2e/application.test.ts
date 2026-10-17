@@ -25,9 +25,8 @@ const adaptersModule = join(
   repository,
   "apps/cli/test/e2e/fixtures/fake-adapters.ts",
 );
-const fixtureDaemonBin = join(
-  repository,
-  "apps/cli/test/e2e/fixtures/daemon-fixture.mjs",
+const fixtureDaemonBin = fileURLToPath(
+  new URL("./fixtures/daemon-fixture.mjs", import.meta.url),
 );
 const fixtures: Array<{ directory: string; daemonPids: string }> = [];
 const clients: ReinsConnection[] = [];

@@ -3,32 +3,44 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "boundaries": "node --conditions=source scripts/check-boundaries.ts",
+    "boundaries": "node --conditions=source scripts/check-boundaries.ts && node --conditions=source scripts/check-toolchain-versions.ts",
     "language": "node --conditions=source scripts/check-runtime-language.ts",
-    "check": "turbo run boundaries language format:check lint typecheck build test test:e2e --continue=dependencies-successful --output-logs=errors-only --log-order=grouped --log-prefix=task",
-    "deployment": "pnpm exec turbo run //#release:npm-smoke",
-    "fix": "turbo run lint:fix format:write --continue=dependencies-successful --output-logs=full --log-order=grouped --log-prefix=task",
-    "format:check": "node --conditions=source scripts/run-root-owned-task.ts format:check",
-    "format:write": "node --conditions=source scripts/run-root-owned-task.ts format:write",
-    "lint": "node --conditions=source scripts/run-root-owned-task.ts lint",
-    "lint:fix": "node --conditions=source scripts/run-root-owned-task.ts lint:fix",
+    "check": "node --conditions=source scripts/task-gates.ts check",
+    "fix": "node --conditions=source scripts/task-gates.ts fix",
+    "format:check": "oxfmt --list-different --no-error-on-unmatched-pattern package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.json tsconfig.config.json *.config.ts .pnpmfile.mjs .gitignore .dockerignore Dockerfile TODO.md rust-toolchain.toml .vscode .github .devcontainer scripts",
+    "format:write": "oxfmt --write --no-error-on-unmatched-pattern package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.json tsconfig.config.json *.config.ts .pnpmfile.mjs .gitignore .dockerignore Dockerfile TODO.md rust-toolchain.toml .vscode .github .devcontainer scripts",
+    "lint": "oxlint --quiet --format=unix --no-error-on-unmatched-pattern *.config.ts .pnpmfile.mjs scripts",
+    "lint:fix": "oxlint --format=unix --no-error-on-unmatched-pattern *.config.ts .pnpmfile.mjs scripts --fix",
     "reins": "node --conditions=source scripts/run-development-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "release:build": "node --conditions=source scripts/build-distribution.ts",
     "release:verify": "node --conditions=source scripts/validate-release-package.ts",
-    "release:npm-smoke": "node --conditions=source scripts/check-packed-cli.ts"
+    "release:npm-smoke": "node --conditions=source scripts/check-packed-cli.ts && node --conditions=source scripts/npm-publication/handoff.ts",
+    "check:heavy": "node --conditions=source scripts/task-gates.ts check:heavy",
+    "check:full": "node --conditions=source scripts/task-gates.ts check:full",
+    "test": "node --test --conditions=source scripts/test/*.test.ts",
+    "test:e2e": "REINS_DAEMON_TEST_FIXTURE=\"$(pnpm --filter @reins/daemon exec node -p \"require.resolve('@reins/daemon/testing/fixture')\")\" pnpm --filter @ykdz/reins exec vitest run test/e2e --reporter=agent --no-file-parallelism",
+    "publication:readiness": "node --conditions=source scripts/npm-publication/readiness.ts",
+    "publication:candidate": "node --conditions=source scripts/npm-publication/candidate.ts",
+    "publication:setup": "node --conditions=source scripts/npm-publication/setup.ts",
+    "publication:publish": "node --conditions=source scripts/npm-publication/publish.ts",
+    "publication:release": "node --conditions=source scripts/npm-publication/release.ts"
   },
   "devDependencies": {
     "@types/node": "catalog:",
+    "@types/semver": "catalog:",
+    "npm": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
     "rolldown": "catalog:",
+    "semver": "catalog:",
+    "smol-toml": "catalog:",
     "turbo": "catalog:",
     "typescript-7": "catalog:"
   },
   "engines": {
-    "node": "24"
+    "node": "24.21.0"
   },
-  "packageManager": "pnpm@11.22.0"
+  "packageManager": "pnpm@12.9.1"
 }

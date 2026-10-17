@@ -27,8 +27,9 @@
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules --ignore-pattern src/generated .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts --ignore-pattern src/generated . --fix",
     "record:fixture": "node --conditions=source test/scripts/record-fixture.ts",
-    "test": "vitest run test",
-    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
+    "test": "vitest run test --exclude test/live-smoke.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
+    "test:live": "REINS_LIVE_SMOKE=1 vitest run test/live-smoke.test.ts"
   },
   "dependencies": {
     "@reins/adapter-kit": "workspace:*",

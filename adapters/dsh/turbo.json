@@ -1,4 +1,26 @@
 {
   "extends": ["//"],
-  "tags": ["adapter"]
+  "tags": ["adapter"],
+  "tasks": {
+    "build": {
+      "tags": ["quality:light"]
+    },
+    "format:check": {
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "tags": ["work:repair"],
+      "cache": false
+    },
+    "lint": {
+      "tags": ["quality:light"]
+    },
+    "lint:fix": {
+      "tags": ["work:repair"],
+      "cache": false
+    },
+    "typecheck": {
+      "tags": ["quality:light"]
+    }
+  }
 }

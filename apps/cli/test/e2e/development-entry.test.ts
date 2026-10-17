@@ -31,9 +31,8 @@ const codexAppServerFixture = join(
   repository,
   "apps/cli/test/e2e/fixtures/codex-app-server.mjs",
 );
-const fixtureDaemon = join(
-  repository,
-  "apps/cli/test/e2e/fixtures/daemon-fixture.mjs",
+const fixtureDaemon = fileURLToPath(
+  new URL("./fixtures/daemon-fixture.mjs", import.meta.url),
 );
 const cleanupDirectories: string[] = [];
 const cleanupProcesses: ChildProcess[] = [];
