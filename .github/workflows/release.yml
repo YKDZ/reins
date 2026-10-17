@@ -11,6 +11,7 @@ env:
 concurrency:
   group: npm-publication
   cancel-in-progress: false
+  queue: max
 
 jobs:
   verify:
@@ -35,6 +36,7 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
       - name: Set up Node.js
+        id: node-setup
         uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: package.json
@@ -44,6 +46,15 @@ jobs:
           cache: true
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
+      - name: Restore Turbo cache
+        id: turbo-cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-${{ github.job }}-
+            turbo-${{ runner.os }}-${{ runner.arch }}-node-${{ steps.node-setup.outputs.node-version }}-check-
       - name: Select the original verified candidate when available
         run: pnpm publication:candidate
         env:
@@ -54,6 +65,12 @@ jobs:
         run: pnpm publication:readiness
         env:
           PUBLICATION_ARTIFACT_DIRECTORY: ${{ github.workspace }}/.artifacts/release
+      - name: Save Turbo cache
+        if: success() && steps.turbo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: .turbo/cache
+          key: ${{ steps.turbo-cache.outputs.cache-primary-key }}
       - name: Upload verified npm artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
