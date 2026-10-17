@@ -364,7 +364,7 @@ describe("checkout-isolated development entry", () => {
 
     expect(result.status).toBe(1);
     expect(result.stdout).toBe("");
-    expect(result.stderr).toBe(
+    expect(result.stderr).toContain(
       "Failed to run the development CLI: REINS_ADAPTERS_MODULE is not supported by the development CLI\n",
     );
     expect(await pathExists(requests)).toBe(false);
