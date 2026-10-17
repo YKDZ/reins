@@ -4,7 +4,7 @@
     "tags": {
       "app": {
         "dependencies": {
-          "allow": ["protocol", "transport", "library"]
+          "allow": ["client", "protocol", "transport", "library"]
         }
       },
       "adapter": {
@@ -22,6 +22,26 @@
           "allow": ["protocol", "library"]
         }
       },
+      "client": {
+        "dependencies": {
+          "allow": ["client", "protocol", "transport", "library"]
+        }
+      },
+      "conformance": {
+        "dependencies": {
+          "allow": [
+            "adapter",
+            "adapter-kit",
+            "client",
+            "core",
+            "daemon",
+            "event-journal",
+            "protocol",
+            "transport",
+            "library"
+          ]
+        }
+      },
       "daemon": {
         "dependencies": {
           "allow": [
@@ -29,9 +49,15 @@
             "core",
             "adapter",
             "adapter-kit",
+            "event-journal",
             "transport",
             "library"
           ]
+        }
+      },
+      "event-journal": {
+        "dependencies": {
+          "allow": ["protocol", "library"]
         }
       },
       "library": {
@@ -51,36 +77,51 @@
       }
     }
   },
-  "globalPassThroughEnv": ["CARGO_HOME", "RUSTUP_HOME", "RUSTUP_TOOLCHAIN"],
+  "globalPassThroughEnv": [
+    "CARGO_HOME",
+    "RUSTUP_HOME",
+    "RUSTUP_TOOLCHAIN",
+    "TMPDIR",
+    "REINS_RELEASE_CANDIDATE_DIR",
+    "GITHUB_RUN_ID",
+    "GITHUB_RUN_ATTEMPT",
+    "GITHUB_WORKFLOW_REF",
+    "GITHUB_SHA",
+    "GITHUB_REPOSITORY"
+  ],
   "tasks": {
     "//#boundaries": {
-      "cache": false
+      "cache": false,
+      "tags": ["quality:light"]
     },
     "//#language": {
-      "cache": false
+      "cache": false,
+      "tags": ["quality:light"]
     },
     "//#format:check": {
-      "outputs": []
+      "outputs": [],
+      "tags": ["quality:light"]
     },
     "//#format:write": {
       "cache": false,
-      "dependsOn": ["//#lint:fix"]
+      "dependsOn": ["//#lint:fix"],
+      "tags": ["work:repair"]
     },
     "//#lint": {
-      "outputs": []
+      "outputs": [],
+      "tags": ["quality:light"]
     },
     "//#lint:fix": {
-      "cache": false
+      "cache": false,
+      "tags": ["work:repair"]
     },
     "//#typecheck": {
-      "outputs": []
+      "outputs": [],
+      "tags": ["quality:light"]
     },
     "build": {
       "dependsOn": ["^build"],
       "outputs": ["dist/**"]
-    },
-    "deployment": {
-      "cache": false
     },
     "format:check": {
       "outputs": []
@@ -90,10 +131,12 @@
       "dependsOn": ["lint:fix"]
     },
     "lint": {
-      "outputs": []
+      "outputs": [],
+      "dependsOn": ["^build"]
     },
     "lint:fix": {
-      "cache": false
+      "cache": false,
+      "dependsOn": ["^build"]
     },
     "test": {
       "dependsOn": ["build"],
@@ -106,6 +149,70 @@
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "outputs": []
+    },
+    "//#release:build": {
+      "cache": false,
+      "dependsOn": ["@ykdz/reins#build", "@reins/daemon#build"],
+      "tags": ["work:preparation"]
+    },
+    "//#release:verify": {
+      "cache": false,
+      "dependsOn": ["//#release:build"],
+      "tags": ["work:preparation"]
+    },
+    "//#release:npm-smoke": {
+      "cache": false,
+      "dependsOn": ["//#release:verify"],
+      "tags": ["quality:heavy"]
+    },
+    "//#check": {
+      "tags": ["quality:entry"],
+      "cache": false
+    },
+    "//#fix": {
+      "tags": ["work:repair"],
+      "cache": false
+    },
+    "//#reins": {
+      "tags": ["work:development"],
+      "cache": false
+    },
+    "//#check:heavy": {
+      "tags": ["quality:entry"],
+      "cache": false
+    },
+    "//#check:full": {
+      "tags": ["quality:entry"],
+      "cache": false
+    },
+    "//#test": {
+      "tags": ["quality:light"],
+      "dependsOn": ["@ykdz/reins#build", "@reins/daemon#build"]
+    },
+    "//#test:e2e": {
+      "tags": ["quality:heavy"],
+      "cache": false,
+      "dependsOn": ["@ykdz/reins#build", "@reins/daemon#build"]
+    },
+    "//#publication:readiness": {
+      "tags": ["quality:light"],
+      "cache": false
+    },
+    "//#publication:candidate": {
+      "tags": ["work:preparation"],
+      "cache": false
+    },
+    "//#publication:setup": {
+      "tags": ["work:release"],
+      "cache": false
+    },
+    "//#publication:publish": {
+      "tags": ["work:release"],
+      "cache": false
+    },
+    "//#publication:release": {
+      "tags": ["work:release"],
+      "cache": false
     }
   }
 }

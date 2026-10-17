@@ -233,7 +233,7 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-2"),
       harness: "codex",
       message: "第一步",
@@ -249,7 +249,7 @@ describe("driver 抛错时动作整体回滚", () => {
     });
 
     await expect(
-      machine.send({ sessionId: id, message: "继续" }),
+      machine.send({ placement: "new_turn", sessionId: id, message: "继续" }),
     ).rejects.toEqual(
       expect.objectContaining({
         code: "internal_error",
@@ -294,14 +294,14 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-3"),
       harness: "codex",
       message: "进行中",
       cwd: "/tmp/demo",
     });
 
-    await expect(machine.kill({ ids: [id] })).rejects.toEqual(
+    await expect(machine.kill({ sessionId: id })).rejects.toEqual(
       expect.objectContaining({
         code: "internal_error",
         cause: { kind: "exception", message: "终止失败" },
@@ -309,6 +309,7 @@ describe("driver 抛错时动作整体回滚", () => {
     );
 
     expect(events.some((event) => event.type === "session.killed")).toBe(false);
+    expect(events.some((event) => event.type === "turn.completed")).toBe(false);
     expect(machine.list()[0]).toEqual(
       expect.objectContaining({ sessionId: id, state: "busy" }),
     );
@@ -343,35 +344,57 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("concurrent-kill"),
       harness: "codex",
       message: "start",
       cwd: "/tmp/demo",
     });
 
-    const first = machine.kill({ ids: [sessionId] });
+    const first = machine.kill({ sessionId: sessionId });
     await vi.waitFor(() => expect(terminateCalls).toBe(1));
-    const second = machine.kill({ ids: [sessionId] });
+    const second = machine.kill({ sessionId: sessionId });
     await expect(
-      machine.send({ sessionId, message: "must not enter driver" }),
+      machine.send({
+        placement: "new_turn",
+        sessionId,
+        message: "must not enter driver",
+      }),
     ).rejects.toEqual({ code: "session_terminating", sessionId });
-    await expect(machine.interrupt({ ids: [sessionId] })).rejects.toEqual({
+    await expect(
+      machine.interrupt({ sessionId: sessionId, turnId: ids.turn("t1") }),
+    ).rejects.toEqual({
       code: "session_terminating",
       sessionId,
     });
     expect(fake.controls.delivered).toEqual([]);
     expect(fake.controls.interrupted).toEqual([]);
+    expect(
+      events.some(
+        (event) =>
+          event.type === "turn.completed" || event.type === "session.killed",
+      ),
+    ).toBe(false);
 
     releaseTermination();
     await expect(Promise.all([first, second])).resolves.toEqual([
-      [{ sessionId, status: "killed" }],
-      [{ sessionId, status: "killed" }],
+      { sessionId, status: "killed" },
+      { sessionId, status: "killed" },
     ]);
     expect(terminateCalls).toBe(1);
     expect(
       events.filter((event) => event.type === "session.killed"),
     ).toHaveLength(1);
+    await machine.kill({ sessionId });
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "turn.completed" || event.type === "session.killed",
+      ),
+    ).toMatchObject([
+      { type: "turn.completed", sessionId, stopReason: "killed" },
+      { type: "session.killed", sessionId },
+    ]);
   });
 
   test("routing 已验证的 diagnosticId 由 core 复用且不重复记录", async () => {
@@ -396,14 +419,14 @@ describe("driver 抛错时动作整体回滚", () => {
         },
       },
     });
-    const sessionId = await machine.spawn({
+    const { sessionId } = await machine.spawn({
       sessionName: ids.sessionName("verified-failure"),
       harness: "codex",
       message: "start",
       cwd: "/tmp/demo",
     });
 
-    await expect(machine.kill({ ids: [sessionId] })).rejects.toMatchObject({
+    await expect(machine.kill({ sessionId: sessionId })).rejects.toMatchObject({
       code: "internal_error",
       diagnosticId,
     });

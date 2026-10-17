@@ -3,6 +3,7 @@ import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
+  cpSync,
   mkdirSync,
   readFileSync,
   readdirSync,
@@ -15,19 +16,45 @@ import { fileURLToPath } from "node:url";
 
 import { rolldown, type OutputChunk } from "rolldown";
 
+import { acceptPublicationGroup } from "./npm-publication/handoff.ts";
 import {
   assertReleaseVersionAuthority,
   createReleaseStagingManifest,
+  createSdkReleaseStagingManifest,
   readJsonObject,
   releaseTarballName,
   resolveReleaseRuntimeDependencies,
+  resolveReleaseSdkDependencies,
 } from "./release-package.ts";
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const artifactsDirectory = join(repository, ".artifacts");
+const artifactsDirectory = resolve(
+  process.env.REINS_ARTIFACTS_DIR ?? join(repository, ".artifacts"),
+);
 const releaseDirectory = join(artifactsDirectory, "release");
-const stagingDirectory = join(artifactsDirectory, "staging", "reins");
-const distributionDirectory = join(stagingDirectory, "dist");
+const stagingRoot = join(artifactsDirectory, "staging");
+const runtimeStagingDirectory = join(stagingRoot, "reins");
+const sdkStagingDirectory = join(stagingRoot, "reins-sdk");
+const runtimeDistributionDirectory = join(runtimeStagingDirectory, "dist");
+const sdkDistributionDirectory = join(sdkStagingDirectory, "dist");
+
+const retainedCandidate = process.env.REINS_RELEASE_CANDIDATE_DIR;
+if (retainedCandidate !== undefined && retainedCandidate !== "") {
+  const accepted = acceptPublicationGroup({
+    repository,
+    artifactDirectory: resolve(retainedCandidate),
+    requireClean: true,
+    ...(process.env.GITHUB_SHA === undefined
+      ? {}
+      : { expectedCommit: process.env.GITHUB_SHA }),
+  });
+  if (resolve(retainedCandidate) !== releaseDirectory) {
+    rmSync(releaseDirectory, { recursive: true, force: true });
+    cpSync(accepted.directory, releaseDirectory, { recursive: true });
+  }
+  process.stdout.write(`复用已验收候选 ${accepted.version}，不重新打包\n`);
+  process.exit(0);
+}
 
 function packageName(specifier: string): string {
   if (!specifier.startsWith("@"))
@@ -35,19 +62,28 @@ function packageName(specifier: string): string {
   return specifier.split("/", 2).join("/");
 }
 
+function isExternalDependency(
+  specifier: string,
+  dependencies: readonly string[],
+): boolean {
+  return dependencies.includes(packageName(specifier));
+}
+
 function verifyBundle(
   chunks: readonly OutputChunk[],
   expectedDependencies: readonly string[],
+  expectedEntries: readonly string[],
+  requireSharedChunk = false,
 ): void {
   const entries = new Set(
     chunks.filter((chunk) => chunk.isEntry).map((chunk) => chunk.fileName),
   );
-  if (!entries.has("reins.js") || !entries.has("reins-daemon.js")) {
+  if (expectedEntries.some((entry) => !entries.has(entry))) {
     throw new Error(
-      `Bundle omitted executable entries: ${[...entries].join(", ")}`,
+      `Bundle omitted expected entries: ${expectedEntries.join(", ")}`,
     );
   }
-  if (!chunks.some((chunk) => !chunk.isEntry))
+  if (requireSharedChunk && !chunks.some((chunk) => !chunk.isEntry))
     throw new Error("Bundle omitted the shared chunk");
 
   const importedPackages = new Set<string>();
@@ -93,15 +129,37 @@ function filesRecursively(directory: string): string[] {
   return files;
 }
 
-function verifySourceMaps(): void {
+function verifySourceMaps(distributionDirectory: string): void {
   const javascript = filesRecursively(distributionDirectory).filter((path) =>
     path.endsWith(".js"),
   );
   const maps = filesRecursively(distributionDirectory).filter((path) =>
     path.endsWith(".js.map"),
   );
-  if (maps.length !== javascript.length)
-    throw new Error("Every JavaScript output must have a source map");
+  if (maps.length === 0) throw new Error("Distribution omitted source maps");
+  const mappedJavaScript = new Set(
+    maps.map((path) => path.slice(0, -".map".length)),
+  );
+  const unmappedJavaScript = javascript.filter(
+    (path) => !mappedJavaScript.has(path),
+  );
+  // Rolldown 可为共享代码拆分产生仅做 import/export 的无逻辑 facade；
+  // 实际代码块必须带 source map，这类 facade 无 authored statement 可映射。
+  for (const path of unmappedJavaScript) {
+    const authoredLines = readFileSync(path, "utf8")
+      .split("\n")
+      .map((line) => line.trim())
+      .filter(
+        (line) =>
+          line !== "" &&
+          !line.startsWith("import ") &&
+          !line.startsWith("export ") &&
+          !line.startsWith("#!/usr/bin/env node"),
+      );
+    if (authoredLines.length > 0) {
+      throw new Error(`JavaScript output omitted a source map: ${path}`);
+    }
+  }
   for (const path of maps) {
     const sourceMap = readJsonObject(path);
     const sources = sourceMap.sources;
@@ -118,7 +176,7 @@ function verifySourceMaps(): void {
   }
 }
 
-function pack(): string {
+function pack(stagingDirectory: string, expectedTarball: string): string {
   const result = spawnSync(
     "pnpm",
     ["pack", "--pack-destination", releaseDirectory],
@@ -134,63 +192,84 @@ function pack(): string {
       `pnpm pack failed with exit ${result.status ?? 1}\n${result.stdout}${result.stderr}`,
     );
   }
-  const tarballs = readdirSync(releaseDirectory).filter((name) =>
-    name.endsWith(".tgz"),
-  );
-  if (tarballs.length !== 1)
-    throw new Error(`Expected one release tarball, found ${tarballs.length}`);
-  return join(releaseDirectory, tarballs[0] ?? "");
+  const tarball = join(releaseDirectory, expectedTarball);
+  if (!readdirSync(releaseDirectory).includes(expectedTarball)) {
+    throw new Error(`Pack omitted expected tarball: ${expectedTarball}`);
+  }
+  return tarball;
 }
 
 const { authority } = assertReleaseVersionAuthority(repository);
-const dependencies = resolveReleaseRuntimeDependencies(repository);
-const manifest = createReleaseStagingManifest(authority, dependencies);
-const expectedTarball = releaseTarballName(
+const runtimeDependencies = resolveReleaseRuntimeDependencies(repository);
+const runtimeManifest = createReleaseStagingManifest(
+  authority,
+  runtimeDependencies,
+);
+const sdkDependencies = resolveReleaseSdkDependencies(repository);
+const sdkManifest = createSdkReleaseStagingManifest(authority, sdkDependencies);
+const expectedRuntimeTarball = releaseTarballName(
   String(authority.name),
+  String(authority.version),
+);
+const expectedSdkTarball = releaseTarballName(
+  "@ykdz/reins-sdk",
   String(authority.version),
 );
 
 rmSync(join(artifactsDirectory, "release"), { recursive: true, force: true });
 rmSync(join(artifactsDirectory, "staging"), { recursive: true, force: true });
-mkdirSync(distributionDirectory, { recursive: true });
+mkdirSync(runtimeDistributionDirectory, { recursive: true });
+mkdirSync(sdkDistributionDirectory, { recursive: true });
 mkdirSync(releaseDirectory, { recursive: true });
 
 writeFileSync(
-  join(stagingDirectory, "package.json"),
-  `${JSON.stringify(manifest, null, 2)}\n`,
+  join(runtimeStagingDirectory, "package.json"),
+  `${JSON.stringify(runtimeManifest, null, 2)}\n`,
+);
+writeFileSync(
+  join(sdkStagingDirectory, "package.json"),
+  `${JSON.stringify(sdkManifest, null, 2)}\n`,
 );
 for (const name of ["README.md", "LICENSE"] as const) {
-  copyFileSync(join(repository, name), join(stagingDirectory, name));
+  copyFileSync(join(repository, name), join(runtimeStagingDirectory, name));
+  copyFileSync(join(repository, name), join(sdkStagingDirectory, name));
 }
 
-const bundle = await rolldown({
+const runtimeBundle = await rolldown({
   cwd: repository,
   input: {
     reins: "apps/cli/src/cli.ts",
     "reins-daemon": "packages/daemon/src/main.ts",
+    application: "apps/cli/src/application.ts",
   },
   platform: "node",
-  external: Object.keys(dependencies),
+  external: (specifier) =>
+    isExternalDependency(specifier, Object.keys(runtimeDependencies)),
   resolve: {
     conditionNames: ["source", "import", "node", "default"],
   },
 });
-const output = await bundle.write({
-  dir: distributionDirectory,
+const runtimeOutput = await runtimeBundle.write({
+  dir: runtimeDistributionDirectory,
   format: "esm",
   codeSplitting: true,
   sourcemap: true,
   entryFileNames: "[name].js",
   chunkFileNames: "chunks/[name]-[hash].js",
 });
-await bundle.close();
+await runtimeBundle.close();
 
+const runtimeChunks = runtimeOutput.output.filter(
+  (entry): entry is OutputChunk => entry.type === "chunk",
+);
 verifyBundle(
-  output.output.filter((entry): entry is OutputChunk => entry.type === "chunk"),
-  Object.keys(dependencies),
+  runtimeChunks,
+  Object.keys(runtimeDependencies),
+  ["reins.js", "reins-daemon.js", "application.js"],
+  true,
 );
 for (const name of ["reins.js", "reins-daemon.js"] as const) {
-  const path = join(distributionDirectory, name);
+  const path = join(runtimeDistributionDirectory, name);
   if (!readFileSync(path, "utf8").startsWith("#!/usr/bin/env node\n")) {
     throw new Error(`Executable omitted shebang: ${path}`);
   }
@@ -198,16 +277,73 @@ for (const name of ["reins.js", "reins-daemon.js"] as const) {
   if ((statSync(path).mode & 0o777) !== 0o755)
     throw new Error(`Executable mode is not 0755: ${path}`);
 }
-verifySourceMaps();
-
-const tarball = pack();
-if (relative(releaseDirectory, tarball) !== expectedTarball) {
-  throw new Error(`Unexpected tarball name: ${tarball}`);
+for (const name of [
+  "application.d.ts",
+  "application-contracts.d.ts",
+] as const) {
+  const declaration = join(repository, "apps", "cli", "dist", name);
+  if (!readFileSync(declaration, "utf8")) {
+    throw new Error(`Application declaration is empty: ${declaration}`);
+  }
+  copyFileSync(declaration, join(runtimeDistributionDirectory, name));
 }
-const digest = createHash("sha256").update(readFileSync(tarball)).digest("hex");
+verifySourceMaps(runtimeDistributionDirectory);
+
+const runtimeTarball = pack(runtimeStagingDirectory, expectedRuntimeTarball);
+if (relative(releaseDirectory, runtimeTarball) !== expectedRuntimeTarball) {
+  throw new Error(`Unexpected runtime tarball name: ${runtimeTarball}`);
+}
+const sdkBundle = await rolldown({
+  cwd: repository,
+  input: { index: "packages/sdk/src/index.ts" },
+  platform: "node",
+  external: (specifier) =>
+    isExternalDependency(specifier, Object.keys(sdkDependencies)),
+  resolve: {
+    conditionNames: ["source", "import", "node", "default"],
+  },
+});
+const sdkOutput = await sdkBundle.write({
+  dir: sdkDistributionDirectory,
+  format: "esm",
+  codeSplitting: true,
+  sourcemap: true,
+  entryFileNames: "[name].js",
+  chunkFileNames: "chunks/[name]-[hash].js",
+});
+await sdkBundle.close();
+verifyBundle(
+  sdkOutput.output.filter(
+    (entry): entry is OutputChunk => entry.type === "chunk",
+  ),
+  Object.keys(sdkDependencies),
+  ["index.js"],
+);
+verifySourceMaps(sdkDistributionDirectory);
+
+// SDK 声明由常规包构建生成；发布的 JavaScript 与运行包共用依赖打包流程。
+cpSync(join(repository, "packages/sdk/dist"), sdkDistributionDirectory, {
+  recursive: true,
+  filter: (source) =>
+    statSync(source).isDirectory() || source.endsWith(".d.ts"),
+});
+
+const sdkTarball = pack(sdkStagingDirectory, expectedSdkTarball);
+if (relative(releaseDirectory, sdkTarball) !== expectedSdkTarball) {
+  throw new Error(`Unexpected SDK tarball name: ${sdkTarball}`);
+}
+const digestLines = [runtimeTarball, sdkTarball]
+  .map((tarball) => ({
+    name: relative(releaseDirectory, tarball),
+    digest: createHash("sha256").update(readFileSync(tarball)).digest("hex"),
+  }))
+  .map(({ digest, name }) => `${digest}  ${name}`)
+  .sort((left, right) => left.localeCompare(right));
 writeFileSync(
   join(releaseDirectory, "SHA256SUMS"),
-  `${digest}  ${expectedTarball}\n`,
+  `${digestLines.join("\n")}\n`,
 );
 
-process.stdout.write(`${relative(repository, tarball)}\n`);
+process.stdout.write(
+  `${relative(repository, runtimeTarball)}\n${relative(repository, sdkTarball)}\n`,
+);

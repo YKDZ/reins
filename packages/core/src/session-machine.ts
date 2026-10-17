@@ -4,7 +4,6 @@ import {
   type DiagnosticId,
   type CoreDiagnosticFact,
   type InterruptAck,
-  type InterruptOutcome,
   type InterruptParams,
   type InvalidParamIssue,
   interruptParamsSchema,
@@ -32,12 +31,16 @@ import {
   type SessionName,
   type SessionInfo,
   type SpawnParams,
+  type SpawnAck,
+  type TurnTarget,
+  turnTargetSchema,
   type TurnCompleted,
   type WaitParams,
   type WaitResult,
   waitParamsSchema,
   type WorkerDriver,
   type WorkerDriverFactory,
+  type WorkerEventRejection,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -55,7 +58,6 @@ type SessionRecord = {
   state: "busy" | "idle" | "killed";
   currentTurnId: TurnId | null;
   activeTurn: TurnScope | null;
-  inbox: Array<{ messageId: MessageId; text: string }>;
   pendingPermissions: Map<
     PermissionId,
     { turnId: TurnId; options: PermissionOption[] }
@@ -75,6 +77,7 @@ type PendingSpawn = {
   readonly turn: TurnScope;
   readonly permissionIds: Set<PermissionId>;
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
+  completedTurnId: TurnId | null;
   accepting: boolean;
 };
 
@@ -82,6 +85,7 @@ type IngressProjection = {
   state: SessionRecord["state"];
   currentTurnId: TurnId | null;
   activeTurn: TurnScope | null;
+  readonly completedTurnIds: Set<TurnId>;
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
   readonly usedPermissionIds: Set<PermissionId>;
 };
@@ -91,15 +95,33 @@ type IngressActionFrame = {
   readonly projections: Map<SessionId, IngressProjection>;
 };
 
+type PendingDelivery = {
+  readonly projection: IngressProjection;
+  readonly events: DomainEvent[];
+  readonly creating: boolean;
+  readonly settled: Promise<void>;
+  readonly settle: () => void;
+  count: number;
+};
+
+function createPendingDelivery(
+  projection: IngressProjection,
+  creating: boolean,
+): PendingDelivery {
+  let settle!: () => void;
+  const settled = new Promise<void>((resolve) => {
+    settle = resolve;
+  });
+  return { projection, creating, events: [], count: 0, settled, settle };
+}
+
+type WorkerEventIngressDecision =
+  | { status: "accepted" }
+  | { status: "rejected"; rejection: WorkerEventRejection };
+
 function createTurnScope(turnId: TurnId): TurnScope {
   return { turnId, messages: new Map(), tools: new Map() };
 }
-
-type WaitOutcome = {
-  sessionId: SessionId;
-  status: "completed" | "killed";
-  turn?: TurnCompleted;
-};
 
 function machineError(error: MachineError): MachineError {
   return error;
@@ -159,9 +181,11 @@ function recordBestEffort(
   diagnostics: DiagnosticEmitter,
   input: CoreDiagnosticFact,
 ): void {
-  void Promise.resolve()
-    .then(async () => await diagnostics.record(input))
-    .catch(() => undefined);
+  try {
+    void diagnostics.record(input).catch(() => undefined);
+  } catch {
+    // Event observation has no response channel and remains best effort.
+  }
 }
 
 const invalidTypeExpectations = [
@@ -200,28 +224,47 @@ function invalidParamsError(
 function toInfo(session: SessionRecord): SessionInfo {
   const lastTurn = session.turns[session.turns.length - 1];
 
-  return {
+  const common = {
     sessionId: session.id,
     sessionName: session.sessionName,
     harness: session.harness,
-    state: session.state,
     model: session.model,
     reasoning: session.reasoning,
     cwd: session.cwd,
     spawnedAt: session.spawnedAt,
     turns: session.turns.length,
-    lastStopReason: lastTurn === undefined ? null : lastTurn.stopReason,
-  } satisfies SessionInfo;
+    ...(lastTurn === undefined
+      ? {}
+      : {
+          lastCompletedTurn: {
+            turnId: lastTurn.turnId,
+            stopReason: lastTurn.stopReason,
+          },
+        }),
+  };
+  if (session.state === "busy")
+    return { ...common, state: "busy", activeTurnId: session.currentTurnId! };
+  if (session.state === "idle")
+    return {
+      ...common,
+      state: "idle",
+      lastCompletedTurn: {
+        turnId: lastTurn!.turnId,
+        stopReason: lastTurn!.stopReason,
+      },
+    };
+  return { ...common, state: "killed" };
 }
 
 export type SessionMachine = {
-  spawn(params: SpawnParams): Promise<SessionId>;
+  spawn(params: SpawnParams): Promise<SpawnAck>;
   send(params: SendParams): Promise<SendAck>;
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): Promise<InterruptAck>;
   resolvePermission(params: ResolvePermissionParams): Promise<void>;
-  kill(params: KillParams): Promise<KillResult[]>;
+  kill(params: KillParams): Promise<KillResult>;
   list(filter?: ListFilter): SessionInfo[];
+  assertTurnTarget(target: TurnTarget): void;
   subscribe(listener: (event: DomainEvent) => void): () => void;
 };
 
@@ -239,7 +282,8 @@ export function createSessionMachine(options: {
   const sessions = new Map<SessionId, SessionRecord>();
   const usedSessionNames = new Set<SessionName>();
   const waiters: Array<{
-    ids: ReadonlySet<SessionId>;
+    targets: readonly TurnTarget[];
+    completion: WaitParams["completion"];
     resolve: (result: WaitResult) => void;
     timer: ReturnType<typeof setTimeout> | null;
   }> = [];
@@ -249,6 +293,9 @@ export function createSessionMachine(options: {
   const pendingSpawns = new Map<SessionId, PendingSpawn>();
   const terminations = new Map<SessionId, Promise<void>>();
   const ingressActions: IngressActionFrame[] = [];
+  // 接受响应与终态通知可能在同一轮到达；只暂存本会话事件，
+  // 保证已接受 caller 事实先于该回合终态，拒绝后仍释放真实终态。
+  const pendingDeliveries = new Map<SessionId, PendingDelivery>();
 
   let bus: EventBus;
   let driver: WorkerDriver;
@@ -279,7 +326,6 @@ export function createSessionMachine(options: {
           state: "busy",
           currentTurnId: null,
           activeTurn: null,
-          inbox: [],
           pendingPermissions: new Map(),
           usedPermissionIds: new Set(),
           turns: [],
@@ -300,28 +346,17 @@ export function createSessionMachine(options: {
         break;
       case "message":
         session?.activeTurn?.messages.set(event.messageId, "complete");
-        if (session !== undefined && session.inbox.length > 0) {
-          deliverInbox(session);
-        }
         break;
       case "tool.requested":
         session?.activeTurn?.tools.set(event.toolCallId, "requested");
         break;
       case "tool.completed":
         session?.activeTurn?.tools.set(event.toolCallId, "complete");
-        if (session !== undefined && session.inbox.length > 0) {
-          deliverInbox(session);
-        }
         break;
       case "turn.completed":
         if (session !== undefined) {
-          session.turns.push({
-            sessionId: event.sessionId,
-            turnId: event.turnId,
-            stopReason: event.stopReason,
-            finalReply: event.finalReply,
-            usage: event.usage,
-          });
+          const { type: _type, ...completed } = event;
+          session.turns.push(completed);
           session.state = "idle";
           session.currentTurnId = null;
           session.activeTurn = null;
@@ -333,7 +368,6 @@ export function createSessionMachine(options: {
           session.state = "killed";
           session.currentTurnId = null;
           session.activeTurn = null;
-          session.inbox = [];
           session.pendingPermissions.clear();
           session.usedPermissionIds.clear();
         }
@@ -357,46 +391,6 @@ export function createSessionMachine(options: {
     settleWaiters();
   };
 
-  function deliverInbox(session: SessionRecord): void {
-    while (session.inbox.length > 0) {
-      const item = session.inbox[0]!;
-      const turnId = session.currentTurnId;
-      if (turnId === null) break;
-      try {
-        driverTransaction(
-          [
-            {
-              type: "message",
-              sessionId: session.id,
-              turnId,
-              messageId: item.messageId,
-              role: "caller",
-              content: item.text,
-            },
-          ],
-          new Map([[session.id, projectSession(session.id)]]),
-          () => {
-            driver.deliver(session.id, turnId, item.text);
-          },
-        );
-        session.inbox.shift();
-      } catch (error) {
-        if (!v.safeParse(machineErrorSchema, error).success) {
-          recordBestEffort(options.diagnostics, {
-            sessionId: session.id,
-            turnId,
-            kind: "request_failure",
-            operation: "send",
-            stage: "steer",
-            reason: "upstream_error",
-            message: evidence(error),
-          });
-        }
-        break;
-      }
-    }
-  }
-
   function activeProjection(
     sessionId: SessionId,
   ): IngressProjection | undefined {
@@ -406,11 +400,13 @@ export function createSessionMachine(options: {
       const projection = frame.projections.get(sessionId);
       if (projection !== undefined) return projection;
     }
-    return undefined;
+    return pendingDeliveries.get(sessionId)?.projection;
   }
 
   function projectSession(sessionId: SessionId): IngressProjection {
-    const source = activeProjection(sessionId) ?? sessions.get(sessionId);
+    const inherited = activeProjection(sessionId);
+    const session = sessions.get(sessionId);
+    const source = inherited ?? session;
     if (source === undefined) {
       throw new Error("Cannot project an unknown session");
     }
@@ -426,6 +422,10 @@ export function createSessionMachine(options: {
               messages: new Map(activeTurn.messages),
               tools: new Map(activeTurn.tools),
             },
+      completedTurnIds:
+        inherited === undefined
+          ? new Set(session?.turns.map(({ turnId }) => turnId))
+          : new Set(inherited.completedTurnIds),
       pendingPermissions: new Map(source.pendingPermissions),
       usedPermissionIds: new Set(source.usedPermissionIds),
     };
@@ -491,6 +491,7 @@ export function createSessionMachine(options: {
         projection.state = "idle";
         projection.currentTurnId = null;
         projection.activeTurn = null;
+        projection.completedTurnIds.add(event.turnId);
         projection.pendingPermissions.clear();
         break;
       case "session.killed":
@@ -534,147 +535,330 @@ export function createSessionMachine(options: {
     },
   });
 
-  function validDriverEvent(event: DomainEvent): boolean {
+  function decideDriverEvent(event: DomainEvent): WorkerEventIngressDecision {
     const session = sessions.get(event.sessionId);
     const projected = activeProjection(event.sessionId);
     const current = projected ?? session;
     const spawning =
       current === undefined ? pendingSpawns.get(event.sessionId) : undefined;
+    const eventTurnId = "turnId" in event ? event.turnId : undefined;
+    if (current === undefined && spawning?.accepting !== true)
+      return {
+        status: "rejected",
+        rejection: {
+          reason: "unknown_session",
+          eventType: event.type,
+          sessionState: "unknown",
+          ...(eventTurnId === undefined ? {} : { eventTurnId }),
+        },
+      };
+    if (current?.state === "killed")
+      return {
+        status: "rejected",
+        rejection: {
+          reason: "session_killed",
+          eventType: event.type,
+          sessionState: "killed",
+          ...(eventTurnId === undefined ? {} : { eventTurnId }),
+        },
+      };
+    const sessionState =
+      spawning === undefined
+        ? current!.state
+        : spawning.completedTurnId === null
+          ? "spawning"
+          : "idle";
     if (
-      (current === undefined && spawning?.accepting !== true) ||
-      current?.state === "killed"
-    ) {
-      return false;
-    }
-    if (event.type === "session.created" || event.type === "turn.started") {
-      return false;
-    }
+      event.type === "session.created" ||
+      event.type === "turn.started" ||
+      event.type === "session.killed"
+    )
+      return {
+        status: "rejected",
+        rejection: {
+          reason: "driver_event_forbidden",
+          eventType: event.type,
+          sessionState,
+        },
+      };
     let turnScope: TurnScope | undefined;
     if ("turnId" in event) {
-      if (
-        (current !== undefined &&
-          (current.state !== "busy" ||
-            current.currentTurnId === null ||
-            event.turnId !== current.currentTurnId)) ||
-        (spawning !== undefined && event.turnId !== spawning.turn.turnId)
-      ) {
-        return false;
+      const activeTurnId =
+        current?.currentTurnId ??
+        (spawning?.completedTurnId === null ? spawning.turn.turnId : null);
+      const eventTurnCompleted =
+        projected?.completedTurnIds.has(event.turnId) === true ||
+        session?.turns.some(({ turnId }) => turnId === event.turnId) === true ||
+        spawning?.completedTurnId === event.turnId;
+      if (eventTurnCompleted)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "event_after_turn_completed",
+            eventType: event.type,
+            eventTurnId: event.turnId,
+            ...(activeTurnId === null
+              ? { sessionState: "idle" as const }
+              : {
+                  sessionState: sessionState as "busy" | "spawning",
+                  activeTurnId,
+                }),
+          },
+        };
+      if (event.type === "permission.resolved" && activeTurnId !== null) {
+        const pendingPermissions =
+          current?.pendingPermissions ?? spawning?.pendingPermissions;
+        const pending = pendingPermissions?.get(event.permissionId);
+        if (pending === undefined)
+          return {
+            status: "rejected",
+            rejection: {
+              reason: "permission_not_pending",
+              eventType: event.type,
+              sessionState: sessionState as "busy" | "spawning",
+              eventTurnId: event.turnId,
+              activeTurnId,
+              permissionId: event.permissionId,
+            },
+          };
+        if (pending.turnId !== event.turnId)
+          return {
+            status: "rejected",
+            rejection: {
+              reason: "permission_turn_mismatch",
+              eventType: event.type,
+              sessionState: sessionState as "busy" | "spawning",
+              eventTurnId: event.turnId,
+              activeTurnId,
+              permissionId: event.permissionId,
+            },
+          };
       }
-      turnScope = current?.activeTurn ?? spawning?.turn;
-      if (turnScope === undefined || turnScope.turnId !== event.turnId) {
-        return false;
+      if (activeTurnId === null) {
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "turn_not_active",
+            eventType: event.type,
+            sessionState: "idle",
+            eventTurnId: event.turnId,
+          },
+        };
       }
+      if (event.turnId !== activeTurnId)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "turn_mismatch",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId,
+          },
+        };
+      turnScope =
+        current?.activeTurn ??
+        (spawning?.completedTurnId === null ? spawning.turn : undefined);
+      if (turnScope === undefined || turnScope.turnId !== event.turnId)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "turn_mismatch",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId,
+          },
+        };
     }
     if (event.type === "text.delta") {
-      if (turnScope?.messages.get(event.messageId) === "complete") return false;
-      turnScope?.messages.set(event.messageId, "streaming");
+      if (turnScope?.messages.get(event.messageId) === "complete")
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "message_already_completed",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            messageId: event.messageId,
+          },
+        };
     }
     if (event.type === "message") {
-      if (turnScope?.messages.get(event.messageId) === "complete") return false;
-      turnScope?.messages.set(event.messageId, "complete");
+      if (turnScope?.messages.get(event.messageId) === "complete")
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "message_already_completed",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            messageId: event.messageId,
+          },
+        };
     }
     if (event.type === "tool.requested") {
-      if (turnScope?.tools.has(event.toolCallId) === true) return false;
-      turnScope?.tools.set(event.toolCallId, "requested");
+      if (turnScope?.tools.has(event.toolCallId) === true)
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "tool_already_requested",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            toolCallId: event.toolCallId,
+          },
+        };
     }
     if (event.type === "tool.completed") {
-      if (turnScope?.tools.get(event.toolCallId) === "complete") return false;
-      turnScope?.tools.set(event.toolCallId, "complete");
+      if (turnScope?.tools.get(event.toolCallId) === "complete")
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "tool_already_completed",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            toolCallId: event.toolCallId,
+          },
+        };
     }
     if (event.type === "permission.requested") {
       const used = current?.usedPermissionIds ?? spawning?.permissionIds;
-      if (used === undefined || used.has(event.permissionId)) return false;
-      used.add(event.permissionId);
-      const pendingPermissions =
-        current?.pendingPermissions ?? spawning?.pendingPermissions;
-      pendingPermissions?.set(event.permissionId, {
-        turnId: event.turnId,
-        options: event.options,
-      });
-      return true;
+      if (used === undefined || used.has(event.permissionId))
+        return {
+          status: "rejected",
+          rejection: {
+            reason: "permission_id_reused",
+            eventType: event.type,
+            sessionState: sessionState as "busy" | "spawning",
+            eventTurnId: event.turnId,
+            activeTurnId: event.turnId,
+            permissionId: event.permissionId,
+          },
+        };
     }
-    if (event.type === "permission.resolved") {
-      const pendingPermissions =
-        current?.pendingPermissions ?? spawning?.pendingPermissions;
-      if (pendingPermissions === undefined) return false;
-      const pending = pendingPermissions.get(event.permissionId);
-      if (pending === undefined || pending.turnId !== event.turnId)
-        return false;
-      pendingPermissions.delete(event.permissionId);
-      return true;
-    }
-    return true;
+    return { status: "accepted" };
   }
 
-  function protocolViolation(event: DomainEvent): void {
-    const session = sessions.get(event.sessionId);
-    const knownTurn =
-      session !== undefined &&
-      "turnId" in event &&
-      session.currentTurnId === event.turnId
-        ? event.turnId
-        : undefined;
+  function protocolViolation(
+    sessionId: SessionId,
+    rejection: WorkerEventRejection,
+  ): void {
     recordBestEffort(options.diagnostics, {
-      ...(session === undefined
-        ? {}
-        : {
-            sessionId: session.id,
-            ...(knownTurn === undefined ? {} : { turnId: knownTurn }),
-          }),
+      sessionId,
       kind: "protocol_violation",
       operation: "validate_worker_event",
-      reason: "unexpected_message",
-      message: {
-        text: "Worker event does not belong to the active session state",
-        truncated: false,
-        originalBytes: 56,
-      },
+      ...rejection,
     });
   }
 
   ingestDriverEvent = (event) => {
-    if (!validDriverEvent(event)) {
-      protocolViolation(event);
-      return;
+    const decision = decideDriverEvent(event);
+    switch (decision.status) {
+      case "rejected":
+        protocolViolation(event.sessionId, decision.rejection);
+        return;
+      case "accepted":
+        break;
+      default:
+        decision satisfies never;
     }
-    bus.publish(event);
-  };
-
-  function collectOutcomes(ids: ReadonlySet<SessionId>): WaitOutcome[] {
-    const outcomes: WaitOutcome[] = [];
-    for (const id of ids) {
-      const session = sessions.get(id);
-      if (session === undefined) continue;
-      if (session.state === "killed") {
-        outcomes.push({ sessionId: id, status: "killed" });
-      } else if (session.state === "idle" && session.turns.length > 0) {
-        const lastTurn = session.turns[session.turns.length - 1];
-        if (lastTurn !== undefined) {
-          outcomes.push({
-            sessionId: id,
-            status: "completed",
-            turn: lastTurn,
+    const projection = activeProjection(event.sessionId);
+    if (projection !== undefined) projectEvent(projection, event);
+    else {
+      const spawning = pendingSpawns.get(event.sessionId);
+      if (spawning?.accepting === true) {
+        if (event.type === "text.delta")
+          spawning.turn.messages.set(event.messageId, "streaming");
+        else if (event.type === "message")
+          spawning.turn.messages.set(event.messageId, "complete");
+        else if (event.type === "tool.requested")
+          spawning.turn.tools.set(event.toolCallId, "requested");
+        else if (event.type === "tool.completed")
+          spawning.turn.tools.set(event.toolCallId, "complete");
+        else if (event.type === "permission.requested") {
+          spawning.permissionIds.add(event.permissionId);
+          spawning.pendingPermissions.set(event.permissionId, {
+            turnId: event.turnId,
+            options: event.options,
           });
+        } else if (event.type === "permission.resolved")
+          spawning.pendingPermissions.delete(event.permissionId);
+        else if (event.type === "turn.completed") {
+          spawning.completedTurnId = event.turnId;
+          spawning.pendingPermissions.clear();
         }
       }
     }
-    return outcomes;
+    const delivering = pendingDeliveries.get(event.sessionId);
+    if (delivering === undefined) bus.publish(event);
+    else delivering.events.push(event);
+  };
+
+  function assertTurnTarget(target: TurnTarget): void {
+    const parsed = v.safeParse(turnTargetSchema, target);
+    if (!parsed.success) throw invalidParamsError(parsed.issues);
+    const session = sessions.get(parsed.output.sessionId);
+    if (session === undefined)
+      throw machineError({
+        code: "session_not_found",
+        sessionId: parsed.output.sessionId,
+      });
+    if (
+      session.currentTurnId !== parsed.output.turnId &&
+      !session.turns.some((turn) => turn.turnId === parsed.output.turnId)
+    ) {
+      throw machineError({
+        code: "invalid_params",
+        issues: [{ issue: "invalid_value", path: "turnId" }],
+      });
+    }
+  }
+
+  function collectOutcomes(
+    targets: readonly TurnTarget[],
+  ): Pick<WaitResult, "completed" | "pending"> {
+    const completed: TurnCompleted[] = [];
+    const pending: TurnTarget[] = [];
+    for (const target of targets) {
+      const turn = sessions
+        .get(target.sessionId)
+        ?.turns.find((turn) => turn.turnId === target.turnId);
+      if (turn === undefined) pending.push(target);
+      else completed.push(turn);
+    }
+    return { completed, pending };
+  }
+
+  function isSatisfied(
+    snapshot: Pick<WaitResult, "completed" | "pending">,
+    completion: WaitParams["completion"],
+  ): boolean {
+    return completion === "any"
+      ? snapshot.completed.length > 0
+      : snapshot.pending.length === 0;
   }
 
   function settleWaiters(): void {
-    const resolved: Array<{
+    const satisfied: {
       waiter: (typeof waiters)[number];
-      outcomes: WaitOutcome[];
-    }> = [];
+      snapshot: Pick<WaitResult, "completed" | "pending">;
+    }[] = [];
     for (const waiter of waiters) {
-      const outcomes = collectOutcomes(waiter.ids);
-      if (outcomes.length > 0) resolved.push({ waiter, outcomes });
+      const snapshot = collectOutcomes(waiter.targets);
+      if (isSatisfied(snapshot, waiter.completion)) {
+        satisfied.push({ waiter, snapshot });
+      }
     }
-    for (const { waiter, outcomes } of resolved) {
+    for (const { waiter, snapshot } of satisfied) {
       if (waiter.timer !== null) clearTimeout(waiter.timer);
-      const index = waiters.indexOf(waiter);
-      if (index !== -1) waiters.splice(index, 1);
-      waiter.resolve({ status: "completed", results: outcomes });
+      waiters.splice(waiters.indexOf(waiter), 1);
+      waiter.resolve({ status: "satisfied", ...snapshot });
     }
   }
 
@@ -700,12 +884,13 @@ export function createSessionMachine(options: {
       sessionSeq += 1;
       const sessionId = options.identity.session(spec.sessionName);
       const turnId = nextTurnId(sessionId);
-      const cwd = spec.cwd ?? process.cwd();
+      const cwd = spec.cwd;
       const spawnScope: PendingSpawn = {
         token: Symbol(spec.sessionName),
         turn: createTurnScope(turnId),
         permissionIds: new Set(),
         pendingPermissions: new Map(),
+        completedTurnId: null,
         accepting: true,
       };
       pendingSpawns.set(sessionId, spawnScope);
@@ -771,7 +956,7 @@ export function createSessionMachine(options: {
       if (pendingSpawns.get(sessionId)?.token === spawnScope.token) {
         pendingSpawns.delete(sessionId);
       }
-      return sessionId;
+      return { sessionId, turnId, cwd };
     },
     async send(params) {
       const parsed = v.safeParse(sendParamsSchema, params);
@@ -787,28 +972,39 @@ export function createSessionMachine(options: {
         throw machineError({ code: "session_killed", sessionId });
       }
       assertNotTerminating(sessionId);
+      if (
+        parsed.output.placement === "new_turn" &&
+        (session.state !== "idle" || pendingDeliveries.has(sessionId))
+      ) {
+        throw machineError({ code: "session_busy", sessionId });
+      }
       messageSeq += 1;
       const messageId = v.parse(messageIdSchema, `m${messageSeq}`);
-      if (session.state === "idle") {
+      if (parsed.output.placement === "new_turn") {
         const turnId = nextTurnId(sessionId);
+        const started: DomainEvent = {
+          type: "turn.started",
+          sessionId,
+          turnId,
+        };
+        const projection = projectSession(sessionId);
+        projectEvent(projection, started);
+        const delivery = createPendingDelivery(projection, true);
+        pendingDeliveries.set(sessionId, delivery);
         try {
-          driverTransaction(
-            [
-              { type: "turn.started", sessionId, turnId },
-              {
-                type: "message",
-                sessionId,
-                turnId,
-                messageId,
-                role: "caller",
-                content: message,
-              },
-            ],
-            new Map([[sessionId, projectSession(sessionId)]]),
-            () => {
-              driver.deliver(sessionId, turnId, message);
+          await driver.deliver(sessionId, turnId, message, "new_turn");
+          bus.publish([
+            started,
+            {
+              type: "message",
+              sessionId,
+              turnId,
+              messageId,
+              role: "caller",
+              content: message,
             },
-          );
+            ...delivery.events,
+          ]);
         } catch (error) {
           throw await unexpectedFailure(options.diagnostics, error, {
             sessionId,
@@ -819,101 +1015,148 @@ export function createSessionMachine(options: {
             reason: "upstream_error",
             message: evidence(error),
           });
+        } finally {
+          pendingDeliveries.delete(sessionId);
+          delivery.settle();
         }
         return { sessionId, turnId, messageId, deliveryPoint: "new_turn" };
       }
-      session.inbox.push({ messageId, text: message });
-      if (session.currentTurnId === null) {
-        throw new Error("Busy session is missing its current turn");
+      const turnId = parsed.output.turnId;
+      if (pendingDeliveries.get(sessionId)?.creating)
+        throw machineError({ code: "turn_not_active", sessionId, turnId });
+      const current = activeProjection(sessionId) ?? session;
+      if (current.currentTurnId !== turnId) {
+        if (
+          session.turns.some((turn) => turn.turnId === turnId) ||
+          activeProjection(sessionId)?.completedTurnIds.has(turnId)
+        )
+          throw machineError({ code: "turn_not_active", sessionId, turnId });
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
       }
-      return {
-        sessionId,
-        turnId: session.currentTurnId,
-        messageId,
-        deliveryPoint: "boundary",
-      };
+      const delivery =
+        pendingDeliveries.get(sessionId) ??
+        createPendingDelivery(projectSession(sessionId), false);
+      delivery.count += 1;
+      pendingDeliveries.set(sessionId, delivery);
+      try {
+        await driver.deliver(sessionId, turnId, message, "active_turn");
+        bus.publish({
+          type: "message",
+          sessionId,
+          turnId,
+          messageId,
+          role: "caller",
+          content: message,
+        });
+      } catch (error) {
+        throw await unexpectedFailure(options.diagnostics, error, {
+          sessionId,
+          turnId,
+          kind: "request_failure",
+          operation: "send",
+          stage: "steer",
+          reason: "upstream_error",
+          message: evidence(error),
+        });
+      } finally {
+        delivery.count -= 1;
+        if (delivery.count === 0) {
+          try {
+            bus.publish(delivery.events);
+          } finally {
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+          }
+        }
+      }
+      return { sessionId, turnId, messageId, deliveryPoint: "active_turn" };
     },
     async wait(params) {
       const parsed = v.safeParse(waitParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
       }
-      const ids = new Set(parsed.output.ids);
-      for (const id of ids) {
-        if (!sessions.has(id)) {
-          throw machineError({ code: "session_not_found", sessionId: id });
-        }
-      }
-      const immediate = collectOutcomes(ids);
-      if (immediate.length > 0) {
-        return { status: "completed", results: immediate };
-      }
+      const { targets, completion, timeoutMs } = parsed.output;
+      for (const target of targets) assertTurnTarget(target);
+      const immediate = collectOutcomes(targets);
+      if (isSatisfied(immediate, completion))
+        return { status: "satisfied", ...immediate };
+      if (timeoutMs === 0) return { status: "timeout", ...immediate };
       return await new Promise<WaitResult>((resolve) => {
-        const timer =
-          parsed.output.timeoutMs === undefined
-            ? null
-            : setTimeout(() => {
-                const index = waiters.findIndex(
-                  (waiter) => waiter.resolve === resolve,
-                );
-                if (index !== -1) waiters.splice(index, 1);
-                resolve({ status: "timeout", results: [] });
-              }, parsed.output.timeoutMs);
-        waiters.push({ ids, resolve, timer });
+        const waiter: (typeof waiters)[number] = {
+          targets,
+          completion,
+          resolve,
+          timer: null,
+        };
+        const deadline =
+          timeoutMs === undefined ? undefined : performance.now() + timeoutMs;
+        function observeDeadline(): void {
+          if (deadline === undefined) return;
+          const remaining = deadline - performance.now();
+          if (remaining > 0) {
+            // Node 超过单次计时上限会钳为 1ms；分段只观察同一个单调截止点。
+            waiter.timer = setTimeout(
+              observeDeadline,
+              Math.min(remaining, 2_147_483_647),
+            );
+            return;
+          }
+          waiters.splice(waiters.indexOf(waiter), 1);
+          resolve({ status: "timeout", ...collectOutcomes(targets) });
+        }
+        waiters.push(waiter);
+        observeDeadline();
       });
     },
     async interrupt(params) {
       const parsed = v.safeParse(interruptParamsSchema, params);
-      if (!parsed.success) {
-        throw invalidParamsError(parsed.issues);
+      if (!parsed.success) throw invalidParamsError(parsed.issues);
+      const { sessionId, turnId } = parsed.output;
+      const session = sessions.get(sessionId);
+      if (session === undefined)
+        throw machineError({ code: "session_not_found", sessionId });
+      if (session.state === "killed")
+        throw machineError({ code: "session_killed", sessionId });
+      assertNotTerminating(sessionId);
+      if (pendingDeliveries.get(sessionId)?.creating)
+        throw machineError({ code: "turn_not_active", sessionId, turnId });
+      const current = activeProjection(sessionId) ?? session;
+      if (current.currentTurnId !== turnId) {
+        if (
+          session.turns.some((turn) => turn.turnId === turnId) ||
+          activeProjection(sessionId)?.completedTurnIds.has(turnId)
+        )
+          throw machineError({ code: "turn_not_active", sessionId, turnId });
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
       }
-      const outcomes: InterruptOutcome[] = [];
-      for (const id of parsed.output.ids) {
-        const session = sessions.get(id);
-        if (session === undefined) {
-          throw machineError({ code: "session_not_found", sessionId: id });
-        }
-        if (session.state === "killed") {
-          throw machineError({ code: "session_killed", sessionId: id });
-        }
-        assertNotTerminating(id);
-        if (session.state === "busy") {
-          try {
-            driverTransaction([], new Map([[id, projectSession(id)]]), () => {
-              driver.interrupt(id);
-            });
-          } catch (error) {
-            throw await unexpectedFailure(options.diagnostics, error, {
-              sessionId: id,
-              ...(session.currentTurnId === null
-                ? {}
-                : { turnId: session.currentTurnId }),
-              kind: "request_failure",
-              operation: "interrupt",
-              stage: "interrupt",
-              reason: "upstream_error",
-              message: evidence(error),
-            });
-          }
-          outcomes.push({
-            sessionId: id,
-            status: "requested",
-            ...(session.currentTurnId === null
-              ? {}
-              : { turnId: session.currentTurnId }),
-          });
-        } else {
-          outcomes.push({ sessionId: id, status: "idle" });
-        }
+      try {
+        await driver.interrupt(sessionId, turnId);
+      } catch (error) {
+        throw await unexpectedFailure(options.diagnostics, error, {
+          sessionId,
+          turnId,
+          kind: "request_failure",
+          operation: "interrupt",
+          stage: "interrupt",
+          reason: "upstream_error",
+          message: evidence(error),
+        });
       }
-      return outcomes;
+      return { sessionId, turnId };
     },
     async resolvePermission(params) {
       const parsed = v.safeParse(resolvePermissionParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
       }
-      const { sessionId, permissionId, resolution } = parsed.output;
+      const { sessionId, turnId, permissionId, resolution } = parsed.output;
       const session = sessions.get(sessionId);
       if (session === undefined) {
         throw machineError({ code: "session_not_found", sessionId });
@@ -930,6 +1173,11 @@ export function createSessionMachine(options: {
           permissionId,
         });
       }
+      if (pending.turnId !== turnId)
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "turnId" }],
+        });
       const inMenu = v.safeParse(
         permissionResolutionSchemaFor(pending.options),
         resolution,
@@ -976,51 +1224,57 @@ export function createSessionMachine(options: {
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
       }
-      const results: KillResult[] = [];
-      for (const id of parsed.output.ids) {
-        const session = sessions.get(id);
-        if (session === undefined) {
-          results.push({ sessionId: id, status: "not_found" });
-          continue;
-        }
-        if (session.state === "killed") {
-          results.push({ sessionId: id, status: "killed" });
-          continue;
-        }
-        let termination = terminations.get(id);
-        if (termination === undefined) {
-          termination = (async () => {
-            try {
-              // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
-              await driver.terminate(id);
-              bus.transaction(
-                [{ type: "session.killed", sessionId: id }],
-                () => {},
-              );
-            } catch (error) {
-              throw await unexpectedFailure(options.diagnostics, error, {
+      const id = parsed.output.sessionId;
+      const session = sessions.get(id);
+      if (session === undefined) {
+        return { sessionId: id, status: "not_found" };
+      }
+      if (session.state === "killed") {
+        return { sessionId: id, status: "killed" };
+      }
+      let termination = terminations.get(id);
+      if (termination === undefined) {
+        termination = (async () => {
+          try {
+            // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
+            await driver.terminate(id);
+            // 停止后先结算原生已接受或拒绝的消息，避免 kill 越过其事实。
+            await pendingDeliveries.get(id)?.settled;
+            // 停止期间自然终态可能已提交；只补仍活动的回合，且先于会话终态。
+            const terminalEvents: DomainEvent[] = [];
+            if (session.currentTurnId !== null) {
+              terminalEvents.push({
+                type: "turn.completed",
                 sessionId: id,
-                ...(session.currentTurnId === null
-                  ? {}
-                  : { turnId: session.currentTurnId }),
-                kind: "request_failure",
-                operation: "kill",
-                stage: "terminate",
-                reason: "upstream_error",
-                message: evidence(error),
+                turnId: session.currentTurnId,
+                stopReason: "killed",
+                finalReply: null,
               });
             }
-          })();
-          terminations.set(id, termination);
-          const clearTermination = () => {
-            if (terminations.get(id) === termination) terminations.delete(id);
-          };
-          void termination.then(clearTermination, clearTermination);
-        }
-        await termination;
-        results.push({ sessionId: id, status: "killed" });
+            terminalEvents.push({ type: "session.killed", sessionId: id });
+            bus.transaction(terminalEvents, () => {});
+          } catch (error) {
+            throw await unexpectedFailure(options.diagnostics, error, {
+              sessionId: id,
+              ...(session.currentTurnId === null
+                ? {}
+                : { turnId: session.currentTurnId }),
+              kind: "request_failure",
+              operation: "kill",
+              stage: "terminate",
+              reason: "upstream_error",
+              message: evidence(error),
+            });
+          }
+        })();
+        terminations.set(id, termination);
+        const clearTermination = () => {
+          if (terminations.get(id) === termination) terminations.delete(id);
+        };
+        void termination.then(clearTermination, clearTermination);
       }
-      return results;
+      await termination;
+      return { sessionId: id, status: "killed" };
     },
     list(filter) {
       const matches =
@@ -1028,6 +1282,8 @@ export function createSessionMachine(options: {
           ? [...sessions.values()]
           : [...sessions.values()].filter(
               (session) =>
+                (filter.sessionId === undefined ||
+                  session.id === filter.sessionId) &&
                 (filter.harness === undefined ||
                   session.harness === filter.harness) &&
                 (filter.state === undefined ||
@@ -1036,12 +1292,20 @@ export function createSessionMachine(options: {
                   session.sessionName === filter.sessionName) &&
                 (filter.model === undefined || session.model === filter.model),
             );
-      return matches
-        .map(toInfo)
-        .toSorted((left, right) =>
-          left.sessionId.localeCompare(right.sessionId),
-        );
+      return (
+        matches
+          // 创建事务尚未折叠首回合时，不投影缺少活动回合的中间状态。
+          .filter(
+            (session) =>
+              session.state !== "busy" || session.currentTurnId !== null,
+          )
+          .map(toInfo)
+          .toSorted((left, right) =>
+            left.sessionId.localeCompare(right.sessionId),
+          )
+      );
     },
+    assertTurnTarget,
     subscribe(listener) {
       return bus.subscribe(listener);
     },

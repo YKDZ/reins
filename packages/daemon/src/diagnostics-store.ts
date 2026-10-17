@@ -1,7 +1,14 @@
 import { basename, dirname, join } from "node:path";
 
 import {
+  consumerContextSchema,
+  diagnosticIdSchema,
   diagnosticRecordSchema,
+  sessionIdSchema,
+  textEvidenceSchema,
+  turnIdSchema,
+  utcMillisecondTimestampSchema,
+  type ConsumerContext,
   type DiagnosticRecord,
   type DiagnosticsParams,
   type DiagnosticsResult,
@@ -30,7 +37,44 @@ const ACTIVE_FILE = "active.ndjson";
 const LOCK_TARGET = "writer-lease";
 const BOOTSTRAP_LOCK_TARGET = "diagnostics-bootstrap-lease";
 const SEGMENT_PATTERN = /^segment-(\d{12})\.ndjson$/;
+const MIGRATION_TEMP_SUFFIX = ".transport-migration";
 const strictUtf8 = new TextDecoder("utf-8", { fatal: true });
+
+const legacyV1TransportEntries = {
+  source: v.literal("daemon"),
+  harness: v.optional(v.pipe(v.string(), v.minLength(1))),
+  v: v.literal(1),
+  diagnosticId: diagnosticIdSchema,
+  recordedAt: utcMillisecondTimestampSchema,
+  severity: v.literal("error"),
+  kind: v.literal("transport_failure"),
+  operation: v.picklist(["listen", "connect", "read", "write", "close"]),
+  reason: v.picklist(["io_error", "timeout", "disconnected"]),
+  message: textEvidenceSchema,
+} as const;
+
+const legacyV1TransportFailureRecordSchema = v.pipe(
+  v.union([
+    v.strictObject(legacyV1TransportEntries),
+    v.strictObject({
+      ...legacyV1TransportEntries,
+      sessionId: sessionIdSchema,
+      turnId: v.optional(turnIdSchema),
+    }),
+  ]),
+  v.check((record) => {
+    switch (record.operation) {
+      case "listen":
+        return record.reason === "io_error";
+      case "connect":
+        return record.reason === "io_error" || record.reason === "timeout";
+      case "read":
+      case "write":
+      case "close":
+        return true;
+    }
+  }),
+);
 
 export type DiagnosticsStoreHealth =
   | {
@@ -50,8 +94,11 @@ export type TailRepair = {
 };
 
 export interface DiagnosticsStore {
-  append(record: DiagnosticRecord): Promise<void>;
-  query(params: DiagnosticsParams): Promise<DiagnosticsResult>;
+  append(record: DiagnosticRecord, consumer?: ConsumerContext): Promise<void>;
+  query(
+    params: DiagnosticsParams,
+    scope?: ConsumerContext,
+  ): Promise<DiagnosticsResult>;
   health(): DiagnosticsStoreHealth;
   close(): Promise<void>;
 }
@@ -92,8 +139,20 @@ type InternalOptions = DiagnosticsStoreOptions & {
 
 type Segment = {
   path: string;
-  records: DiagnosticRecord[];
+  records: StoredDiagnostic[];
   bytes: number;
+};
+
+type ParsedRecords = {
+  records: StoredDiagnostic[];
+  migratedLegacy: boolean;
+};
+
+// consumer 是 store 内部的归属元数据：随记录持久化，但不属于公开
+// DiagnosticRecord，也不出现在任何查询结果里。
+type StoredDiagnostic = {
+  readonly record: DiagnosticRecord;
+  readonly consumer?: ConsumerContext;
 };
 
 export function openDiagnosticsStore(
@@ -145,6 +204,8 @@ export async function openDiagnosticsStoreInternal(
       ...loaded,
     });
     await store.initializeRetention();
+    // 上次 rename 后的目录 sync 可能失败；成功 open 必须重新跨过持久化屏障。
+    await filesystem.syncDirectory(options.directory);
     return store;
   } catch (error) {
     await filesystem.close().catch(() => undefined);
@@ -166,10 +227,10 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
   readonly #failQuery: (() => Error | undefined) | undefined;
   readonly #beforeQueryRead: (() => Promise<void>) | undefined;
   #segments: Segment[];
-  #activeRecords: DiagnosticRecord[];
+  #activeRecords: StoredDiagnostic[];
   #activeBytes: number;
   #nextSegment: number;
-  #visibleRecords: DiagnosticRecord[];
+  #visibleRecords: StoredDiagnostic[];
   #degraded: { operation: "append" | "query"; cause: string } | undefined;
   #closing = false;
   #closed = false;
@@ -185,7 +246,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
       stderr: (message: string) => void;
       filesystem: LeaseGuardedDiagnosticsFilesystem;
       segments: Segment[];
-      activeRecords: DiagnosticRecord[];
+      activeRecords: StoredDiagnostic[];
       activeBytes: number;
       nextSegment: number;
       repairs: TailRepair[];
@@ -226,22 +287,28 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     this.#publishAcceptedRecords();
   }
 
-  append(record: DiagnosticRecord): Promise<void> {
+  append(record: DiagnosticRecord, consumer?: ConsumerContext): Promise<void> {
     if (this.#closing || this.#closed)
       return Promise.reject(new Error("Diagnostics store is closed"));
-    const operation = this.#writeTail.then(() => this.#append(record));
+    const operation = this.#writeTail.then(() =>
+      this.#append(record, consumer),
+    );
     this.#writeTail = operation.catch(() => undefined);
     return operation;
   }
 
-  query(params: DiagnosticsParams): Promise<DiagnosticsResult> {
+  query(
+    params: DiagnosticsParams,
+    scope?: ConsumerContext,
+  ): Promise<DiagnosticsResult> {
     const snapshot = this.#queryableRecords();
-    return this.#querySnapshot(params, snapshot);
+    return this.#querySnapshot(params, snapshot, scope);
   }
 
   async #querySnapshot(
     params: DiagnosticsParams,
-    snapshot: DiagnosticRecord[],
+    snapshot: StoredDiagnostic[],
+    scope?: ConsumerContext,
   ): Promise<DiagnosticsResult> {
     await this.#assertAvailable("query");
     const injected = this.#failQuery?.();
@@ -250,9 +317,18 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
       throw unavailableError();
     }
     await this.#beforeQueryRead?.();
+    // 消费者范围与其他过滤作用于同一接纳快照，先于 latest limit 与 truncated。
+    // 无归属记录是 daemon 全局事实，对所有消费者可见；只排除其他消费者的记录。
+    const visible =
+      scope === undefined
+        ? snapshot
+        : snapshot.filter(
+            (stored) =>
+              stored.consumer === undefined || stored.consumer === scope,
+          );
     if ("diagnosticId" in params) {
-      const found = snapshot.find(
-        (record) => record.diagnosticId === params.diagnosticId,
+      const found = visible.find(
+        (stored) => stored.record.diagnosticId === params.diagnosticId,
       );
       if (found === undefined) {
         throw new DiagnosticsStoreError(
@@ -260,14 +336,14 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
           "Diagnostic record was not found",
         );
       }
-      return { record: found };
+      return { record: found.record };
     }
 
-    const matching = snapshot.filter((record) => matches(record, params));
+    const matching = visible.filter((stored) => matches(stored.record, params));
     const limit = params.limit ?? 100;
     const start = Math.max(0, matching.length - limit);
     return {
-      records: matching.slice(start),
+      records: matching.slice(start).map((stored) => stored.record),
       truncated: start > 0,
     };
   }
@@ -296,7 +372,10 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     }
   }
 
-  async #append(record: DiagnosticRecord): Promise<void> {
+  async #append(
+    record: DiagnosticRecord,
+    consumer?: ConsumerContext,
+  ): Promise<void> {
     await this.#assertAvailable("append", true);
     const injected = this.#failAppend?.();
     if (injected !== undefined) {
@@ -305,7 +384,11 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     }
     const parsed = v.safeParse(diagnosticRecordSchema, record);
     if (!parsed.success) throw new Error("Invalid diagnostic record");
-    const serialized = JSON.stringify(parsed.output);
+    const stored: StoredDiagnostic =
+      consumer === undefined
+        ? { record: parsed.output }
+        : { record: parsed.output, consumer };
+    const serialized = serializeEntry(stored);
     if (Buffer.byteLength(serialized) > MAX_RECORD_BYTES) {
       throw new Error("Diagnostic record exceeds 256 KiB");
     }
@@ -322,7 +405,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     if (
       this.#activeRecords.length > 0 &&
       (this.#activeBytes + bytes > this.#segmentBytes ||
-        utcDate(this.#activeRecords[0]!.recordedAt) !==
+        utcDate(this.#activeRecords[0]!.record.recordedAt) !==
           utcDate(parsed.output.recordedAt) ||
         this.#shouldRotateForAgeOrDate())
     ) {
@@ -341,7 +424,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
       this.#degrade("append", asError(error));
       throw unavailableError();
     }
-    this.#activeRecords.push(parsed.output);
+    this.#activeRecords.push(stored);
     this.#activeBytes += bytes;
     await this.#enforceRetention();
     this.#publishAcceptedRecords();
@@ -352,8 +435,8 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     if (first === undefined) return false;
     const now = this.#now();
     return (
-      utcDate(first.recordedAt) !== utcDate(now.toISOString()) ||
-      Date.parse(first.recordedAt) <= now.getTime() - this.#maxAgeMs
+      utcDate(first.record.recordedAt) !== utcDate(now.toISOString()) ||
+      Date.parse(first.record.recordedAt) <= now.getTime() - this.#maxAgeMs
     );
   }
 
@@ -398,7 +481,7 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     while (this.#segments.length > 0) {
       const oldest = this.#segments[0]!;
       const hasExpired = oldest.records.some(
-        (record) => Date.parse(record.recordedAt) <= cutoff,
+        (stored) => Date.parse(stored.record.recordedAt) <= cutoff,
       );
       const overBytes = this.#totalBytes() > this.#maxBytes;
       if (!hasExpired && !overBytes) break;
@@ -419,10 +502,10 @@ class RollingDiagnosticsStore implements DiagnosticsStore {
     );
   }
 
-  #queryableRecords(): DiagnosticRecord[] {
+  #queryableRecords(): StoredDiagnostic[] {
     const cutoff = this.#now().getTime() - this.#maxAgeMs;
     return this.#visibleRecords.filter(
-      (record) => Date.parse(record.recordedAt) > cutoff,
+      (stored) => Date.parse(stored.record.recordedAt) > cutoff,
     );
   }
 
@@ -488,7 +571,7 @@ async function loadFiles(
   filesystem: LeaseGuardedDiagnosticsFilesystem,
 ): Promise<{
   segments: Segment[];
-  activeRecords: DiagnosticRecord[];
+  activeRecords: StoredDiagnostic[];
   activeBytes: number;
   nextSegment: number;
   repairs: TailRepair[];
@@ -498,6 +581,10 @@ async function loadFiles(
     .filter((name) => SEGMENT_PATTERN.test(name))
     .sort();
   const segments: Segment[] = [];
+  const migrations: Array<{
+    path: string;
+    records: StoredDiagnostic[];
+  }> = [];
   let nextSegment = 0;
   for (const name of segmentNames) {
     const path = join(directory, name);
@@ -506,11 +593,15 @@ async function loadFiles(
     const bytes = await filesystem.readFile(path);
     if (bytes.length > 0 && bytes.at(-1) !== 0x0a)
       corrupt("Immutable segment has an incomplete line");
+    const parsed = parseCompleteLines(bytes, name);
     segments.push({
       path,
-      records: parseCompleteLines(bytes, name),
+      records: parsed.records,
       bytes: bytes.length,
     });
+    if (parsed.migratedLegacy) {
+      migrations.push({ path, records: parsed.records });
+    }
     const match = SEGMENT_PATTERN.exec(name)!;
     nextSegment = Math.max(nextSegment, Number(match[1]) + 1);
   }
@@ -550,49 +641,137 @@ async function loadFiles(
       activeBytes = Buffer.concat([activeBytes, Buffer.from("\n")]);
     }
   }
+  const parsedActive = parseCompleteLines(activeBytes, ACTIVE_FILE);
+  if (parsedActive.migratedLegacy) {
+    migrations.push({ path: activePath, records: parsedActive.records });
+  }
+  for (const migration of migrations) {
+    const bytes = serializeRecords(migration.records);
+    await filesystem.replaceFileAtomically(
+      migration.path,
+      migration.path + MIGRATION_TEMP_SUFFIX,
+      bytes,
+      0o600,
+    );
+    await verifyMode(
+      filesystem,
+      migration.path,
+      0o600,
+      migration.path === activePath
+        ? "diagnostics file"
+        : "diagnostics segment",
+    );
+    const segment = segments.find(
+      (candidate) => candidate.path === migration.path,
+    );
+    if (segment !== undefined) segment.bytes = bytes.length;
+    if (migration.path === activePath) activeBytes = bytes;
+  }
   return {
     segments,
-    activeRecords: parseCompleteLines(activeBytes, ACTIVE_FILE),
+    activeRecords: parsedActive.records,
     activeBytes: activeBytes.length,
     nextSegment,
     repairs,
   };
 }
 
-function parseCompleteLines(bytes: Buffer, file: string): DiagnosticRecord[] {
+function parseCompleteLines(bytes: Buffer, file: string): ParsedRecords {
   let text: string;
   try {
     text = strictUtf8.decode(bytes);
   } catch {
     corrupt(`Invalid UTF-8 in ${file}`);
   }
-  if (text.length === 0) return [];
+  if (text.length === 0) return { records: [], migratedLegacy: false };
   const lines = text.endsWith("\n")
     ? text.slice(0, -1).split("\n")
     : text.split("\n");
-  return lines.map((line) => {
+  let migratedLegacy = false;
+  const records = lines.map((line) => {
     try {
-      return parseRecord(JSON.parse(line));
+      const parsed = parseRecordWithMigration(JSON.parse(line));
+      migratedLegacy ||= parsed.migratedLegacy;
+      return parsed.record;
     } catch (error) {
       if (error instanceof DiagnosticsStoreError) throw error;
       corrupt(`Invalid diagnostic record in ${file}`);
     }
   });
+  return { records, migratedLegacy };
 }
 
-function parseRecord(input: unknown): DiagnosticRecord {
-  if (typeof input !== "object" || input === null || !("v" in input)) {
+function parseRecord(input: unknown): StoredDiagnostic {
+  return parseRecordWithMigration(input).record;
+}
+
+// store 内部的归属键：从持久化行里剥离，不进入公开 DiagnosticRecord。
+function splitOwnership(input: unknown): {
+  payload: unknown;
+  consumer?: ConsumerContext;
+} {
+  if (typeof input !== "object" || input === null) return { payload: input };
+  if (!("consumer" in input)) return { payload: input };
+  const { consumer, ...rest } = input as Record<string, unknown>;
+  const parsed = v.safeParse(consumerContextSchema, consumer);
+  if (!parsed.success) {
+    corrupt("Diagnostic record has an invalid consumer binding");
+  }
+  return { payload: rest, consumer: parsed.output };
+}
+
+function parseRecordWithMigration(input: unknown): {
+  record: StoredDiagnostic;
+  migratedLegacy: boolean;
+} {
+  const { payload, consumer } = splitOwnership(input);
+  if (typeof payload !== "object" || payload === null || !("v" in payload)) {
     corrupt("Diagnostic record has no schema version");
   }
-  switch (input.v) {
+  switch (payload.v) {
     case 1:
       break;
     default:
       corrupt("Diagnostic record has an unknown schema version");
   }
-  const parsed = v.safeParse(diagnosticRecordSchema, input);
-  if (!parsed.success) corrupt("Diagnostic record does not match schema v1");
-  return parsed.output;
+  const parsed = v.safeParse(diagnosticRecordSchema, payload);
+  if (parsed.success) {
+    return {
+      record:
+        consumer === undefined
+          ? { record: parsed.output }
+          : { record: parsed.output, consumer },
+      migratedLegacy: false,
+    };
+  }
+  const legacy = v.safeParse(legacyV1TransportFailureRecordSchema, payload);
+  if (!legacy.success) corrupt("Diagnostic record does not match schema v1");
+  const migrated = { ...legacy.output };
+  Reflect.deleteProperty(migrated, "message");
+  const current = v.safeParse(diagnosticRecordSchema, migrated);
+  if (!current.success) corrupt("Diagnostic record does not match schema v1");
+  return {
+    record:
+      consumer === undefined
+        ? { record: current.output }
+        : { record: current.output, consumer },
+    migratedLegacy: true,
+  };
+}
+
+function serializeEntry(stored: StoredDiagnostic): string {
+  return JSON.stringify(
+    stored.consumer === undefined
+      ? stored.record
+      : { ...stored.record, consumer: stored.consumer },
+  );
+}
+
+function serializeRecords(records: readonly StoredDiagnostic[]): Buffer {
+  if (records.length === 0) return Buffer.alloc(0);
+  return Buffer.from(
+    `${records.map((stored) => serializeEntry(stored)).join("\n")}\n`,
+  );
 }
 
 async function ensurePrivateDirectory(

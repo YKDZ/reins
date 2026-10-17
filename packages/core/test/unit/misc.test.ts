@@ -16,7 +16,7 @@ describe("权限与事件", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-8"),
       harness: "codex",
       message: "跑测试",
@@ -34,6 +34,7 @@ describe("权限与事件", () => {
     expect(machine.list()[0]?.state).toBe("busy");
 
     await machine.resolvePermission({
+      turnId: ids.turn("t1"),
       sessionId: id,
       permissionId: ids.permission("p1"),
       resolution: { outcome: "allow", scope: "once" },
@@ -58,7 +59,7 @@ describe("权限与事件", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-9"),
       harness: "codex",
       message: "跑测试",
@@ -73,7 +74,7 @@ describe("权限与事件", () => {
       options: [{ outcome: "allow", scope: "once" }],
     });
 
-    await machine.interrupt({ ids: [id] });
+    await machine.interrupt({ sessionId: id, turnId: ids.turn("t1") });
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
@@ -98,7 +99,7 @@ describe("权限与事件", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-10"),
       harness: "dsh",
       message: "跑构建",
@@ -110,26 +111,36 @@ describe("权限与事件", () => {
       sessionId: id,
       turnId: ids.turn("t1"),
       stopReason: "failed",
+      failure: { failureCategory: "unclassified", retryDisposition: "unknown" },
       finalReply: "构建失败",
       usage: {},
     });
 
     expect(machine.list()[0]).toEqual(
-      expect.objectContaining({ state: "idle", lastStopReason: "failed" }),
+      expect.objectContaining({
+        state: "idle",
+        lastCompletedTurn: expect.objectContaining({ stopReason: "failed" }),
+      }),
     );
-    await expect(machine.wait({ ids: [id] })).resolves.toEqual({
-      status: "completed",
-      results: [
+    await expect(
+      machine.wait({
+        targets: [{ sessionId: id, turnId: ids.turn("t1") }],
+        completion: "all",
+      }),
+    ).resolves.toEqual({
+      status: "satisfied",
+      pending: [],
+      completed: [
         {
           sessionId: id,
-          status: "completed",
-          turn: {
-            sessionId: id,
-            turnId: ids.turn("t1"),
-            stopReason: "failed",
-            finalReply: "构建失败",
-            usage: {},
+          turnId: ids.turn("t1"),
+          stopReason: "failed",
+          failure: {
+            failureCategory: "unclassified",
+            retryDisposition: "unknown",
           },
+          finalReply: "构建失败",
+          usage: {},
         },
       ],
     });
@@ -144,7 +155,7 @@ describe("权限与事件", () => {
     });
     const events: DomainEvent[] = [];
     const unsubscribe = machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-11"),
       harness: "codex",
       message: "开始",
@@ -183,7 +194,7 @@ describe("权限与事件", () => {
       throw new Error("bad listener");
     });
 
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-12"),
       harness: "codex",
       message: "开始",

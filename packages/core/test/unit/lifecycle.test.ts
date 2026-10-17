@@ -7,7 +7,7 @@ import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testDiagnostics, testIdentity } from "./ids.ts";
 
 async function spawnBusy(machine: ReturnType<typeof createSessionMachine>) {
-  const id = await machine.spawn({
+  const { sessionId: id } = await machine.spawn({
     sessionName: ids.sessionName("fixture-7"),
     harness: "codex",
     message: "分析",
@@ -82,7 +82,7 @@ describe("回合生命周期", () => {
         sessionId: id,
         state: "idle",
         turns: 1,
-        lastStopReason: "end_turn",
+        lastCompletedTurn: expect.objectContaining({ stopReason: "end_turn" }),
       }),
     ]);
   });
@@ -96,7 +96,10 @@ describe("回合生命周期", () => {
     });
     const id = await spawnBusy(machine);
 
-    const waiting = machine.wait({ ids: [id] });
+    const waiting = machine.wait({
+      targets: [{ sessionId: id, turnId: ids.turn("t1") }],
+      completion: "all",
+    });
     fake.controls.emit({
       type: "turn.completed",
       sessionId: id,
@@ -107,18 +110,15 @@ describe("回合生命周期", () => {
     });
 
     await expect(waiting).resolves.toEqual({
-      status: "completed",
-      results: [
+      status: "satisfied",
+      pending: [],
+      completed: [
         {
           sessionId: id,
-          status: "completed",
-          turn: {
-            sessionId: id,
-            turnId: ids.turn("t1"),
-            stopReason: "end_turn",
-            finalReply: "完成",
-            usage: { durationMs: 1200 },
-          },
+          turnId: ids.turn("t1"),
+          stopReason: "end_turn",
+          finalReply: "完成",
+          usage: { durationMs: 1200 },
         },
       ],
     });

@@ -1,0 +1,448 @@
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rename,
+  rm,
+  writeFile,
+} from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+import { afterEach, describe, expect, test } from "vitest";
+
+import {
+  assertMatchesKnownCredentialPolicy,
+  KnownCredentialPolicyError,
+  replaceFixturePair,
+  replaceFixturePairs,
+} from "../scripts/fixture-files.ts";
+
+const directories: string[] = [];
+
+async function fixtureDirectory(): Promise<string> {
+  const directory = await mkdtemp(join(tmpdir(), "reins-fixture-files-"));
+  directories.push(directory);
+  return directory;
+}
+
+afterEach(async () => {
+  await Promise.all(
+    directories
+      .splice(0)
+      .map((directory) => rm(directory, { recursive: true, force: true })),
+  );
+});
+
+function failMetadataInstallOnce(metadataPath: string) {
+  let failed = false;
+  return async (source: string, destination: string): Promise<void> => {
+    if (!failed && source.includes(".tmp") && destination === metadataPath) {
+      failed = true;
+      throw new Error("injected metadata install failure");
+    }
+    await rename(source, destination);
+  };
+}
+
+function failRenameCallOnce(callToFail: number) {
+  let calls = 0;
+  return async (source: string, destination: string): Promise<void> => {
+    calls += 1;
+    if (calls === callToFail) {
+      throw new Error("injected rename failure");
+    }
+    await rename(source, destination);
+  };
+}
+
+function failRenameCalls(callsToFail: ReadonlySet<number>) {
+  let calls = 0;
+  return async (source: string, destination: string): Promise<void> => {
+    calls += 1;
+    if (callsToFail.has(calls)) {
+      throw new Error(`injected rename failure ${calls}`);
+    }
+    await rename(source, destination);
+  };
+}
+
+describe("fixture 文件对替换", () => {
+  test("staging首因后的cleanup失败仍返回闭合typed双重语义", async () => {
+    const directory = await fixtureDirectory();
+    const pair = {
+      jsonlPath: join(directory, "sample.jsonl"),
+      metadataPath: join(directory, "sample.metadata.json"),
+      jsonl: "new-jsonl\n",
+      metadata: "new-metadata\n",
+    };
+    let writes = 0;
+    const error = await replaceFixturePairs([pair], {
+      writeFixtureFile: async (path, content) => {
+        writes += 1;
+        if (writes === 2) throw new Error("SECRET staging failure");
+        await writeFile(path, content, { flag: "wx" });
+      },
+      removeFile: async () => {
+        throw new Error("SECRET cleanup failure");
+      },
+    }).catch((cause: unknown) => cause);
+    expect(error).toMatchObject({
+      code: "fixture_pair_cleanup_failed",
+      phase: "staging",
+      primaryCode: "fixture_pair_replace_failed",
+    });
+    expect(JSON.stringify(error)).not.toContain("SECRET");
+    expect((error as Error).stack).not.toContain("SECRET");
+  });
+
+  test("第二个 fixture pair 安装失败时恢复全部 pair 且无事务残留", async () => {
+    const directory = await fixtureDirectory();
+    const pairs = ["first", "second"].map((name) => ({
+      jsonlPath: join(directory, `${name}.jsonl`),
+      metadataPath: join(directory, `${name}.metadata.json`),
+      jsonl: `new-${name}-jsonl\n`,
+      metadata: `new-${name}-metadata\n`,
+    }));
+    for (const pair of pairs) {
+      await writeFile(
+        pair.jsonlPath,
+        `old-${pair.jsonlPath.endsWith("first.jsonl") ? "first" : "second"}-jsonl\n`,
+      );
+      await writeFile(
+        pair.metadataPath,
+        `old-${pair.metadataPath.includes("first") ? "first" : "second"}-metadata\n`,
+      );
+    }
+
+    await expect(
+      replaceFixturePairs(pairs, {
+        renameFile: failMetadataInstallOnce(pairs[1]!.metadataPath),
+      }),
+    ).rejects.toMatchObject({ code: "fixture_pair_replace_failed" });
+
+    for (const name of ["first", "second"]) {
+      await expect(
+        readFile(join(directory, `${name}.jsonl`), "utf8"),
+      ).resolves.toBe(`old-${name}-jsonl\n`);
+      await expect(
+        readFile(join(directory, `${name}.metadata.json`), "utf8"),
+      ).resolves.toBe(`old-${name}-metadata\n`);
+    }
+    expect(
+      (await readdir(directory)).some((file) =>
+        /\.(?:tmp|backup)$/u.test(file),
+      ),
+    ).toBe(false);
+  });
+
+  test("已有文件对在第二个 install 失败后逐字节恢复且无残留", async () => {
+    const directory = await fixtureDirectory();
+    const jsonlPath = join(directory, "sample.jsonl");
+    const metadataPath = join(directory, "sample.metadata.json");
+    await writeFile(jsonlPath, "old-jsonl\n");
+    await writeFile(metadataPath, "old-metadata\n");
+
+    await expect(
+      replaceFixturePair(
+        {
+          jsonlPath,
+          metadataPath,
+          jsonl: "new-jsonl\n",
+          metadata: "new-metadata\n",
+        },
+        { renameFile: failMetadataInstallOnce(metadataPath) },
+      ),
+    ).rejects.toMatchObject({ code: "fixture_pair_replace_failed" });
+
+    await expect(readFile(jsonlPath, "utf8")).resolves.toBe("old-jsonl\n");
+    await expect(readFile(metadataPath, "utf8")).resolves.toBe(
+      "old-metadata\n",
+    );
+    await expect(readdir(directory)).resolves.toEqual([
+      "sample.jsonl",
+      "sample.metadata.json",
+    ]);
+  });
+
+  test("首次生成在第二个 install 失败后恢复为两个目标都不存在", async () => {
+    const directory = await fixtureDirectory();
+    const jsonlPath = join(directory, "sample.jsonl");
+    const metadataPath = join(directory, "sample.metadata.json");
+
+    await expect(
+      replaceFixturePair(
+        {
+          jsonlPath,
+          metadataPath,
+          jsonl: "new-jsonl\n",
+          metadata: "new-metadata\n",
+        },
+        { renameFile: failMetadataInstallOnce(metadataPath) },
+      ),
+    ).rejects.toMatchObject({ code: "fixture_pair_replace_failed" });
+
+    await expect(readdir(directory)).resolves.toEqual([]);
+  });
+
+  test.each([1, 2, 3, 4])(
+    "已有文件对在第 %i 个 rename 失败后恢复旧 pair",
+    async (callToFail) => {
+      const directory = await fixtureDirectory();
+      const jsonlPath = join(directory, "sample.jsonl");
+      const metadataPath = join(directory, "sample.metadata.json");
+      await writeFile(jsonlPath, "old-jsonl\n");
+      await writeFile(metadataPath, "old-metadata\n");
+
+      await expect(
+        replaceFixturePair(
+          {
+            jsonlPath,
+            metadataPath,
+            jsonl: "new-jsonl\n",
+            metadata: "new-metadata\n",
+          },
+          { renameFile: failRenameCallOnce(callToFail) },
+        ),
+      ).rejects.toMatchObject({ code: "fixture_pair_replace_failed" });
+
+      await expect(readFile(jsonlPath, "utf8")).resolves.toBe("old-jsonl\n");
+      await expect(readFile(metadataPath, "utf8")).resolves.toBe(
+        "old-metadata\n",
+      );
+      await expect(readdir(directory)).resolves.toEqual([
+        "sample.jsonl",
+        "sample.metadata.json",
+      ]);
+    },
+  );
+
+  test("成功时两个目标同时更新且无残留", async () => {
+    const directory = await fixtureDirectory();
+    const jsonlPath = join(directory, "sample.jsonl");
+    const metadataPath = join(directory, "sample.metadata.json");
+    await writeFile(jsonlPath, "old-jsonl\n");
+    await writeFile(metadataPath, "old-metadata\n");
+
+    await replaceFixturePair({
+      jsonlPath,
+      metadataPath,
+      jsonl: "new-jsonl\n",
+      metadata: "new-metadata\n",
+    });
+
+    await expect(readFile(jsonlPath, "utf8")).resolves.toBe("new-jsonl\n");
+    await expect(readFile(metadataPath, "utf8")).resolves.toBe(
+      "new-metadata\n",
+    );
+    await expect(readdir(directory)).resolves.toEqual([
+      "sample.jsonl",
+      "sample.metadata.json",
+    ]);
+  });
+
+  test("整组安装完成后的cleanup失败保持全部目标在同一新版本", async () => {
+    const directory = await fixtureDirectory();
+    const pairs = ["first", "second"].map((name) => ({
+      jsonlPath: join(directory, `${name}.jsonl`),
+      metadataPath: join(directory, `${name}.metadata.json`),
+      jsonl: `new-${name}-jsonl\n`,
+      metadata: `new-${name}-metadata\n`,
+    }));
+    for (const [index, pair] of pairs.entries()) {
+      await writeFile(pair.jsonlPath, `old-${index}-jsonl\n`);
+      await writeFile(pair.metadataPath, `old-${index}-metadata\n`);
+    }
+    let failed = false;
+    await expect(
+      replaceFixturePairs(pairs, {
+        removeFile: async (path) => {
+          if (!failed && path.endsWith(".backup")) {
+            failed = true;
+            throw new Error("injected cleanup failure");
+          }
+          await rm(path, { force: true });
+        },
+      }),
+    ).rejects.toMatchObject({ code: "fixture_pair_cleanup_failed" });
+
+    for (const name of ["first", "second"]) {
+      await expect(
+        readFile(join(directory, `${name}.jsonl`), "utf8"),
+      ).resolves.toBe(`new-${name}-jsonl\n`);
+      await expect(
+        readFile(join(directory, `${name}.metadata.json`), "utf8"),
+      ).resolves.toBe(`new-${name}-metadata\n`);
+    }
+    expect(
+      (await readdir(directory)).some((file) => file.endsWith(".tmp")),
+    ).toBe(false);
+  });
+
+  test("install 与 rollback 都失败时保留仍是唯一原件的 backup", async () => {
+    const directory = await fixtureDirectory();
+    const jsonlPath = join(directory, "sample.jsonl");
+    const metadataPath = join(directory, "sample.metadata.json");
+    await writeFile(jsonlPath, "old-jsonl\n");
+    await writeFile(metadataPath, "old-metadata\n");
+
+    await expect(
+      replaceFixturePair(
+        {
+          jsonlPath,
+          metadataPath,
+          jsonl: "new-jsonl\n",
+          metadata: "new-metadata\n",
+        },
+        { renameFile: failRenameCalls(new Set([4, 6])) },
+      ),
+    ).rejects.toMatchObject({ code: "fixture_pair_rollback_failed" });
+
+    const files = await readdir(directory);
+    const jsonlBackup = files.find(
+      (file) => file.startsWith("sample.jsonl.") && file.endsWith(".backup"),
+    );
+    expect(jsonlBackup).toBeDefined();
+    await expect(readFile(join(directory, jsonlBackup!), "utf8")).resolves.toBe(
+      "old-jsonl\n",
+    );
+    await expect(readFile(metadataPath, "utf8")).resolves.toBe(
+      "old-metadata\n",
+    );
+    expect(files.some((file) => file.endsWith(".tmp"))).toBe(false);
+  });
+});
+
+describe("known credential policy", () => {
+  test.each([
+    "password",
+    "private_key",
+    "client-secret",
+    "sessionToken",
+    "access_token",
+    "refreshToken",
+    "api-key",
+    "authorization",
+    "cookie",
+    "secret",
+  ])("拒绝规范化敏感 key %s", (key) => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({ [key]: "redacted" }),
+    ).toThrow(KnownCredentialPolicyError);
+  });
+
+  test.each([
+    "Bearer abcdefghijklmnop",
+    "sk-abcdefghijklmnop",
+    "ghp_abcdefghijklmnopqrstuvwxyz123456",
+    "github_pat_abcdefghijklmnopqrstuvwxyz_123456",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxIn0.signature123",
+    "-----BEGIN PRIVATE KEY-----\nredacted\n-----END PRIVATE KEY-----",
+  ])("拒绝已知 credential 字符串形式", (value) => {
+    expect(() => assertMatchesKnownCredentialPolicy({ value })).toThrow(
+      KnownCredentialPolicyError,
+    );
+  });
+
+  test("允许明确无凭据来源与普通 fixture 事实", () => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({
+        apiKeySource: "none",
+        result: "token count: 3",
+        nested: [null, 0, false],
+      }),
+    ).not.toThrow();
+  });
+
+  test.each([
+    { auth: { oauth: "opaque-device-secret" } },
+    { oauth_token: "opaque-device-secret" },
+    { device_token: "opaque-device-secret" },
+    { credential: "opaque-device-secret" },
+    { "session token": "opaque-device-secret" },
+    { runtime: { state: { oauth: "opaque-device-secret" } } },
+  ])("拒绝闭合保存契约中的认证与嵌套运行态字段", (candidate) => {
+    expect(() => assertMatchesKnownCredentialPolicy(candidate)).toThrow(
+      KnownCredentialPolicyError,
+    );
+  });
+
+  test("apiKeySource 只允许精确的 none sentinel", () => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({ apiKeySource: "environment" }),
+    ).toThrow(KnownCredentialPolicyError);
+  });
+
+  test.each([
+    "AWS_SECRET_ACCESS_KEY",
+    "QODER_OAUTH_TOKEN_CACHE",
+    "github_token",
+    "authentication",
+    "tokenType",
+    "tokenSource",
+    "serviceAccountKey",
+    "serviceAccountToken",
+    "serviceAccountProvider",
+    "accessTokenEnv",
+    "job_tokens",
+    "QODER_ACCESS_TOKEN",
+    "qoderOAuth",
+    "runtimeCredential",
+    "deviceTokenValue",
+    "vendorPassword",
+    "privateKeyQoder",
+    "qoderClientSecret",
+    "sessionTokenCache",
+    "accessTokenV2",
+    "refreshTokenVendor",
+    "vendorApiKey",
+    "authorizationHeader",
+    "cookieJar",
+    "secretState",
+  ])("拒绝带厂商或用途限定的 credential key %s", (key) => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({ [key]: "opaque-value" }),
+    ).toThrow(KnownCredentialPolicyError);
+  });
+
+  test.each([
+    "author",
+    "tokens_used",
+    "tokenizer",
+    "tokenCount",
+    "tokenUsage",
+    "input_tokens",
+    "output_tokens",
+    "maxOutputTokens",
+    "totalTokens",
+  ])("允许非 credential 的 token 计量 key %s", (key) => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({ [key]: 3 }),
+    ).not.toThrow();
+  });
+
+  test("允许完整 ModelUsage 计量字段", () => {
+    expect(() =>
+      assertMatchesKnownCredentialPolicy({
+        modelUsage: {
+          inputTokens: 1,
+          outputTokens: 2,
+          cacheReadInputTokens: 3,
+          cacheCreationInputTokens: 4,
+          maxOutputTokens: 5,
+          totalTokens: 6,
+        },
+        pre_tokens: 7,
+        total_tokens: 8,
+      }),
+    ).not.toThrow();
+  });
+
+  test("token计量key只允许finite number", () => {
+    for (const value of ["3", {}, Number.NaN, Number.POSITIVE_INFINITY]) {
+      expect(() =>
+        assertMatchesKnownCredentialPolicy({ maxOutputTokens: value }),
+      ).toThrow(KnownCredentialPolicyError);
+    }
+  });
+});

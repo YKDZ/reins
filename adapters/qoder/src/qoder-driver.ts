@@ -3,10 +3,15 @@ import type {
   WorkerDriver,
   AdapterDriverFactory,
   WorkerSpec,
+  MachineError,
 } from "@reins/protocol";
 import { makeTextEvidence } from "@reins/protocol";
 
-import { derivePermissionOptions, mapSdkMessage } from "./mapper.ts";
+import {
+  createQoderMappingState,
+  derivePermissionOptions,
+  mapSdkMessage,
+} from "./mapper.ts";
 import type {
   CanUseTool,
   PermissionResult,
@@ -48,8 +53,13 @@ export function createQoderDriver(deps: {
     let query: ReturnType<QoderSdk["query"]> | null = null;
     let abortController: AbortController | null = null;
     let session: HarnessSession<PendingEntry> | null = null;
+    let mappingState = createQoderMappingState();
     let terminating = false;
     let runPromise: Promise<void> | null = null;
+    let terminationComplete = false;
+    let terminationPromise: Promise<void> | null = null;
+    let queryClosePromise: Promise<void> | null = null;
+    let closedDiagnosticEmitted = false;
 
     function makeCanUseTool(): CanUseTool {
       return async (toolName, input, options) => {
@@ -88,9 +98,10 @@ export function createQoderDriver(deps: {
     async function run(): Promise<void> {
       if (query === null || stream === null || session === null) return;
       let readFailed = false;
+      let evidence: Parameters<HarnessSession["failActiveTurn"]>[1];
       try {
         for await (const message of query) {
-          const events = mapSdkMessage(session, message);
+          const events = await mapSdkMessage(session, mappingState, message);
           for (const event of events) {
             emit(event);
           }
@@ -98,16 +109,16 @@ export function createQoderDriver(deps: {
       } catch (error) {
         if (!terminating) {
           readFailed = true;
-          void session.diagnostic({
+          evidence = {
             kind: "stream_failure",
             operation: "receive_worker_stream",
             reason: "read_error",
             message: makeTextEvidence(String(error)),
-          });
+          };
         }
       }
       if (!readFailed && !terminating) {
-        await session.diagnostic({
+        evidence = {
           kind: "lifecycle",
           operation: "worker",
           reason: "exited_unexpectedly",
@@ -116,14 +127,43 @@ export function createQoderDriver(deps: {
               ? "worker stream ended unexpectedly while idle"
               : "worker stream ended before turn completion",
           ),
-        });
+        };
       }
-      if (!terminating) session.failActiveTurn();
+      if (!terminating) {
+        if (session.turnId === null) {
+          if (evidence !== undefined) await session.diagnostic(evidence);
+        } else {
+          await session.failActiveTurn(
+            {
+              failureCategory: "runtime_unavailable",
+              retryDisposition: "external_state_change",
+            },
+            evidence,
+          );
+        }
+      }
     }
 
     const driver: WorkerDriver = {
       start(spec: WorkerSpec) {
+        const unsupported =
+          spec.agent !== undefined
+            ? "agent"
+            : spec.reasoning !== undefined
+              ? "reasoning"
+              : spec.sandbox !== undefined
+                ? "sandbox"
+                : undefined;
+        if (unsupported !== undefined)
+          throw {
+            code: "unsupported_feature",
+            feature: unsupported,
+          } satisfies MachineError;
         terminating = false;
+        terminationComplete = false;
+        terminationPromise = null;
+        queryClosePromise = null;
+        closedDiagnosticEmitted = false;
         session = new HarnessSession<PendingEntry>({
           sessionId: spec.sessionId,
           emit,
@@ -132,24 +172,10 @@ export function createQoderDriver(deps: {
             // 回合终态作废未决请求：直接丢弃，不结算、不写文案。
           },
         });
+        mappingState = createQoderMappingState();
         session.beginTurn(spec.turnId);
         abortController = new AbortController();
         stream = createAsyncQueue<SDKUserMessage>();
-        const unsupportedFields = [
-          ...(spec.agent === undefined ? [] : (["agent"] as const)),
-          ...(spec.reasoning === undefined ? [] : (["reasoning"] as const)),
-          ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
-        ];
-        const [firstUnsupportedField, ...otherUnsupportedFields] =
-          unsupportedFields;
-        if (firstUnsupportedField !== undefined) {
-          void session.diagnostic({
-            kind: "mapping_gap",
-            operation: "spawn",
-            reason: "unsupported_input",
-            fields: [firstUnsupportedField, ...otherUnsupportedFields],
-          });
-        }
         const options: QoderOptions = {
           cwd: spec.cwd,
           persistSession: false,
@@ -171,14 +197,13 @@ export function createQoderDriver(deps: {
         try {
           query = deps.sdk.query({ prompt: stream, options });
         } catch (error) {
-          void session.diagnostic({
+          runPromise = session.failActiveTurn(undefined, {
             kind: "request_failure",
             operation: "spawn",
             stage: "start_session",
             reason: "upstream_error",
             message: makeTextEvidence(String(error)),
           });
-          session.failActiveTurn();
           return;
         }
         runPromise = (async () => {
@@ -191,27 +216,22 @@ export function createQoderDriver(deps: {
           await run();
         })();
       },
-      deliver(sessionId, turnId, message) {
+      async deliver(sessionId, turnId, message, placement) {
+        if (placement === "active_turn") {
+          throw { code: "unsupported_feature", feature: "active_turn" };
+        }
+        if (session?.turnId !== turnId) {
+          mappingState = createQoderMappingState();
+        }
         void sessionId;
         session?.setTurnId(turnId);
         stream?.push(userMessage(message, "next", true));
       },
-      interrupt(sessionId) {
-        void sessionId;
-        if (session !== null) session.cancelling = true;
-        query?.interrupt().catch((error: unknown) => {
-          if (session === null) return;
-          void session.diagnostic({
-            kind: "request_failure",
-            operation: "interrupt",
-            stage: "interrupt",
-            reason: "upstream_error",
-            message: makeTextEvidence(String(error)),
-          });
-        });
+      async interrupt() {
+        throw { code: "unsupported_feature", feature: "interrupt" };
       },
       resolvePermission(sessionId, permissionId, resolution) {
-        const entry = session?.takePending(permissionId);
+        const entry = session?.takePending(permissionId, resolution);
         if (entry === undefined) {
           if (session !== null) {
             void session.diagnostic({
@@ -222,7 +242,11 @@ export function createQoderDriver(deps: {
               permissionId,
             });
           }
-          return;
+          throw {
+            code: "permission_not_pending",
+            sessionId,
+            permissionId,
+          } satisfies MachineError;
         }
         if (resolution.outcome === "allow") {
           const sessionRules =
@@ -261,14 +285,47 @@ export function createQoderDriver(deps: {
       },
       async terminate(sessionId) {
         void sessionId;
-        terminating = true;
-        abortController?.abort();
-        await runPromise;
-        await session?.diagnostic({
-          kind: "lifecycle",
-          operation: "worker",
-          reason: "closed",
-        });
+        if (terminationComplete) return;
+        if (terminationPromise !== null) return terminationPromise;
+
+        const pending = (async () => {
+          terminating = true;
+          // 先结束 Reins 提供的 prompt，再主动调用并保存 SDK 的首次 close。
+          // SDK 的 AbortSignal listener 会 fire-and-forget close；一旦它先置
+          // closed，后续 close() 会直接返回，无法等待首次关闭完成。
+          stream?.end();
+          if (query !== null && queryClosePromise === null) {
+            try {
+              queryClosePromise = Promise.resolve(query.close());
+            } catch (error) {
+              queryClosePromise = Promise.reject(error);
+            }
+          }
+          abortController?.abort();
+          if (queryClosePromise !== null) await queryClosePromise;
+          await runPromise;
+          if (session !== null && !closedDiagnosticEmitted) {
+            await session.diagnostic({
+              kind: "lifecycle",
+              operation: "worker",
+              reason: "closed",
+            });
+            closedDiagnosticEmitted = true;
+          }
+          terminationComplete = true;
+          query = null;
+          queryClosePromise = null;
+          abortController = null;
+          stream = null;
+          runPromise = null;
+          session = null;
+        })();
+        terminationPromise = pending;
+        try {
+          await pending;
+        } finally {
+          if (terminationPromise === pending) terminationPromise = null;
+        }
       },
     };
     return driver;

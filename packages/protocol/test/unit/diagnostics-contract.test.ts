@@ -1,5 +1,5 @@
 import * as v from "valibot";
-import { describe, expect, test } from "vitest";
+import { describe, expect, expectTypeOf, test } from "vitest";
 
 import {
   capabilityFailureSchema,
@@ -13,6 +13,7 @@ import {
   makeErrorCause,
   machineErrorSchema,
   messageIdSchema,
+  parseTransportFailureFact,
   permissionIdSchema,
   protocolParamsSchemaFor,
   protocolResultSchemaFor,
@@ -20,7 +21,9 @@ import {
   sessionIdSchema,
   sessionNameSchema,
   toolCallIdSchema,
+  transportFailureFactSchema,
   turnIdSchema,
+  workerEventRejectionSchema,
   type DiagnosticId,
   type DiagnosticInput,
   type DriverDiagnosticFact,
@@ -34,6 +37,7 @@ import {
   type SessionId,
   type ToolCallId,
   type TurnId,
+  type WorkerEventRejection,
 } from "../../src/index.ts";
 
 const ok = (schema: v.GenericSchema, input: unknown): void =>
@@ -43,6 +47,259 @@ const bad = (schema: v.GenericSchema, input: unknown): void =>
 
 const sessionId = "reviewer@g7";
 const diagnosticId = makeDiagnosticId("7", "42");
+
+describe("worker event rejection contract", () => {
+  const rejections = [
+    {
+      reason: "unknown_session",
+      eventType: "message",
+      sessionState: "unknown",
+      eventTurnId: "t1",
+    },
+    {
+      reason: "session_killed",
+      eventType: "message",
+      sessionState: "killed",
+      eventTurnId: "t1",
+    },
+    {
+      reason: "driver_event_forbidden",
+      eventType: "session.created",
+      sessionState: "busy",
+    },
+    {
+      reason: "turn_not_active",
+      eventType: "message",
+      sessionState: "idle",
+      eventTurnId: "t2",
+    },
+    {
+      reason: "turn_mismatch",
+      eventType: "message",
+      sessionState: "busy",
+      eventTurnId: "t2",
+      activeTurnId: "t1",
+    },
+    {
+      reason: "event_after_turn_completed",
+      eventType: "text.delta",
+      sessionState: "idle",
+      eventTurnId: "t1",
+    },
+    {
+      reason: "message_already_completed",
+      eventType: "message",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      messageId: "m1",
+    },
+    {
+      reason: "tool_already_requested",
+      eventType: "tool.requested",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      toolCallId: "c1",
+    },
+    {
+      reason: "tool_already_completed",
+      eventType: "tool.completed",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      toolCallId: "c1",
+    },
+    {
+      reason: "permission_id_reused",
+      eventType: "permission.requested",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      permissionId: "p1",
+    },
+    {
+      reason: "permission_not_pending",
+      eventType: "permission.resolved",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t1",
+      permissionId: "p1",
+    },
+    {
+      reason: "permission_turn_mismatch",
+      eventType: "permission.resolved",
+      sessionState: "busy",
+      eventTurnId: "t2",
+      activeTurnId: "t1",
+      permissionId: "p1",
+    },
+  ] as const;
+  const requiredVariantFields = [
+    "eventType",
+    "eventType",
+    "eventType",
+    "eventTurnId",
+    "activeTurnId",
+    "eventTurnId",
+    "messageId",
+    "toolCallId",
+    "toolCallId",
+    "permissionId",
+    "permissionId",
+    "permissionId",
+  ] as const;
+
+  test("accepts every closed rejection variant and rejects unsafe fields", () => {
+    for (const [index, rejection] of rejections.entries()) {
+      ok(workerEventRejectionSchema, rejection);
+      ok(diagnosticInputSchema, {
+        source: "core",
+        sessionId,
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        ...rejection,
+      });
+      bad(workerEventRejectionSchema, {
+        ...rejection,
+        content: "secret-content",
+      });
+      bad(workerEventRejectionSchema, {
+        ...rejection,
+        nativePayload: { secret: true },
+      });
+      bad(diagnosticInputSchema, {
+        source: "core",
+        sessionId,
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        ...rejection,
+        content: "secret-content",
+      });
+      const missingField = requiredVariantFields[index];
+      if (missingField === undefined)
+        throw new Error("Missing rejection field fixture");
+      const incomplete = { ...rejection } as Record<string, unknown>;
+      delete incomplete[missingField];
+      bad(workerEventRejectionSchema, incomplete);
+      bad(diagnosticInputSchema, {
+        source: "core",
+        sessionId,
+        kind: "protocol_violation",
+        operation: "validate_worker_event",
+        ...incomplete,
+      });
+    }
+    bad(workerEventRejectionSchema, {
+      ...rejections[0],
+      reason: "unexpected_message",
+    });
+    bad(diagnosticInputSchema, {
+      source: "core",
+      sessionId,
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+      reason: "unexpected_message",
+    });
+  });
+
+  test("requires the active turn only when a completed-turn event arrives during an active turn", () => {
+    const envelope = {
+      source: "core",
+      sessionId,
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+    } as const;
+    const busy = {
+      reason: "event_after_turn_completed",
+      eventType: "message",
+      sessionState: "busy",
+      eventTurnId: "t1",
+      activeTurnId: "t2",
+    } as const;
+    const spawning = { ...busy, sessionState: "spawning" } as const;
+    const idle = {
+      reason: "event_after_turn_completed",
+      eventType: "message",
+      sessionState: "idle",
+      eventTurnId: "t1",
+    } as const;
+
+    for (const rejection of [busy, spawning, idle]) {
+      ok(workerEventRejectionSchema, rejection);
+      ok(diagnosticInputSchema, { ...envelope, ...rejection });
+    }
+    for (const rejection of [
+      { ...busy, activeTurnId: undefined },
+      { ...spawning, activeTurnId: undefined },
+      { ...idle, activeTurnId: "t2" },
+    ]) {
+      bad(workerEventRejectionSchema, rejection);
+      bad(diagnosticInputSchema, { ...envelope, ...rejection });
+    }
+  });
+
+  test("keeps rejection handling exhaustive", () => {
+    const handleRejection = (rejection: WorkerEventRejection): string => {
+      switch (rejection.reason) {
+        case "unknown_session":
+        case "session_killed":
+        case "driver_event_forbidden":
+        case "turn_not_active":
+        case "turn_mismatch":
+        case "event_after_turn_completed":
+        case "message_already_completed":
+        case "tool_already_requested":
+        case "tool_already_completed":
+        case "permission_id_reused":
+        case "permission_not_pending":
+        case "permission_turn_mismatch":
+          return rejection.reason;
+        default:
+          return rejection satisfies never;
+      }
+    };
+    expect(
+      rejections.map((rejection) =>
+        handleRejection(v.parse(workerEventRejectionSchema, rejection)),
+      ),
+    ).toEqual(rejections.map(({ reason }) => reason));
+  });
+
+  test("derives diagnostic input and record types from the rejection union", () => {
+    type WorkerDiagnosticInput = Extract<
+      DiagnosticInput,
+      {
+        source: "core";
+        operation: "validate_worker_event";
+      }
+    >;
+    type ExpectedInput = WorkerEventRejection & {
+      source: "core";
+      sessionId: SessionId;
+      kind: "protocol_violation";
+      operation: "validate_worker_event";
+    };
+    type WorkerDiagnosticRecord = Extract<
+      DiagnosticRecord,
+      {
+        source: "core";
+        operation: "validate_worker_event";
+      }
+    >;
+    type ExpectedRecord = ExpectedInput & {
+      v: 1;
+      diagnosticId: DiagnosticId;
+      recordedAt: string;
+      severity: "error";
+    };
+
+    expectTypeOf<WorkerDiagnosticInput>().toMatchTypeOf<ExpectedInput>();
+    expectTypeOf<ExpectedInput>().toMatchTypeOf<WorkerDiagnosticInput>();
+    expectTypeOf<WorkerDiagnosticRecord>().toMatchTypeOf<ExpectedRecord>();
+    expectTypeOf<ExpectedRecord>().toMatchTypeOf<WorkerDiagnosticRecord>();
+  });
+});
 
 describe("typed identifiers", () => {
   test("DiagnosticId check character detects every one-character edit and adjacent transposition", () => {
@@ -170,6 +427,44 @@ describe("typed identifiers", () => {
 });
 
 describe("strict diagnostic protocol", () => {
+  test("transport fact 使用 source-free strict schema 并返回冻结副本", () => {
+    const secretSentinel = ["protocol", "fact", "sentinel"].join("-");
+    const mutable = {
+      kind: "transport_failure" as const,
+      operation: "write" as const,
+      reason: "io_error" as const,
+    };
+    const fact = parseTransportFailureFact(mutable);
+    Object.assign(mutable, { operation: "read", message: secretSentinel });
+    expect(fact).toEqual({
+      kind: "transport_failure",
+      operation: "write",
+      reason: "io_error",
+    });
+    expect(Object.isFrozen(fact)).toBe(true);
+
+    for (const candidate of [
+      { ...fact, source: "daemon" },
+      { ...fact, message: secretSentinel },
+      { ...fact, frame: secretSentinel },
+      { ...fact, operation: "invented" },
+      {
+        kind: "transport_failure",
+        operation: "write",
+        reason: "invalid_frame",
+        inputBytes: 1,
+      },
+      {
+        kind: "transport_failure",
+        operation: "read",
+        reason: "invalid_frame",
+        inputBytes: Number.MAX_SAFE_INTEGER + 1,
+      },
+    ]) {
+      bad(transportFailureFactSchema, candidate);
+    }
+  });
+
   test("adapter driver facts cannot express source or harness authority", () => {
     const fact = {
       kind: "mapping_gap",
@@ -330,7 +625,20 @@ describe("strict diagnostic protocol", () => {
         kind: "transport_failure",
         operation: "listen",
         reason: "io_error",
-        message: evidence,
+      },
+      {
+        source: "daemon",
+        kind: "transport_failure",
+        operation: "read",
+        reason: "invalid_frame",
+        inputBytes: 123,
+      },
+      {
+        source: "daemon",
+        kind: "protocol_violation",
+        operation: "validate_daemon_request",
+        stage: "envelope",
+        reason: "invalid_shape",
       },
       {
         source: "daemon",
@@ -375,6 +683,20 @@ describe("strict diagnostic protocol", () => {
         message: evidence,
       },
       {
+        source: "daemon",
+        kind: "transport_failure",
+        operation: "read",
+        reason: "invalid_frame",
+        inputBytes: -1,
+      },
+      {
+        source: "daemon",
+        kind: "transport_failure",
+        operation: "read",
+        reason: "invalid_frame",
+        inputBytes: 1.5,
+      },
+      {
         source: "core",
         sessionId,
         kind: "authorization_failure",
@@ -395,6 +717,22 @@ describe("strict diagnostic protocol", () => {
         operation: "listen",
         reason: "disconnected",
         message: evidence,
+      },
+      {
+        source: "daemon",
+        kind: "transport_failure",
+        operation: "read",
+        reason: "invalid_frame",
+        inputBytes: 123,
+        message: evidence,
+      },
+      {
+        source: "daemon",
+        kind: "protocol_violation",
+        operation: "validate_daemon_request",
+        stage: "envelope",
+        reason: "invalid_shape",
+        details: { raw: "not allowed" },
       },
       {
         source: "daemon",
@@ -501,6 +839,15 @@ describe("strict diagnostic protocol", () => {
       diagnosticId,
       recordedAt: "2026-08-20T00:00:00.000Z",
       severity: "warning",
+    });
+    acceptInput({
+      source: "daemon",
+      kind: "transport_failure",
+      operation: "read",
+      reason: "invalid_frame",
+      inputBytes: 8,
+      // @ts-expect-error transport failures never carry raw text evidence.
+      message: evidence,
     });
   });
 
@@ -747,10 +1094,6 @@ describe("strict diagnostic protocol", () => {
       ["decode_worker_message", "invalid_json"],
       ["decode_worker_message", "invalid_shape"],
       ["decode_worker_message", "unexpected_message"],
-      ["validate_worker_response", "invalid_shape"],
-      ["validate_worker_response", "unexpected_message"],
-      ["validate_worker_event", "invalid_shape"],
-      ["validate_worker_event", "unexpected_message"],
       ["validate_daemon_result", "invalid_shape"],
       ["emit_domain_event", "invalid_shape"],
     ] as const;
@@ -766,11 +1109,39 @@ describe("strict diagnostic protocol", () => {
         "error",
       );
     }
+    add(
+      {
+        source: "daemon",
+        kind: "protocol_violation",
+        operation: "validate_daemon_request",
+        stage: "envelope",
+        reason: "invalid_shape",
+      },
+      "error",
+    );
+    for (const operation of [
+      "validate_worker_response",
+      "validate_worker_event",
+    ] as const)
+      for (const reason of ["invalid_shape", "unexpected_message"] as const) {
+        add(
+          {
+            source: "adapter",
+            harness: "codex",
+            sessionId,
+            kind: "protocol_violation",
+            operation,
+            reason,
+          },
+          "error",
+        );
+      }
 
     const transportPairs = [
       ["listen", "io_error"],
       ["connect", "io_error"],
       ["connect", "timeout"],
+      ["connection", "io_error"],
       ["read", "io_error"],
       ["read", "timeout"],
       ["read", "disconnected"],
@@ -788,11 +1159,20 @@ describe("strict diagnostic protocol", () => {
           kind: "transport_failure",
           operation,
           reason,
-          message: evidence,
         },
         "error",
       );
     }
+    add(
+      {
+        source: "daemon",
+        kind: "transport_failure",
+        operation: "read",
+        reason: "invalid_frame",
+        inputBytes: 123,
+      },
+      "error",
+    );
 
     const storagePairs = [
       ["initialize", "unavailable"],
@@ -1023,11 +1403,11 @@ describe("machine errors", () => {
     ];
   });
 
-  test("capability failures use the dedicated unexpected failure contract", () => {
+  test("capability failures carry typed harness failure and optional accepted evidence", () => {
     ok(capabilityFailureSchema, {
       harness: "codex",
       code: "capability_query_failed",
-      cause: { kind: "upstream", message: "failed" },
+      failure: { failureCategory: "unclassified", retryDisposition: "unknown" },
       diagnosticId,
     });
     bad(capabilityFailureSchema, {

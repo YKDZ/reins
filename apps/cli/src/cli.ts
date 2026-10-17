@@ -1,20 +1,143 @@
 #!/usr/bin/env node
 
+import { createRequire } from "node:module";
+import { createInterface } from "node:readline";
+
+import { CliWriteError, type WriteCliOutput } from "@ykdz/cli-contract";
+import { isNodeBrokenPipe, nodeCliOutput } from "@ykdz/cli-contract/node";
+
+import { connectReins } from "./application.ts";
 import { main } from "./main.ts";
 
-async function flushIfPending(stream: NodeJS.WriteStream): Promise<void> {
-  if (stream.writableLength > 0 && !stream.destroyed) {
-    await Promise.race([
-      new Promise<void>((resolve) => stream.once("drain", resolve)),
-      new Promise<void>((resolve) => setTimeout(resolve, 1000)),
-    ]);
+const require = createRequire(import.meta.url);
+const manifest: unknown = require("../package.json");
+const version =
+  typeof manifest === "object" &&
+  manifest !== null &&
+  "version" in manifest &&
+  typeof manifest.version === "string"
+    ? manifest.version
+    : "unpublished";
+const outputPort = nodeCliOutput({
+  stdout: process.stdout,
+  stderr: process.stderr,
+});
+const promptReader = createPromptReader();
+let outputCancelled = false;
+let cancelPendingWrite: (() => void) | undefined;
+const write: WriteCliOutput = (output) => {
+  if (outputCancelled) return Promise.resolve();
+  const pendingWrite = outputPort(output);
+  const cancelledWrite = new Promise<void>((resolve) => {
+    cancelPendingWrite = resolve;
+  });
+  return Promise.race([pendingWrite, cancelledWrite]).finally(() => {
+    cancelPendingWrite = undefined;
+  });
+};
+
+let exitCode: number;
+try {
+  exitCode = await main({
+    argv: process.argv,
+    version,
+    write,
+    cancelOutput() {
+      if (cancelPendingWrite === undefined) return;
+      outputCancelled = true;
+      cancelPendingWrite?.();
+    },
+    dependencies: {
+      connect: () =>
+        connectReins({
+          consumerContext: process.env.REINS_CONSUMER_CONTEXT ?? "",
+          env: process.env,
+        }),
+      readLine: (prompt, signal) => promptReader.readLine(prompt, signal),
+    },
+  });
+} catch (error) {
+  if (!(error instanceof CliWriteError)) throw error;
+  if (isNodeBrokenPipe(error)) {
+    exitCode = 0;
+  } else {
+    process.stderr.write("error: CLI output failed\n");
+    exitCode = 1;
   }
+} finally {
+  promptReader.close();
+}
+process.exitCode = exitCode;
+if (outputCancelled) process.exit(exitCode);
+
+function createPromptReader(): {
+  readLine(prompt: string, signal: AbortSignal): Promise<string | undefined>;
+  close(): void;
+} {
+  const reader = createInterface({
+    input: process.stdin,
+    crlfDelay: Infinity,
+    terminal: process.stdin.isTTY,
+  });
+  const queued: string[] = [];
+  const waiters: Array<{
+    resolve(value: string | undefined): void;
+    reject(error: Error): void;
+  }> = [];
+  let closed = false;
+  reader.on("line", (line) => {
+    const waiter = waiters.shift();
+    if (waiter === undefined) queued.push(line);
+    else waiter.resolve(line);
+  });
+  reader.once("close", () => {
+    closed = true;
+    for (const waiter of waiters.splice(0)) waiter.resolve(undefined);
+  });
+
+  return {
+    async readLine(prompt, signal) {
+      await writePrompt(prompt, signal);
+      if (signal.aborted) throw abortError();
+      const line = queued.shift();
+      if (line !== undefined) return line;
+      if (closed) return undefined;
+      return new Promise((resolve, reject) => {
+        const waiter = { resolve, reject };
+        const onAbort = () => {
+          const index = waiters.indexOf(waiter);
+          if (index !== -1) waiters.splice(index, 1);
+          signal.removeEventListener("abort", onAbort);
+          reject(abortError());
+        };
+        waiters.push(waiter);
+        signal.addEventListener("abort", onAbort, { once: true });
+      });
+    },
+    close() {
+      reader.close();
+    },
+  };
 }
 
-// CLI 是拉起常驻 daemon 的短命进程：main 完成后显式退出，
-// 避免后台连接 / 子进程句柄拖住事件循环（管道场景）。
-void main(process.argv.slice(2)).then(async (code) => {
-  await flushIfPending(process.stdout);
-  await flushIfPending(process.stderr);
-  process.exit(code);
-});
+function writePrompt(prompt: string, signal: AbortSignal): Promise<void> {
+  if (signal.aborted) return Promise.reject(abortError());
+  return new Promise((resolve, reject) => {
+    const onAbort = () => {
+      signal.removeEventListener("abort", onAbort);
+      reject(abortError());
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    process.stdout.write(prompt, (error) => {
+      signal.removeEventListener("abort", onAbort);
+      if (error !== null && error !== undefined) reject(error);
+      else resolve();
+    });
+  });
+}
+
+function abortError(): Error {
+  const error = new Error("The operation was aborted");
+  error.name = "AbortError";
+  return error;
+}

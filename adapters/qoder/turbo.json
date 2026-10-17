@@ -1,4 +1,41 @@
 {
   "extends": ["//"],
-  "tags": ["adapter"]
+  "tags": ["adapter"],
+  "tasks": {
+    "build": {
+      "tags": ["quality:light"]
+    },
+    "format:check": {
+      "tags": ["quality:light"]
+    },
+    "format:write": {
+      "tags": ["work:repair"],
+      "cache": false
+    },
+    "lint": {
+      "tags": ["quality:light"]
+    },
+    "lint:fix": {
+      "tags": ["work:repair"],
+      "cache": false
+    },
+    "migrate:fixtures": {
+      "tags": ["work:on-demand"],
+      "cache": false
+    },
+    "record:fixture": {
+      "tags": ["work:on-demand"],
+      "cache": false
+    },
+    "test": {
+      "tags": ["quality:light"]
+    },
+    "typecheck": {
+      "tags": ["quality:light"]
+    },
+    "test:live": {
+      "tags": ["quality:conditional"],
+      "cache": false
+    }
+  }
 }

@@ -14,11 +14,17 @@ export type FakeQoderControls = {
   delivered(): SDKUserMessage[];
   lastOptions(): QoderOptions | null;
   interruptCount(): number;
+  closeCount(): number;
   setAvailableModels(models: ModelInfo[]): void;
   modelsCalls(): number;
 };
 
-export function createFakeSdk(): {
+export function createFakeSdk(
+  behavior: {
+    interrupt?: () => Promise<unknown>;
+    close?: () => Promise<void>;
+  } = {},
+): {
   sdk: QoderSdk;
   controls: FakeQoderControls;
 } {
@@ -28,15 +34,18 @@ export function createFakeSdk(): {
   const delivered: SDKUserMessage[] = [];
   let lastOptions: QoderOptions | null = null;
   let interruptCount = 0;
+  let closeCount = 0;
+  let closePromise: Promise<void> | undefined;
   let availableModels: ModelInfo[] = [];
   let modelsCallsCount = 0;
 
   const sdk: QoderSdk = {
     query({ prompt, options }) {
       lastOptions = options ?? null;
-      void (async () => {
+      const promptReader = (async () => {
         for await (const message of prompt) delivered.push(message);
       })();
+      void promptReader.catch(() => {});
       const q: QoderQuery = {
         [Symbol.asyncIterator]() {
           const iterator = queue[Symbol.asyncIterator]();
@@ -52,6 +61,17 @@ export function createFakeSdk(): {
         },
         interrupt: async () => {
           interruptCount += 1;
+          return await behavior.interrupt?.();
+        },
+        close: () => {
+          closeCount += 1;
+          if (closePromise !== undefined) return Promise.resolve();
+          closePromise = (async () => {
+            await behavior.close?.();
+            queue.end();
+            await promptReader;
+          })();
+          return closePromise;
         },
       };
       return q;
@@ -74,6 +94,7 @@ export function createFakeSdk(): {
       delivered: () => [...delivered],
       lastOptions: () => lastOptions,
       interruptCount: () => interruptCount,
+      closeCount: () => closeCount,
       setAvailableModels: (models) => {
         availableModels = models;
       },

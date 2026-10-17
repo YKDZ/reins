@@ -24,16 +24,16 @@ describe("interrupt", () => {
         },
       },
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("interrupt-failure"),
       harness: "codex",
       message: "work",
       cwd: "/tmp/demo",
     });
 
-    await expect(machine.interrupt({ ids: [id] })).rejects.toEqual(
-      expect.objectContaining({ code: "internal_error" }),
-    );
+    await expect(
+      machine.interrupt({ sessionId: id, turnId: ids.turn("t1") }),
+    ).rejects.toEqual(expect.objectContaining({ code: "internal_error" }));
     expect(diagnostics).toContainEqual(
       expect.objectContaining({
         sessionId: id,
@@ -54,18 +54,19 @@ describe("interrupt", () => {
     });
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-4"),
       harness: "codex",
       message: "重构",
       cwd: "/tmp/demo",
     });
 
-    const ack = await machine.interrupt({ ids: [id] });
+    const ack = await machine.interrupt({
+      sessionId: id,
+      turnId: ids.turn("t1"),
+    });
 
-    expect(ack).toEqual([
-      { sessionId: id, status: "requested", turnId: ids.turn("t1") },
-    ]);
+    expect(ack).toEqual({ sessionId: id, turnId: ids.turn("t1") });
     expect(fake.controls.interrupted).toEqual([{ sessionId: id }]);
 
     fake.controls.emit({
@@ -83,19 +84,19 @@ describe("interrupt", () => {
         sessionId: id,
         state: "idle",
         turns: 1,
-        lastStopReason: "cancelled",
+        lastCompletedTurn: expect.objectContaining({ stopReason: "cancelled" }),
       }),
     );
   });
 
-  test("对 idle 会话幂等，不调用 driver", async () => {
+  test("原目标已结束时拒绝，不调用 driver", async () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({
       driverFactory: fake.factory,
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-5"),
       harness: "codex",
       message: "收尾",
@@ -110,9 +111,13 @@ describe("interrupt", () => {
       usage: {},
     });
 
-    await expect(machine.interrupt({ ids: [id] })).resolves.toEqual([
-      { sessionId: id, status: "idle" },
-    ]);
+    await expect(
+      machine.interrupt({ sessionId: id, turnId: ids.turn("t1") }),
+    ).rejects.toEqual({
+      code: "turn_not_active",
+      sessionId: id,
+      turnId: ids.turn("t1"),
+    });
     expect(fake.controls.interrupted).toEqual([]);
   });
 
@@ -123,19 +128,22 @@ describe("interrupt", () => {
       identity: testIdentity,
       diagnostics: testDiagnostics,
     });
-    const id = await machine.spawn({
+    const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-6"),
       harness: "dsh",
       message: "临时",
       cwd: "/tmp/demo",
     });
-    await machine.kill({ ids: [id] });
+    await machine.kill({ sessionId: id });
 
-    await expect(machine.interrupt({ ids: [id] })).rejects.toEqual(
-      expect.objectContaining({ code: "session_killed" }),
-    );
     await expect(
-      machine.interrupt({ ids: [ids.session("missing@gtest")] }),
+      machine.interrupt({ sessionId: id, turnId: ids.turn("t1") }),
+    ).rejects.toEqual(expect.objectContaining({ code: "session_killed" }));
+    await expect(
+      machine.interrupt({
+        sessionId: ids.session("missing@gtest"),
+        turnId: ids.turn("t1"),
+      }),
     ).rejects.toEqual(expect.objectContaining({ code: "session_not_found" }));
   });
 });

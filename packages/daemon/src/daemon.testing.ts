@@ -14,11 +14,20 @@ export function createDaemonForTest(options: {
   idleTimeoutMs?: number;
   eventLogLimit?: number;
   beforeAttachReplay?: (sessionId: SessionId) => void;
+  onDiagnosticsQueryAccepted?: () => void;
   onEvent?: (event: DomainEvent) => void;
 }): Daemon {
-  const { beforeAttachReplay, onEvent, ...productionOptions } = options;
+  const {
+    beforeAttachReplay,
+    onDiagnosticsQueryAccepted,
+    onEvent,
+    ...productionOptions
+  } = options;
   return createDaemonInternal(productionOptions, {
     ...(beforeAttachReplay === undefined ? {} : { beforeAttachReplay }),
+    ...(onDiagnosticsQueryAccepted === undefined
+      ? {}
+      : { onDiagnosticsQueryAccepted }),
     ...(onEvent === undefined ? {} : { onEvent }),
   });
 }

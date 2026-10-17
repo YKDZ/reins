@@ -10,16 +10,20 @@ import {
   type AdapterDriverFactory,
   type WorkerSpec,
   type PermissionId,
+  type TurnId,
+  type MachineError,
 } from "@reins/protocol";
 
 import type { UserInput } from "#/generated/v2/UserInput";
 
+import { initializeCodexTransport } from "./initialization.ts";
 import {
   derivePermissionOptions,
   mapNotification,
   resolutionToResponse,
 } from "./mapper.ts";
 import {
+  CodexRequestError,
   type CodexApprovalRequest,
   type CodexTransport,
   type InboundMessage,
@@ -71,46 +75,22 @@ export function createCodexDriver(deps: {
     let workerExitedUnexpectedly = false;
     let activeTurnId: string | null = null;
     let ended = false;
+    let runPromise: Promise<void> | undefined;
     let turnOverrides: { readonly model?: string; readonly effort?: string } =
       {};
+    const nativeTurns = new Map<TurnId, Promise<string>>();
     const pendingByRequest = new Map<number, PermissionId>();
 
-    async function startTurn(
-      message: string,
-      context:
-        | { operation: "spawn"; stage: "start_turn" }
-        | { operation: "send"; stage: "deliver" },
-    ): Promise<void> {
-      if (transport === null || threadId === "") return;
-      try {
-        const turn = await transport.request("turn/start", {
-          threadId,
-          input: [textInput(message)],
-          ...turnOverrides,
-        });
-        activeTurnId = turn.turn.id;
-      } catch (error) {
-        if (isAlreadyDiagnosedError(error)) {
-          session?.failActiveTurn();
-        } else if (session !== null && context.operation === "spawn") {
-          void session.diagnostic({
-            kind: "request_failure",
-            operation: "spawn",
-            stage: "start_turn",
-            reason: "upstream_error",
-            message: makeTextEvidence(String(error)),
-          });
-        } else if (session !== null) {
-          void session.diagnostic({
-            kind: "request_failure",
-            operation: "send",
-            stage: "deliver",
-            reason: "upstream_error",
-            message: makeTextEvidence(String(error)),
-          });
-        }
-        session?.failActiveTurn();
-      }
+    async function startTurn(message: string): Promise<string> {
+      if (transport === null || threadId === "" || ended)
+        throw new Error("Codex session is unavailable");
+      const turn = await transport.request("turn/start", {
+        threadId,
+        input: [textInput(message)],
+        ...turnOverrides,
+      });
+      activeTurnId = turn.turn.id;
+      return turn.turn.id;
     }
 
     function handleRequest(
@@ -131,6 +111,21 @@ export function createCodexDriver(deps: {
         );
         return;
       }
+      const options = derivePermissionOptions(message);
+      if (options.length === 0) {
+        void session.diagnostic({
+          kind: "compatibility_gap",
+          operation: "receive_worker_request",
+          reason: "unsupported_request",
+          message: makeTextEvidence("No supported approval decisions"),
+        });
+        transport?.respondError(
+          message.id,
+          -32601,
+          "No supported approval decisions",
+        );
+        return;
+      }
       const permissionId = session.requestPermission(
         message.method === "item/commandExecution/requestApproval"
           ? "tool:commandExecution"
@@ -138,7 +133,7 @@ export function createCodexDriver(deps: {
             ? "tool:fileChange"
             : "tool:permissions",
         message.input,
-        derivePermissionOptions(message),
+        options,
         message,
       );
       pendingByRequest.set(message.id, permissionId);
@@ -147,6 +142,7 @@ export function createCodexDriver(deps: {
     async function run(): Promise<void> {
       if (transport === null || session === null) return;
       let readFailed = false;
+      let evidence: Parameters<HarnessSession["failActiveTurn"]>[1];
       try {
         for await (const message of transport.messages) {
           if (message.kind === "notification") {
@@ -159,7 +155,12 @@ export function createCodexDriver(deps: {
               }
               continue;
             }
-            const events = mapNotification(session, message);
+            if (
+              message.method === "turn/completed" &&
+              message.params.turn.id !== activeTurnId
+            )
+              continue;
+            const events = await mapNotification(session, message);
             for (const event of events) {
               if (event.type === "turn.completed") {
                 activeTurnId = null;
@@ -174,17 +175,17 @@ export function createCodexDriver(deps: {
       } catch (error) {
         if (!ended) {
           readFailed = true;
-          void session.diagnostic({
+          evidence = {
             kind: "stream_failure",
             operation: "receive_worker_stream",
             reason: "read_error",
             message: makeTextEvidence(String(error)),
-          });
+          };
         }
       }
       if (!readFailed && !ended) {
         workerExitedUnexpectedly = true;
-        await session.diagnostic({
+        evidence = {
           kind: "lifecycle",
           operation: "worker",
           reason: "exited_unexpectedly",
@@ -193,13 +194,46 @@ export function createCodexDriver(deps: {
               ? "worker stream ended unexpectedly while idle"
               : "worker stream ended before turn completion",
           ),
-        });
+        };
       }
-      if (!ended) session.failActiveTurn();
+      if (!ended) {
+        // new_turn 的原生受理若先失败，它并未产生可提交的运行中回合。
+        const pendingTurn = session.turnId;
+        if (pendingTurn !== null && activeTurnId === null) {
+          try {
+            await nativeTurns.get(pendingTurn);
+          } catch {
+            /* deliver/start 负责该请求拒绝。 */
+          }
+          if (ended) return;
+        }
+        if (session.turnId === null) {
+          if (evidence !== undefined) await session.diagnostic(evidence);
+        } else {
+          await session.failActiveTurn(
+            {
+              failureCategory: "runtime_unavailable",
+              retryDisposition: "external_state_change",
+            },
+            evidence,
+          );
+        }
+      }
     }
 
     const driver: WorkerDriver = {
       start(spec: WorkerSpec) {
+        const unsupported =
+          spec.agent !== undefined
+            ? "agent"
+            : spec.sandbox !== undefined
+              ? "sandbox"
+              : undefined;
+        if (unsupported !== undefined)
+          throw {
+            code: "unsupported_feature",
+            feature: unsupported,
+          } satisfies MachineError;
         session = new HarnessSession<CodexApproval>({
           sessionId: spec.sessionId,
           emit,
@@ -216,33 +250,26 @@ export function createCodexDriver(deps: {
             ? { captureHarnessStderr: true }
             : {}),
         });
-        transport.start();
         turnOverrides = {
           ...(spec.model === undefined ? {} : { model: spec.model }),
           ...(spec.reasoning === undefined ? {} : { effort: spec.reasoning }),
         };
-        const unsupportedFields = [
-          ...(spec.agent === undefined ? [] : (["agent"] as const)),
-          ...(spec.sandbox === undefined ? [] : (["sandbox"] as const)),
-        ];
-        const [firstUnsupportedField, ...otherUnsupportedFields] =
-          unsupportedFields;
-        if (firstUnsupportedField !== undefined) {
-          void session.diagnostic({
-            kind: "mapping_gap",
-            operation: "spawn",
-            reason: "unsupported_input",
-            fields: [firstUnsupportedField, ...otherUnsupportedFields],
-          });
-        }
+        let resolveInitial!: (nativeId: string) => void;
+        let rejectInitial!: (error: unknown) => void;
+        const initialReady = new Promise<string>((resolve, reject) => {
+          resolveInitial = resolve;
+          rejectInitial = reject;
+        });
+        nativeTurns.set(spec.turnId, initialReady);
+        void initialReady.catch(() => undefined);
         void (async () => {
+          let startingTurn = false;
           try {
-            await transport?.request("initialize", {
-              clientInfo: { name: "reins", title: null, version: "0.0.0" },
-              capabilities: null,
-            });
-            transport?.notify("initialized", {});
-            const thread = await transport?.request("thread/start", {
+            const startingTransport = transport;
+            if (startingTransport === null)
+              throw new Error("Codex transport is unavailable");
+            await initializeCodexTransport(startingTransport);
+            const thread = await startingTransport.request("thread/start", {
               ephemeral: true,
               cwd: spec.cwd,
               ...(spec.authorizationMode === "allowAll"
@@ -263,72 +290,118 @@ export function createCodexDriver(deps: {
                 reason: "initialized",
               });
             }
-            await startTurn(spec.message, {
-              operation: "spawn",
-              stage: "start_turn",
-            });
+            startingTurn = true;
+            resolveInitial(await startTurn(spec.message));
           } catch (error) {
-            if (session !== null && !isAlreadyDiagnosedError(error)) {
-              void session.diagnostic({
-                kind: "request_failure",
-                operation: "spawn",
-                stage: "start_session",
-                reason: "upstream_error",
-                message: makeTextEvidence(String(error)),
-              });
+            rejectInitial(error);
+            if (!ended && session !== null) {
+              runPromise = session.failActiveTurn(
+                undefined,
+                isAlreadyDiagnosedError(error)
+                  ? undefined
+                  : {
+                      kind: "request_failure",
+                      operation: "spawn",
+                      stage: startingTurn ? "start_turn" : "start_session",
+                      reason: "upstream_error",
+                      message: makeTextEvidence(String(error)),
+                    },
+              );
+              await runPromise;
             }
-            session?.failActiveTurn();
           }
-          await run();
+          runPromise = run();
+          await runPromise;
         })();
       },
-      deliver(sessionId, turnId, message) {
-        void sessionId;
-        session?.setTurnId(turnId);
-        if (ended) return;
-        if (activeTurnId === null) {
-          void startTurn(message, { operation: "send", stage: "deliver" });
-        } else {
-          void transport
-            ?.request("turn/steer", {
-              threadId,
-              input: [textInput(message)],
-              expectedTurnId: activeTurnId,
-            })
-            .catch((error: unknown) => {
-              if (session !== null && !isAlreadyDiagnosedError(error)) {
-                void session.diagnostic({
-                  kind: "request_failure",
-                  operation: "send",
-                  stage: "steer",
-                  reason: "upstream_error",
-                  message: makeTextEvidence(String(error)),
-                });
-              }
-            });
+      async deliver(sessionId, turnId, message, placement) {
+        if (session === null || session.sessionId !== sessionId || ended)
+          throw {
+            code: "turn_not_active",
+            sessionId,
+            turnId,
+          } satisfies MachineError;
+        if (placement === "new_turn") {
+          session.beginTurn(turnId);
+          const ready = startTurn(message);
+          nativeTurns.set(turnId, ready);
+          try {
+            await ready;
+          } catch (error) {
+            session.turnId = null;
+            throw error;
+          }
+          return;
+        }
+        const ready = nativeTurns.get(turnId);
+        if (ready === undefined)
+          throw {
+            code: "turn_not_active",
+            sessionId,
+            turnId,
+          } satisfies MachineError;
+        const expectedTurnId = await ready;
+        if (session.turnId !== turnId || ended || transport === null)
+          throw {
+            code: "turn_not_active",
+            sessionId,
+            turnId,
+          } satisfies MachineError;
+        try {
+          const accepted = await transport.request("turn/steer", {
+            threadId,
+            input: [textInput(message)],
+            expectedTurnId,
+          });
+          if (accepted.turnId !== expectedTurnId)
+            throw new Error("Codex accepted a different turn");
+        } catch (error) {
+          if (error instanceof CodexRequestError && session.turnId !== turnId)
+            throw {
+              code: "turn_not_active",
+              sessionId,
+              turnId,
+            } satisfies MachineError;
+          throw error;
         }
       },
-      interrupt(sessionId) {
-        void sessionId;
-        if (session !== null) session.cancelling = true;
-        if (activeTurnId !== null) {
-          void transport
-            ?.request("turn/interrupt", { threadId, turnId: activeTurnId })
-            .catch((error: unknown) => {
-              if (session !== null && !isAlreadyDiagnosedError(error)) {
-                void session.diagnostic({
-                  kind: "request_failure",
-                  operation: "interrupt",
-                  stage: "interrupt",
-                  reason: "upstream_error",
-                  message: makeTextEvidence(String(error)),
-                });
-              }
-            });
+      async interrupt(sessionId, turnId) {
+        const ready = nativeTurns.get(turnId);
+        if (
+          session === null ||
+          session.sessionId !== sessionId ||
+          ready === undefined ||
+          ended
+        )
+          throw {
+            code: "turn_not_active",
+            sessionId,
+            turnId,
+          } satisfies MachineError;
+        const nativeTurnId = await ready;
+        if (session.turnId !== turnId || ended || transport === null)
+          throw {
+            code: "turn_not_active",
+            sessionId,
+            turnId,
+          } satisfies MachineError;
+        try {
+          await transport.request("turn/interrupt", {
+            threadId,
+            turnId: nativeTurnId,
+          });
+        } catch (error) {
+          if (error instanceof CodexRequestError && session.turnId !== turnId)
+            throw {
+              code: "turn_not_active",
+              sessionId,
+              turnId,
+            } satisfies MachineError;
+          throw error;
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {
-        const entry = session?.takePending(permissionId);
+        const entry = session?.takePending(permissionId, resolution);
         if (entry === undefined) {
           if (session !== null) {
             void session.diagnostic({
@@ -339,7 +412,11 @@ export function createCodexDriver(deps: {
               permissionId,
             });
           }
-          return;
+          throw {
+            code: "permission_not_pending",
+            sessionId,
+            permissionId,
+          } satisfies MachineError;
         }
         pendingByRequest.delete(entry.id);
         transport?.respond(entry.id, resolutionToResponse(entry, resolution));
@@ -370,6 +447,8 @@ export function createCodexDriver(deps: {
         let closeFailure: unknown;
         try {
           await closingTransport?.close();
+          // 已收到的终态先完成有界证据接受；成功停止不能把它抢成 killed。
+          await runPromise;
         } catch (error) {
           closeFailure = error;
         }

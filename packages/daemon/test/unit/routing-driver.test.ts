@@ -13,7 +13,7 @@ import {
   sessionIdSchema,
   sessionNameSchema,
   turnIdSchema,
-  type WorkerDriver,
+  type DomainEvent,
   type WorkerSpec,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -25,7 +25,272 @@ import { daemonGenerationSchema } from "../../src/generation.ts";
 import type { HarnessAdapter } from "../../src/registry.ts";
 import { createRoutingDriverFactory } from "../../src/routing-driver.ts";
 
+function createNativeWorker(threadId: string) {
+  const stdin = new PassThrough();
+  const stdout = new PassThrough();
+  const emitter = new EventEmitter();
+  const requests: { method: string; params: unknown }[] = [];
+  const responded: { id: number; result: unknown }[] = [];
+  let outbound = "";
+  let closeError: unknown;
+  stdin.on("data", (chunk) => {
+    outbound += String(chunk);
+    for (;;) {
+      const newline = outbound.indexOf("\n");
+      if (newline < 0) break;
+      const message = JSON.parse(outbound.slice(0, newline)) as {
+        id?: number;
+        method?: string;
+        params?: unknown;
+        result?: unknown;
+      };
+      outbound = outbound.slice(newline + 1);
+      if (message.id === undefined) continue;
+      if (message.method === undefined) {
+        responded.push({ id: message.id, result: message.result });
+        continue;
+      }
+      requests.push({ method: message.method, params: message.params });
+      const result =
+        message.method === "thread/start"
+          ? { thread: { id: threadId } }
+          : message.method === "turn/start"
+            ? { turn: { id: "turn1" } }
+            : message.method === "turn/steer"
+              ? { turnId: "turn1" }
+              : {};
+      stdout.write(`${JSON.stringify({ id: message.id, result })}\n`);
+    }
+  });
+  const transport = createCodexTransport({
+    shutdownGraceMs: 5,
+    spawnChild: () => ({
+      stdin,
+      stdout,
+      on: (event, listener) => emitter.on(event, listener),
+      kill() {
+        emitter.emit("exit");
+        stdout.end();
+        if (closeError !== undefined) throw closeError;
+        return true;
+      },
+    }),
+  });
+  return {
+    transport,
+    controls: {
+      requests: () => [...requests],
+      responded: () => [...responded],
+      closed: () => transport.isClosed(),
+      pushInbound(message: unknown) {
+        stdout.write(`${JSON.stringify(message)}\n`);
+      },
+      setCloseError(error: unknown) {
+        closeError = error;
+      },
+      end() {
+        stdout.end();
+        stdin.end();
+        emitter.emit("exit");
+      },
+    },
+  };
+}
+
+function codexRoutingFixture() {
+  const workers: ReturnType<typeof createNativeWorker>[] = [];
+  const events: DomainEvent[] = [];
+  const adapter: HarnessAdapter = {
+    driverFactory: createCodexDriver({
+      transportFactory() {
+        const worker = createNativeWorker(`thread-${workers.length + 1}`);
+        workers.push(worker);
+        return worker.transport;
+      },
+    }),
+    capabilities: async () => ({ harness: "codex", models: [] }),
+  };
+  const driver = createRoutingDriverFactory(new Map([["codex", adapter]]), {
+    record: async () => undefined,
+    async query() {
+      throw new Error("Unexpected diagnostic query");
+    },
+  })((event) => events.push(event));
+  const alpha: WorkerSpec = {
+    sessionId: v.parse(sessionIdSchema, "alpha@groute"),
+    turnId: v.parse(turnIdSchema, "turn-alpha"),
+    sessionName: v.parse(sessionNameSchema, "alpha"),
+    harness: "codex",
+    message: "caller task for alpha",
+    cwd: "/tmp",
+  };
+  const beta: WorkerSpec = {
+    ...alpha,
+    sessionId: v.parse(sessionIdSchema, "beta@groute"),
+    turnId: v.parse(turnIdSchema, "turn-beta"),
+    sessionName: v.parse(sessionNameSchema, "beta"),
+    message: "caller task for beta",
+  };
+  return { driver, workers, events, alpha, beta };
+}
+
 describe("routing driver invariants", () => {
+  test("same-harness session actions reach only their own native worker", async () => {
+    const { driver, workers, alpha, beta } = codexRoutingFixture();
+    try {
+      driver.start(alpha);
+      await vi.waitFor(() => {
+        expect(workers[0]?.controls.requests().at(-1)?.method).toBe(
+          "turn/start",
+        );
+      });
+      driver.start(beta);
+      await vi.waitFor(() => {
+        expect(workers[1]?.controls.requests().at(-1)?.method).toBe(
+          "turn/start",
+        );
+      });
+      const [workerA, workerB] = workers;
+      if (workerA === undefined || workerB === undefined) {
+        throw new Error("Expected two native workers");
+      }
+      const initialA = workerA.controls.requests().length;
+      const initialB = workerB.controls.requests().length;
+      await driver.deliver(
+        alpha.sessionId,
+        alpha.turnId,
+        "caller message for alpha",
+        "active_turn",
+      );
+      await driver.interrupt(alpha.sessionId, alpha.turnId);
+      await driver.terminate(alpha.sessionId);
+      expect(workerA.controls.requests().slice(initialA)).toEqual([
+        {
+          method: "turn/steer",
+          params: {
+            threadId: "thread-1",
+            input: [
+              {
+                type: "text",
+                text: "caller message for alpha",
+                text_elements: [],
+              },
+            ],
+            expectedTurnId: "turn1",
+          },
+        },
+        {
+          method: "turn/interrupt",
+          params: { threadId: "thread-1", turnId: "turn1" },
+        },
+        { method: "thread/delete", params: { threadId: "thread-1" } },
+      ]);
+      expect(workerA.controls.closed()).toBe(true);
+      expect(workerB.controls.requests().slice(initialB)).toEqual([]);
+      expect(workerB.controls.closed()).toBe(false);
+
+      await driver.deliver(
+        beta.sessionId,
+        beta.turnId,
+        "caller message for beta",
+        "active_turn",
+      );
+      await driver.interrupt(beta.sessionId, beta.turnId);
+      await driver.terminate(beta.sessionId);
+      expect(workerB.controls.requests().slice(initialB)).toMatchObject([
+        {
+          method: "turn/steer",
+          params: {
+            threadId: "thread-2",
+            input: [{ text: "caller message for beta" }],
+          },
+        },
+        {
+          method: "turn/interrupt",
+          params: { threadId: "thread-2", turnId: "turn1" },
+        },
+        { method: "thread/delete", params: { threadId: "thread-2" } },
+      ]);
+      expect(workerB.controls.closed()).toBe(true);
+    } finally {
+      for (const worker of workers) worker.controls.end();
+    }
+  });
+
+  test("session-local permission ids resolve only on their own native worker", async () => {
+    const { driver, workers, events, alpha, beta } = codexRoutingFixture();
+    try {
+      for (const spec of [alpha, beta]) {
+        driver.start(spec);
+        await vi.waitFor(() => {
+          expect(workers.at(-1)?.controls.requests().at(-1)?.method).toBe(
+            "turn/start",
+          );
+        });
+      }
+      const [workerA, workerB] = workers;
+      if (workerA === undefined || workerB === undefined) {
+        throw new Error("Expected two native workers");
+      }
+      for (const [index, worker] of workers.entries()) {
+        worker.controls.pushInbound({
+          id: index + 7,
+          method: "item/commandExecution/requestApproval",
+          params: {
+            threadId: `thread-${index + 1}`,
+            turnId: "turn1",
+            itemId: "command",
+            command: "pwd",
+            availableDecisions: ["accept", "decline"],
+          },
+        });
+      }
+      await vi.waitFor(() => {
+        expect(
+          events.filter((event) => event.type === "permission.requested"),
+        ).toHaveLength(2);
+      });
+      const permissionA = events.find(
+        (event) =>
+          event.type === "permission.requested" &&
+          event.sessionId === alpha.sessionId,
+      );
+      const permissionB = events.find(
+        (event) =>
+          event.type === "permission.requested" &&
+          event.sessionId === beta.sessionId,
+      );
+      if (
+        permissionA?.type !== "permission.requested" ||
+        permissionB?.type !== "permission.requested"
+      ) {
+        throw new Error("Expected permissions from both sessions");
+      }
+      expect(permissionA.permissionId).toBe(permissionB.permissionId);
+      driver.resolvePermission(alpha.sessionId, permissionA.permissionId, {
+        outcome: "allow",
+        scope: "once",
+      });
+      expect(workerA.controls.responded()).toEqual([
+        { id: 7, result: { decision: "accept" } },
+      ]);
+      expect(workerB.controls.responded()).toEqual([]);
+      driver.resolvePermission(beta.sessionId, permissionB.permissionId, {
+        outcome: "deny",
+      });
+      expect(workerB.controls.responded()).toEqual([
+        { id: 8, result: { decision: "decline" } },
+      ]);
+      expect(workerA.controls.responded()).toEqual([
+        { id: 7, result: { decision: "accept" } },
+      ]);
+      await driver.terminate(alpha.sessionId);
+      await driver.terminate(beta.sessionId);
+    } finally {
+      for (const worker of workers) worker.controls.end();
+    }
+  });
+
   test("verified driver diagnostic crosses routing without a duplicate core record", async () => {
     const sessionId = v.parse(sessionIdSchema, "verified@groute");
     const diagnosticId = makeDiagnosticId("route", "1");
@@ -52,8 +317,8 @@ describe("routing driver invariants", () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
-        deliver() {},
-        interrupt() {},
+        async deliver() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {
           throw new DriverFailure("close failed", diagnosticId);
@@ -153,8 +418,8 @@ describe("routing driver invariants", () => {
       const adapter: HarnessAdapter = {
         driverFactory: () => ({
           start() {},
-          deliver() {},
-          interrupt() {},
+          async deliver() {},
+          async interrupt() {},
           resolvePermission() {},
           async terminate() {
             throw new DriverFailure("terminate failed", suppliedId);
@@ -172,12 +437,15 @@ describe("routing driver invariants", () => {
         diagnostics: { record: recordFallback },
       });
       await machine.spawn({
+        cwd: "/tmp",
         sessionName: v.parse(sessionNameSchema, "unrelated"),
         harness: "unrelated",
         message: "start",
       });
 
-      await expect(machine.kill({ ids: [sessionId] })).rejects.toMatchObject({
+      await expect(
+        machine.kill({ sessionId: sessionId }),
+      ).rejects.toMatchObject({
         code: "internal_error",
         diagnosticId: fallbackId,
       });
@@ -325,8 +593,8 @@ describe("routing driver invariants", () => {
         sink = diagnostics;
         return {
           start() {},
-          deliver() {},
-          interrupt() {},
+          async deliver() {},
+          async interrupt() {},
           resolvePermission() {},
           async terminate() {},
         };
@@ -399,8 +667,8 @@ describe("routing driver invariants", () => {
             fields: ["reasoning"],
           });
         },
-        deliver() {},
-        interrupt() {},
+        async deliver() {},
+        async interrupt() {},
         resolvePermission() {},
         async terminate() {},
       }),
@@ -436,7 +704,7 @@ describe("routing driver invariants", () => {
     await rm(root, { recursive: true, force: true });
   });
 
-  test("does not silently drop delivery with no session routing entry", () => {
+  test("does not silently drop delivery with no session routing entry", async () => {
     const driver = createRoutingDriverFactory(new Map(), {
       record: async () => undefined,
       async query() {
@@ -444,37 +712,42 @@ describe("routing driver invariants", () => {
       },
     })(() => {});
 
-    expect(() =>
+    await expect(
       driver.deliver(
         v.parse(sessionIdSchema, "missing@groute"),
         v.parse(turnIdSchema, "turn-route"),
         "message",
+        "active_turn",
       ),
-    ).toThrow("No routing entry for session missing@groute");
+    ).rejects.toThrow("No routing entry for session missing@groute");
   });
 
   test("does not retain failed starts and retains failed termination for retry", async () => {
+    const workers: ReturnType<typeof createNativeWorker>[] = [];
+    const codexDriverFactory = createCodexDriver({
+      transportFactory() {
+        const worker = createNativeWorker("thread-retry");
+        workers.push(worker);
+        return worker.transport;
+      },
+    });
     let starts = 0;
-    let terminations = 0;
-    const worker: WorkerDriver = {
-      start() {
-        starts += 1;
-        if (starts === 1) throw new Error("start failed");
-      },
-      deliver() {},
-      interrupt() {},
-      resolvePermission() {},
-      async terminate() {
-        terminations += 1;
-        await Promise.resolve();
-        if (terminations === 1) throw new Error("terminate failed");
-      },
-    };
     const adapter: HarnessAdapter = {
-      driverFactory: () => worker,
-      capabilities: async () => ({ harness: "fake", models: [] }),
+      driverFactory(context) {
+        if (starts++ !== 0) return codexDriverFactory(context);
+        return {
+          start() {
+            throw new Error("start failed");
+          },
+          async deliver() {},
+          async interrupt() {},
+          resolvePermission() {},
+          async terminate() {},
+        };
+      },
+      capabilities: async () => ({ harness: "codex", models: [] }),
     };
-    const driver = createRoutingDriverFactory(new Map([["fake", adapter]]), {
+    const driver = createRoutingDriverFactory(new Map([["codex", adapter]]), {
       record: async () => undefined,
       async query() {
         throw new Error("not found");
@@ -484,20 +757,52 @@ describe("routing driver invariants", () => {
     const spec: WorkerSpec = {
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-route"),
-      harness: "fake",
+      harness: "codex",
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
       sessionName: v.parse(sessionNameSchema, "retry"),
     };
-    expect(() => driver.start(spec)).toThrow("start failed");
-    expect(() => driver.deliver(sessionId, spec.turnId, "message")).toThrow(
-      "No routing entry",
-    );
-    driver.start(spec);
-    await expect(driver.terminate(sessionId)).rejects.toThrow(
-      "terminate failed",
-    );
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    try {
+      expect(() => driver.start(spec)).toThrow("start failed");
+      await expect(
+        driver.deliver(sessionId, spec.turnId, "message", "active_turn"),
+      ).rejects.toThrow("No routing entry");
+      driver.start(spec);
+      await vi.waitFor(() => {
+        expect(workers[0]?.controls.requests().at(-1)?.method).toBe(
+          "turn/start",
+        );
+      });
+      const retryWorker = workers[0];
+      if (retryWorker === undefined) throw new Error("Expected retry worker");
+      await driver.deliver(
+        sessionId,
+        spec.turnId,
+        "retry message",
+        "active_turn",
+      );
+      expect(retryWorker.controls.requests().at(-1)).toMatchObject({
+        method: "turn/steer",
+        params: { input: [{ text: "retry message" }] },
+      });
+      retryWorker.controls.setCloseError(new Error("terminate failed"));
+      await expect(driver.terminate(sessionId)).rejects.toThrow(
+        "terminate failed",
+      );
+      retryWorker.controls.setCloseError(undefined);
+      await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+      expect(retryWorker.controls.closed()).toBe(true);
+      await expect(
+        driver.deliver(
+          sessionId,
+          spec.turnId,
+          "after termination",
+          "active_turn",
+        ),
+      ).rejects.toThrow("No routing entry");
+    } finally {
+      for (const worker of workers) worker.controls.end();
+    }
   });
 });

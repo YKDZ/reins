@@ -28,8 +28,12 @@ export type FakeDriverControls = {
 
 export function createFakeDriver(options?: {
   start?: (spec: WorkerSpec) => void;
-  deliver?: (sessionId: SessionId, turnId: TurnId, message: string) => void;
-  interrupt?: (sessionId: SessionId) => void;
+  deliver?: (
+    sessionId: SessionId,
+    turnId: TurnId,
+    message: string,
+  ) => Promise<void> | void;
+  interrupt?: (sessionId: SessionId, turnId: TurnId) => void | Promise<void>;
   resolvePermission?: (
     sessionId: SessionId,
     permissionId: PermissionId,
@@ -68,18 +72,18 @@ export function createFakeDriver(options?: {
           options.start(spec);
         }
       },
-      deliver(sessionId, turnId, message) {
+      async deliver(sessionId, turnId, message) {
         if (options?.deliver === undefined) {
           delivered.push({ sessionId, turnId, message });
         } else {
-          options.deliver(sessionId, turnId, message);
+          await options.deliver(sessionId, turnId, message);
         }
       },
-      interrupt(sessionId) {
+      async interrupt(sessionId, turnId) {
         if (options?.interrupt === undefined) {
           interrupted.push({ sessionId });
         } else {
-          options.interrupt(sessionId);
+          await options.interrupt(sessionId, turnId);
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {

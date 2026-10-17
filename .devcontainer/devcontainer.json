@@ -1,8 +1,7 @@
 {
   "build": {
     "args": {
-      "NODE_VERSION": "24",
-      "PACKAGE_MANAGER_PIN": "pnpm@11.22.0"
+      "NODE_VERSION": "24.21.0"
     },
     "dockerfile": "Dockerfile"
   },
@@ -11,6 +10,9 @@
       "extensions": ["oxc.oxc-vscode"]
     }
   },
+  "features": {
+    "ghcr.io/devcontainers/features/docker-outside-of-docker:1": {}
+  },
   "mounts": [
     {
       "source": "${devcontainerId}-pnpm-store",
@@ -18,5 +20,9 @@
       "type": "volume"
     }
   ],
-  "name": "reins"
+  "name": "reins",
+  "containerEnv": {
+    "PNPM_CONFIG_STORE_DIR": "/pnpm/store",
+    "PNPM_CONFIG_PACKAGE_IMPORT_METHOD": "copy"
+  }
 }

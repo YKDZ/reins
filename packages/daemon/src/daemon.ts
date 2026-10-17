@@ -9,6 +9,8 @@ import {
 } from "@reins/protocol";
 import type { TransportServer } from "@reins/transport";
 
+import { createConsumerScope } from "./consumer-scope.ts";
+import { orderDiagnosticsAcceptance } from "./diagnostics-acceptance.ts";
 import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 import { createRoutingDriverFactory } from "./routing-driver.ts";
@@ -65,24 +67,27 @@ export function createDaemonInternal(
   },
   testing: {
     beforeAttachReplay?: (sessionId: SessionId) => void;
+    onDiagnosticsQueryAccepted?: () => void;
     onEvent?: (event: DomainEvent) => void;
   },
 ): Daemon {
+  const consumerScope = createConsumerScope();
+  const diagnostics = orderDiagnosticsAcceptance(
+    options.diagnostics,
+    consumerScope,
+  );
   const coreDiagnostics = {
     async record(fact: CoreDiagnosticFact) {
       const unsafe = fact as unknown as Record<string, unknown>;
       if ("source" in unsafe) return undefined;
-      return await options.diagnostics.record({
+      return await diagnostics.record({
         ...fact,
         source: "core",
       });
     },
   };
   const machine = createSessionMachine({
-    driverFactory: createRoutingDriverFactory(
-      options.adapters,
-      options.diagnostics,
-    ),
+    driverFactory: createRoutingDriverFactory(options.adapters, diagnostics),
     identity: options.identity,
     diagnostics: coreDiagnostics,
   });
@@ -91,7 +96,8 @@ export function createDaemonInternal(
       transport: options.transport,
       adapters: options.adapters,
       machine,
-      diagnostics: options.diagnostics,
+      diagnostics,
+      consumerScope,
       ...(options.idleTimeoutMs === undefined
         ? {}
         : { idleTimeoutMs: options.idleTimeoutMs }),
@@ -99,9 +105,16 @@ export function createDaemonInternal(
         ? {}
         : { eventLogLimit: options.eventLogLimit }),
     },
-    testing.beforeAttachReplay === undefined
-      ? {}
-      : { beforeAttachReplay: testing.beforeAttachReplay },
+    {
+      ...(testing.beforeAttachReplay === undefined
+        ? {}
+        : { beforeAttachReplay: testing.beforeAttachReplay }),
+      ...(testing.onDiagnosticsQueryAccepted === undefined
+        ? {}
+        : {
+            onDiagnosticsQueryAccepted: testing.onDiagnosticsQueryAccepted,
+          }),
+    },
   );
   machine.subscribe((event) => {
     server.forwardEvent(event);
@@ -120,7 +133,7 @@ export function createDaemonInternal(
         .map((session) => session.sessionId);
       const results = await Promise.allSettled(
         liveSessionIds.map(async (sessionId) => {
-          await machine.kill({ ids: [sessionId] });
+          await machine.kill({ sessionId: sessionId });
         }),
       );
       const failures = results

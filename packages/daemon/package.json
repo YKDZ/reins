@@ -24,7 +24,13 @@
       "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    }
+    },
+    "./testing": {
+      "source": "./src/testing.ts",
+      "types": "./dist/testing.d.ts",
+      "default": "./dist/testing.js"
+    },
+    "./testing/fixture": "./test/fixtures/daemon-fixture.mjs"
   },
   "scripts": {
     "build": "tsc -p tsconfig.build.json --pretty false",
@@ -40,6 +46,7 @@
     "@reins/adapter-kit": "workspace:*",
     "@reins/codex": "workspace:*",
     "@reins/core": "workspace:*",
+    "@reins/event-journal": "workspace:*",
     "@reins/protocol": "workspace:*",
     "@reins/qoder": "workspace:*",
     "@reins/transport": "workspace:*",
@@ -64,6 +71,9 @@
       "injected": false
     },
     "@reins/core": {
+      "injected": false
+    },
+    "@reins/event-journal": {
       "injected": false
     },
     "@reins/protocol": {

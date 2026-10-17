@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+
 import * as v from "valibot";
 
 // —— 会话与状态 ——
@@ -29,11 +31,83 @@ export const sessionIdSchema = v.pipe(
 export type SessionId = v.InferOutput<typeof sessionIdSchema>;
 export const turnIdSchema = identifier("TurnId", /^[a-z0-9][a-z0-9-]*$/);
 export type TurnId = v.InferOutput<typeof turnIdSchema>;
+export const sessionHandleSchema = sessionIdSchema;
+export type SessionHandle = SessionId;
+export const turnTargetSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
+});
+export type TurnTarget = v.InferOutput<typeof turnTargetSchema>;
+
+function turnHandleChecksum(value: string): string {
+  // 校验覆盖完整父子地址，用于发现抄写错配；它不是所有权或授权凭据。
+  return createHash("sha256").update(value).digest("hex").slice(0, 8);
+}
+
+export const turnHandleSchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    const match = /^([^/]+)\/([a-z0-9-]+)\.([a-f0-9]{8})$/u.exec(value);
+    return (
+      match !== null &&
+      v.safeParse(sessionIdSchema, match[1]).success &&
+      v.safeParse(turnIdSchema, match[2]).success &&
+      turnHandleChecksum(`${match[1]}/${match[2]}`) === match[3]
+    );
+  }),
+  v.brand<string, "TurnHandle">("TurnHandle"),
+);
+export type TurnHandle = v.InferOutput<typeof turnHandleSchema>;
+
+export function encodeTurnHandle(target: TurnTarget): TurnHandle {
+  const parsed = v.parse(turnTargetSchema, target);
+  const value = `${parsed.sessionId}/${parsed.turnId}`;
+  return v.parse(turnHandleSchema, `${value}.${turnHandleChecksum(value)}`);
+}
+
+export function decodeTurnHandle(handle: string): TurnTarget {
+  const value = v.parse(turnHandleSchema, handle);
+  const [sessionId, suffix] = value.split("/");
+  return v.parse(turnTargetSchema, { sessionId, turnId: suffix!.slice(0, -9) });
+}
 export const permissionIdSchema = identifier(
   "PermissionId",
   /^[a-z0-9][a-z0-9-]*$/,
 );
 export type PermissionId = v.InferOutput<typeof permissionIdSchema>;
+export const permissionTargetSchema = v.strictObject({
+  ...turnTargetSchema.entries,
+  permissionId: permissionIdSchema,
+});
+export type PermissionTarget = v.InferOutput<typeof permissionTargetSchema>;
+export function encodePermissionHandle(target: PermissionTarget): string {
+  const body = Buffer.from(
+    JSON.stringify(v.parse(permissionTargetSchema, target)),
+  ).toString("base64url");
+  return "permission1_" + body + "." + turnHandleChecksum(body);
+}
+export function decodePermissionHandle(handle: string): PermissionTarget {
+  const match = /^permission1_([A-Za-z0-9_-]+)\.([a-f0-9]{8})$/u.exec(handle);
+  if (match === null || turnHandleChecksum(match[1]!) !== match[2])
+    throw new Error("Invalid PermissionHandle");
+  return v.parse(
+    permissionTargetSchema,
+    JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")),
+  );
+}
+export const permissionHandleSchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    try {
+      decodePermissionHandle(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
+  v.brand("PermissionHandle"),
+);
+export type PermissionHandle = v.InferOutput<typeof permissionHandleSchema>;
 export const messageIdSchema = identifier("MessageId", /^[a-z0-9][a-z0-9-]*$/);
 export type MessageId = v.InferOutput<typeof messageIdSchema>;
 export const toolCallIdSchema = identifier(
@@ -41,8 +115,52 @@ export const toolCallIdSchema = identifier(
   /^[a-z0-9][a-z0-9-]*$/,
 );
 export type ToolCallId = v.InferOutput<typeof toolCallIdSchema>;
+export const commandIdSchema = identifier(
+  "CommandId",
+  /^[a-z0-9]+:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,
+);
+export type CommandId = v.InferOutput<typeof commandIdSchema>;
+export const sideEffectMethodSchema = v.picklist([
+  "spawn",
+  "send",
+  "interrupt",
+  "kill",
+  "resolvePermission",
+]);
+export type SideEffectMethod = v.InferOutput<typeof sideEffectMethodSchema>;
+export function isSideEffectMethod(method: string): method is SideEffectMethod {
+  return v.safeParse(sideEffectMethodSchema, method).success;
+}
 export const requestIdSchema = identifier("RequestId", /^[a-z0-9][a-z0-9-]*$/);
 export type RequestId = v.InferOutput<typeof requestIdSchema>;
+
+// —— 握手：协议主版本、daemon 世代与消费者绑定 ——
+
+export const REINS_PROTOCOL_MAJOR_VERSION = 1;
+
+// 主版本是兼容性边界；不匹配必须以 protocol_version_mismatch 类型化呈现，
+// 不能被字面量 schema 伪装成参数校验失败（ADR-0033）。
+export const protocolMajorVersionSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(1),
+);
+
+export const daemonGenerationSchema = identifier(
+  "DaemonGeneration",
+  /^[a-z0-9]+$/,
+);
+export type DaemonGeneration = v.InferOutput<typeof daemonGenerationSchema>;
+
+// 消费者上下文是 initialize 必填的内部路由事实；
+// 不作为 agent 参数、成功输出或第四类句柄（ADR-0037）。
+export const consumerContextSchema = v.pipe(
+  v.string(),
+  v.maxLength(64),
+  v.regex(/^[A-Za-z0-9][A-Za-z0-9._-]*$/),
+  v.brand<string, "ConsumerContext">("ConsumerContext"),
+);
+export type ConsumerContext = v.InferOutput<typeof consumerContextSchema>;
 
 const checksumAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
 const damm36Packed =
@@ -112,7 +230,7 @@ export const stopReasonSchema = v.picklist(STOP_REASONS);
 export type StopReason = v.InferOutput<typeof stopReasonSchema>;
 
 export const deliveryPointSchema = v.union([
-  v.literal("boundary"),
+  v.literal("active_turn"),
   v.literal("new_turn"),
 ]);
 export type DeliveryPoint = v.InferOutput<typeof deliveryPointSchema>;
@@ -182,6 +300,14 @@ export function permissionResolutionSchemaFor(
   );
 }
 
+export function isPermissionResolutionAllowed(
+  options: readonly PermissionOption[],
+  resolution: PermissionResolution,
+): boolean {
+  return v.safeParse(permissionResolutionSchemaFor(options), resolution)
+    .success;
+}
+
 // —— 七动作的参数与结果 ——
 
 export const spawnParamsSchema = v.strictObject({
@@ -191,18 +317,43 @@ export const spawnParamsSchema = v.strictObject({
   agent: v.optional(v.string()),
   model: v.optional(v.string()),
   reasoning: v.optional(v.string()),
-  cwd: v.optional(v.string()),
+  cwd: v.pipe(
+    v.string(),
+    v.startsWith("/"),
+    v.check((path) => !path.includes("\0")),
+  ),
+  cwdIdentity: v.optional(
+    v.strictObject({
+      // 本机 CLI 投影的目录对象证据，只在接受边界比对，不作运行期身份。
+      device: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
+      inode: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
+    }),
+  ),
   authorizationMode: v.optional(authorizationModeSchema),
   sandbox: v.optional(v.string()),
   captureHarnessStderr: v.optional(v.boolean()),
-  meta: v.optional(v.record(v.string(), v.unknown())),
 });
 export type SpawnParams = v.InferOutput<typeof spawnParamsSchema>;
-
-export const sendParamsSchema = v.strictObject({
+export const spawnAckSchema = v.strictObject({
   sessionId: sessionIdSchema,
-  message: v.string(),
+  turnId: turnIdSchema,
+  cwd: v.string(),
 });
+export type SpawnAck = v.InferOutput<typeof spawnAckSchema>;
+
+export const sendParamsSchema = v.variant("placement", [
+  v.strictObject({
+    placement: v.literal("new_turn"),
+    sessionId: sessionIdSchema,
+    message: v.string(),
+  }),
+  v.strictObject({
+    placement: v.literal("active_turn"),
+    sessionId: sessionIdSchema,
+    turnId: turnIdSchema,
+    message: v.string(),
+  }),
+]);
 export type SendParams = v.InferOutput<typeof sendParamsSchema>;
 
 export const sendAckSchema = v.strictObject({
@@ -214,47 +365,85 @@ export const sendAckSchema = v.strictObject({
 export type SendAck = v.InferOutput<typeof sendAckSchema>;
 
 export const waitParamsSchema = v.strictObject({
-  ids: v.array(sessionIdSchema),
-  timeoutMs: v.optional(v.number()),
+  targets: v.pipe(
+    v.array(turnTargetSchema),
+    v.minLength(1),
+    v.check(
+      (targets) =>
+        new Set(targets.map((target) => `${target.sessionId}/${target.turnId}`))
+          .size === targets.length,
+      "Duplicate turn target",
+    ),
+  ),
+  completion: v.picklist(["any", "all"]),
+  timeoutMs: v.optional(v.pipe(v.number(), v.finite(), v.minValue(0))),
 });
 export type WaitParams = v.InferOutput<typeof waitParamsSchema>;
 
-export const turnCompletedSchema = v.strictObject({
+export const harnessFailureSchema = v.strictObject({
+  failureCategory: v.picklist([
+    "credential_rejected",
+    "quota_exhausted",
+    "balance_exhausted",
+    "account_unavailable",
+    "rate_limited",
+    "model_unavailable",
+    "request_rejected",
+    "provider_unavailable",
+    "runtime_unavailable",
+    "unclassified",
+  ]),
+  retryDisposition: v.picklist([
+    "wait",
+    "external_state_change",
+    "input_change",
+    "unknown",
+  ]),
+});
+export type HarnessFailure = v.InferOutput<typeof harnessFailureSchema>;
+export const UNKNOWN_HARNESS_FAILURE: HarnessFailure = {
+  failureCategory: "unclassified",
+  retryDisposition: "unknown",
+};
+
+const turnCompletedFields = {
   sessionId: sessionIdSchema,
   turnId: turnIdSchema,
-  stopReason: stopReasonSchema,
   finalReply: v.nullable(v.string()),
   usage: v.optional(v.record(v.string(), v.unknown())),
+  diagnosticId: v.optional(diagnosticIdSchema),
+};
+const failedTurnCompletedSchema = v.strictObject({
+  ...turnCompletedFields,
+  stopReason: v.literal("failed"),
+  failure: harnessFailureSchema,
 });
+const successfulTurnCompletedSchema = v.strictObject({
+  ...turnCompletedFields,
+  stopReason: v.picklist(["end_turn", "cancelled", "killed"]),
+});
+export const turnCompletedSchema = v.variant("stopReason", [
+  failedTurnCompletedSchema,
+  successfulTurnCompletedSchema,
+]);
 export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
 export const waitResultSchema = v.strictObject({
-  status: v.union([v.literal("completed"), v.literal("timeout")]),
-  results: v.array(
-    v.strictObject({
-      sessionId: sessionIdSchema,
-      status: v.union([v.literal("completed"), v.literal("killed")]),
-      turn: v.optional(turnCompletedSchema),
-    }),
-  ),
+  status: v.picklist(["satisfied", "timeout"]),
+  completed: v.array(turnCompletedSchema),
+  pending: v.array(turnTargetSchema),
 });
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 
-export const interruptParamsSchema = v.strictObject({
-  ids: v.array(sessionIdSchema),
-});
+export const interruptParamsSchema = turnTargetSchema;
 export type InterruptParams = v.InferOutput<typeof interruptParamsSchema>;
 
-export const interruptOutcomeSchema = v.strictObject({
-  sessionId: sessionIdSchema,
-  status: v.union([v.literal("requested"), v.literal("idle")]),
-  turnId: v.optional(turnIdSchema),
-});
-export type InterruptOutcome = v.InferOutput<typeof interruptOutcomeSchema>;
-export type InterruptAck = readonly InterruptOutcome[];
+export const interruptAckSchema = turnTargetSchema;
+export type InterruptAck = v.InferOutput<typeof interruptAckSchema>;
 
 export const resolvePermissionParamsSchema = v.strictObject({
   sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
   permissionId: permissionIdSchema,
   resolution: permissionResolutionSchema,
 });
@@ -264,6 +453,7 @@ export type ResolvePermissionParams = v.InferOutput<
 
 export const resolvePermissionAckSchema = v.strictObject({
   sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
   permissionId: permissionIdSchema,
 });
 export type ResolvePermissionAck = v.InferOutput<
@@ -271,11 +461,12 @@ export type ResolvePermissionAck = v.InferOutput<
 >;
 
 export const killParamsSchema = v.strictObject({
-  ids: v.array(sessionIdSchema),
+  sessionId: sessionIdSchema,
 });
 export type KillParams = v.InferOutput<typeof killParamsSchema>;
 
 export const listFilterSchema = v.strictObject({
+  sessionId: v.optional(sessionIdSchema),
   harness: v.optional(v.string()),
   state: v.optional(sessionStateSchema),
   sessionName: v.optional(sessionNameSchema),
@@ -283,12 +474,85 @@ export const listFilterSchema = v.strictObject({
 });
 export type ListFilter = v.InferOutput<typeof listFilterSchema>;
 
-export const attachParamsSchema = v.strictObject({
-  sessionId: sessionIdSchema,
-  replay: v.optional(v.number()),
-  exitOn: v.optional(v.array(stopReasonSchema)),
+export const subscriptionTargetSchema = v.variant("scope", [
+  v.strictObject({ scope: v.literal("session"), sessionId: sessionIdSchema }),
+  v.strictObject({ scope: v.literal("turn"), ...turnTargetSchema.entries }),
+]);
+export type SubscriptionTarget = v.InferOutput<typeof subscriptionTargetSchema>;
+
+export const resumePositionSchema = v.strictObject({
+  target: subscriptionTargetSchema,
+  daemonGeneration: daemonGenerationSchema,
+  eventId: v.pipe(v.number(), v.integer(), v.minValue(0)),
 });
+export type ResumePosition = v.InferOutput<typeof resumePositionSchema>;
+export function encodeResumeCursor(position: ResumePosition): ResumeCursor {
+  const body = Buffer.from(
+    JSON.stringify(v.parse(resumePositionSchema, position)),
+  ).toString("base64url");
+  return v.parse(
+    resumeCursorSchema,
+    "resume1_" + body + "." + turnHandleChecksum(body),
+  );
+}
+export function decodeResumeCursor(cursor: string): ResumePosition {
+  const match = /^resume1_([A-Za-z0-9_-]+)\.([a-f0-9]{8})$/u.exec(cursor);
+  if (match === null || turnHandleChecksum(match[1]!) !== match[2])
+    throw new Error("Invalid ResumeCursor");
+  return v.parse(
+    resumePositionSchema,
+    JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")),
+  );
+}
+export const resumeCursorSchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    try {
+      decodeResumeCursor(value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
+  v.brand("ResumeCursor"),
+);
+export type ResumeCursor = v.InferOutput<typeof resumeCursorSchema>;
+export const replayPolicySchema = v.variant("mode", [
+  v.strictObject({ mode: v.literal("none") }),
+  v.strictObject({ mode: v.literal("available") }),
+  v.strictObject({ mode: v.literal("after"), cursor: resumeCursorSchema }),
+]);
+
+export const attachParamsSchema = v.variant("scope", [
+  v.strictObject({
+    scope: v.literal("session"),
+    sessionId: sessionIdSchema,
+    replay: replayPolicySchema,
+  }),
+  v.strictObject({
+    scope: v.literal("turn"),
+    ...turnTargetSchema.entries,
+    replay: replayPolicySchema,
+  }),
+]);
 export type AttachParams = v.InferOutput<typeof attachParamsSchema>;
+export const subscriptionIdSchema = identifier(
+  "SubscriptionId",
+  /^[a-z0-9-]+$/u,
+);
+export type SubscriptionId = v.InferOutput<typeof subscriptionIdSchema>;
+export const eventIdSchema = v.pipe(
+  v.number(),
+  v.integer(),
+  v.minValue(1),
+  v.brand("EventId"),
+);
+export type EventId = v.InferOutput<typeof eventIdSchema>;
+export const eventWindowSchema = v.strictObject({
+  truncated: v.boolean(),
+  oldest: v.nullable(eventIdSchema),
+  head: v.nullable(eventIdSchema),
+});
 
 export const killResultSchema = v.strictObject({
   sessionId: sessionIdSchema,
@@ -296,18 +560,34 @@ export const killResultSchema = v.strictObject({
 });
 export type KillResult = v.InferOutput<typeof killResultSchema>;
 
-export const sessionInfoSchema = v.strictObject({
+const completedTurnSummarySchema = v.strictObject({
+  turnId: turnIdSchema,
+  stopReason: stopReasonSchema,
+});
+const sessionInfoFields = {
   sessionId: sessionIdSchema,
   sessionName: sessionNameSchema,
   harness: v.string(),
-  state: sessionStateSchema,
   model: v.nullable(v.string()),
   reasoning: v.nullable(v.string()),
   cwd: v.string(),
   spawnedAt: v.string(),
   turns: v.number(),
-  lastStopReason: v.nullable(stopReasonSchema),
-});
+  lastCompletedTurn: v.optional(completedTurnSummarySchema),
+};
+export const sessionInfoSchema = v.variant("state", [
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("busy"),
+    activeTurnId: turnIdSchema,
+  }),
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("idle"),
+    lastCompletedTurn: completedTurnSummarySchema,
+  }),
+  v.strictObject({ ...sessionInfoFields, state: v.literal("killed") }),
+]);
 export type SessionInfo = v.InferOutput<typeof sessionInfoSchema>;
 
 // —— 领域事件 ——
@@ -377,11 +657,11 @@ export const domainEventSchema = v.union([
   }),
   v.strictObject({
     type: v.literal("turn.completed"),
-    sessionId: sessionIdSchema,
-    turnId: turnIdSchema,
-    stopReason: stopReasonSchema,
-    finalReply: v.nullable(v.string()),
-    usage: v.optional(v.record(v.string(), v.unknown())),
+    ...failedTurnCompletedSchema.entries,
+  }),
+  v.strictObject({
+    type: v.literal("turn.completed"),
+    ...successfulTurnCompletedSchema.entries,
   }),
   v.strictObject({
     type: v.literal("session.killed"),
@@ -389,6 +669,176 @@ export const domainEventSchema = v.union([
   }),
 ]);
 export type DomainEvent = v.InferOutput<typeof domainEventSchema>;
+
+const workerEventTypeSchema = v.picklist([
+  "session.created",
+  "turn.started",
+  "text.delta",
+  "message",
+  "tool.requested",
+  "tool.completed",
+  "permission.requested",
+  "permission.resolved",
+  "turn.completed",
+  "session.killed",
+]);
+const turnWorkerEventTypeSchema = v.picklist([
+  "turn.started",
+  "text.delta",
+  "message",
+  "tool.requested",
+  "tool.completed",
+  "permission.requested",
+  "permission.resolved",
+  "turn.completed",
+]);
+const activeTurnRejectionEntries = {
+  sessionState: v.picklist(["spawning", "busy"]),
+  eventTurnId: turnIdSchema,
+  activeTurnId: turnIdSchema,
+} as const;
+
+function defineWorkerEventRejection<
+  const TReason extends string,
+  const TEntries extends v.ObjectEntries,
+>(reason: TReason, entries: TEntries) {
+  const rejectionEntries = { reason: v.literal(reason), ...entries } as const;
+  return {
+    reason,
+    entries: rejectionEntries,
+    rejection: v.strictObject(rejectionEntries),
+  } as const;
+}
+
+function defineCompletedTurnWorkerEventRejection() {
+  const reason = "event_after_turn_completed";
+  const variants = [
+    {
+      reason: v.literal(reason),
+      eventType: turnWorkerEventTypeSchema,
+      sessionState: v.literal("idle"),
+      eventTurnId: turnIdSchema,
+    },
+    {
+      reason: v.literal(reason),
+      eventType: turnWorkerEventTypeSchema,
+      sessionState: v.literal("busy"),
+      eventTurnId: turnIdSchema,
+      activeTurnId: turnIdSchema,
+    },
+    {
+      reason: v.literal(reason),
+      eventType: turnWorkerEventTypeSchema,
+      sessionState: v.literal("spawning"),
+      eventTurnId: turnIdSchema,
+      activeTurnId: turnIdSchema,
+    },
+  ] as const;
+  return {
+    reason,
+    variants,
+    rejection: v.variant("sessionState", [
+      v.strictObject(variants[0]),
+      v.strictObject(variants[1]),
+      v.strictObject(variants[2]),
+    ]),
+  } as const;
+}
+
+type DefinitionFieldTuple<
+  TKey extends PropertyKey,
+  TDefinitions extends readonly [
+    Record<TKey, unknown>,
+    ...Record<TKey, unknown>[],
+  ],
+> = {
+  -readonly [TIndex in keyof TDefinitions]: TDefinitions[TIndex][TKey];
+};
+
+function selectDefinitionField<
+  const TKey extends PropertyKey,
+  const TDefinitions extends readonly [
+    Record<TKey, unknown>,
+    ...Record<TKey, unknown>[],
+  ],
+>(definitions: TDefinitions, key: TKey) {
+  return definitions.map(
+    (definition) => definition[key],
+  ) as DefinitionFieldTuple<TKey, TDefinitions>;
+}
+
+const workerEventRejectionDefinitions = [
+  defineWorkerEventRejection("unknown_session", {
+    eventType: workerEventTypeSchema,
+    sessionState: v.literal("unknown"),
+    eventTurnId: v.optional(turnIdSchema),
+  }),
+  defineWorkerEventRejection("session_killed", {
+    eventType: workerEventTypeSchema,
+    sessionState: v.literal("killed"),
+    eventTurnId: v.optional(turnIdSchema),
+  }),
+  defineWorkerEventRejection("driver_event_forbidden", {
+    eventType: v.picklist([
+      "session.created",
+      "turn.started",
+      "session.killed",
+    ]),
+    sessionState: v.picklist(["spawning", "busy", "idle"]),
+  }),
+  defineWorkerEventRejection("turn_not_active", {
+    eventType: turnWorkerEventTypeSchema,
+    sessionState: v.literal("idle"),
+    eventTurnId: turnIdSchema,
+  }),
+  defineWorkerEventRejection("turn_mismatch", {
+    eventType: turnWorkerEventTypeSchema,
+    ...activeTurnRejectionEntries,
+  }),
+  defineCompletedTurnWorkerEventRejection(),
+  defineWorkerEventRejection("message_already_completed", {
+    eventType: v.picklist(["text.delta", "message"]),
+    ...activeTurnRejectionEntries,
+    messageId: messageIdSchema,
+  }),
+  defineWorkerEventRejection("tool_already_requested", {
+    eventType: v.literal("tool.requested"),
+    ...activeTurnRejectionEntries,
+    toolCallId: toolCallIdSchema,
+  }),
+  defineWorkerEventRejection("tool_already_completed", {
+    eventType: v.literal("tool.completed"),
+    ...activeTurnRejectionEntries,
+    toolCallId: toolCallIdSchema,
+  }),
+  defineWorkerEventRejection("permission_id_reused", {
+    eventType: v.literal("permission.requested"),
+    ...activeTurnRejectionEntries,
+    permissionId: permissionIdSchema,
+  }),
+  defineWorkerEventRejection("permission_not_pending", {
+    eventType: v.literal("permission.resolved"),
+    ...activeTurnRejectionEntries,
+    permissionId: permissionIdSchema,
+  }),
+  defineWorkerEventRejection("permission_turn_mismatch", {
+    eventType: v.literal("permission.resolved"),
+    ...activeTurnRejectionEntries,
+    permissionId: permissionIdSchema,
+  }),
+] as const;
+
+export const WORKER_EVENT_REJECTION_REASONS = Object.freeze(
+  selectDefinitionField(workerEventRejectionDefinitions, "reason"),
+);
+
+export const workerEventRejectionSchema = v.variant(
+  "reason",
+  selectDefinitionField(workerEventRejectionDefinitions, "rejection"),
+);
+export type WorkerEventRejection = v.InferOutput<
+  typeof workerEventRejectionSchema
+>;
 
 // —— 诊断（存储 envelope 与 producer input） ——
 
@@ -611,6 +1061,76 @@ function defineCoreSessionDiagnostic<
     record: withCoreSession({ ...recordEnvelope(severity), ...entries }),
   } as const;
 }
+
+function defineCoreWorkerEventDiagnosticVariant<
+  const TEntries extends v.ObjectEntries,
+>(definition: { entries: TEntries }) {
+  const inputEntries = {
+    source: v.literal("core"),
+    sessionId: sessionIdSchema,
+    kind: v.literal("protocol_violation"),
+    operation: v.literal("validate_worker_event"),
+    ...definition.entries,
+  } as const;
+  return {
+    input: v.strictObject(inputEntries),
+    record: v.strictObject({
+      ...recordEnvelope("error"),
+      ...inputEntries,
+    }),
+  } as const;
+}
+
+function defineCoreCompletedTurnWorkerEventDiagnostic(
+  definition: ReturnType<typeof defineCompletedTurnWorkerEventRejection>,
+) {
+  const variants = [
+    defineCoreWorkerEventDiagnosticVariant({
+      entries: definition.variants[0],
+    }),
+    defineCoreWorkerEventDiagnosticVariant({
+      entries: definition.variants[1],
+    }),
+    defineCoreWorkerEventDiagnosticVariant({
+      entries: definition.variants[2],
+    }),
+  ] as const;
+  return {
+    input: v.variant("sessionState", selectDefinitionField(variants, "input")),
+    record: v.variant(
+      "sessionState",
+      selectDefinitionField(variants, "record"),
+    ),
+  } as const;
+}
+
+function defineCoreWorkerEventDiagnostic() {
+  const variants = [
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[0]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[1]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[2]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[3]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[4]),
+    defineCoreCompletedTurnWorkerEventDiagnostic(
+      workerEventRejectionDefinitions[5],
+    ),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[6]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[7]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[8]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[9]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[10]),
+    defineCoreWorkerEventDiagnosticVariant(workerEventRejectionDefinitions[11]),
+  ] as const;
+  return {
+    input: v.variant("reason", selectDefinitionField(variants, "input")),
+    record: v.variant("reason", selectDefinitionField(variants, "record")),
+  } as const;
+}
+
+const coreWorkerEventDiagnosticDefinition = defineCoreWorkerEventDiagnostic();
+type WorkerEventProtocolViolationFact = v.InferOutput<
+  typeof coreWorkerEventDiagnosticDefinition.input
+>;
 
 function defineSessionDiagnostic<
   const TEntries extends v.ObjectEntries,
@@ -919,7 +1439,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_response"),
@@ -928,7 +1448,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_response"),
@@ -937,7 +1457,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_event"),
@@ -946,7 +1466,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
-  defineControlDiagnostic(
+  defineAdapterDiagnostic(
     {
       kind: v.literal("protocol_violation"),
       operation: v.literal("validate_worker_event"),
@@ -955,6 +1475,7 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
+  coreWorkerEventDiagnosticDefinition,
   defineControlDiagnostic(
     {
       kind: v.literal("protocol_violation"),
@@ -973,21 +1494,85 @@ const diagnosticDefinitions = [
     },
     "error",
   ),
+  defineDaemonGlobalDiagnostic(
+    {
+      kind: v.literal("protocol_violation"),
+      operation: v.literal("validate_daemon_request"),
+      stage: v.literal("envelope"),
+      reason: v.literal("invalid_shape"),
+    },
+    "error",
+  ),
 ] as const;
 
-function defineTransportFailure<
+function defineTransportFailure<const TEntries extends v.ObjectEntries>(
+  entries: TEntries,
+) {
+  return {
+    fact: v.strictObject(entries),
+    ...defineDaemonDiagnostic(entries, "error"),
+  } as const;
+}
+
+function defineTransportFailurePair<
   const TOperation extends string,
   const TReason extends string,
 >(operation: TOperation, reason: TReason) {
-  return defineDaemonDiagnostic(
-    {
-      kind: v.literal("transport_failure"),
-      operation: v.literal(operation),
-      reason: v.literal(reason),
-      message: textEvidenceSchema,
-    },
-    "error",
-  );
+  return defineTransportFailure({
+    kind: v.literal("transport_failure"),
+    operation: v.literal(operation),
+    reason: v.literal(reason),
+  });
+}
+
+const transportFailureDefinitions = [
+  defineTransportFailure({
+    kind: v.literal("transport_failure"),
+    operation: v.literal("read"),
+    reason: v.literal("invalid_frame"),
+    inputBytes: v.pipe(
+      v.number(),
+      v.integer(),
+      v.minValue(0),
+      v.maxValue(Number.MAX_SAFE_INTEGER),
+    ),
+  }),
+  defineTransportFailurePair("listen", "io_error"),
+  defineTransportFailurePair("connect", "io_error"),
+  defineTransportFailurePair("connect", "timeout"),
+  defineTransportFailurePair("connection", "io_error"),
+  defineTransportFailurePair("read", "io_error"),
+  defineTransportFailurePair("read", "timeout"),
+  defineTransportFailurePair("read", "disconnected"),
+  defineTransportFailurePair("write", "io_error"),
+  defineTransportFailurePair("write", "timeout"),
+  defineTransportFailurePair("write", "disconnected"),
+  defineTransportFailurePair("close", "io_error"),
+  defineTransportFailurePair("close", "timeout"),
+  defineTransportFailurePair("close", "disconnected"),
+] as const;
+
+export const transportFailureFactSchema = v.union(
+  selectDefinitionField(transportFailureDefinitions, "fact"),
+);
+type ParsedTransportFailureFact = v.InferOutput<
+  typeof transportFailureFactSchema
+>;
+export type TransportFailureFact =
+  ParsedTransportFailureFact extends infer TFact
+    ? TFact extends object
+      ? Readonly<TFact>
+      : never
+    : never;
+
+export function parseTransportFailureFact(
+  input: unknown,
+): TransportFailureFact {
+  const parsed = v.safeParse(transportFailureFactSchema, input);
+  if (!parsed.success) {
+    throw new TypeError("Invalid transport failure fact");
+  }
+  return Object.freeze({ ...parsed.output });
 }
 
 function defineStorageFailure<
@@ -1006,18 +1591,7 @@ function defineStorageFailure<
 }
 
 const remainingDiagnosticDefinitions = [
-  defineTransportFailure("listen", "io_error"),
-  defineTransportFailure("connect", "io_error"),
-  defineTransportFailure("connect", "timeout"),
-  defineTransportFailure("read", "io_error"),
-  defineTransportFailure("read", "timeout"),
-  defineTransportFailure("read", "disconnected"),
-  defineTransportFailure("write", "io_error"),
-  defineTransportFailure("write", "timeout"),
-  defineTransportFailure("write", "disconnected"),
-  defineTransportFailure("close", "io_error"),
-  defineTransportFailure("close", "timeout"),
-  defineTransportFailure("close", "disconnected"),
+  ...transportFailureDefinitions,
   defineStorageFailure("initialize", "unavailable"),
   defineStorageFailure("initialize", "io_error"),
   defineStorageFailure("initialize", "corrupt"),
@@ -1278,10 +1852,6 @@ type ProtocolViolationPair =
       reason: "invalid_json" | "invalid_shape" | "unexpected_message";
     }
   | {
-      operation: "validate_worker_response" | "validate_worker_event";
-      reason: "invalid_shape" | "unexpected_message";
-    }
-  | {
       operation: "validate_daemon_result" | "emit_domain_event";
       reason: "invalid_shape";
     };
@@ -1289,16 +1859,17 @@ type ProtocolViolationFact = ProtocolViolationPair & {
   kind: "protocol_violation";
   message?: TextEvidence | undefined;
 };
-type TransportFailurePair =
-  | { operation: "listen"; reason: "io_error" }
-  | { operation: "connect"; reason: "io_error" | "timeout" }
-  | {
-      operation: "read" | "write" | "close";
-      reason: "io_error" | "timeout" | "disconnected";
-    };
-type TransportFailureFact = TransportFailurePair & {
-  kind: "transport_failure";
-  message: TextEvidence;
+type WorkerShapeProtocolViolationFact = {
+  kind: "protocol_violation";
+  operation: "validate_worker_event" | "validate_worker_response";
+  reason: "invalid_shape" | "unexpected_message";
+  message?: TextEvidence | undefined;
+};
+type DaemonRequestProtocolViolationFact = {
+  kind: "protocol_violation";
+  operation: "validate_daemon_request";
+  stage: "envelope";
+  reason: "invalid_shape";
 };
 type StorageFailurePair =
   | {
@@ -1342,6 +1913,9 @@ export type DiagnosticInput =
   | (AdapterSessionAssociation & TurnFailureFact)
   | (ScopedControlAssociation & AuthorizationFailureFact)
   | (ControlAssociation & ProtocolViolationFact)
+  | (AdapterAssociation & WorkerShapeProtocolViolationFact)
+  | ({ source: "daemon" } & DaemonRequestProtocolViolationFact)
+  | WorkerEventProtocolViolationFact
   | (DaemonAssociation & TransportFailureFact)
   | (DaemonAssociation & (StorageFailureFact | TailRepairedFact))
   | HarnessStderrFact;
@@ -1508,10 +2082,14 @@ export type AdapterCapabilities = v.InferOutput<
 // —— 错误码与机器错误（程序化契约；可读文案由 CLI / MCP 映射） ——
 
 export const errorCodeSchema = v.union([
+  v.literal("session_busy"),
+  v.literal("turn_not_active"),
   v.literal("session_not_found"),
   v.literal("session_killed"),
   v.literal("session_terminating"),
   v.literal("daemon_shutting_down"),
+  v.literal("workspace_detaching"),
+  v.literal("native_view_lost"),
   v.literal("invalid_params"),
   v.literal("permission_not_pending"),
   v.literal("permission_resolution_mismatch"),
@@ -1525,10 +2103,15 @@ export const errorCodeSchema = v.union([
   v.literal("diagnostics_unavailable"),
   v.literal("diagnostics_store_corrupt"),
   v.literal("session_name_conflict"),
+  v.literal("protocol_version_mismatch"),
+  v.literal("consumer_context_required"),
+  v.literal("command_id_conflict"),
+  v.literal("stale_command_id"),
   v.literal("daemon_timeout"),
   v.literal("invalid_daemon_response"),
   v.literal("daemon_start_failed"),
   v.literal("daemon_disconnected"),
+  v.literal("event_cursor_expired"),
 ]);
 export type ErrorCode = v.InferOutput<typeof errorCodeSchema>;
 
@@ -1603,7 +2186,33 @@ const unexpectedError = <const TCode extends UnexpectedErrorCode>(
     cause: v.optional(errorCauseSchema),
     diagnosticId: v.optional(diagnosticIdSchema),
   });
+export const nativeViewLossSchema = v.variant("reason", [
+  v.strictObject({
+    reason: v.literal("moved"),
+    currentRoot: v.string(),
+  }),
+  v.strictObject({ reason: v.literal("replaced") }),
+  v.strictObject({ reason: v.literal("removed") }),
+  v.strictObject({ reason: v.literal("split") }),
+  v.strictObject({ reason: v.literal("unreachable") }),
+]);
+export type NativeViewLoss = v.InferOutput<typeof nativeViewLossSchema>;
 export const machineErrorSchema = v.union([
+  v.strictObject({
+    code: v.literal("native_view_lost"),
+    detail: v.optional(v.string()),
+    nativeView: nativeViewLossSchema,
+  }),
+  v.strictObject({
+    code: v.literal("session_busy"),
+    sessionId: sessionIdSchema,
+  }),
+  v.strictObject({
+    code: v.literal("turn_not_active"),
+    ...turnTargetSchema.entries,
+  }),
+  v.strictObject({ code: v.literal("command_id_conflict") }),
+  v.strictObject({ code: v.literal("stale_command_id") }),
   v.strictObject({
     code: v.literal("session_not_found"),
     sessionId: sessionIdSchema,
@@ -1617,6 +2226,7 @@ export const machineErrorSchema = v.union([
     sessionId: sessionIdSchema,
   }),
   v.strictObject({ code: v.literal("daemon_shutting_down") }),
+  v.strictObject({ code: v.literal("workspace_detaching") }),
   v.strictObject({
     code: v.literal("permission_not_pending"),
     sessionId: sessionIdSchema,
@@ -1650,6 +2260,12 @@ export const machineErrorSchema = v.union([
   }),
   v.strictObject({ code: v.literal("protocol_error") }),
   v.strictObject({
+    code: v.literal("protocol_version_mismatch"),
+    requestedProtocolMajorVersion: v.pipe(v.number(), v.integer()),
+    supportedProtocolMajorVersion: v.pipe(v.number(), v.integer()),
+  }),
+  v.strictObject({ code: v.literal("consumer_context_required") }),
+  v.strictObject({
     code: v.literal("unsupported_feature"),
     feature: v.pipe(v.string(), v.minLength(1)),
   }),
@@ -1659,7 +2275,15 @@ export const machineErrorSchema = v.union([
     code: v.literal("daemon_start_failed"),
     cause: errorCauseSchema,
   }),
-  v.strictObject({ code: v.literal("daemon_disconnected") }),
+  v.strictObject({
+    code: v.literal("daemon_disconnected"),
+    resumeCursor: v.optional(resumeCursorSchema),
+  }),
+  v.strictObject({
+    code: v.literal("event_cursor_expired"),
+    oldest: v.nullable(eventIdSchema),
+    head: v.nullable(eventIdSchema),
+  }),
   v.strictObject({ code: v.literal("diagnostics_unavailable") }),
   unexpectedError("capability_query_failed"),
   unexpectedError("internal_error"),
@@ -1705,9 +2329,14 @@ export interface WorkerDriver {
   // 启动 worker 进程/会话；worker 内容事件通过 emit 回调流入 core。
   start(spec: WorkerSpec): void;
   // 把消息交给 worker；turnId 标识它所属的回合。
-  deliver(sessionId: SessionId, turnId: TurnId, message: string): void;
+  deliver(
+    sessionId: SessionId,
+    turnId: TurnId,
+    message: string,
+    placement: SendParams["placement"],
+  ): Promise<void>;
   // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
-  interrupt(sessionId: SessionId): void;
+  interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;
   // 把控制面的授权决议交还 adapter，翻译为 harness 原生回答。
   resolvePermission(
     sessionId: SessionId,
@@ -1749,7 +2378,7 @@ export type HarnessCapability = v.InferOutput<typeof harnessCapabilitySchema>;
 export const capabilityFailureSchema = v.strictObject({
   harness: v.pipe(v.string(), v.minLength(1)),
   code: v.literal("capability_query_failed"),
-  cause: v.optional(errorCauseSchema),
+  failure: harnessFailureSchema,
   diagnosticId: v.optional(diagnosticIdSchema),
 });
 export type CapabilityFailure = v.InferOutput<typeof capabilityFailureSchema>;
@@ -1781,6 +2410,7 @@ export const protocolRequestSchema = v.strictObject({
   kind: v.literal("request"),
   requestId: requestIdSchema,
   method: protocolMethodSchema,
+  commandId: v.optional(commandIdSchema),
   params: v.unknown(),
 });
 export type ProtocolRequest = v.InferOutput<typeof protocolRequestSchema>;
@@ -1801,14 +2431,25 @@ export type ProtocolResponse = v.InferOutput<typeof protocolResponseSchema>;
 
 export const attachEndedSchema = v.strictObject({
   sessionId: sessionIdSchema,
-  reason: v.union([stopReasonSchema, v.literal("session_killed")]),
+  subscriptionId: subscriptionIdSchema,
+  target: subscriptionTargetSchema,
+  lastEventId: v.nullable(eventIdSchema),
+  reason: v.union([
+    stopReasonSchema,
+    v.literal("session_killed"),
+    v.literal("closed"),
+  ]),
 });
 export type AttachEnded = v.InferOutput<typeof attachEndedSchema>;
 
 export const protocolEventNotificationSchema = v.strictObject({
   kind: v.literal("notification"),
   method: v.literal("event"),
-  params: domainEventSchema,
+  params: v.strictObject({
+    subscriptionId: subscriptionIdSchema,
+    eventId: eventIdSchema,
+    event: domainEventSchema,
+  }),
 });
 export type ProtocolEventNotification = v.InferOutput<
   typeof protocolEventNotificationSchema
@@ -1831,23 +2472,40 @@ export type ProtocolNotification = v.InferOutput<
   typeof protocolNotificationSchema
 >;
 
+export const subscriptionCloseSchema = v.strictObject({
+  kind: v.literal("control"),
+  method: v.literal("subscription.close"),
+  subscriptionId: subscriptionIdSchema,
+});
+
 export const protocolMessageSchema = v.union([
+  subscriptionCloseSchema,
   protocolRequestSchema,
   protocolResponseSchema,
   protocolNotificationSchema,
 ]);
 export type ProtocolMessage = v.InferOutput<typeof protocolMessageSchema>;
 
-export const initializeParamsSchema = v.strictObject({});
-export const initializeResultSchema = v.strictObject({});
+export const initializeParamsSchema = v.strictObject({
+  protocolMajorVersion: protocolMajorVersionSchema,
+  consumerContext: consumerContextSchema,
+});
+export type InitializeParams = v.InferOutput<typeof initializeParamsSchema>;
+
+export const initializeResultSchema = v.strictObject({
+  protocolMajorVersion: protocolMajorVersionSchema,
+  daemonGeneration: daemonGenerationSchema,
+});
+export type InitializeResult = v.InferOutput<typeof initializeResultSchema>;
 
 export const attachResultSchema = v.strictObject({
   sessionId: sessionIdSchema,
+  subscriptionId: subscriptionIdSchema,
+  target: subscriptionTargetSchema,
+  window: eventWindowSchema,
   replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
-
-export const interruptAckSchema = v.array(interruptOutcomeSchema);
 
 // 每个方法的参数 / 结果 schema 由方法名静态确定，双端共用同一契约。
 const protocolParamsSchemas = {
@@ -1876,11 +2534,11 @@ export function protocolParamsSchemaFor<M extends ProtocolMethod>(
 
 const protocolResultSchemas = {
   initialize: initializeResultSchema,
-  spawn: v.strictObject({ sessionId: sessionIdSchema }),
+  spawn: spawnAckSchema,
   send: sendAckSchema,
   wait: waitResultSchema,
   interrupt: interruptAckSchema,
-  kill: v.array(killResultSchema),
+  kill: killResultSchema,
   list: v.array(sessionInfoSchema),
   attach: attachResultSchema,
   resolvePermission: resolvePermissionAckSchema,

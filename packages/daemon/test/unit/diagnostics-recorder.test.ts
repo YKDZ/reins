@@ -13,7 +13,7 @@ import {
   sessionNameSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
-import { afterEach, describe, expect, test } from "vitest";
+import { afterEach, describe, expect, test, vi } from "vitest";
 
 import { openDiagnosticsRuntimeForTest } from "../../src/diagnostics-recorder.testing.ts";
 import type { DiagnosticsRuntime } from "../../src/diagnostics-recorder.ts";
@@ -65,6 +65,7 @@ class MemoryStore implements DiagnosticsStore {
   queryError: Error | undefined;
   closeError: Error | undefined;
   appendGate: Promise<void> | undefined;
+  appendGates: Promise<void>[] = [];
   readonly repairs: DiagnosticsStoreHealth["repairs"];
 
   constructor(repairs: DiagnosticsStoreHealth["repairs"] = []) {
@@ -73,7 +74,7 @@ class MemoryStore implements DiagnosticsStore {
 
   async append(record: DiagnosticRecord): Promise<void> {
     if (this.appendError !== undefined) throw this.appendError;
-    await this.appendGate;
+    await (this.appendGates.shift() ?? this.appendGate);
     this.records.push(record);
   }
 
@@ -117,6 +118,72 @@ async function openRuntime(
 }
 
 describe("DiagnosticsRuntime", () => {
+  test("未结束的写入有界拒绝引用，释放查询水位且不重试", async () => {
+    const store = new MemoryStore();
+    const runtime = await openRuntime(store);
+    store.appendGate = new Promise(() => {});
+    vi.useFakeTimers();
+    try {
+      let settled = false;
+      const record = runtime.record(input()).then((id) => {
+        settled = true;
+        return id;
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(settled).toBe(true);
+      expect(await record).toBeUndefined();
+      await expect(runtime.query({})).rejects.toThrow(
+        "Diagnostics store is unavailable",
+      );
+      expect(runtime.health().status).toBe("degraded");
+      expect(store.records).toEqual([]);
+      await runtime.close();
+      expect(store.closed).toBe(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+  test("queries wait for the record watermark captured at call time only", async () => {
+    const store = new MemoryStore();
+    let releaseFirst!: () => void;
+    let releaseSecond!: () => void;
+    store.appendGates = [
+      new Promise<void>((resolve) => {
+        releaseFirst = resolve;
+      }),
+      new Promise<void>((resolve) => {
+        releaseSecond = resolve;
+      }),
+    ];
+    const runtime = await openRuntime(store);
+
+    const first = runtime.record(input());
+    let querySettled = false;
+    const querying = runtime.query({}).then((result) => {
+      querySettled = true;
+      return result;
+    });
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const settledBeforeWatermark = querySettled;
+
+    const second = runtime.record(input());
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    releaseFirst();
+    const result = await querying;
+    const recordsAtQuery = "records" in result ? [...result.records] : [];
+    const secondSettledBeforeQuery = await Promise.race([
+      second.then(() => true),
+      new Promise<false>((resolve) => setImmediate(() => resolve(false))),
+    ]);
+    releaseSecond();
+    await Promise.all([first, second]);
+    await runtime.close();
+
+    expect(settledBeforeWatermark).toBe(false);
+    expect(recordsAtQuery).toHaveLength(1);
+    expect(secondSettledBeforeQuery).toBe(false);
+  });
+
   test("accepts a normalized fact only after it is immediately queryable", async () => {
     const runtime = await openRuntime();
 
@@ -215,7 +282,10 @@ describe("DiagnosticsRuntime", () => {
     "close retries a real writer lease without duplicating the logical closed commit",
     async () => {
       const directory = await temporaryDirectory();
-      const store = await openDiagnosticsStoreForTest({ directory });
+      const store = await openDiagnosticsStoreForTest({
+        directory,
+        now: () => new Date("2026-08-20T00:00:00.000Z"),
+      });
       const runtime = await openRuntime(store);
       const blocker = join(directory, "writer-lease.lock", "blocks-rmdir");
       await appendFile(blocker, "failure");
@@ -227,7 +297,10 @@ describe("DiagnosticsRuntime", () => {
       await expect(runtime.close()).resolves.toBeUndefined();
       await expect(runtime.close()).resolves.toBeUndefined();
 
-      const reopened = await openDiagnosticsStoreForTest({ directory });
+      const reopened = await openDiagnosticsStoreForTest({
+        directory,
+        now: () => new Date("2026-08-20T00:00:00.000Z"),
+      });
       const result = await reopened.query({
         sources: ["daemon"],
         kinds: ["lifecycle"],

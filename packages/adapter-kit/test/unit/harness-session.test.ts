@@ -4,7 +4,7 @@ import type {
   SessionId,
   TurnId,
 } from "@reins/protocol";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { AlreadyDiagnosedError, isAlreadyDiagnosedError } from "#/diagnostic";
 import { HarnessSession } from "#/harness-session";
@@ -28,6 +28,56 @@ function setup(cleared: string[] = []): {
 }
 
 describe("HarnessSession", () => {
+  test("诊断永久挂起也有界提交原失败一次，不接受迟到引用", async () => {
+    vi.useFakeTimers();
+    try {
+      const events: DomainEvent[] = [];
+      const cleared: string[] = [];
+      const session = new HarnessSession<string>({
+        sessionId,
+        emit: (event) => events.push(event),
+        diagnostics: () => new Promise(() => {}),
+        onClearPending: (attachments) => cleared.push(...attachments),
+      });
+      session.beginTurn(firstTurnId);
+      session.requestPermission("tool:Bash", {}, [], "pending");
+      const failure = {
+        failureCategory: "quota_exhausted",
+        retryDisposition: "external_state_change",
+      } as const;
+      const submitted = session.failActiveTurn(failure, {
+        kind: "turn_failure",
+        operation: "run_turn",
+        reason: "worker_reported_failure",
+        message: {
+          text: "native failure",
+          truncated: false,
+          originalBytes: 14,
+        },
+      });
+      await vi.advanceTimersByTimeAsync(1_000);
+      expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+        [
+          {
+            type: "turn.completed",
+            sessionId,
+            turnId: firstTurnId,
+            stopReason: "failed",
+            finalReply: null,
+            failure,
+          },
+        ],
+      );
+      await submitted;
+      await session.failActiveTurn();
+      expect(
+        events.filter((event) => event.type === "turn.completed"),
+      ).toHaveLength(1);
+      expect(cleared).toEqual(["pending"]);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
   test("AlreadyDiagnosed guard 只接受本模块实例与合法 DiagnosticId", () => {
     expect(
       isAlreadyDiagnosedError(
@@ -159,17 +209,18 @@ describe("HarnessSession", () => {
     expect(cleared).toEqual(["a", "b"]);
   });
 
-  test("failActiveTurn 发 failed 并复位清空", () => {
+  test("failActiveTurn 发 failed 并复位清空", async () => {
     const { events, session, cleared } = setup();
     session.beginTurn(firstTurnId);
     session.requestPermission("tool:Bash", {}, [], "a");
 
-    session.failActiveTurn();
+    await session.failActiveTurn();
     expect(events.at(-1)).toEqual({
       type: "turn.completed",
       sessionId,
       turnId: firstTurnId,
       stopReason: "failed",
+      failure: { failureCategory: "unclassified", retryDisposition: "unknown" },
       finalReply: null,
     });
     expect(session.turnId).toBeNull();

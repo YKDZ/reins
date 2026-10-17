@@ -18,9 +18,7 @@ skills-lock.json
 .agents/
 .scratch/
 AGENTS.md
-CONTEXT.md
-docs/adr/
-docs/agents/
-docs/research/
+GLOSSARY.md
+/docs
 .scratch
 .agents

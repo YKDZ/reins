@@ -5,7 +5,14 @@ export {
 export { createNdjsonDecoder, encodeNdjson } from "./ndjson.ts";
 export { resolveReinsSocketPath } from "./socket-path.ts";
 export type { SocketPathEnvironment } from "./socket-path.ts";
-export { createTransportError, isTransportError } from "./transport.ts";
+export {
+  createTransportError,
+  isTransportErrorCode,
+  isTransportError,
+  TRANSPORT_ERROR_CODES,
+  transportErrorCodeOf,
+  transportFailureFactOf,
+} from "./transport.ts";
 export {
   createUnixSocketClient,
   createUnixSocketServer,

@@ -100,13 +100,21 @@ function fakeAdapter(options: {
               type: "turn.completed",
               sessionId: spec.sessionId,
               turnId: spec.turnId,
-              stopReason: behavior === "failed" ? "failed" : "cancelled",
+              ...(behavior === "failed"
+                ? {
+                    stopReason: "failed" as const,
+                    failure: {
+                      failureCategory: "unclassified" as const,
+                      retryDisposition: "unknown" as const,
+                    },
+                  }
+                : { stopReason: "cancelled" as const }),
               finalReply: null,
             });
           });
         }
       },
-      deliver(_sessionId, turnId) {
+      async deliver(_sessionId, turnId) {
         if (current === null) return;
         const sessionId = current.sessionId;
         queueMicrotask(() => {
@@ -119,7 +127,7 @@ function fakeAdapter(options: {
           });
         });
       },
-      interrupt() {},
+      async interrupt() {},
       resolvePermission(_sessionId, permissionId, resolution) {
         if (current === null) return;
         const requestsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;

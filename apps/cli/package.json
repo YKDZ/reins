@@ -1,6 +1,6 @@
 {
   "name": "@ykdz/reins",
-  "version": "0.1.1",
+  "version": "0.2.0",
   "private": true,
   "description": "A deliberately simple harness control plane.",
   "keywords": [
@@ -33,6 +33,13 @@
     "x64"
   ],
   "type": "module",
+  "exports": {
+    "./application": {
+      "source": "./src/application.ts",
+      "types": "./dist/application.d.ts",
+      "default": "./dist/application.js"
+    }
+  },
   "publishConfig": {
     "access": "public"
   },
@@ -44,13 +51,15 @@
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
     "postbuild": "node -e \"const fs = require('node:fs'); fs.copyFileSync('dist/cli.js', 'dist/reins.js'); if (process.platform !== 'win32') fs.chmodSync('dist/reins.js', 0o755)\"",
     "test": "vitest run test/unit --reporter=agent",
-    "test:e2e": "vitest run test/e2e --reporter=agent",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@reins/client": "workspace:*",
     "@reins/protocol": "workspace:*",
     "@reins/transport": "workspace:*",
-    "commander": "catalog:",
+    "@valibot/to-json-schema": "catalog:",
+    "@ykdz/cli-contract": "catalog:",
+    "@ykdz/reins-sdk": "workspace:*",
     "proper-lockfile": "catalog:",
     "valibot": "catalog:"
   },
@@ -61,14 +70,21 @@
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
     "oxlint-tsgolint": "catalog:",
+    "rolldown": "catalog:",
     "typescript-7": "catalog:",
     "vitest": "catalog:"
   },
   "dependenciesMeta": {
+    "@reins/client": {
+      "injected": false
+    },
     "@reins/protocol": {
       "injected": false
     },
     "@reins/transport": {
+      "injected": false
+    },
+    "@ykdz/reins-sdk": {
       "injected": false
     }
   },

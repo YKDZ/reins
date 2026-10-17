@@ -1,12 +1,6 @@
-import { spawnSync } from "node:child_process";
+import { checkConformanceDependencyContract } from "./boundary-contract.ts";
+import { runTurboBoundaries } from "./run-turbo-boundaries.ts";
 
-const result = spawnSync(
-  "pnpm",
-  ["exec", "turbo", "boundaries", "--no-color"],
-  {
-    stdio: "inherit",
-  },
-);
+checkConformanceDependencyContract(process.cwd());
 
-if (result.error !== undefined) throw result.error;
-process.exit(result.status ?? 1);
+process.exitCode = await runTurboBoundaries();

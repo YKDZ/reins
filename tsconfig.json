@@ -2,17 +2,13 @@
   "extends": "./tsconfig.config.json",
   "compilerOptions": {
     "allowImportingTsExtensions": true,
-    "noEmit": true
+    "noEmit": true,
+    "paths": {
+      "@reins/daemon": ["./packages/daemon/src/index.ts"],
+      "@reins/protocol": ["./packages/protocol/src/index.ts"],
+      "@ykdz/reins-sdk": ["./packages/sdk/src/index.ts"],
+      "@ykdz/reins/application": ["./apps/cli/src/application.ts"]
+    }
   },
-  "files": [
-    "oxfmt.config.ts",
-    "oxlint.config.ts",
-    "scripts/build-distribution.ts",
-    "scripts/check-boundaries.ts",
-    "scripts/check-packed-cli.ts",
-    "scripts/check-runtime-language.ts",
-    "scripts/release-package.ts",
-    "scripts/run-root-owned-task.ts",
-    "scripts/validate-release-package.ts"
-  ]
+  "include": ["*.config.ts", "scripts/**/*.ts"]
 }
