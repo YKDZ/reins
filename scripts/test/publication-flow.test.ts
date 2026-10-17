@@ -61,11 +61,15 @@ async function fixture() {
       GITHUB_REF: "refs/heads/main",
       GITHUB_DEFAULT_BRANCH: "main",
       GITHUB_REPOSITORY: "YKDZ/reins",
+      GITHUB_SERVER_URL: "https://github.com",
+      GITHUB_REPOSITORY_ID: "1342443187",
+      GITHUB_REPOSITORY_OWNER_ID: "69898831",
+      RUNNER_ENVIRONMENT: "github-hosted",
       GITHUB_SHA: git(["rev-parse", "HEAD"]),
       GITHUB_RUN_ID: "123",
       GITHUB_RUN_ATTEMPT: "1",
       GITHUB_WORKFLOW_REF:
-        "YKDZ/reins/.github/workflows/check.yml@refs/heads/main",
+        "YKDZ/reins/.github/workflows/release.yml@refs/heads/main",
       GH_TOKEN: "fixture",
       ACTIONS_ID_TOKEN_REQUEST_URL: "https://example.invalid/oidc",
       ACTIONS_ID_TOKEN_REQUEST_TOKEN: "fixture",
@@ -113,7 +117,11 @@ async function fixture() {
       repository,
       artifactDirectory,
       evidenceFile,
-      environment,
+      environment: {
+        ...environment,
+        GITHUB_WORKFLOW_REF:
+          "YKDZ/reins/.github/workflows/check.yml@refs/heads/main",
+      },
     });
     return {
       repository,
@@ -165,7 +173,7 @@ function externalServices(
       _type: "https://in-toto.io/Statement/v1",
       subject: [
         {
-          name: `pkg:npm/${name}@${group.version}`,
+          name: `pkg:npm/${name.replace("@", "%40")}@${group.version}`,
           digest: { sha512: artifact.sha512 },
         },
       ],
@@ -241,6 +249,20 @@ function externalServices(
         return published.has(name) ? ok(metadata(name)) : notFound();
       }
       if (args[0] === "publish") {
+        assert.equal(options.env.RUNNER_ENVIRONMENT, "github-hosted");
+        assert.equal(options.env.GITHUB_SERVER_URL, "https://github.com");
+        assert.equal(
+          options.env.GITHUB_REPOSITORY_ID,
+          environment.GITHUB_REPOSITORY_ID,
+        );
+        assert.equal(
+          options.env.GITHUB_REPOSITORY_OWNER_ID,
+          environment.GITHUB_REPOSITORY_OWNER_ID,
+        );
+        assert.equal(
+          options.env.GITHUB_WORKFLOW_REF,
+          environment.GITHUB_WORKFLOW_REF,
+        );
         const artifact = group.artifacts.find((item) => item.path === args[1])!;
         assert.ok(artifact, "发布必须使用原始候选路径");
         writes.push({
@@ -335,14 +357,6 @@ function externalServices(
       if (path.endsWith("/git/tags/tag-object")) return ok(tag);
       if (path.includes("/releases?"))
         return ok([release === undefined ? [] : [release]]);
-      if (path.includes("/releases/assets/")) {
-        const asset = assets.get(Number(path.split("/").at(-1)))!;
-        await writeFile(
-          args.find((arg) => arg.startsWith("--output="))!.slice(9),
-          asset.bytes,
-        );
-        return ok();
-      }
       if (path === "repos/YKDZ/reins") return ok({ default_branch: "main" });
       if (path === "repos/YKDZ/reins/immutable-releases")
         return ok({ enabled: true, enforced_by_owner: false });
@@ -357,6 +371,15 @@ function externalServices(
         });
     }
     if (args[0] === "release") {
+      if (args[1] === "download") {
+        const name = args[args.indexOf("--pattern") + 1]!;
+        const destination = args[args.indexOf("--dir") + 1]!;
+        const asset = [...assets.values()].find(
+          (value) => value.name === name,
+        )!;
+        await writeFile(join(destination, name), asset.bytes);
+        return ok();
+      }
       if (args[1] === "create") {
         githubWrites.push("create-release");
         for (const path of args.slice(3, args.indexOf("--draft")))

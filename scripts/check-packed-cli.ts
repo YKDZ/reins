@@ -415,7 +415,6 @@ async function smokePackedCli(
         "--no-audit",
         "--no-fund",
         "--package-lock=false",
-        "--prefer-offline",
         tarball,
         sdkTarball,
       ],

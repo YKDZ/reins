@@ -117,10 +117,13 @@ export async function npmSession(options: {
     "GITHUB_REF",
     "GITHUB_SHA",
     "GITHUB_REPOSITORY",
+    "GITHUB_REPOSITORY_ID",
+    "GITHUB_REPOSITORY_OWNER_ID",
     "GITHUB_RUN_ID",
     "GITHUB_RUN_ATTEMPT",
     "GITHUB_WORKFLOW_REF",
     "GITHUB_SERVER_URL",
+    "RUNNER_ENVIRONMENT",
   ]) {
     if (options.environment[key] !== undefined)
       environment[key] = options.environment[key];

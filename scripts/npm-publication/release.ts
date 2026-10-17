@@ -200,13 +200,15 @@ export async function runImmutableGithubRelease(
       )
         fail("release-asset-conflict", "Release 附件与原候选不一致");
       seen.add(value.name);
-      const output = join(directory, `asset-${value.id}`);
+      const output = join(directory, value.name);
       const result = await gh([
-        "api",
-        "-H",
-        "Accept: application/octet-stream",
-        `repos/${repo}/releases/assets/${value.id}`,
-        `--output=${output}`,
+        "release",
+        "download",
+        tag,
+        "--pattern",
+        value.name,
+        "--dir",
+        directory,
       ]);
       if (
         result.exitCode !== 0 ||

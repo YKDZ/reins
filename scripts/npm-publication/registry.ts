@@ -114,7 +114,8 @@ function verifyProvenance(
     fail("provenance-invalid", "来源证明缺少唯一包主体");
   const subject = object(statement.subject[0], "provenance-invalid");
   if (
-    subject.name !== `pkg:npm/${artifact.packageName}@${artifact.version}` ||
+    subject.name !==
+      `pkg:npm/${artifact.packageName.replace("@", "%40")}@${artifact.version}` ||
     object(subject.digest, "provenance-invalid").sha512 !== artifact.sha512
   )
     fail("provenance-invalid", "来源证明未绑定候选包字节");
