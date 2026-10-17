@@ -142,12 +142,34 @@ function readJsonLineRecords(
   const lines = stdout.trim().split("\n").filter(Boolean);
   if (lines.length === 0)
     throw new Error(`${label} returned no stream records`);
-  return lines.map((line) => {
+  const records = lines.map((line) => {
     const value: unknown = JSON.parse(line);
-    if (!isRecord(value) || value.schemaVersion !== "2")
-      throw new Error(`${label} 未返回 v2 流记录`);
+    if (!isRecord(value)) throw new Error(`${label} 未返回 JSON 流记录`);
     return value;
   });
+  // 原生合同只在流头声明版本，后续 record 与 streamSuccess 不重复携带版本。
+  const header = records[0]!;
+  if (header.kind === "stream") {
+    if (header.schemaVersion !== "2")
+      throw new Error(`${label} 未返回 v2 流头`);
+    for (const record of records.slice(1)) {
+      if (
+        record.kind === "record" &&
+        typeof record.variant === "string" &&
+        isRecord(record.data)
+      )
+        continue;
+      if (record.kind === "streamSuccess") continue;
+      throw new Error(`${label} 返回非法的流内记录`);
+    }
+  } else if (
+    records.some(
+      (record) => record.schemaVersion !== "2" || record.kind !== "failure",
+    )
+  ) {
+    throw new Error(`${label} 未返回 v2 失败终态`);
+  }
+  return records;
 }
 
 function canonicalJson(value: unknown): string {
