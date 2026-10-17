@@ -11,7 +11,7 @@ import {
   sealPublicationGroup,
   type AcceptedPublicationGroup,
 } from "../npm-publication/handoff.ts";
-import type { ProcessRunner } from "../npm-publication/process.ts";
+import { runProcess, type ProcessRunner } from "../npm-publication/process.ts";
 import { runDirectOidcPublication } from "../npm-publication/publish.ts";
 import { runImmutableGithubRelease } from "../npm-publication/release.ts";
 import {
@@ -595,6 +595,54 @@ void test("首发准备无外部写入，人工确认拒绝时不登录；缺原
     assert.equal(service.writes.length, 0);
     await rm(f.group.artifacts[0]!.path);
     await assert.rejects(prepareSdkBootstrap(f), /校验失败/u);
+  } finally {
+    await f.cleanup();
+  }
+});
+
+void test("首发向导接受锁定 npm 的真实授权预览，并在维护者取消时停止写入", async () => {
+  const f = await fixture();
+  try {
+    const service = externalServices(f.group, f.environment, true);
+    const confirmations: string[] = [];
+    const writes: string[][] = [];
+    const run: ProcessRunner = async (command, args, options) => {
+      if (basename(command) === "npm") {
+        if (["login", "whoami", "logout"].includes(args[0]!))
+          return { exitCode: 0, stdout: "fixture\n", stderr: "" };
+        if (args[0] === "trust" && args[1] === "list")
+          return { exitCode: 0, stdout: "\n", stderr: "" };
+        if (args[0] === "trust" && args.includes("--dry-run")) {
+          return await runProcess(
+            join(process.cwd(), "node_modules", ".bin", "npm"),
+            args,
+            options,
+          );
+        }
+        if (args[0] === "publish" || args[0] === "trust") {
+          writes.push([...args]);
+          throw new Error("维护者确认之前发生公开写入");
+        }
+      }
+      return await service.run(command, args, options);
+    };
+    await assert.rejects(
+      runSdkBootstrap({
+        ...f,
+        run,
+        confirm: async (phrase) => {
+          confirmations.push(phrase);
+          if (phrase.startsWith("授权 ")) throw new Error("维护者取消授权");
+        },
+      }),
+      /维护者取消授权/u,
+    );
+    assert.deepEqual(confirmations, [
+      "确认 npm 2FA 和恢复码已准备",
+      "授权 @ykdz/reins-sdk YKDZ/reins release.yml createPackage",
+    ]);
+    assert.equal(writes.length, 0);
+    assert.equal(service.writes.length, 0);
   } finally {
     await f.cleanup();
   }

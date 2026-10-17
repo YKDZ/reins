@@ -182,7 +182,7 @@ export async function runSdkBootstrap(options: SetupOptions): Promise<void> {
         return trustRecords(result.stdout);
       };
       const exact = (value: Record<string, unknown>, preview: boolean) =>
-        value.type === "github" &&
+        (preview ? !Object.hasOwn(value, "type") : value.type === "github") &&
         value.repository === repo &&
         value.file === "release.yml" &&
         !Object.hasOwn(value, "environment") &&
@@ -195,7 +195,7 @@ export async function runSdkBootstrap(options: SetupOptions): Promise<void> {
         Object.keys(value).every((key) =>
           [
             preview ? "package" : "id",
-            "type",
+            ...(preview ? [] : ["type"]),
             "repository",
             "file",
             "permissions",
