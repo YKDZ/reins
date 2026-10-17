@@ -160,6 +160,14 @@ function readJsonLineRecords(
       )
         continue;
       if (record.kind === "streamSuccess") continue;
+      if (
+        record.kind === "failure" &&
+        record.schemaVersion === "2" &&
+        record.command === header.command &&
+        typeof record.variant === "string" &&
+        isRecord(record.data)
+      )
+        continue;
       throw new Error(`${label} 返回非法的流内记录`);
     }
   } else if (
