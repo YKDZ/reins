@@ -462,6 +462,52 @@ void test("人工 SDK 首发后，首次正常发布只写运行包并保留同�
   }
 });
 
+void test("SDK 首个真实版本可接续 npm 暂存占位，但不能忽略真实旧版本", async () => {
+  const f = await fixture();
+  try {
+    for (const stub of [true, false]) {
+      const service = externalServices(f.group, f.environment, true);
+      const run: ProcessRunner = async (command, args, options) => {
+        if (basename(command) === "npm" && args[0] === "view") {
+          if (args[1] === "@ykdz/reins-sdk" && args[2] === "versions")
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify(["0.0.0-stage", f.group.version]),
+              stderr: "",
+            };
+          if (args[1] === "@ykdz/reins-sdk@0.0.0-stage")
+            return {
+              exitCode: 0,
+              stdout: JSON.stringify({
+                name: "@ykdz/reins-sdk",
+                version: "0.0.0-stage",
+                stub,
+              }),
+              stderr: "",
+            };
+        }
+        return await service.run(command, args, options);
+      };
+      if (stub) {
+        const result = await runDirectOidcPublication({ ...f, run });
+        assert.equal(result.packages[0]!.origin, "manual-sdk-bootstrap");
+        assert.deepEqual(
+          service.writes.map((item) => item.name),
+          ["@ykdz/reins"],
+        );
+      } else {
+        await assert.rejects(
+          runDirectOidcPublication({ ...f, run }),
+          /新发布不能复用/u,
+        );
+        assert.equal(service.writes.length, 0);
+      }
+    }
+  } finally {
+    await f.cleanup();
+  }
+});
+
 void test("SDK 成功、运行包失败后，同一候选重跑核实 SDK 并继续；来源冲突停止", async () => {
   const f = await fixture();
   try {

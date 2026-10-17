@@ -43,12 +43,36 @@ export async function inspectRegistryPackage(
         : "registry-package-missing",
       "公开包尚未初始化；SDK 首发须由维护者完成",
     );
-  const versions = readJsonResult(versionsResult, "registry-unavailable");
+  const versionList = readJsonResult(versionsResult, "registry-unavailable");
   if (
-    !Array.isArray(versions) ||
-    !versions.every((value) => typeof value === "string")
+    !Array.isArray(versionList) ||
+    !versionList.every((value) => typeof value === "string")
   )
     fail("registry-invalid", "注册表版本清单无效");
+  let versions = versionList;
+  if (
+    artifact.packageName === "@ykdz/reins-sdk" &&
+    versions.includes("0.0.0-stage")
+  ) {
+    const staged = object(
+      readJsonResult(
+        await session.npm([
+          "view",
+          `${artifact.packageName}@0.0.0-stage`,
+          "--json",
+        ]),
+        "registry-unavailable",
+      ),
+      "registry-invalid",
+    );
+    // npm 暂存首发生成的占位不属于真实发布；同名真实版本仍计入。
+    if (
+      staged.name === artifact.packageName &&
+      staged.version === "0.0.0-stage" &&
+      staged.stub === true
+    )
+      versions = versions.filter((version) => version !== "0.0.0-stage");
+  }
   const tags = object(
     readJsonResult(
       await session.npm(["view", artifact.packageName, "dist-tags", "--json"]),
