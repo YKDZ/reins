@@ -245,8 +245,10 @@ function externalServices(
                 : ["0.1.1"],
           );
         if (args[2] === "dist-tags")
-          return ok({ latest: published.has(name) ? group.version : "0.1.1" });
-        return published.has(name) ? ok(metadata(name)) : notFound();
+          return ok([
+            { latest: published.has(name) ? group.version : "0.1.1" },
+          ]);
+        return published.has(name) ? ok([metadata(name)]) : notFound();
       }
       if (args[0] === "publish") {
         assert.equal(options.env.RUNNER_ENVIRONMENT, "github-hosted");
@@ -478,11 +480,13 @@ void test("SDK 首个真实版本可接续 npm 暂存占位，但不能忽略真
           if (args[1] === "@ykdz/reins-sdk@0.0.0-stage")
             return {
               exitCode: 0,
-              stdout: JSON.stringify({
-                name: "@ykdz/reins-sdk",
-                version: "0.0.0-stage",
-                stub,
-              }),
+              stdout: JSON.stringify([
+                {
+                  name: "@ykdz/reins-sdk",
+                  version: "0.0.0-stage",
+                  stub,
+                },
+              ]),
               stderr: "",
             };
         }
