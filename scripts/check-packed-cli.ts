@@ -406,23 +406,37 @@ async function smokePackedCli(
     )}\n`,
   );
   // npm 专属的干净安装留在原入口；进程观察走共享接缝，完整日志（含安装脚本输出）留证。
-  const installLog = join(logsDirectory, "npm-install.log");
-  const install = toCommandResult(
+  let installLog = join(logsDirectory, "npm-install.log");
+  const installArgs = [
+    "install",
+    "--no-audit",
+    "--no-fund",
+    "--package-lock=false",
+    tarball,
+    sdkTarball,
+  ];
+  let install = toCommandResult(
     await runLoggedCommand({
       command: "npm",
-      args: [
-        "install",
-        "--no-audit",
-        "--no-fund",
-        "--package-lock=false",
-        tarball,
-        sdkTarball,
-      ],
+      args: [...installArgs, "--prefer-offline"],
       cwd: installDirectory,
       logPath: installLog,
       timeoutMs: 300_000,
     }),
   );
+  // 依赖升级可能超出已有元数据的版本清单；仅此失败刷新元数据，仍复用包文件缓存。
+  if (install.status !== 0 && /\bcode ETARGET\b/u.test(install.stderr)) {
+    installLog = join(logsDirectory, "npm-install-refresh.log");
+    install = toCommandResult(
+      await runLoggedCommand({
+        command: "npm",
+        args: [...installArgs, "--prefer-online"],
+        cwd: installDirectory,
+        logPath: installLog,
+        timeoutMs: 300_000,
+      }),
+    );
+  }
   requireSuccess("clean install", install, installLog);
   recorder.record("npm_install", {
     exitCode: install.status,
