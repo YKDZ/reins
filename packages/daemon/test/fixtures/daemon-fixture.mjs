@@ -4,7 +4,6 @@ const mode = process.env.REINS_FIXTURE_DAEMON_MODE ?? "invalid-envelope";
 const socketPath = process.env.REINS_SOCKET;
 const pidFile = process.env.REINS_FIXTURE_PID_FILE;
 const exitFile = process.env.REINS_FIXTURE_EXIT_FILE;
-const requestsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
 
 if (pidFile !== undefined) {
   if (mode === "cold-launch-barrier") {

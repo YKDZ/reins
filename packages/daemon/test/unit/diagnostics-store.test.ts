@@ -196,9 +196,7 @@ describe("DiagnosticsStore contract", () => {
 
     const canonicalText = (
       await Promise.all(
-        (
-          await readdir(directory)
-        )
+        (await readdir(directory))
           .filter(
             (name) => name === "active.ndjson" || name.startsWith("segment-"),
           )
