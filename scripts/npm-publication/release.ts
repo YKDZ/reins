@@ -18,6 +18,7 @@ export async function runImmutableGithubRelease(
   const run = options.run ?? runProcess;
   const environment: NodeJS.ProcessEnv = {
     PATH: options.environment.PATH,
+    HOME: options.environment.HOME,
     GH_TOKEN: options.environment.GH_TOKEN,
     GH_PROMPT_DISABLED: "1",
   };

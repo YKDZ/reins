@@ -1129,6 +1129,9 @@ test("CLI preserves delivered facts and reports daemon disconnect in structured 
   await vi.waitFor(() =>
     expect(output.join("")).toContain('"variant":"established"'),
   );
+  await vi.waitFor(() =>
+    expect(textOutput.join("")).toContain("Event window:"),
+  );
   await writeFile(gate, "release");
   await vi.waitFor(() => expect(cliFacts().length).toBeGreaterThanOrEqual(2));
   await vi.waitFor(() =>

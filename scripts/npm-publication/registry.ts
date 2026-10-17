@@ -26,6 +26,13 @@ function object(value: unknown, code: string): Record<string, unknown> {
   return value;
 }
 
+// 锁定的 npm 12 对单个版本和单个对象字段也返回单元素数组。
+function viewObject(value: unknown): Record<string, unknown> {
+  if (!Array.isArray(value) || value.length !== 1)
+    fail("registry-invalid", "npm view 必须返回唯一对象");
+  return object(value[0], "registry-invalid");
+}
+
 export async function inspectRegistryPackage(
   session: Session,
   artifact: ReleaseArtifact,
@@ -43,18 +50,40 @@ export async function inspectRegistryPackage(
         : "registry-package-missing",
       "公开包尚未初始化；SDK 首发须由维护者完成",
     );
-  const versions = readJsonResult(versionsResult, "registry-unavailable");
+  const versionList = readJsonResult(versionsResult, "registry-unavailable");
   if (
-    !Array.isArray(versions) ||
-    !versions.every((value) => typeof value === "string")
+    !Array.isArray(versionList) ||
+    !versionList.every((value) => typeof value === "string")
   )
     fail("registry-invalid", "注册表版本清单无效");
-  const tags = object(
+  let versions = versionList;
+  if (
+    artifact.packageName === "@ykdz/reins-sdk" &&
+    versions.includes("0.0.0-stage")
+  ) {
+    const staged = viewObject(
+      readJsonResult(
+        await session.npm([
+          "view",
+          `${artifact.packageName}@0.0.0-stage`,
+          "--json",
+        ]),
+        "registry-unavailable",
+      ),
+    );
+    // npm 暂存首发生成的占位不属于真实发布；同名真实版本仍计入。
+    if (
+      staged.name === artifact.packageName &&
+      staged.version === "0.0.0-stage" &&
+      staged.stub === true
+    )
+      versions = versions.filter((version) => version !== "0.0.0-stage");
+  }
+  const tags = viewObject(
     readJsonResult(
       await session.npm(["view", artifact.packageName, "dist-tags", "--json"]),
       "registry-unavailable",
     ),
-    "registry-invalid",
   );
   if (
     typeof tags.latest !== "string" ||
@@ -69,7 +98,7 @@ export async function inspectRegistryPackage(
   ]);
   const metadata = explicitNotFound(exact)
     ? undefined
-    : object(readJsonResult(exact, "registry-unavailable"), "registry-invalid");
+    : viewObject(readJsonResult(exact, "registry-unavailable"));
   if (metadata === undefined && !gt(artifact.version, tags.latest))
     fail("candidate-not-newer", "新候选版本必须高于注册表 latest");
   return { artifact, versions, latest: tags.latest, metadata };

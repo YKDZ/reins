@@ -230,8 +230,10 @@ test("local CLI projects its cwd into an already running daemon and the worker r
       }),
     ),
   );
-  expect(events).toContainEqual(
-    expect.objectContaining({ type: "turn.started", ...target }),
+  await vi.waitFor(() =>
+    expect(events).toContainEqual(
+      expect.objectContaining({ type: "turn.started", ...target }),
+    ),
   );
   expect(
     controlData(await cli(["list", "--session", ack.sessionHandle])).sessions,
