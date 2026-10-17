@@ -131,10 +131,12 @@
       "dependsOn": ["lint:fix"]
     },
     "lint": {
-      "outputs": []
+      "outputs": [],
+      "dependsOn": ["^build"]
     },
     "lint:fix": {
-      "cache": false
+      "cache": false,
+      "dependsOn": ["^build"]
     },
     "test": {
       "dependsOn": ["build"],
