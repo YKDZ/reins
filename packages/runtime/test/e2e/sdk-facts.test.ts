@@ -33,7 +33,11 @@ import {
   serializeToolKey,
   serializeTurnHandle,
   type AgentFact,
+  type AutonomousTurnCause,
+  type BackgroundActivitySource,
+  type BackgroundActivityStatus,
   type ReinsConnection,
+  type TurnOrigin,
 } from "@ykdz/reins-sdk";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -41,6 +45,9 @@ const runtimePackage = fileURLToPath(new URL("../../", import.meta.url));
 const daemonBin = join(runtimePackage, "node_modules/.bin/reins-daemon");
 const adapters = fileURLToPath(
   new URL("./fixtures/readable-events-adapters.ts", import.meta.url),
+);
+const autonomousAdapters = fileURLToPath(
+  new URL("./fixtures/autonomous-adapters.ts", import.meta.url),
 );
 const clients: ReinsConnection[] = [];
 const fixtures: Array<{ directory: string; daemon: ChildProcess }> = [];
@@ -68,7 +75,7 @@ afterEach(async () => {
   }
 });
 
-async function fixture() {
+async function fixture(adapterModule = adapters) {
   const directory = await mkdtemp(join(tmpdir(), "reins-sdk-facts-"));
   await mkdir(join(directory, "state"));
   const env = {
@@ -78,7 +85,7 @@ async function fixture() {
     REINS_CONSUMER_CONTEXT: "sdk-facts-test",
     REINS_IDLE_TIMEOUT_MS: "120000",
   };
-  const daemon = spawn(daemonBin, ["--adapters", adapters], {
+  const daemon = spawn(daemonBin, ["--adapters", adapterModule], {
     cwd: directory,
     env,
     stdio: ["ignore", "ignore", "pipe"],
@@ -123,6 +130,302 @@ async function fixture() {
 
   return { directory, env, sdk, spawnSession };
 }
+
+test("自主回合保留来源、参与前驱并让迟到后台事实进入会话历史", async () => {
+  const f = await fixture(autonomousAdapters);
+  const owner = await f.sdk();
+  const wakeGate = join(f.directory, "wake-background");
+  const turnGate = join(f.directory, "finish-autonomous-turn");
+  const startedFile = join(f.directory, "autonomous-turn-id");
+  const spawnResult = await f.spawnSession(
+    owner,
+    JSON.stringify({ wakeGate, turnGate, startedFile }),
+    "autonomous",
+  );
+  const jobSource: BackgroundActivitySource = {
+    kind: "fixture_job",
+    id: "job-before-status",
+  };
+  const activeStatus: BackgroundActivityStatus = "active";
+  const callerOrigin: TurnOrigin = { kind: "caller" };
+  const autonomousOrigin: TurnOrigin = {
+    kind: "harness",
+    harness: "codex",
+    cause: { source: jobSource },
+  };
+  const autonomousCause: AutonomousTurnCause = { source: jobSource };
+  const firstWait = await owner.wait({
+    targets: [spawnResult.turnHandle],
+    completion: "all",
+  });
+  expect(firstWait.status).toBe("satisfied");
+
+  const observer = await f.sdk();
+  const endedCallerTurn = await observer.attach(
+    { scope: "turn", turnHandle: spawnResult.turnHandle },
+    { mode: "snapshot" },
+  );
+  expect(await endedCallerTurn.done).toMatchObject({ reason: "end_turn" });
+  const sessionTarget = {
+    scope: "session" as const,
+    sessionHandle: spawnResult.sessionHandle,
+  };
+  const sessionFacts = await observer.attach(sessionTarget, {
+    mode: "snapshot",
+  });
+  if (sessionFacts.initial.mode !== "snapshot")
+    throw new Error("预期获得会话快照");
+  expect(sessionFacts.initial).toMatchObject({
+    mode: "snapshot",
+    baseline: {
+      session: {
+        state: "idle",
+        lastCompletedTurn: { origin: callerOrigin },
+      },
+    },
+  });
+  expect(sessionFacts.initial.baseline.backgroundActivities).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "background.activity",
+        source: { kind: "fixture_job", id: "job-before-status" },
+        causedBy: {
+          turnHandle: spawnResult.turnHandle,
+          toolKey: expect.any(String),
+        },
+        status: activeStatus,
+      }),
+      expect.objectContaining({
+        type: "background.activity",
+        source: { kind: "fixture_job", id: "job-after-status" },
+        causedBy: {
+          turnHandle: spawnResult.turnHandle,
+          toolKey: expect.any(String),
+        },
+        status: activeStatus,
+      }),
+    ]),
+  );
+
+  await writeFile(wakeGate, "wake");
+  await vi.waitFor(async () => {
+    expect(await readFile(startedFile, "utf8")).toContain("t");
+  });
+  const outputBeforeStatus = await sessionFacts.next();
+  expect(outputBeforeStatus.done).toBe(false);
+  if (outputBeforeStatus.done) throw new Error("会话订阅提前结束");
+  expect(outputBeforeStatus.value).toMatchObject({
+    type: "tool.completed",
+    name: "finish_background_job",
+    result: {
+      content: [{ type: "text", text: "BACKGROUND_OUTPUT_BEFORE_STATUS" }],
+      bytes: "AAEC",
+    },
+    isError: false,
+  });
+  if (outputBeforeStatus.value.type !== "tool.completed")
+    throw new Error("预期先收到后台工具正文");
+  const beforeStatusToolKey = outputBeforeStatus.value.toolKey;
+  sessionFacts.acknowledge(outputBeforeStatus.value);
+  const beforeStatus = await sessionFacts.next();
+  expect(beforeStatus.done).toBe(false);
+  if (beforeStatus.done) throw new Error("会话订阅提前结束");
+  expect(beforeStatus.value).toMatchObject({
+    type: "background.activity",
+    source: { kind: "fixture_job", id: "job-before-status" },
+    status: "completed",
+    causedBy: {
+      turnHandle: spawnResult.turnHandle,
+      toolKey: beforeStatusToolKey,
+    },
+  });
+  sessionFacts.acknowledge(beforeStatus.value);
+  const afterStatus = await sessionFacts.next();
+  expect(afterStatus.done).toBe(false);
+  if (afterStatus.done) throw new Error("会话订阅提前结束");
+  expect(afterStatus.value).toMatchObject({
+    type: "background.activity",
+    source: { kind: "fixture_job", id: "job-after-status" },
+    status: "completed",
+    causedBy: {
+      turnHandle: spawnResult.turnHandle,
+      toolKey: expect.any(String),
+    },
+  });
+  if (afterStatus.value.type !== "background.activity")
+    throw new Error("预期先收到第二项后台状态");
+  const afterStatusToolKey = afterStatus.value.causedBy?.toolKey;
+  sessionFacts.acknowledge(afterStatus.value);
+  const outputAfterStatus = await sessionFacts.next();
+  expect(outputAfterStatus.done).toBe(false);
+  if (outputAfterStatus.done) throw new Error("会话订阅提前结束");
+  expect(outputAfterStatus.value).toMatchObject({
+    type: "tool.completed",
+    toolKey: afterStatusToolKey,
+    name: "finish_background_job",
+    result: {
+      content: [{ type: "text", text: "BACKGROUND_OUTPUT_AFTER_STATUS" }],
+      bytes: "BAUG",
+    },
+    isError: false,
+  });
+  if (outputAfterStatus.value.type !== "tool.completed")
+    throw new Error("预期在后台完成状态后收到工具正文");
+  sessionFacts.acknowledge(outputAfterStatus.value);
+  const turnStart = await sessionFacts.next();
+  expect(turnStart.done).toBe(false);
+  if (turnStart.done) throw new Error("自主回合未发布");
+  expect(turnStart.value).toMatchObject({
+    type: "turn.started",
+    origin: autonomousOrigin,
+    cause: {
+      ...autonomousCause,
+      causedBy: { turnHandle: spawnResult.turnHandle },
+    },
+  });
+  sessionFacts.acknowledge(turnStart.value);
+  if (turnStart.value.type !== "turn.started")
+    throw new Error("预期收到自主回合开始事实");
+  const autonomousTurn = turnStart.value.turnHandle;
+  expect(
+    await owner.wait({
+      targets: [spawnResult.turnHandle],
+      completion: "all",
+    }),
+  ).toMatchObject({
+    status: "satisfied",
+    completed: [{ turnHandle: spawnResult.turnHandle, stopReason: "end_turn" }],
+  });
+
+  const autonomousFacts = await observer.attach(
+    { scope: "turn", turnHandle: autonomousTurn },
+    { mode: "snapshot" },
+  );
+  expect(autonomousFacts.initial).toMatchObject({
+    mode: "snapshot",
+    baseline: {
+      session: {
+        state: "busy",
+        activeTurn: autonomousTurn,
+        activeTurnOrigin: autonomousOrigin,
+      },
+      activeTurnCause: {
+        ...autonomousCause,
+        causedBy: {
+          turnHandle: spawnResult.turnHandle,
+          toolKey: expect.any(String),
+        },
+      },
+      backgroundActivities: [],
+    },
+  });
+  await expect(
+    owner.send({
+      placement: "new_turn",
+      sessionHandle: spawnResult.sessionHandle,
+      message: "caller input while autonomous turn is active",
+    }),
+  ).rejects.toMatchObject({ failure: { code: "session_busy" } });
+
+  const history = await observer.attach(sessionTarget, { mode: "history" });
+  const historyFacts = [];
+  for (;;) {
+    const item = await history.next();
+    if (item.done) break;
+    historyFacts.push(item.value);
+    history.acknowledge(item.value);
+    if (
+      item.value.type === "turn.started" &&
+      item.value.turnHandle === autonomousTurn
+    )
+      break;
+  }
+  expect(historyFacts.map((fact) => fact.type)).toContain(
+    "background.activity",
+  );
+  expect(
+    historyFacts.filter(
+      (fact) =>
+        fact.type === "turn.completed" &&
+        fact.turnHandle === spawnResult.turnHandle,
+    ),
+  ).toHaveLength(1);
+  expect(historyFacts).toContainEqual(
+    expect.objectContaining({
+      type: "tool.completed",
+      toolKey: beforeStatusToolKey,
+      result: {
+        content: [{ type: "text", text: "BACKGROUND_OUTPUT_BEFORE_STATUS" }],
+        bytes: "AAEC",
+      },
+    }),
+  );
+  expect(
+    historyFacts.filter(
+      (fact) =>
+        fact.type === "tool.completed" && fact.toolKey === beforeStatusToolKey,
+    ),
+  ).toHaveLength(1);
+  expect(
+    historyFacts.filter(
+      (fact) =>
+        fact.type === "tool.completed" &&
+        fact.name === "ordinary_tool_without_background_source",
+    ),
+  ).toHaveLength(0);
+  expect(historyFacts).toContainEqual(
+    expect.objectContaining({
+      type: "tool.completed",
+      toolKey: afterStatusToolKey,
+      result: {
+        content: [{ type: "text", text: "BACKGROUND_OUTPUT_AFTER_STATUS" }],
+        bytes: "BAUG",
+      },
+    }),
+  );
+
+  await owner.interrupt(
+    { turnHandle: autonomousTurn },
+    { operationKey: owner.prepareOperation("interrupt") },
+  );
+  const autonomousWait = await owner.wait({
+    targets: [autonomousTurn],
+    completion: "all",
+  });
+  expect(autonomousWait).toMatchObject({
+    status: "satisfied",
+    pending: [],
+    completed: [{ turnHandle: autonomousTurn, stopReason: "cancelled" }],
+  });
+  const terminal = await autonomousFacts.next();
+  expect(terminal.done).toBe(false);
+  if (terminal.done) throw new Error("Autonomous terminal was not observed");
+  expect(terminal.value).toMatchObject({
+    type: "turn.completed",
+    turnHandle: autonomousTurn,
+    stopReason: "cancelled",
+  });
+  autonomousFacts.acknowledge(terminal.value);
+  expect(await autonomousFacts.done).toMatchObject({ reason: "cancelled" });
+  const sessionTerminal = await sessionFacts.next();
+  expect(sessionTerminal.done).toBe(false);
+  if (sessionTerminal.done) throw new Error("会话订阅不能随回合订阅一起结束");
+  expect(sessionTerminal.value).toMatchObject({
+    type: "turn.completed",
+    turnHandle: autonomousTurn,
+    stopReason: "cancelled",
+  });
+  sessionFacts.acknowledge(sessionTerminal.value);
+
+  await expect(
+    owner.send({
+      placement: "new_turn",
+      sessionHandle: spawnResult.sessionHandle,
+      ifLastCompletedTurn: spawnResult.turnHandle,
+      message: "stale predecessor",
+    }),
+  ).rejects.toMatchObject({ failure: { code: "turn_precondition_failed" } });
+});
 
 test("快照初始切面包含可决议授权，确认事实应用后才推进游标", async () => {
   const f = await fixture();

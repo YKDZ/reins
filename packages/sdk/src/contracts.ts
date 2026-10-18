@@ -91,6 +91,29 @@ export type MessageContentPart =
 export type MessageContent = string | MessageContentPart[];
 
 export type HarnessId = "codex" | "qoder";
+export type BackgroundActivitySource = { kind: string; id: string };
+export type BackgroundActivityStatus =
+  | "active"
+  | "completed"
+  | "failed"
+  | "cancelled";
+export type BackgroundActivityCause = {
+  turnHandle: TurnHandle;
+  toolKey?: ToolKey | undefined;
+};
+export type AutonomousTurnCause =
+  | {
+      source: BackgroundActivitySource;
+      causedBy?: BackgroundActivityCause | undefined;
+    }
+  | { source?: undefined; causedBy: BackgroundActivityCause };
+export type TurnOrigin =
+  | { kind: "caller" }
+  | {
+      kind: "harness";
+      harness: HarnessId;
+      cause?: { source: BackgroundActivitySource } | undefined;
+    };
 
 export type SpawnInput = {
   sessionLabel?: string;
@@ -230,6 +253,7 @@ export type WaitInput = {
 };
 export type CompletedTurn = {
   turnHandle: TurnHandle;
+  origin?: TurnOrigin;
   finalReply: string | null;
   usage?: Record<string, unknown>;
   diagnosticId?: DiagnosticId;
@@ -336,11 +360,13 @@ export type AgentSubscriptionInitial =
     };
 export type AgentSubscriptionBaseline = {
   session: SessionInfo;
+  activeTurnCause?: AutonomousTurnCause;
   confirmedTerminals: Extract<
     AgentFact,
     { type: "turn.completed" | "session.killed" }
   >[];
   pendingPermissions: Extract<AgentFact, { type: "permission.requested" }>[];
+  backgroundActivities: Extract<AgentFact, { type: "background.activity" }>[];
 };
 export type AgentSubscriptionEnd = {
   target: AgentTarget;
@@ -792,7 +818,17 @@ export type AgentFact =
       sessionLabel?: string;
       spawnedAt: string;
     })
-  | (TurnFactBase & { type: "turn.started" })
+  | (TurnFactBase & {
+      type: "turn.started";
+      origin?: TurnOrigin;
+      cause?: AutonomousTurnCause;
+    })
+  | (FactBase & {
+      type: "background.activity";
+      source: BackgroundActivitySource;
+      status: BackgroundActivityStatus;
+      causedBy?: BackgroundActivityCause;
+    })
   | (TurnFactBase & {
       type: "text.delta";
       messageKey: MessageKey;
@@ -865,6 +901,7 @@ export type SessionFilter = {
 };
 export type LastCompletedTurn = {
   turnHandle: TurnHandle;
+  origin?: TurnOrigin;
   stopReason: StopReason;
 };
 type SessionInfoFields = {
@@ -881,6 +918,7 @@ export type SessionInfo =
   | (SessionInfoFields & {
       state: "busy";
       activeTurn: TurnHandle;
+      activeTurnOrigin?: TurnOrigin;
       lastCompletedTurn?: LastCompletedTurn;
     })
   | (SessionInfoFields & {
@@ -895,6 +933,7 @@ export type SessionInfo =
       state: "unreachable";
       lastKnownState: "busy";
       lastKnownActiveTurn: TurnHandle;
+      activeTurnOrigin?: TurnOrigin;
       lastCompletedTurn?: LastCompletedTurn;
       unreachableReason:
         | "previous_generation"
@@ -947,6 +986,7 @@ export type OperationEffect =
 type ControlEventType =
   | "session.created"
   | "turn.started"
+  | "background.activity"
   | "text.delta"
   | "message"
   | "tool.requested"

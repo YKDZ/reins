@@ -27,6 +27,7 @@ import type {
   ToolCallId,
   WorkerDriver,
   AdapterDriverFactory,
+  AutonomousTurnCause,
   WorkerSpec,
 } from "@reins/protocol";
 import {
@@ -378,6 +379,7 @@ function createFakeHarness(options: {
   calls: FakeCalls;
   controls: {
     completeTurn(stopReason?: StopReason, finalReply?: string | null): void;
+    beginAutonomousTurn(cause?: AutonomousTurnCause): Promise<TurnId>;
     emitWorkerMessage(content: string): void;
     emitText(messageId: MessageId, delta: string): void;
     emitToolRequest(toolCallId: ToolCallId, name: string): void;
@@ -394,6 +396,9 @@ function createFakeHarness(options: {
     terminated: [],
   };
   let emitEvent: ((event: DomainEvent) => void) | null = null;
+  let beginAutonomousTurn:
+    | ((cause?: AutonomousTurnCause) => Promise<TurnId>)
+    | null = null;
   let current: { sessionId: SessionId; turnId: TurnId } | null = null;
   let permissionSeq = 0;
   let messageSeq = 0;
@@ -436,9 +441,10 @@ function createFakeHarness(options: {
   };
 
   const adapter: HarnessAdapter = {
-    driverFactory: (({ emit }) => {
+    driverFactory: ((context) => {
       calls.factoryCalls += 1;
-      emitEvent = emit;
+      emitEvent = context.emit;
+      beginAutonomousTurn = context.beginAutonomousTurn ?? null;
       return driver;
     }) satisfies AdapterDriverFactory,
     async modelCatalog() {
@@ -453,6 +459,11 @@ function createFakeHarness(options: {
     adapter,
     calls,
     controls: {
+      async beginAutonomousTurn(cause) {
+        if (beginAutonomousTurn === null)
+          throw new Error("worker 尚未注册自主回合入口");
+        return beginAutonomousTurn(cause);
+      },
       completeTurn(
         stopReason: StopReason = "end_turn",
         finalReply: string | null = "done",
@@ -1048,6 +1059,7 @@ describe("daemon 协议面（缝 C）", () => {
         {
           sessionId,
           turnId: "t1",
+          origin: { kind: "caller" },
           stopReason: "end_turn",
           finalReply: "ok",
           usage: undefined,
@@ -1574,7 +1586,13 @@ describe("daemon 协议面（缝 C）", () => {
       status: "satisfied",
       pending: [],
       completed: [
-        { sessionId, turnId: "t1", stopReason: "end_turn", finalReply: "done" },
+        {
+          sessionId,
+          turnId: "t1",
+          origin: { kind: "caller" },
+          stopReason: "end_turn",
+          finalReply: "done",
+        },
       ],
     });
 
@@ -3504,6 +3522,166 @@ describe("daemon 空闲退出", () => {
     await expect(running).rejects.toThrow();
   });
 
+  test("自主回合提交失败会停止worker并结束既有观察", async () => {
+    const backingStore = createInMemoryControlStore();
+    const controlStore: ControlStore = {
+      ...backingStore,
+      recordEvent(event, session) {
+        if (event.type === "turn.started" && event.origin?.kind === "harness")
+          throw new Error("AUTONOMOUS_TURN_EVENT_IO");
+        return backingStore.recordEvent(event, session);
+      },
+    };
+    const codex = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", codex.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "autonomous-commit-failure",
+        message: "创建可观察会话",
+      }),
+    ) as { sessionId: SessionId; turnId: TurnId };
+    codex.controls.completeTurn();
+    const observations = collectNotifications(connection);
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: spawned.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({ initial: { mode: "snapshot" } });
+
+    await expect(
+      codex.controls.beginAutonomousTurn({
+        source: { kind: "fixture_job", id: "job-uncommitted" },
+        causedBy: { turnId: spawned.turnId },
+      }),
+    ).rejects.toThrow("AUTONOMOUS_TURN_EVENT_IO");
+    await waitFor(() => codex.calls.terminated.includes(spawned.sessionId));
+    await vi.waitFor(() =>
+      expect(observations.ended).toContainEqual({
+        sessionId: spawned.sessionId,
+        reason: "control_unavailable",
+      }),
+    );
+
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(
+          (entry) =>
+            entry.event.type === "turn.started" &&
+            entry.event.origin?.kind === "harness",
+        ),
+    ).toBe(false);
+    expect(observations.events).not.toContainEqual(
+      expect.objectContaining({
+        type: "turn.started",
+        sessionId: spawned.sessionId,
+        origin: expect.objectContaining({ kind: "harness" }),
+      }),
+    );
+    expect(codex.calls.terminated).toEqual([spawned.sessionId]);
+
+    connection.close();
+    await expect(daemon.stop()).rejects.toThrow();
+    await expect(running).rejects.toThrow();
+  });
+
+  test("caller新回合进入原生接受阶段后拒绝竞争的自主回合", async () => {
+    let releaseDelivery!: () => void;
+    const deliveryGate = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      deliver: async () => deliveryGate,
+    });
+    const backingStore = createInMemoryControlStore();
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore: backingStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    void daemon.start();
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "autonomous-caller-race",
+        message: "初始回合",
+      }),
+    ) as { sessionId: SessionId; turnId: TurnId };
+    fake.controls.completeTurn();
+
+    const sending = requester("send", {
+      placement: "new_turn",
+      sessionId: spawned.sessionId,
+      message: "caller先进入原生接受",
+    });
+    let autonomousFailure: unknown;
+    try {
+      await waitFor(() => fake.calls.delivered.length === 1);
+      await fake.controls.beginAutonomousTurn({
+        source: { kind: "fixture_job", id: "caller-race" },
+        causedBy: { turnId: spawned.turnId },
+      });
+    } catch (error) {
+      autonomousFailure = error;
+    } finally {
+      releaseDelivery();
+    }
+    expect(autonomousFailure).toMatchObject({ code: "session_busy" });
+    expect(resultOf(await sending)).toMatchObject({
+      deliveryPoint: "new_turn",
+    });
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .filter(
+          (entry) =>
+            entry.event.type === "turn.started" &&
+            entry.event.origin?.kind === "caller",
+        ),
+    ).toHaveLength(2);
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(
+          (entry) =>
+            entry.event.type === "turn.started" &&
+            entry.event.origin?.kind === "harness",
+        ),
+    ).toBe(false);
+    client.close();
+  });
+
   test("自有资源释放失败且故障记录未落盘时查询保留已确认关闭效果", async () => {
     const backingStore = createInMemoryControlStore();
     let queryUnavailable = false;
@@ -5378,6 +5556,86 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
   expect(fake.calls.terminated).toEqual([sessionId]);
   a.close();
   b.close();
+});
+
+test("自主回合入口在writer lease丢失后不提交并停止原worker", async () => {
+  let writerHeld = true;
+  let leaseChecks = 0;
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
+  });
+  const server = createInMemoryTransportServer<ProtocolMessage>();
+  const daemon = createDaemonForTest({
+    transport: server,
+    adapters: new Map([["codex", fake.adapter]]),
+    identity: testIdentity,
+    diagnostics: testDiagnostics,
+    runtimeScopeId: testRuntimeScopeId,
+    idleTimeoutMs: 60_000,
+    assertWriterLease: async () => {
+      leaseChecks += 1;
+      if (!writerHeld) throw new Error("writer lease lost");
+    },
+  });
+  const running = daemon.start();
+  void running.catch(() => undefined);
+  const connection = server.connect();
+  const requester = makeRequester(connection);
+  const spawned = resultOf(
+    await requester("spawn", {
+      harness: "codex",
+      sessionLabel: "autonomous-writer-lease-loss",
+      message: "create a session before lease loss",
+      cwd: "/tmp",
+    }),
+  ) as { sessionId: SessionId; turnId: TurnId };
+  fake.controls.completeTurn();
+  const observations = collectNotifications(connection);
+  expect(
+    resultOf(
+      await requester("attach", {
+        scope: "session",
+        sessionId: spawned.sessionId,
+        start: { mode: "snapshot" },
+      }),
+    ),
+  ).toMatchObject({ initial: { mode: "snapshot" } });
+
+  writerHeld = false;
+  const checksBeforeAutonomousStart = leaseChecks;
+  await expect(
+    fake.controls.beginAutonomousTurn({
+      source: { kind: "fixture_job", id: "job-after-lease-loss" },
+      causedBy: { turnId: spawned.turnId },
+    }),
+  ).rejects.toMatchObject({
+    code: "internal_error",
+    cause: { kind: "closed" },
+  });
+  expect(leaseChecks).toBe(checksBeforeAutonomousStart + 1);
+  await waitFor(() => fake.calls.terminated.includes(spawned.sessionId));
+  await vi.waitFor(() =>
+    expect(observations.ended).toContainEqual({
+      sessionId: spawned.sessionId,
+      reason: "control_unavailable",
+    }),
+  );
+  expect(fake.calls.terminated).toEqual([spawned.sessionId]);
+  expect(observations.events).not.toContainEqual(
+    expect.objectContaining({
+      type: "turn.started",
+      sessionId: spawned.sessionId,
+      origin: expect.objectContaining({ kind: "harness" }),
+    }),
+  );
+  expect(
+    resultOf(await requester("list", { sessionId: spawned.sessionId })),
+  ).toMatchObject([{ sessionId: spawned.sessionId, state: "unreachable" }]);
+
+  connection.close();
+  await daemon.stop().catch(() => undefined);
+  await running.catch(() => undefined);
 });
 
 test("writer lease 在模型目录等待期间丢失会阻止 native spawn", async () => {

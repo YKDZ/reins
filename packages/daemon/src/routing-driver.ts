@@ -2,6 +2,7 @@ import {
   isDriverFailure,
   makeErrorCause,
   type MachineError,
+  type AutonomousTurnCause,
   type DiagnosticInput,
   type DriverDiagnosticFact,
   type HarnessId,
@@ -20,6 +21,13 @@ import type { AdapterRegistry } from "./registry.ts";
 export function createRoutingDriverFactory(
   adapters: AdapterRegistry,
   diagnostics: Pick<DiagnosticsRuntime, "record" | "query">,
+  beginAutonomousTurn: (input: {
+    readonly sessionId: SessionId;
+    readonly harness: HarnessId;
+    readonly cause?: AutonomousTurnCause;
+  }) => Promise<TurnId> = async () => {
+    throw new Error("Autonomous turn control is unavailable");
+  },
 ): WorkerDriverFactory {
   return (emit) => {
     const drivers = new Map<SessionId, WorkerDriver>();
@@ -98,6 +106,12 @@ export function createRoutingDriverFactory(
         }
         const driver = adapter.driverFactory({
           emit,
+          beginAutonomousTurn: (cause) =>
+            beginAutonomousTurn({
+              sessionId: spec.sessionId,
+              harness: spec.harness,
+              ...(cause === undefined ? {} : { cause }),
+            }),
           diagnostics: (input) => recordAdapterFact(spec.harness, input),
         });
         // 先登记清理路由，再等待原生接受。若接受未知或启动后续失败，
