@@ -1,5 +1,3 @@
-import { createHash } from "node:crypto";
-
 import * as v from "valibot";
 
 // —— 会话与状态 ——
@@ -7,29 +5,12 @@ import * as v from "valibot";
 const identifier = <T extends string>(name: T, pattern: RegExp) =>
   v.pipe(v.string(), v.regex(pattern), v.brand<string, T>(name));
 
-export const sessionNameSchema = v.pipe(
-  v.string(),
-  v.maxLength(32),
-  v.regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/),
-  v.check(
-    (value) =>
-      !["daemon", "core", "adapter", "harness", "root"].includes(value),
-  ),
-  v.brand<string, "SessionName">("SessionName"),
-);
-export type SessionName = v.InferOutput<typeof sessionNameSchema>;
+const opaqueIdentity = <T extends string>(name: T) =>
+  v.pipe(v.string(), v.minLength(1), v.brand<string, T>(name));
 
-export const sessionIdSchema = v.pipe(
-  v.string(),
-  v.regex(/^[a-z][a-z0-9]*(?:-[a-z0-9]+)*@g[a-z0-9]+$/),
-  v.check((value) => {
-    const [name] = value.split("@", 1);
-    return name !== undefined && v.safeParse(sessionNameSchema, name).success;
-  }),
-  v.brand<string, "SessionId">("SessionId"),
-);
+export const sessionIdSchema = opaqueIdentity("SessionId");
 export type SessionId = v.InferOutput<typeof sessionIdSchema>;
-export const turnIdSchema = identifier("TurnId", /^[a-z0-9][a-z0-9-]*$/);
+export const turnIdSchema = opaqueIdentity("TurnId");
 export type TurnId = v.InferOutput<typeof turnIdSchema>;
 export const sessionHandleSchema = sessionIdSchema;
 export type SessionHandle = SessionId;
@@ -39,41 +20,55 @@ export const turnTargetSchema = v.strictObject({
 });
 export type TurnTarget = v.InferOutput<typeof turnTargetSchema>;
 
-function turnHandleChecksum(value: string): string {
-  // 校验覆盖完整父子地址，用于发现抄写错配；它不是所有权或授权凭据。
-  return createHash("sha256").update(value).digest("hex").slice(0, 8);
+function encodeIdentity<T>(
+  prefix: string,
+  schema: v.GenericSchema<T>,
+  value: unknown,
+): string {
+  const parsed = v.parse(schema, value);
+  return prefix + Buffer.from(JSON.stringify(parsed)).toString("base64url");
+}
+
+function decodeIdentity<T>(
+  prefix: string,
+  schema: v.GenericSchema<T>,
+  value: string,
+): T {
+  if (!value.startsWith(prefix)) throw new Error("Invalid serialized identity");
+  const encoded = value.slice(prefix.length);
+  if (!/^[A-Za-z0-9_-]+$/u.test(encoded))
+    throw new Error("Invalid serialized identity");
+  const decoded = Buffer.from(encoded, "base64url").toString("utf8");
+  if (Buffer.from(decoded, "utf8").toString("base64url") !== encoded)
+    throw new Error("Invalid serialized identity");
+  return v.parse(schema, JSON.parse(decoded));
 }
 
 export const turnHandleSchema = v.pipe(
   v.string(),
   v.check((value) => {
-    const match = /^([^/]+)\/([a-z0-9-]+)\.([a-f0-9]{8})$/u.exec(value);
-    return (
-      match !== null &&
-      v.safeParse(sessionIdSchema, match[1]).success &&
-      v.safeParse(turnIdSchema, match[2]).success &&
-      turnHandleChecksum(`${match[1]}/${match[2]}`) === match[3]
-    );
+    try {
+      decodeIdentity("turn1_", turnTargetSchema, value);
+      return true;
+    } catch {
+      return false;
+    }
   }),
   v.brand<string, "TurnHandle">("TurnHandle"),
 );
 export type TurnHandle = v.InferOutput<typeof turnHandleSchema>;
 
 export function encodeTurnHandle(target: TurnTarget): TurnHandle {
-  const parsed = v.parse(turnTargetSchema, target);
-  const value = `${parsed.sessionId}/${parsed.turnId}`;
-  return v.parse(turnHandleSchema, `${value}.${turnHandleChecksum(value)}`);
+  return v.parse(
+    turnHandleSchema,
+    encodeIdentity("turn1_", turnTargetSchema, target),
+  );
 }
 
 export function decodeTurnHandle(handle: string): TurnTarget {
-  const value = v.parse(turnHandleSchema, handle);
-  const [sessionId, suffix] = value.split("/");
-  return v.parse(turnTargetSchema, { sessionId, turnId: suffix!.slice(0, -9) });
+  return decodeIdentity("turn1_", turnTargetSchema, handle);
 }
-export const permissionIdSchema = identifier(
-  "PermissionId",
-  /^[a-z0-9][a-z0-9-]*$/,
-);
+export const permissionIdSchema = opaqueIdentity("PermissionId");
 export type PermissionId = v.InferOutput<typeof permissionIdSchema>;
 export const permissionTargetSchema = v.strictObject({
   ...turnTargetSchema.entries,
@@ -81,19 +76,10 @@ export const permissionTargetSchema = v.strictObject({
 });
 export type PermissionTarget = v.InferOutput<typeof permissionTargetSchema>;
 export function encodePermissionHandle(target: PermissionTarget): string {
-  const body = Buffer.from(
-    JSON.stringify(v.parse(permissionTargetSchema, target)),
-  ).toString("base64url");
-  return "permission1_" + body + "." + turnHandleChecksum(body);
+  return encodeIdentity("permission1_", permissionTargetSchema, target);
 }
 export function decodePermissionHandle(handle: string): PermissionTarget {
-  const match = /^permission1_([A-Za-z0-9_-]+)\.([a-f0-9]{8})$/u.exec(handle);
-  if (match === null || turnHandleChecksum(match[1]!) !== match[2])
-    throw new Error("Invalid PermissionHandle");
-  return v.parse(
-    permissionTargetSchema,
-    JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")),
-  );
+  return decodeIdentity("permission1_", permissionTargetSchema, handle);
 }
 export const permissionHandleSchema = v.pipe(
   v.string(),
@@ -108,12 +94,9 @@ export const permissionHandleSchema = v.pipe(
   v.brand("PermissionHandle"),
 );
 export type PermissionHandle = v.InferOutput<typeof permissionHandleSchema>;
-export const messageIdSchema = identifier("MessageId", /^[a-z0-9][a-z0-9-]*$/);
+export const messageIdSchema = opaqueIdentity("MessageId");
 export type MessageId = v.InferOutput<typeof messageIdSchema>;
-export const toolCallIdSchema = identifier(
-  "ToolCallId",
-  /^[a-z0-9][a-z0-9-]*$/,
-);
+export const toolCallIdSchema = opaqueIdentity("ToolCallId");
 export type ToolCallId = v.InferOutput<typeof toolCallIdSchema>;
 export const commandIdSchema = identifier(
   "CommandId",
@@ -152,6 +135,66 @@ export const daemonGenerationSchema = identifier(
 );
 export type DaemonGeneration = v.InferOutput<typeof daemonGenerationSchema>;
 
+export const messageIdentitySchema = v.strictObject({
+  generation: daemonGenerationSchema,
+  sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
+  messageId: messageIdSchema,
+});
+export type MessageIdentity = v.InferOutput<typeof messageIdentitySchema>;
+export const messageKeySchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    try {
+      decodeIdentity("message1_", messageIdentitySchema, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
+  v.brand("MessageKey"),
+);
+export type MessageKey = v.InferOutput<typeof messageKeySchema>;
+export function encodeMessageKey(identity: MessageIdentity): MessageKey {
+  return v.parse(
+    messageKeySchema,
+    encodeIdentity("message1_", messageIdentitySchema, identity),
+  );
+}
+export function decodeMessageKey(value: string): MessageIdentity {
+  return decodeIdentity("message1_", messageIdentitySchema, value);
+}
+
+export const toolIdentitySchema = v.strictObject({
+  generation: daemonGenerationSchema,
+  sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
+  toolCallId: toolCallIdSchema,
+});
+export type ToolIdentity = v.InferOutput<typeof toolIdentitySchema>;
+export const toolKeySchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    try {
+      decodeIdentity("tool1_", toolIdentitySchema, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
+  v.brand("ToolKey"),
+);
+export type ToolKey = v.InferOutput<typeof toolKeySchema>;
+export function encodeToolKey(identity: ToolIdentity): ToolKey {
+  return v.parse(
+    toolKeySchema,
+    encodeIdentity("tool1_", toolIdentitySchema, identity),
+  );
+}
+export function decodeToolKey(value: string): ToolIdentity {
+  return decodeIdentity("tool1_", toolIdentitySchema, value);
+}
+
 // 消费者上下文是 initialize 必填的内部路由事实；
 // 不作为 agent 参数、成功输出或第四类句柄（ADR-0037）。
 export const consumerContextSchema = v.pipe(
@@ -162,50 +205,13 @@ export const consumerContextSchema = v.pipe(
 );
 export type ConsumerContext = v.InferOutput<typeof consumerContextSchema>;
 
-const checksumAlphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
-const damm36Packed =
-  "AAIDAQQGBwUICgsJDA4PDRASExEUFhcVGBobGRweHx0gIiMhAgABAwYEBQcKCAkLDgwNDxIQERMWFBUXGhgZGx4cHR8iICEjAwEAAgcFBAYLCQgKDw0MDhMREBIXFRQWGxkYGh8dHB4jISAiAQMCAAUHBgQJCwoIDQ8ODBETEhAVFxYUGRsaGB0fHhwhIyIgICIjIQACAwEEBgcFCAoLCQwODw0QEhMRFBYXFRgaGxkcHh8dIiAhIwIAAQMGBAUHCggJCw4MDQ8SEBETFhQVFxoYGRseHB0fIyEgIgMBAAIHBQQGCwkICg8NDA4TERASFxUUFhsZGBofHRweISMiIAEDAgAFBwYECQsKCA0PDgwRExIQFRcWFBkbGhgdHx4cHB4fHSAiIyEAAgMBBAYHBQgKCwkMDg8NEBITERQWFxUYGhsZHhwdHyIgISMCAAEDBgQFBwoICQsODA0PEhARExYUFRcaGBkbHx0cHiMhICIDAQACBwUEBgsJCAoPDQwOExEQEhcVFBYbGRgaHR8eHCEjIiABAwIABQcGBAkLCggNDw4MERMSEBUXFhQZGxoYGBobGRweHx0gIiMhAAIDAQQGBwUICgsJDA4PDRASExEUFhcVGhgZGx4cHR8iICEjAgABAwYEBQcKCAkLDgwNDxIQERMWFBUXGxkYGh8dHB4jISAiAwEAAgcFBAYLCQgKDw0MDhMREBIXFRQWGRsaGB0fHhwhIyIgAQMCAAUHBgQJCwoIDQ8ODBETEhAVFxYUFBYXFRgaGxkcHh8dICIjIQACAwEEBgcFCAoLCQwODw0QEhMRFhQVFxoYGRseHB0fIiAhIwIAAQMGBAUHCggJCw4MDQ8SEBETFxUUFhsZGBofHRweIyEgIgMBAAIHBQQGCwkICg8NDA4TERASFRcWFBkbGhgdHx4cISMiIAEDAgAFBwYECQsKCA0PDgwRExIQEBITERQWFxUYGhsZHB4fHSAiIyEAAgMBBAYHBQgKCwkMDg8NEhARExYUFRcaGBkbHhwdHyIgISMCAAEDBgQFBwoICQsODA0PExEQEhcVFBYbGRgaHx0cHiMhICIDAQACBwUEBgsJCAoPDQwOERMSEBUXFhQZGxoYHR8eHCEjIiABAwIABQcGBAkLCggNDw4MDA4PDRASExEUFhcVGBobGRweHx0gIiMhAAIDAQQGBwUICgsJDgwNDxIQERMWFBUXGhgZGx4cHR8iICEjAgABAwYEBQcKCAkLDw0MDhMREBIXFRQWGxkYGh8dHB4jISAiAwEAAgcFBAYLCQgKDQ8ODBETEhAVFxYUGRsaGB0fHhwhIyIgAQMCAAUHBgQJCwoICAoLCQwODw0QEhMRFBYXFRgaGxkcHh8dICIjIQACAwEEBgcFCggJCw4MDQ8SEBETFhQVFxoYGRseHB0fIiAhIwIAAQMGBAUHCwkICg8NDA4TERASFxUUFhsZGBofHRweIyEgIgMBAAIHBQQGCQsKCA0PDgwRExIQFRcWFBkbGhgdHx4cISMiIAEDAgAFBwYEBAYHBQgKCwkMDg8NEBITERQWFxUYGhsZHB4fHSAiIyEAAgMBBgQFBwoICQsODA0PEhARExYUFRcaGBkbHhwdHyIgISMCAAEDBwUEBgsJCAoPDQwOExEQEhcVFBYbGRgaHx0cHiMhICIDAQACBQcGBAkLCggNDw4MERMSEBUXFhQZGxoYHR8eHCEjIiABAwIA";
-const damm36 = Uint8Array.from(Buffer.from(damm36Packed, "base64"));
-function dammState(value: string): number {
-  let state = 0;
-  for (const character of value) {
-    const digit = checksumAlphabet.indexOf(character);
-    if (digit === -1) throw new Error("Invalid DiagnosticId character");
-    state = damm36[state * 36 + digit]!;
-  }
-  return state;
-}
-function diagnosticChecksum(generation: string, counter: string): string {
-  // prefix-free 的一元长度编码保留 generation/counter 边界；移动 `-` 时拼接数据虽不变，前缀仍会变化。
-  const boundaryPrefix = "1".repeat(generation.length) + "0";
-  return checksumAlphabet[dammState(boundaryPrefix + generation + counter)]!;
-}
 export function makeDiagnosticId(
   generation: string,
   counter: string,
 ): DiagnosticId {
-  const component = v.pipe(v.string(), v.regex(/^[a-z0-9]+$/));
-  if (
-    !v.safeParse(component, generation).success ||
-    !v.safeParse(component, counter).success
-  )
-    throw new Error("Invalid DiagnosticId component");
-  return v.parse(
-    diagnosticIdSchema,
-    "d" + generation + "-" + counter + diagnosticChecksum(generation, counter),
-  );
+  return v.parse(diagnosticIdSchema, `diagnostic:${generation}:${counter}`);
 }
-export const diagnosticIdSchema = v.pipe(
-  v.string(),
-  v.regex(/^d[a-z0-9]+-[a-z0-9]+$/),
-  v.check((value) => {
-    const match = /^d([a-z0-9]+)-([a-z0-9]+)([a-z0-9])$/.exec(value);
-    return (
-      match !== null && diagnosticChecksum(match[1]!, match[2]!) === match[3]
-    );
-  }),
-  v.brand<string, "DiagnosticId">("DiagnosticId"),
-);
+export const diagnosticIdSchema = opaqueIdentity("DiagnosticId");
 export type DiagnosticId = v.InferOutput<typeof diagnosticIdSchema>;
 
 export function isDiagnosticId(value: unknown): value is DiagnosticId {
@@ -311,7 +317,7 @@ export function isPermissionResolutionAllowed(
 // —— 七动作的参数与结果 ——
 
 export const spawnParamsSchema = v.strictObject({
-  sessionName: sessionNameSchema,
+  sessionLabel: v.optional(v.string()),
   harness: v.pipe(v.string(), v.minLength(1)),
   message: v.pipe(v.string(), v.minLength(1)),
   agent: v.optional(v.string()),
@@ -469,7 +475,7 @@ export const listFilterSchema = v.strictObject({
   sessionId: v.optional(sessionIdSchema),
   harness: v.optional(v.string()),
   state: v.optional(sessionStateSchema),
-  sessionName: v.optional(sessionNameSchema),
+  sessionLabel: v.optional(v.string()),
   model: v.optional(v.string()),
 });
 export type ListFilter = v.InferOutput<typeof listFilterSchema>;
@@ -487,22 +493,13 @@ export const resumePositionSchema = v.strictObject({
 });
 export type ResumePosition = v.InferOutput<typeof resumePositionSchema>;
 export function encodeResumeCursor(position: ResumePosition): ResumeCursor {
-  const body = Buffer.from(
-    JSON.stringify(v.parse(resumePositionSchema, position)),
-  ).toString("base64url");
   return v.parse(
     resumeCursorSchema,
-    "resume1_" + body + "." + turnHandleChecksum(body),
+    encodeIdentity("resume1_", resumePositionSchema, position),
   );
 }
 export function decodeResumeCursor(cursor: string): ResumePosition {
-  const match = /^resume1_([A-Za-z0-9_-]+)\.([a-f0-9]{8})$/u.exec(cursor);
-  if (match === null || turnHandleChecksum(match[1]!) !== match[2])
-    throw new Error("Invalid ResumeCursor");
-  return v.parse(
-    resumePositionSchema,
-    JSON.parse(Buffer.from(match[1]!, "base64url").toString("utf8")),
-  );
+  return decodeIdentity("resume1_", resumePositionSchema, cursor);
 }
 export const resumeCursorSchema = v.pipe(
   v.string(),
@@ -566,7 +563,7 @@ const completedTurnSummarySchema = v.strictObject({
 });
 const sessionInfoFields = {
   sessionId: sessionIdSchema,
-  sessionName: sessionNameSchema,
+  sessionLabel: v.optional(v.string()),
   harness: v.string(),
   model: v.nullable(v.string()),
   reasoning: v.nullable(v.string()),
@@ -600,7 +597,7 @@ export const domainEventSchema = v.union([
     model: v.nullable(v.string()),
     reasoning: v.nullable(v.string()),
     cwd: v.string(),
-    sessionName: sessionNameSchema,
+    sessionLabel: v.optional(v.string()),
     spawnedAt: v.string(),
   }),
   v.strictObject({
@@ -2102,7 +2099,6 @@ export const errorCodeSchema = v.union([
   v.literal("diagnostic_not_found"),
   v.literal("diagnostics_unavailable"),
   v.literal("diagnostics_store_corrupt"),
-  v.literal("session_name_conflict"),
   v.literal("protocol_version_mismatch"),
   v.literal("consumer_context_required"),
   v.literal("command_id_conflict"),
@@ -2242,10 +2238,6 @@ export const machineErrorSchema = v.union([
     diagnosticId: diagnosticIdSchema,
   }),
   v.strictObject({
-    code: v.literal("session_name_conflict"),
-    sessionName: sessionNameSchema,
-  }),
-  v.strictObject({
     code: v.literal("unknown_harness"),
     harness: v.pipe(v.string(), v.minLength(1)),
     availableHarnesses: v.array(v.pipe(v.string(), v.minLength(1))),
@@ -2322,7 +2314,6 @@ export type WorkerSpec = {
   readonly authorizationMode?: AuthorizationMode;
   readonly sandbox?: string;
   readonly captureHarnessStderr?: boolean;
-  readonly sessionName: SessionName;
 };
 
 export interface WorkerDriver {

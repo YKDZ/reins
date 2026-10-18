@@ -30,7 +30,7 @@ import {
   makeDiagnosticId,
   REINS_PROTOCOL_MAJOR_VERSION,
   sessionIdSchema,
-  sessionNameSchema,
+  sessionLabelSchema,
 } from "@reins/protocol";
 import {
   createInMemoryTransportServer,
@@ -73,8 +73,8 @@ async function waitFor(
 const daemons: Daemon[] = [];
 
 const testIdentity = {
-  session: (sessionName: string) =>
-    v.parse(sessionIdSchema, `${sessionName}@gdaemontest`),
+  session: (sessionLabel: string) =>
+    v.parse(sessionIdSchema, `${sessionLabel}@gdaemontest`),
 };
 
 const testDiagnostics: DiagnosticsRuntime = {
@@ -454,7 +454,7 @@ describe("daemon 公共接口", () => {
     protocolServer.forwardEvent({
       type: "session.created",
       sessionId,
-      sessionName: v.parse(sessionNameSchema, "public-interface"),
+      sessionLabel: v.parse(sessionLabelSchema, "public-interface"),
       harness: "fake",
       model: null,
       reasoning: null,
@@ -595,7 +595,7 @@ describe("daemon 协议面（缝 C）", () => {
       requestId: "raw1",
       method: "spawn",
       params: {
-        sessionName: "reviewer",
+        sessionLabel: "reviewer",
         harness: "fake",
         message: "hello",
         cwd: "/tmp",
@@ -668,7 +668,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
 
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -707,7 +707,7 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "nope",
       message: "x",
       captureHarnessStderr: true,
@@ -734,7 +734,7 @@ describe("daemon 协议面（缝 C）", () => {
     const collector = collectNotifications(client);
 
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "capture-test",
+      sessionLabel: "capture-test",
       harness: "fake",
       message: "hello",
       captureHarnessStderr: true,
@@ -758,7 +758,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
 
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "capture-supported",
+      sessionLabel: "capture-supported",
       harness: "fake",
       message: "hello",
       captureHarnessStderr: true,
@@ -812,7 +812,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -848,7 +848,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -877,7 +877,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -909,7 +909,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requesterB = makeRequester(clientB);
 
     const spawned = await requesterA("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -968,7 +968,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -1003,7 +1003,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -1055,7 +1055,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const collector = collectNotifications(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -1107,7 +1107,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-target",
+      sessionLabel: "attach-target",
       harness: "fake",
       message: "first",
     });
@@ -1152,7 +1152,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-gap",
+      sessionLabel: "attach-gap",
       harness: "fake",
       message: "first",
     });
@@ -1203,7 +1203,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-slice",
+      sessionLabel: "coherent-slice",
       harness: "fake",
       message: "first",
     });
@@ -1259,7 +1259,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-terminal",
+      sessionLabel: "coherent-terminal",
       harness: "fake",
       message: "first",
     });
@@ -1294,7 +1294,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-zero",
+      sessionLabel: "coherent-zero",
       harness: "fake",
       message: "first",
     });
@@ -1338,7 +1338,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-limit",
+      sessionLabel: "coherent-limit",
       harness: "fake",
       message: "first",
     });
@@ -1390,7 +1390,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-boundary",
+      sessionLabel: "coherent-boundary",
       harness: "fake",
       message: "first",
     });
@@ -1432,7 +1432,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-reentrant",
+      sessionLabel: "attach-reentrant",
       harness: "fake",
       message: "first",
     });
@@ -1470,7 +1470,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-hook",
+      sessionLabel: "attach-hook",
       harness: "fake",
       message: "first",
     });
@@ -1510,7 +1510,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-idle",
+      sessionLabel: "attach-idle",
       harness: "fake",
       message: "first",
     });
@@ -1541,7 +1541,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-reason",
+      sessionLabel: "attach-reason",
       harness: "fake",
       message: "first",
     });
@@ -1576,7 +1576,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-session",
+      sessionLabel: "attach-session",
       harness: "fake",
       message: "first",
     });
@@ -1615,7 +1615,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-ring",
+      sessionLabel: "attach-ring",
       harness: "fake",
       message: "first",
     });
@@ -1666,7 +1666,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hello",
     });
@@ -1896,7 +1896,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
 
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "failing",
+      sessionLabel: "failing",
       harness: "failing",
       message: "hello",
     });
@@ -1958,17 +1958,17 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     await requester("spawn", {
-      sessionName: "a-one",
+      sessionLabel: "a-one",
       harness: "a",
       message: "1",
     });
     await requester("spawn", {
-      sessionName: "a-two",
+      sessionLabel: "a-two",
       harness: "a",
       message: "2",
     });
     await requester("spawn", {
-      sessionName: "b-one",
+      sessionLabel: "b-one",
       harness: "b",
       message: "3",
     });
@@ -2020,7 +2020,7 @@ describe("daemon 空闲退出", () => {
     const client = server.connect();
     await flush();
     const spawned = await makeRequester(client).request("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "fake",
       message: "hi",
     });
@@ -2082,7 +2082,7 @@ describe("daemon 空闲退出", () => {
     const client = server.connect();
     await flush();
     await makeRequester(client).request("spawn", {
-      sessionName: "shutdown-owner",
+      sessionLabel: "shutdown-owner",
       harness: "fake",
       message: "hi",
     });
@@ -2096,7 +2096,7 @@ describe("daemon 空闲退出", () => {
     expect(events.some((event) => event.type === "session.killed")).toBe(false);
 
     const rejected = await makeRequester(client).request("spawn", {
-      sessionName: "must-not-start",
+      sessionLabel: "must-not-start",
       harness: "fake",
       message: "late",
     });
@@ -2197,7 +2197,7 @@ describe("daemon 空闲退出", () => {
       requestId: "raw1",
       method: "spawn",
       params: {
-        sessionName: "queued-start",
+        sessionLabel: "queued-start",
         harness: "fake",
         message: "must not start",
       },
@@ -2331,7 +2331,7 @@ describe("daemon 空闲退出", () => {
     const client = server.connect();
     await flush();
     await makeRequester(client).request("spawn", {
-      sessionName: "retry-shutdown",
+      sessionLabel: "retry-shutdown",
       harness: "fake",
       message: "hi",
     });
@@ -2366,7 +2366,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const beta = makeRequester(betaClient, "beta");
 
     const spawned = await alpha("spawn", {
-      sessionName: "owned-by-alpha",
+      sessionLabel: "owned-by-alpha",
       harness: "fake",
       message: "hello",
     });
@@ -2422,7 +2422,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const sessionId = (
       resultOf(
         await makeRequester(firstAlpha, "alpha")("spawn", {
-          sessionName: "short-lived",
+          sessionLabel: "short-lived",
           harness: "fake",
           message: "hello",
         }),
@@ -2476,7 +2476,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const alpha = makeRequester(alphaClient, "alpha");
     const collector = collectNotifications(alphaClient);
     const spawned = await alpha("spawn", {
-      sessionName: "guarded",
+      sessionLabel: "guarded",
       harness: "fake",
       message: "hello",
     });
@@ -2540,7 +2540,7 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
     params: {
       harness: "fake",
       cwd: "/tmp",
-      sessionName: "recoverable",
+      sessionLabel: "recoverable",
       message: "caller original",
     },
   };
@@ -2578,7 +2578,7 @@ test("命令结果恢复：其他消费者不能用原身份取结果或另起�
     params: {
       harness: "fake",
       cwd: "/tmp",
-      sessionName: "private-command",
+      sessionLabel: "private-command",
       message: "private",
     },
   };
@@ -2645,7 +2645,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
     {
       harness: "fake",
       cwd: "/tmp",
-      sessionName: "commands",
+      sessionLabel: "commands",
       message: "initial",
       authorizationMode: "interactive",
     },
@@ -2736,7 +2736,7 @@ test("操作账本只在首次 spawn 时校验动态能力", async () => {
   const params = {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "capability-ledger",
+    sessionLabel: "capability-ledger",
     message: "original intent",
     model: "not-yet-available",
   };
@@ -2808,7 +2808,7 @@ test("能力查询失败时不把 harness 误判为未知或拒绝模型", async
   const { server } = startDaemon(new Map([["fake", fake.adapter]]));
   const connection = server.connect();
   const response = await makeRequester(connection)("spawn", {
-    sessionName: "capability-query-failed",
+    sessionLabel: "capability-query-failed",
     harness: "fake",
     model: "live-model",
     message: "continue with explicitly supplied model",
@@ -2839,7 +2839,7 @@ test("kill 恢复返回原清理失败，新身份才会重试", async () => {
   const request = makeRequester(connection);
   const spawned = resultOf(
     await request("spawn", {
-      sessionName: "kill-recovery",
+      sessionLabel: "kill-recovery",
       harness: "fake",
       message: "keep the worker until cleanup succeeds",
     }),
@@ -2902,7 +2902,7 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
     await sendRaw(connection, {
       ...base,
       requestId: "invalid",
-      params: { harness: "fake", sessionName: "params" },
+      params: { harness: "fake", sessionLabel: "params" },
     }),
   ).toMatchObject({ error: { code: "invalid_params" } });
   expect(
@@ -2912,7 +2912,7 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
       params: {
         harness: "fake",
         cwd: "/tmp",
-        sessionName: "params",
+        sessionLabel: "params",
         message: "now valid",
       },
     }),
@@ -2974,7 +2974,7 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
     params: {
       harness: "fake",
       cwd: "/tmp",
-      sessionName: "accepted",
+      sessionLabel: "accepted",
       message: "original",
     },
   };
@@ -3014,7 +3014,7 @@ test("none turn scope ends from authoritative terminal history after event reten
   await flush();
   const request = makeRequester(client);
   const spawned = await request("spawn", {
-    sessionName: "retained-terminal",
+    sessionLabel: "retained-terminal",
     harness: "fake",
     message: "first",
   });
@@ -3058,7 +3058,7 @@ test("after freezes its replay prefix and buffers live events before the establi
   await flush();
   const requester = makeRequester(client);
   const spawned = await requester("spawn", {
-    sessionName: "after-boundary",
+    sessionLabel: "after-boundary",
     harness: "fake",
     message: "first",
   });

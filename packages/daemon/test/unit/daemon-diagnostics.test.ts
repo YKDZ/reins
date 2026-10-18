@@ -30,7 +30,7 @@ import {
   diagnosticIdSchema,
   requestIdSchema,
   sessionIdSchema,
-  sessionNameSchema,
+  sessionLabelSchema,
   turnIdSchema,
   REINS_PROTOCOL_MAJOR_VERSION,
   type WorkerEventRejection,
@@ -412,7 +412,7 @@ describe("daemon diagnostic error dispatch", () => {
       },
     });
     const { sessionId } = await machine.spawn({
-      sessionName: v.parse(sessionNameSchema, "immediate-query"),
+      sessionLabel: v.parse(sessionLabelSchema, "immediate-query"),
       harness: "fake",
       message: "start",
       cwd: "/tmp",
@@ -476,7 +476,7 @@ describe("daemon diagnostic error dispatch", () => {
       },
     });
     const { sessionId } = await machine.spawn({
-      sessionName: v.parse(sessionNameSchema, "immediate-close"),
+      sessionLabel: v.parse(sessionLabelSchema, "immediate-close"),
       harness: "fake",
       message: "start",
       cwd: "/tmp",
@@ -574,9 +574,9 @@ describe("daemon diagnostic error dispatch", () => {
       client.send({ kind: "request", requestId, method, params });
       return await response;
     };
-    const spawn = async (sessionName: string) => {
+    const spawn = async (sessionLabel: string) => {
       const response = await request("spawn", {
-        sessionName,
+        sessionLabel,
         harness: "fake",
         message: "caller-authored",
         cwd: "/tmp",
@@ -594,7 +594,7 @@ describe("daemon diagnostic error dispatch", () => {
         model: null,
         reasoning: null,
         cwd: "/sentinel-cwd",
-        sessionName: v.parse(sessionNameSchema, "forged"),
+        sessionLabel: v.parse(sessionLabelSchema, "forged"),
         spawnedAt: "sentinel-time",
       });
       emit({
@@ -736,7 +736,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
       emit({
         type: "message",
-        sessionId: runtime.sessionId(v.parse(sessionNameSchema, "unknown")),
+        sessionId: runtime.sessionId(v.parse(sessionLabelSchema, "unknown")),
         turnId: v.parse(turnIdSchema, "t1"),
         messageId: "m-unknown" as never,
         role: "worker",
@@ -1012,7 +1012,7 @@ describe("daemon diagnostic error dispatch", () => {
         requestId: v.parse(requestIdSchema, "r1"),
         method: "spawn",
         params: {
-          sessionName: "failed-worker",
+          sessionLabel: "failed-worker",
           cwd: "/tmp",
           harness: "fake",
           message: "start",
@@ -1108,7 +1108,7 @@ describe("daemon diagnostic error dispatch", () => {
         requestId: v.parse(requestIdSchema, "append-failure"),
         method: "spawn",
         params: {
-          sessionName: "append-failure",
+          sessionLabel: "append-failure",
           cwd: "/tmp",
           harness: "fake",
           message: "start",
@@ -2233,7 +2233,7 @@ describe("daemon diagnostic error dispatch", () => {
         requestId: v.parse(requestIdSchema, "listener-failure"),
         method: "spawn",
         params: {
-          sessionName: "listener-failure",
+          sessionLabel: "listener-failure",
           cwd: "/tmp",
           harness: "fake",
           message: "start",
@@ -2277,7 +2277,7 @@ describe("daemon diagnostic error dispatch", () => {
         v.parse(daemonGenerationSchema, "filters"),
       now: () => now,
     });
-    const sessionId = runtime.sessionId(v.parse(sessionNameSchema, "filters"));
+    const sessionId = runtime.sessionId(v.parse(sessionLabelSchema, "filters"));
     const turnId = v.parse(turnIdSchema, "turn-filter");
     await runtime.record({
       source: "daemon",
@@ -2672,7 +2672,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
     const alpha = await boundClient(transport, "alpha");
     try {
       const spawned = await request(alpha, "alpha-spawn", "spawn", {
-        sessionName: v.parse(sessionNameSchema, "scoped-session"),
+        sessionLabel: v.parse(sessionLabelSchema, "scoped-session"),
         harness: "fake",
         message: "start",
         cwd: root,
@@ -2757,7 +2757,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
     const alpha = await boundClient(transport, "alpha");
     try {
       const spawned = await request(alpha, "alpha-failing-spawn", "spawn", {
-        sessionName: v.parse(sessionNameSchema, "failing-session"),
+        sessionLabel: v.parse(sessionLabelSchema, "failing-session"),
         harness: "fake",
         message: "start",
         cwd: root,

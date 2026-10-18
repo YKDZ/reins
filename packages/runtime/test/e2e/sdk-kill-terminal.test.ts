@@ -138,12 +138,12 @@ async function fixture() {
   }
   async function spawnSession(
     connection: ReinsConnection,
-    sessionName: string,
+    sessionLabel: string,
     cwd: string,
     message: string,
   ) {
     return connection.spawn(
-      { sessionName, harness: "codex", message, cwd },
+      { sessionLabel, harness: "codex", message, cwd },
       connection.prepareOperation("spawn"),
     );
   }

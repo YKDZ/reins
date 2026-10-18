@@ -124,9 +124,7 @@ async function main(): Promise<void> {
   const daemon = createDaemon({
     transport,
     adapters,
-    identity: {
-      session: (sessionName) => diagnosticsRuntime.sessionId(sessionName),
-    },
+      identity: { session: () => diagnosticsRuntime.sessionId() },
     diagnostics: diagnosticsRuntime,
     idleTimeoutMs: idleTimeoutFromEnv(process.env),
   });

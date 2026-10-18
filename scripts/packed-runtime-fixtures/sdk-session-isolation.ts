@@ -73,7 +73,7 @@ try {
   const first = await owner.spawn(
     {
       harness: "fixture",
-      sessionName: "packed-session-a",
+      sessionLabel: "packed-session-a",
       message: "session A",
       cwd,
     },
@@ -84,7 +84,7 @@ try {
   const second = await owner.spawn(
     {
       harness: "fixture",
-      sessionName: "packed-session-b",
+      sessionLabel: "packed-session-b",
       message: "session B",
       cwd,
     },

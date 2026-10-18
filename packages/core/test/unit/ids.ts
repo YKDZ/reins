@@ -2,7 +2,6 @@ import {
   messageIdSchema,
   permissionIdSchema,
   sessionIdSchema,
-  sessionNameSchema,
   toolCallIdSchema,
   turnIdSchema,
 } from "@reins/protocol";
@@ -13,7 +12,7 @@ import type { SessionIdentity } from "#/session-machine";
 
 // 测试夹具也经协议解析，避免用断言绕过独立 ID 的品牌和格式约束。
 export const ids = {
-  sessionName: (value: string) => v.parse(sessionNameSchema, value),
+  sessionLabel: (value: string) => value,
   session: (value: string) => v.parse(sessionIdSchema, value),
   turn: (value: string) => v.parse(turnIdSchema, value),
   message: (value: string) => v.parse(messageIdSchema, value),
@@ -21,8 +20,13 @@ export const ids = {
   toolCall: (value: string) => v.parse(toolCallIdSchema, value),
 };
 
+let sessionCounter = 0;
+
 export const testIdentity: SessionIdentity = {
-  session: (sessionName) => v.parse(sessionIdSchema, `${sessionName}@gtest`),
+  session: () => {
+    sessionCounter += 1;
+    return v.parse(sessionIdSchema, `session:gtest:${sessionCounter}`);
+  },
 };
 
 export const testDiagnostics = noopDiagnosticEmitter;

@@ -11,7 +11,7 @@ import {
   DriverFailure,
   makeDiagnosticId,
   sessionIdSchema,
-  sessionNameSchema,
+  sessionLabelSchema,
   turnIdSchema,
   type DomainEvent,
   type WorkerSpec,
@@ -119,7 +119,7 @@ function codexRoutingFixture() {
   const alpha: WorkerSpec = {
     sessionId: v.parse(sessionIdSchema, "alpha@groute"),
     turnId: v.parse(turnIdSchema, "turn-alpha"),
-    sessionName: v.parse(sessionNameSchema, "alpha"),
+    sessionLabel: v.parse(sessionLabelSchema, "alpha"),
     harness: "codex",
     message: "caller task for alpha",
     cwd: "/tmp",
@@ -128,7 +128,7 @@ function codexRoutingFixture() {
     ...alpha,
     sessionId: v.parse(sessionIdSchema, "beta@groute"),
     turnId: v.parse(turnIdSchema, "turn-beta"),
-    sessionName: v.parse(sessionNameSchema, "beta"),
+    sessionLabel: v.parse(sessionLabelSchema, "beta"),
     message: "caller task for beta",
   };
   return { driver, workers, events, alpha, beta };
@@ -338,7 +338,7 @@ describe("routing driver invariants", () => {
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionName: v.parse(sessionNameSchema, "verified"),
+      sessionLabel: v.parse(sessionLabelSchema, "verified"),
     });
 
     await expect(driver.terminate(sessionId)).rejects.toMatchObject({
@@ -438,7 +438,7 @@ describe("routing driver invariants", () => {
       });
       await machine.spawn({
         cwd: "/tmp",
-        sessionName: v.parse(sessionNameSchema, "unrelated"),
+        sessionLabel: v.parse(sessionLabelSchema, "unrelated"),
         harness: "unrelated",
         message: "start",
       });
@@ -542,7 +542,7 @@ describe("routing driver invariants", () => {
       cwd: "/tmp",
       authorizationMode: "allowAll",
       captureHarnessStderr: true,
-      sessionName: v.parse(sessionNameSchema, "stderr"),
+      sessionLabel: v.parse(sessionLabelSchema, "stderr"),
     });
     const invalidVectors = [
       Buffer.from([0xff]),
@@ -614,7 +614,7 @@ describe("routing driver invariants", () => {
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionName: v.parse(sessionNameSchema, "owned"),
+      sessionLabel: v.parse(sessionLabelSchema, "owned"),
     });
 
     await sink({
@@ -685,7 +685,7 @@ describe("routing driver invariants", () => {
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionName: v.parse(sessionNameSchema, "diagnostic"),
+      sessionLabel: v.parse(sessionLabelSchema, "diagnostic"),
     };
 
     driver.start(spec);
@@ -761,7 +761,7 @@ describe("routing driver invariants", () => {
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionName: v.parse(sessionNameSchema, "retry"),
+      sessionLabel: v.parse(sessionLabelSchema, "retry"),
     };
     try {
       expect(() => driver.start(spec)).toThrow("start failed");

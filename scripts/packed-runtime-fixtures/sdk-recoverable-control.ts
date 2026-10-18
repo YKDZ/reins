@@ -84,7 +84,7 @@ async function connectSdk(): Promise<ReinsConnection> {
 
 function spawnInput(): SpawnInput {
   return {
-    sessionName: "packed-recover",
+    sessionLabel: "packed-recover",
     harness: "fixture",
     message: "  exact task\nkeep spacing  ",
     cwd: required("REINS_WORKER_CWD"),
@@ -120,7 +120,7 @@ async function prepareSpawn(): Promise<void> {
     const input = spawnInput();
     const serialized = publishIntent({ credential, input });
     const sessions = await connection.list();
-    if (sessions.some((session) => session.sessionName === input.sessionName))
+    if (sessions.some((session) => session.sessionLabel === input.sessionLabel))
       throw new Error("Preparing an operation created a session");
     process.stdout.write(
       `${JSON.stringify({
@@ -266,7 +266,7 @@ async function spawnWithNewCredential(): Promise<void> {
       connection.spawn(
         {
           ...intent.input,
-          sessionName: "packed-capability-retry",
+          sessionLabel: "packed-capability-retry",
         },
         connection.prepareOperation("spawn"),
       ),
@@ -739,7 +739,7 @@ async function spawnPermission(): Promise<void> {
   try {
     const result = await connection.spawn(
       {
-        sessionName: required("REINS_PERMISSION_SESSION_NAME"),
+        sessionLabel: required("REINS_PERMISSION_SESSION_NAME"),
         harness: "fixture",
         message: "packed-permission",
         cwd: required("REINS_WORKER_CWD"),
@@ -943,7 +943,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
     const input = {
       ...spawnInput(),
       message: "packed-harness-failure",
-      sessionName: "packed-harness-diagnostics",
+      sessionLabel: "packed-harness-diagnostics",
     };
     const spawned = await connection.spawn(
       input,
@@ -1173,7 +1173,7 @@ async function replayWindow(): Promise<void> {
   const connection = await connectSdk();
   try {
     const input: SpawnInput = {
-      sessionName: "packed-history-window",
+      sessionLabel: "packed-history-window",
       harness: "simulated",
       message: JSON.stringify({
         gate: required("REINS_HISTORY_GATE"),

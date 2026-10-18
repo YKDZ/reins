@@ -103,7 +103,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   const secondClient = await connectSdk(env);
   const secondSpawn = await secondClient.spawn(
     {
-      sessionName: "foo",
+      sessionLabel: "foo",
       harness: "fake",
       message: "hello",
       cwd: directory,
@@ -134,7 +134,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   const thirdClient = await connectSdk(env);
   const current = await thirdClient.spawn(
     {
-      sessionName: "foo",
+      sessionLabel: "foo",
       harness: "fake",
       message: "hello",
       cwd: directory,
@@ -158,10 +158,10 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
       thirdClient.prepareOperation("kill"),
     ),
   ).toEqual({ sessionHandle: staleHandle, status: "not_found" });
-  expect(await thirdClient.list({ sessionName: "foo" })).toMatchObject([
+  expect(await thirdClient.list({ sessionLabel: "foo" })).toMatchObject([
     { sessionHandle: current.sessionHandle },
   ]);
-  expect(await thirdClient.list({ sessionName: "foo" })).toHaveLength(1);
+  expect(await thirdClient.list({ sessionLabel: "foo" })).toHaveLength(1);
   expect(
     await thirdClient.kill(
       { sessionHandle: current.sessionHandle },

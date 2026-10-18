@@ -560,7 +560,7 @@ async function runRecoveryAcceptance(options: {
       model: "fixture-model",
       reasoning: "high",
       sandbox: "workspace-write",
-      sessionName: "packed-recover",
+      sessionLabel: "packed-recover",
       sessionId: spawnAcknowledgement.result.sessionId,
       turnId: spawnAcknowledgement.result.turnId,
     };

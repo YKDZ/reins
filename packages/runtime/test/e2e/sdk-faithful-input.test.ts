@@ -110,7 +110,7 @@ async function spawnSession(
 ) {
   return connection.spawn(
     {
-      sessionName: input.sessionName ?? `session-${Date.now()}`,
+      sessionLabel: input.sessionLabel ?? `session-${Date.now()}`,
       cwd,
       ...input,
     },
@@ -164,7 +164,7 @@ test.each([
       spawnSession(f.connection, f.callerCwd, {
         harness,
         message: "caller-only-message",
-        sessionName: "unsupported-input",
+        sessionLabel: "unsupported-input",
         ...input,
       }),
     ).rejects.toMatchObject({
@@ -182,7 +182,7 @@ test.each(["codex", "qoder"] as const)(
   async (harness) => {
     const f = await fixture();
     await spawnSession(f.connection, f.callerCwd, {
-      sessionName: `${harness}-omitted`,
+      sessionLabel: `${harness}-omitted`,
       harness,
       message: "  caller-only message  ",
     });
@@ -232,7 +232,7 @@ test.each(["codex", "qoder"] as const)(
 
     for (const authorizationMode of ["interactive", "allowAll"] as const) {
       await spawnSession(f.connection, f.callerCwd, {
-        sessionName: `${harness}-${authorizationMode === "interactive" ? "interactive" : "allow-all"}`,
+        sessionLabel: `${harness}-${authorizationMode === "interactive" ? "interactive" : "allow-all"}`,
         harness,
         message: "explicit message",
         model: "fixture-model",
@@ -294,7 +294,7 @@ test.each(["codex", "qoder"] as const)(
 test("Codex permission facts expose only native answers and apply the exact accepted decision", async () => {
   const f = await fixture();
   const spawned = await spawnSession(f.connection, f.callerCwd, {
-    sessionName: "codex-permission",
+    sessionLabel: "codex-permission",
     harness: "codex",
     message: "permission",
     authorizationMode: "interactive",
@@ -342,7 +342,7 @@ test("Codex permission facts expose only native answers and apply the exact acce
 test("Codex refuses an approval menu that has no representable caller decision", async () => {
   const f = await fixture();
   await spawnSession(f.connection, f.callerCwd, {
-    sessionName: "codex-cancel-only",
+    sessionLabel: "codex-cancel-only",
     harness: "codex",
     message: "cancel-only",
     authorizationMode: "interactive",
@@ -363,7 +363,7 @@ test.each(["permission", "session-permission"] as const)(
   async (message) => {
     const f = await fixture();
     const spawned = await spawnSession(f.connection, f.callerCwd, {
-      sessionName: `qoder-${message}`,
+      sessionLabel: `qoder-${message}`,
       harness: "qoder",
       message,
       authorizationMode: "interactive",
@@ -464,7 +464,7 @@ test.each(["permission", "session-permission"] as const)(
 test("a natively resolved Codex approval cannot claim a caller resolution", async () => {
   const f = await fixture();
   const spawned = await spawnSession(f.connection, f.callerCwd, {
-    sessionName: "already-resolved",
+    sessionLabel: "already-resolved",
     harness: "codex",
     message: "resolved-permission",
     authorizationMode: "interactive",

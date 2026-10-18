@@ -8,7 +8,7 @@ import { ids, testDiagnostics, testIdentity } from "./ids.ts";
 
 async function spawnBusy(machine: ReturnType<typeof createSessionMachine>) {
   const { sessionId: id } = await machine.spawn({
-    sessionName: ids.sessionName("fixture-7"),
+    sessionLabel: ids.sessionLabel("fixture-7"),
     harness: "codex",
     message: "分析",
     cwd: "/tmp/demo",

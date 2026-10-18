@@ -29,7 +29,7 @@ describe("send", () => {
       },
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("steer-failure"),
+      sessionLabel: ids.sessionLabel("steer-failure"),
       harness: "codex",
       message: "work",
       cwd: "/tmp/demo",
@@ -73,7 +73,7 @@ describe("send", () => {
       diagnostics: { record },
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("steer-recorded"),
+      sessionLabel: ids.sessionLabel("steer-recorded"),
       harness: "codex",
       message: "work",
       cwd: "/tmp/demo",
@@ -100,7 +100,7 @@ describe("send", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-17"),
+      sessionLabel: ids.sessionLabel("fixture-17"),
       harness: "codex",
       message: "第一步",
       cwd: "/tmp/demo",
@@ -142,7 +142,7 @@ describe("send", () => {
       diagnostics: testDiagnostics,
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-20"),
+      sessionLabel: ids.sessionLabel("fixture-20"),
       harness: "dsh",
       message: "临时",
       cwd: "/tmp/demo",

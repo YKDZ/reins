@@ -39,7 +39,7 @@ export type OperationCredential<Kind extends OperationKind> = string & {
 };
 
 export type SpawnInput = {
-  sessionName: string;
+  sessionLabel?: string;
   harness: string;
   message: string;
   cwd: string;
@@ -74,7 +74,7 @@ export type SendInput =
 export type SendResult = {
   sessionHandle: SessionHandle;
   turnHandle: TurnHandle;
-  messageId: string;
+  messageKey: MessageKey;
   deliveryPoint: "active_turn" | "new_turn";
 };
 export type WaitInput = {
@@ -239,7 +239,7 @@ export type AgentFact =
       model: string | null;
       reasoning: string | null;
       cwd: string;
-      sessionName: string;
+      sessionLabel?: string;
       spawnedAt: string;
     })
   | (TurnFactBase & { type: "turn.started" })
@@ -301,7 +301,7 @@ export type SessionFilter = {
   sessionHandle?: SessionHandle;
   harness?: string;
   state?: SessionState;
-  sessionName?: string;
+  sessionLabel?: string;
   model?: string;
 };
 export type LastCompletedTurn = {
@@ -310,7 +310,7 @@ export type LastCompletedTurn = {
 };
 type SessionInfoFields = {
   sessionHandle: SessionHandle;
-  sessionName: string;
+  sessionLabel?: string;
   harness: string;
   model: string | null;
   reasoning: string | null;
@@ -384,7 +384,6 @@ type FailureFactsByCode = {
   diagnostics_unavailable: Record<never, never>;
   unknown_harness: { harness: string; availableHarnesses: string[] };
   unsupported_feature: { feature: string };
-  session_name_conflict: { sessionName: string };
   session_busy: { sessionHandle: SessionHandle };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };

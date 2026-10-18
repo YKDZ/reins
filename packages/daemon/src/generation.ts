@@ -9,7 +9,6 @@ import {
   type DaemonGeneration,
   type DiagnosticId,
   type SessionId,
-  type SessionName,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -196,17 +195,19 @@ class DurableGenerationAllocator implements GenerationAllocatorLease {
 }
 
 export type DaemonIdFactory = {
-  session(sessionName: SessionName): SessionId;
+  session(): SessionId;
   diagnostic(): DiagnosticId;
 };
 
 export function createDaemonIdFactory(
   generation: DaemonGeneration,
 ): DaemonIdFactory {
+  let sessionCounter = 0;
   let diagnosticCounter = 0;
   return {
-    session(sessionName) {
-      return v.parse(sessionIdSchema, `${sessionName}@g${generation}`);
+    session() {
+      sessionCounter += 1;
+      return v.parse(sessionIdSchema, `session:${generation}:${sessionCounter}`);
     },
     diagnostic() {
       diagnosticCounter += 1;

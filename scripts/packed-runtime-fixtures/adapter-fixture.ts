@@ -18,7 +18,7 @@ import type {
 type WorkerState = {
   readonly child: ChildProcess;
   readonly closed: Promise<void>;
-  readonly sessionName: string;
+  readonly sessionLabel: string;
   readonly turnId: TurnId;
 };
 
@@ -109,7 +109,7 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
       workers.set(spec.sessionId, {
         child,
         closed,
-        sessionName: spec.sessionName,
+        sessionLabel: spec.sessionLabel,
         turnId: spec.turnId,
       });
       record({
@@ -209,7 +209,7 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
       record({ type: "terminate_called", sessionId, attempt });
       if (
         attempt === 1 &&
-        worker.sessionName ===
+        worker.sessionLabel ===
           process.env.REINS_PACKED_FIXTURE_FAIL_FIRST_TERMINATE_SESSION_NAME
       ) {
         record({ type: "terminate_rejected", sessionId, attempt });

@@ -47,7 +47,7 @@ try {
   const first = await connection.spawn(
     {
       harness: "fixture",
-      sessionName: "packed-wait-first",
+      sessionLabel: "packed-wait-first",
       message: "first wait target",
       cwd,
     },
@@ -57,7 +57,7 @@ try {
   const second = await connection.spawn(
     {
       harness: "fixture",
-      sessionName: "packed-wait-second",
+      sessionLabel: "packed-wait-second",
       message: "second wait target",
       cwd,
     },

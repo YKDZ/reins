@@ -19,7 +19,7 @@ describe("wait", () => {
       diagnostics: testDiagnostics,
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-22"),
+      sessionLabel: ids.sessionLabel("fixture-22"),
       harness: "codex",
       message: "跑很久的任务",
       cwd: "/tmp/demo",
@@ -50,13 +50,13 @@ describe("wait", () => {
       diagnostics: testDiagnostics,
     });
     const { sessionId: a } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-23"),
+      sessionLabel: ids.sessionLabel("fixture-23"),
       harness: "codex",
       message: "甲",
       cwd: "/tmp/demo",
     });
     const { sessionId: b } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-24"),
+      sessionLabel: ids.sessionLabel("fixture-24"),
       harness: "qoder",
       message: "乙",
       cwd: "/tmp/demo",
@@ -102,7 +102,7 @@ describe("wait", () => {
       diagnostics: testDiagnostics,
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-25"),
+      sessionLabel: ids.sessionLabel("fixture-25"),
       harness: "dsh",
       message: "临时任务",
       cwd: "/tmp/demo",
@@ -162,7 +162,7 @@ test("长显式领域期限跨过单次计时上限后才超时且不停止任�
     diagnostics: testDiagnostics,
   });
   const { sessionId, turnId } = await machine.spawn({
-    sessionName: ids.sessionName("long-budget"),
+    sessionLabel: ids.sessionLabel("long-budget"),
     harness: "codex",
     message: "caller long task",
     cwd: "/tmp/demo",

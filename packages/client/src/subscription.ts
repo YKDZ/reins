@@ -11,22 +11,27 @@ import type {
   SessionHandle,
   TurnHandle,
   DaemonGeneration,
+  MessageKey,
+  ToolKey,
 } from "@reins/protocol";
 import {
   encodePermissionHandle,
+  encodeMessageKey,
+  encodeToolKey,
   encodeTurnHandle,
+  messageIdSchema,
   permissionHandleSchema,
+  permissionIdSchema,
+  sessionIdSchema,
+  toolCallIdSchema,
+  turnIdSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
 
 declare const agentFactIdBrand: unique symbol;
-declare const messageKeyBrand: unique symbol;
-declare const toolKeyBrand: unique symbol;
 export type AgentFactId = string & {
   readonly [agentFactIdBrand]: "AgentFactId";
 };
-export type MessageKey = string & { readonly [messageKeyBrand]: "MessageKey" };
-export type ToolKey = string & { readonly [toolKeyBrand]: "ToolKey" };
 
 type PublicFact<E> = E extends DomainEvent
   ? Omit<
@@ -93,48 +98,67 @@ export function createAgentFact(
   const source = event as unknown as Record<string, unknown>;
   const { sessionId, turnId, messageId, toolCallId, permissionId, ...fields } =
     source;
+  const parsedSessionId = v.parse(sessionIdSchema, sessionId);
+  const parsedTurnId =
+    typeof turnId === "string" ? v.parse(turnIdSchema, turnId) : undefined;
+  const parsedMessageId =
+    typeof messageId === "string"
+      ? v.parse(messageIdSchema, messageId)
+      : undefined;
+  const parsedToolCallId =
+    typeof toolCallId === "string"
+      ? v.parse(toolCallIdSchema, toolCallId)
+      : undefined;
+  const parsedPermissionId =
+    typeof permissionId === "string"
+      ? v.parse(permissionIdSchema, permissionId)
+      : undefined;
   const fact = {
     ...fields,
-    sessionHandle: sessionId,
-    ...(typeof turnId === "string"
+    sessionHandle: parsedSessionId,
+    ...(parsedTurnId !== undefined
       ? {
           turnHandle: encodeTurnHandle({
-            sessionId: sessionId as SessionHandle,
-            turnId: turnId as never,
+            sessionId: parsedSessionId,
+            turnId: parsedTurnId,
           }),
         }
       : {}),
-    ...(typeof messageId === "string" && typeof turnId === "string"
+    ...(parsedMessageId !== undefined && parsedTurnId !== undefined
       ? {
-          messageKey: opaqueKey(
-            "message",
-            [generation, sessionId, turnId, messageId].map(String).join("\0"),
-          ) as MessageKey,
+          messageKey: encodeMessageKey({
+            generation,
+            sessionId: parsedSessionId,
+            turnId: parsedTurnId,
+            messageId: parsedMessageId,
+          }),
         }
       : {}),
-    ...(typeof toolCallId === "string" && typeof turnId === "string"
+    ...(parsedToolCallId !== undefined && parsedTurnId !== undefined
       ? {
-          toolKey: opaqueKey(
-            "tool",
-            [generation, sessionId, turnId, toolCallId].map(String).join("\0"),
-          ) as ToolKey,
+          toolKey: encodeToolKey({
+            generation,
+            sessionId: parsedSessionId,
+            turnId: parsedTurnId,
+            toolCallId: parsedToolCallId,
+          }),
         }
       : {}),
-    ...(typeof permissionId === "string" && typeof turnId === "string"
+    ...(parsedPermissionId !== undefined && parsedTurnId !== undefined
       ? {
           permissionHandle: v.parse(
             permissionHandleSchema,
             encodePermissionHandle({
-              sessionId: sessionId as SessionHandle,
-              turnId: turnId as never,
-              permissionId: permissionId as never,
+              sessionId: parsedSessionId,
+              turnId: parsedTurnId,
+              permissionId: parsedPermissionId,
             }),
           ),
         }
       : {}),
     factId: opaqueKey(
       "fact",
-      [generation, sessionId, eventId].map(String).join("\0"),
+      [generation, parsedSessionId, eventId].map(String).join("\0"),
     ) as AgentFactId,
   };
   return fact as AgentFact;

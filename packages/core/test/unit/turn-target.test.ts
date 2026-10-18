@@ -13,13 +13,13 @@ test("turn targets retain their original parent across active and completed turn
     diagnostics: testDiagnostics,
   });
   const first = await machine.spawn({
-    sessionName: ids.sessionName("first-parent"),
+    sessionLabel: ids.sessionLabel("first-parent"),
     harness: "codex",
     cwd: "/tmp",
     message: "first",
   });
   const second = await machine.spawn({
-    sessionName: ids.sessionName("second-parent"),
+    sessionLabel: ids.sessionLabel("second-parent"),
     harness: "codex",
     cwd: "/tmp",
     message: "second",
@@ -82,7 +82,7 @@ test("spawn returns its accepted first turn even when the driver completes it sy
     diagnostics: testDiagnostics,
   });
   const accepted = await machine.spawn({
-    sessionName: ids.sessionName("instant"),
+    sessionLabel: ids.sessionLabel("instant"),
     harness: "codex",
     cwd: "/tmp",
     message: "finish",

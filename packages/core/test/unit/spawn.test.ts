@@ -22,13 +22,13 @@ describe("spawn", () => {
     machine.subscribe((event) => events.push(event));
 
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-21"),
+      sessionLabel: ids.sessionLabel("fixture-21"),
       harness: "codex",
       message: "审查这个 PR",
       cwd: "/tmp/demo",
     });
 
-    expect(sessionId).toBe("fixture-21@gtest");
+    expect(sessionId).toMatch(/^session:gtest:\d+$/u);
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
@@ -48,7 +48,7 @@ describe("spawn", () => {
     ]);
   });
 
-  test("同一 generation 拒绝重复 sessionName，且不启动第二个 worker", async () => {
+  test("相同会话标签创建独立的机器身份", async () => {
     const fake = createFakeDriver();
     const machine = createSessionMachine({
       driverFactory: fake.factory,
@@ -58,53 +58,23 @@ describe("spawn", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const params = {
-      sessionName: ids.sessionName("duplicate-name"),
+      sessionLabel: ids.sessionLabel("root"),
       harness: "codex",
       message: "first",
       cwd: "/tmp/demo",
     };
 
-    await machine.spawn(params);
-    await expect(
-      machine.spawn({ ...params, message: "second" }),
-    ).rejects.toEqual(
-      expect.objectContaining({
-        code: "session_name_conflict",
-        sessionName: params.sessionName,
-      }),
-    );
-    expect(fake.controls.started).toHaveLength(1);
+    const first = await machine.spawn(params);
+    const second = await machine.spawn({ ...params, message: "second" });
+    expect(first.sessionId).not.toBe(second.sessionId);
+    expect(fake.controls.started).toHaveLength(2);
     expect(
       events.filter((event) => event.type === "session.created"),
-    ).toHaveLength(1);
-  });
-
-  test("failed start permanently reserves the caller-authored session name", async () => {
-    const fake = createFakeDriver({
-      start: () => {
-        throw new Error("start failed");
-      },
-    });
-    const machine = createSessionMachine({
-      driverFactory: fake.factory,
-      identity: testIdentity,
-      diagnostics: testDiagnostics,
-    });
-    const params = {
-      sessionName: ids.sessionName("failed-name"),
-      harness: "codex",
-      message: "first",
-      cwd: "/tmp/demo",
-    };
-
-    await expect(machine.spawn(params)).rejects.toMatchObject({
-      code: "internal_error",
-    });
-    await expect(machine.spawn(params)).rejects.toEqual({
-      code: "session_name_conflict",
-      sessionName: params.sessionName,
-    });
-    expect(machine.list()).toEqual([]);
+    ).toHaveLength(2);
+    expect(machine.list().map((session) => session.sessionLabel)).toEqual([
+      params.sessionLabel,
+      params.sessionLabel,
+    ]);
   });
 
   test("keeps reentrant spawn ingress isolated by session", async () => {
@@ -113,10 +83,10 @@ describe("spawn", () => {
     const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
       start: (spec) => {
-        if (spec.sessionName === ids.sessionName("outer")) {
+        if (spec.message === "outer") {
           nestedSpawn = machine
             .spawn({
-              sessionName: ids.sessionName("inner"),
+              sessionLabel: ids.sessionLabel("inner"),
               harness: "codex",
               message: "inner",
               cwd: "/tmp/demo",
@@ -146,7 +116,7 @@ describe("spawn", () => {
     machine.subscribe((event) => events.push(event));
 
     const { sessionId: outer } = await machine.spawn({
-      sessionName: ids.sessionName("outer"),
+      sessionLabel: ids.sessionLabel("outer"),
       harness: "codex",
       message: "outer",
       cwd: "/tmp/demo",

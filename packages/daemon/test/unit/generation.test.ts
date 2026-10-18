@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import {
   diagnosticIdSchema,
   sessionIdSchema,
-  sessionNameSchema,
+  sessionLabelSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
@@ -87,13 +87,13 @@ describe("daemon generation", () => {
 
     const secondGeneration = await allocateOnce(state);
     const heldHandle = createDaemonIdFactory(secondGeneration).session(
-      v.parse(sessionNameSchema, "foo"),
+      v.parse(sessionLabelSchema, "foo"),
     );
 
     await writeFile(generationFile, savedState);
     const rolledBackGeneration = await allocateOnce(state);
     const reissuedHandle = createDaemonIdFactory(rolledBackGeneration).session(
-      v.parse(sessionNameSchema, "foo"),
+      v.parse(sessionLabelSchema, "foo"),
     );
 
     expect(rolledBackGeneration).not.toBe(secondGeneration);
@@ -196,7 +196,7 @@ describe("daemon generation", () => {
     expect(
       v.safeParse(
         sessionIdSchema,
-        ids.session(v.parse(sessionNameSchema, "reviewer")),
+        ids.session(v.parse(sessionLabelSchema, "reviewer")),
       ).success,
     ).toBe(true);
     expect(v.safeParse(diagnosticIdSchema, ids.diagnostic()).success).toBe(

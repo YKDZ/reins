@@ -17,7 +17,7 @@ declare const resumeCursor: ResumeCursor;
 
 const spawnInput: SpawnInput = {
   harness: "a-runtime-defined-harness",
-  sessionName: "repeated labels remain valid consumer data",
+  sessionLabel: "repeated labels remain valid consumer data",
   message: "dynamic task input",
   cwd: "/consumer/workspace",
   model: "dynamic-model-id",

@@ -1,6 +1,6 @@
 import { createReinsClient, type AgentFact } from "@reins/client";
 import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
-import type { ConsumerContext, SessionName } from "@reins/protocol";
+import type { ConsumerContext, SessionLabel } from "@reins/protocol";
 import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
 import {
   createQoderFixtureSdk,
@@ -157,7 +157,7 @@ test.each(["rejected", "hung", "late"] as const)(
       const spawn = await client.request("spawn", {
         harness: "qoder",
         cwd: "/tmp",
-        sessionName: ("reins-wrr19-" + mode) as SessionName,
+        sessionLabel: ("reins-wrr19-" + mode),
         message: "caller supplied task",
       });
       if ("error" in spawn) throw new Error(JSON.stringify(spawn.error));
@@ -246,7 +246,7 @@ test("结构化限流优先于含额度字样的正文，诊断引用在返回�
     const spawn = await client.request("spawn", {
       harness: "qoder",
       cwd: "/tmp",
-      sessionName: "reins-wrr19-rate" as SessionName,
+      sessionLabel: "reins-wrr19-rate",
       message: "explicit caller task",
     });
     if ("error" in spawn) throw new Error(JSON.stringify(spawn.error));
@@ -335,7 +335,7 @@ test("原生失败经 daemon 与 client wait 保留未知原因和显式重试�
     const spawned = await client.request("spawn", {
       harness: "qoder",
       cwd: "/tmp",
-      sessionName: "reins-wrr19-failed" as SessionName,
+      sessionLabel: "reins-wrr19-failed",
       message: "caller supplied fixture task",
     });
     if ("error" in spawned) throw new Error(JSON.stringify(spawned.error));

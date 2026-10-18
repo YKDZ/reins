@@ -10,7 +10,7 @@ import type {
 import {
   diagnosticRecordSchema,
   makeDiagnosticId,
-  sessionNameSchema,
+  sessionLabelSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -547,7 +547,7 @@ describe("DiagnosticsRuntime", () => {
     const store = new MemoryStore();
     const runtime = await openRuntime(store);
 
-    expect(runtime.sessionId(v.parse(sessionNameSchema, "reviewer"))).toBe(
+    expect(runtime.sessionId(v.parse(sessionLabelSchema, "reviewer"))).toBe(
       "reviewer@ga",
     );
     await runtime.close();

@@ -25,7 +25,7 @@ describe("interrupt", () => {
       },
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("interrupt-failure"),
+      sessionLabel: ids.sessionLabel("interrupt-failure"),
       harness: "codex",
       message: "work",
       cwd: "/tmp/demo",
@@ -55,7 +55,7 @@ describe("interrupt", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-4"),
+      sessionLabel: ids.sessionLabel("fixture-4"),
       harness: "codex",
       message: "重构",
       cwd: "/tmp/demo",
@@ -97,7 +97,7 @@ describe("interrupt", () => {
       diagnostics: testDiagnostics,
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-5"),
+      sessionLabel: ids.sessionLabel("fixture-5"),
       harness: "codex",
       message: "收尾",
       cwd: "/tmp/demo",
@@ -129,7 +129,7 @@ describe("interrupt", () => {
       diagnostics: testDiagnostics,
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-6"),
+      sessionLabel: ids.sessionLabel("fixture-6"),
       harness: "dsh",
       message: "临时",
       cwd: "/tmp/demo",

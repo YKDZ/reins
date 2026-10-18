@@ -17,7 +17,7 @@ describe("权限与事件", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-8"),
+      sessionLabel: ids.sessionLabel("fixture-8"),
       harness: "codex",
       message: "跑测试",
       cwd: "/tmp/demo",
@@ -60,7 +60,7 @@ describe("权限与事件", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-9"),
+      sessionLabel: ids.sessionLabel("fixture-9"),
       harness: "codex",
       message: "跑测试",
       cwd: "/tmp/demo",
@@ -100,7 +100,7 @@ describe("权限与事件", () => {
       diagnostics: testDiagnostics,
     });
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-10"),
+      sessionLabel: ids.sessionLabel("fixture-10"),
       harness: "dsh",
       message: "跑构建",
       cwd: "/tmp/demo",
@@ -156,7 +156,7 @@ describe("权限与事件", () => {
     const events: DomainEvent[] = [];
     const unsubscribe = machine.subscribe((event) => events.push(event));
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-11"),
+      sessionLabel: ids.sessionLabel("fixture-11"),
       harness: "codex",
       message: "开始",
       cwd: "/tmp/demo",
@@ -195,7 +195,7 @@ describe("权限与事件", () => {
     });
 
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-12"),
+      sessionLabel: ids.sessionLabel("fixture-12"),
       harness: "codex",
       message: "开始",
       cwd: "/tmp/demo",
@@ -224,19 +224,19 @@ describe("list 过滤与参数校验", () => {
       diagnostics: testDiagnostics,
     });
     await machine.spawn({
-      sessionName: ids.sessionName("fixture-inline-1"),
+      sessionLabel: ids.sessionLabel("fixture-inline-1"),
       harness: "codex",
       message: "a",
       cwd: "/tmp/demo",
     });
     await machine.spawn({
-      sessionName: ids.sessionName("fixture-inline-2"),
+      sessionLabel: ids.sessionLabel("fixture-inline-2"),
       harness: "qoder",
       message: "b",
       cwd: "/tmp/demo",
     });
     await machine.spawn({
-      sessionName: ids.sessionName("fixture-inline-3"),
+      sessionLabel: ids.sessionLabel("fixture-inline-3"),
       harness: "dsh",
       message: "c",
       cwd: "/tmp/demo",
@@ -260,7 +260,7 @@ describe("list 过滤与参数校验", () => {
 
     await expect(
       machine.spawn({
-        sessionName: ids.sessionName("fixture-inline-4"),
+        sessionLabel: ids.sessionLabel("fixture-inline-4"),
         harness: "",
         message: "x",
         cwd: "/tmp/demo",
@@ -272,7 +272,7 @@ describe("list 过滤与参数校验", () => {
     await expect(
       // @ts-expect-error 故意省略必填字段，验证运行时校验
       machine.spawn({
-        sessionName: ids.sessionName("fixture-inline-5"),
+        sessionLabel: ids.sessionLabel("fixture-inline-5"),
         harness: "codex",
       }),
     ).rejects.toEqual(expect.objectContaining({ code: "invalid_params" }));

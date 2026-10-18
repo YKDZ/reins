@@ -86,12 +86,12 @@ async function fixture() {
   async function spawnSession(
     connection: ReinsConnection,
     message: string,
-    sessionName = "facts",
+    sessionLabel = "facts",
   ) {
     return connection.spawn(
       {
         harness: "codex",
-        sessionName,
+        sessionLabel,
         message,
         cwd: directory,
       },

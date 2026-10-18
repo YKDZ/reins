@@ -3,7 +3,7 @@ import type { HarnessAdapter } from "@reins/daemon";
 import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
 import {
   type ConsumerContext,
-  type SessionName,
+  type SessionLabel,
   type DomainEvent,
   type WorkerSpec,
   type WorkerDriver,
@@ -58,7 +58,7 @@ test("显式 new_turn 在 busy 拒绝，不能改投活动回合", async () => {
   const spawned = await client.request("spawn", {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "placement" as SessionName,
+    sessionLabel: "placement",
     message: "initial caller task",
   });
   if ("error" in spawned) throw new Error("Expected spawn ACK");
@@ -83,7 +83,7 @@ test("active_turn 的 ACK 与 caller 事实等待精确原生接受", async () =
   const spawned = await client.request("spawn", {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "accepted" as SessionName,
+    sessionLabel: "accepted",
     message: "initial caller task",
   });
   if ("error" in spawned) throw new Error("Expected spawn ACK");
@@ -147,7 +147,7 @@ test("原生接受先于终态时，caller 事实仍归原回合且在终态之�
   const spawned = await client.request("spawn", {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "accept-race" as SessionName,
+    sessionLabel: "accept-race",
     message: "initial",
   });
   if ("error" in spawned) throw new Error("Expected spawn ACK");
@@ -201,7 +201,7 @@ test("idle new_turn 原子预留且等待接受，并发请求不会重复创建
   const spawned = await client.request("spawn", {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "new-race" as SessionName,
+    sessionLabel: "new-race",
     message: "initial",
   });
   if ("error" in spawned) throw new Error("Expected spawn ACK");
@@ -262,13 +262,13 @@ test("错误父级和已结束目标拒绝，消息不会流入后继回合", as
   const first = await client.request("spawn", {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "parent-one" as SessionName,
+    sessionLabel: "parent-one",
     message: "one",
   });
   const second = await client.request("spawn", {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "parent-two" as SessionName,
+    sessionLabel: "parent-two",
     message: "two",
   });
   if ("error" in first || "error" in second)
@@ -341,7 +341,7 @@ test("结束先于原生拒绝时，没有 caller 事实或后继回合残留", 
   const spawned = await client.request("spawn", {
     harness: "fake",
     cwd: "/tmp",
-    sessionName: "end-wins" as SessionName,
+    sessionLabel: "end-wins",
     message: "initial",
   });
   if ("error" in spawned) throw new Error("Expected spawn ACK");
@@ -408,7 +408,7 @@ test.each(["active_turn", "new_turn"] as const)(
     const spawned = await client.request("spawn", {
       harness: "fake",
       cwd: "/tmp",
-      sessionName: "kill-race" as SessionName,
+      sessionLabel: "kill-race",
       message: "initial",
     });
     if ("error" in spawned) throw new Error("Expected spawn ACK");

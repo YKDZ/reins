@@ -98,7 +98,7 @@ test("SDK validates worker cwd and preserves exact busy, idle, and killed snapsh
     await expect(
       f.connection.spawn(
         {
-          sessionName: `invalid-cwd-${index}`,
+          sessionLabel: `invalid-cwd-${index}`,
           harness: "codex",
           message: "read-marker",
           cwd,
@@ -118,7 +118,7 @@ test("SDK validates worker cwd and preserves exact busy, idle, and killed snapsh
 
   const spawned = await f.connection.spawn(
     {
-      sessionName: "caller-cwd",
+      sessionLabel: "caller-cwd",
       harness: "codex",
       message: "hold",
       cwd: f.firstCwd,
@@ -213,7 +213,7 @@ test("SDK any and all waits report the exact target set across out-of-order comp
   const f = await fixture();
   const first = await f.connection.spawn(
     {
-      sessionName: "first-target",
+      sessionLabel: "first-target",
       harness: "codex",
       message: "hold",
       cwd: f.firstCwd,
@@ -222,7 +222,7 @@ test("SDK any and all waits report the exact target set across out-of-order comp
   );
   const second = await f.connection.spawn(
     {
-      sessionName: "second-target",
+      sessionLabel: "second-target",
       harness: "codex",
       message: "hold",
       cwd: f.secondCwd,
@@ -318,9 +318,9 @@ test("SDK any and all waits report the exact target set across out-of-order comp
 
 test("SDK any and all preserve every partial result, pending target, and request order", async () => {
   const f = await fixture(waitAdapters);
-  const spawn = async (sessionName: string, message: string) =>
+  const spawn = async (sessionLabel: string, message: string) =>
     f.connection.spawn(
-      { sessionName, harness: "codex", message, cwd: f.firstCwd },
+      { sessionLabel, harness: "codex", message, cwd: f.firstCwd },
       f.connection.prepareOperation("spawn"),
     );
   const a = await spawn(
@@ -418,7 +418,7 @@ test("an old exact SDK target remains completed while its session runs a later t
   const f = await fixture(waitAdapters);
   const first = await f.connection.spawn(
     {
-      sessionName: "turn-history",
+      sessionLabel: "turn-history",
       harness: "codex",
       message: "first",
       cwd: f.firstCwd,
@@ -474,7 +474,7 @@ test("a long finite SDK wait deadline is not clamped to an immediate timeout", a
   const gate = join(f.directory, "release-long-deadline");
   const spawned = await f.connection.spawn(
     {
-      sessionName: "long-deadline",
+      sessionLabel: "long-deadline",
       harness: "codex",
       message: JSON.stringify({ gate, reply: "long result" }),
       cwd: f.firstCwd,
@@ -511,7 +511,7 @@ test("SDK preserves typed harness failure facts on the exact completed target", 
   });
   const spawned = await f.connection.spawn(
     {
-      sessionName: "failed-turn",
+      sessionLabel: "failed-turn",
       harness: "codex",
       message: JSON.stringify({
         stopReason: "failed",

@@ -242,7 +242,7 @@ test("副作用超时保留命令身份、不泄露原参，也不自动重发",
       {
         harness: "fake",
         cwd: "/tmp",
-        sessionName: "worker" as never,
+        sessionLabel: "worker" as never,
         message: "sensitive original",
       },
       5,
@@ -341,7 +341,7 @@ test("已关闭客户端确定未发送；安全查询断连保持普通错误",
     client.request("spawn", {
       harness: "fake",
       cwd: "/tmp",
-      sessionName: "unused" as never,
+      sessionLabel: "unused" as never,
       message: "never-sent",
     }),
   ).rejects.toThrow('"code":"daemon_disconnected"');
@@ -369,7 +369,7 @@ test("显式恢复保留原目录事实，不要求调用方重填目录对象�
   await initialized;
   const caller = {
     harness: "fake",
-    sessionName: "original-dir",
+    sessionLabel: "original-dir",
     message: "private initial task",
   };
   const original = {
@@ -425,7 +425,7 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
     client.request("spawn", {
       harness: "fake",
       cwd: "/tmp",
-      sessionName: "invalid" as never,
+      sessionLabel: "invalid" as never,
       message: "private task",
     }),
     client.request("kill", { sessionId: "worker@gab12cd" as never }),

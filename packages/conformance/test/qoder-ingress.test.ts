@@ -134,7 +134,7 @@ async function runFixture(
     const handshake = await client.initialize();
     if ("error" in handshake) throw new Error(JSON.stringify(handshake.error));
     const spawned = await client.request("spawn", {
-      sessionName: "conformance" as SpawnParams["sessionName"],
+      sessionLabel: "conformance" as SpawnParams["sessionLabel"],
       harness: "qoder",
       message: "fixture replay",
       cwd: "/tmp",

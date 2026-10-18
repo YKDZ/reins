@@ -9,7 +9,6 @@ import {
   type DiagnosticsParams,
   type DiagnosticsResult,
   type SessionId,
-  type SessionName,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -29,7 +28,7 @@ import { resolveDaemonState, type DaemonState } from "./state.ts";
 
 export type DiagnosticsRuntime = {
   readonly generation: DaemonGeneration;
-  sessionId(sessionName: SessionName): SessionId;
+  sessionId(): SessionId;
   record(
     input: DiagnosticInput,
     consumer?: ConsumerContext,
@@ -133,8 +132,8 @@ class RecorderRuntime implements DiagnosticsRuntime {
     this.#idFactory = createDaemonIdFactory(options.generation);
   }
 
-  sessionId(sessionName: SessionName): SessionId {
-    return this.#idFactory.session(sessionName);
+  sessionId(): SessionId {
+    return this.#idFactory.session();
   }
 
   record(

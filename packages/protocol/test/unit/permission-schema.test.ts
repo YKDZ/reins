@@ -184,26 +184,26 @@ describe("授权模式与决议命令", () => {
       cwd: "/tmp",
       harness: "codex",
       message: "x",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       authorizationMode: "interactive",
     });
     ok(spawnParamsSchema, {
       cwd: "/tmp",
       harness: "codex",
       message: "x",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       authorizationMode: "allowAll",
     });
     bad(spawnParamsSchema, {
       cwd: "/tmp",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "x",
       authorizationMode: "yolo",
     });
     bad(spawnParamsSchema, {
       cwd: "/tmp",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "x",
       permissionMode: "yolo",

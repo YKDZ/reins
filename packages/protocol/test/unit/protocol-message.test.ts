@@ -214,7 +214,7 @@ describe("per-method 参数与结果 schema", () => {
       cwd: "/tmp",
       harness: "qoder",
       message: "hello",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
     });
     bad(protocolParamsSchemaFor("spawn"), { harness: "qoder" });
     ok(protocolParamsSchemaFor("send"), {
@@ -294,7 +294,7 @@ describe("per-method 参数与结果 schema", () => {
         model: null,
         reasoning: null,
         cwd: "/tmp",
-        sessionName: "reviewer",
+        sessionLabel: "reviewer",
         spawnedAt: "2026-01-01T00:00:00.000Z",
         turns: 1,
         lastCompletedTurn: { turnId: "t1", stopReason: "end_turn" },
@@ -306,7 +306,7 @@ describe("per-method 参数与结果 schema", () => {
       model: null,
       reasoning: null,
       cwd: "/tmp",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       spawnedAt: "2026-01-01T00:00:00.000Z",
       turns: 1,
     };
