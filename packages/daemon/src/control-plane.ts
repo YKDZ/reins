@@ -2209,6 +2209,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       });
     } catch (error) {
       if (error instanceof PermissionResolutionCommitFailure) {
+        if (error.verificationError !== undefined) notifyControlUnavailable();
         rememberUncommittedPermissionAcceptance(
           key,
           error.result,

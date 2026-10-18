@@ -1653,6 +1653,218 @@ describe("daemon 协议面（缝 C）", () => {
     );
   });
 
+  test("权限提交状态无法核实时先结束旧观察并保留可续读游标", async () => {
+    const backingStore = createInMemoryControlStore();
+    let loseCommitAcknowledgment = false;
+    let verificationReadsToFail = 0;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      commitResolvePermission(input) {
+        const committed = backingStore.commitResolvePermission(input);
+        if (loseCommitAcknowledgment) {
+          loseCommitAcknowledgment = false;
+          verificationReadsToFail = 2;
+          throw new Error("权限决议提交回执丢失");
+        }
+        return committed;
+      },
+      getOperation(operationKey) {
+        if (verificationReadsToFail > 0) {
+          verificationReadsToFail -= 1;
+          throw new Error("权限决议提交核实不可用");
+        }
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      autoPermission: {
+        options: [
+          { outcome: "allow", scope: "once" },
+          { outcome: "deny", feedback: false },
+        ],
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const wire: ProtocolMessage[] = [];
+    connection.onEvent((event) => {
+      if (event.kind === "message") wire.push(event.message);
+    });
+
+    try {
+      const initialized = resultOf(
+        await requester("initialize", {
+          protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+          consumerContext: "test-consumer",
+          runtimeScopeId: testRuntimeScopeId,
+        }),
+      ) as { daemonGeneration: string; runtimeScopeId: RuntimeScopeId };
+      const spawned = resultOf(
+        await requester("spawn", {
+          sessionLabel: "permission-commit-observation-gap",
+          harness: "codex",
+          message: "permission observation",
+        }),
+      ) as { sessionId: SessionId };
+      const attached = await requester("attach", {
+        scope: "session",
+        sessionId: spawned.sessionId,
+        start: { mode: "history" },
+      });
+      expect(resultOf(attached)).toMatchObject({
+        initial: { mode: "history", window: { head: 4 } },
+      });
+      await waitFor(
+        () =>
+          wire.filter(
+            (message) =>
+              message.kind === "notification" && message.method === "event",
+          ).length === 4,
+      );
+      const before = backingStore.sessionEvents(spawned.sessionId);
+      const permissionRequested = before.find(
+        ({ event }) => event.type === "permission.requested",
+      );
+      expect(permissionRequested?.eventId).toBe(4);
+
+      loseCommitAcknowledgment = true;
+      const permission = permissionRequested?.event;
+      if (permission?.type !== "permission.requested")
+        throw new Error("测试没有创建权限请求");
+      const resolutionResponse = await requester("resolvePermission", {
+        sessionId: spawned.sessionId,
+        turnId: permission.turnId,
+        permissionId: permission.permissionId,
+        resolution: { outcome: "allow", scope: "once" },
+      });
+      expect(resolutionResponse).toMatchObject({
+        error: {
+          code: "control_store_unavailable",
+          stage: "commit",
+          acceptance: "accepted",
+        },
+      });
+      if (
+        !("error" in resolutionResponse) ||
+        resolutionResponse.error.code !== "control_store_unavailable" ||
+        !("operationKey" in resolutionResponse.error)
+      )
+        throw new Error("权限决议响应没有保留操作身份");
+      expect(
+        resultOf(
+          await requester("getOperation", {
+            operationKey: resolutionResponse.error.operationKey,
+          }),
+        ),
+      ).toMatchObject({
+        status: "succeeded",
+        result: {
+          sessionId: spawned.sessionId,
+          turnId: permission.turnId,
+          permissionId: permission.permissionId,
+        },
+      });
+      expect(
+        backingStore
+          .sessionEvents(spawned.sessionId)
+          .map(({ event }) => event.type),
+      ).toEqual([
+        "session.created",
+        "turn.started",
+        "message",
+        "permission.requested",
+        "permission.resolved",
+        "turn.completed",
+        "session.killed",
+      ]);
+
+      await waitFor(() =>
+        wire.some(
+          (message) =>
+            message.kind === "notification" &&
+            message.method === "attach.ended" &&
+            message.params.reason === "control_unavailable",
+        ),
+      );
+      const firstEvents = wire.filter(
+        (message) =>
+          message.kind === "notification" && message.method === "event",
+      );
+      const firstEnd = wire.find(
+        (message) =>
+          message.kind === "notification" && message.method === "attach.ended",
+      );
+      expect(firstEvents.map((message) => message.params.eventId)).toEqual([
+        1, 2, 3, 4,
+      ]);
+      expect(firstEnd).toMatchObject({
+        params: { reason: "control_unavailable", lastEventId: 4 },
+      });
+
+      const recoveryStart = wire.length;
+      expect(
+        resultOf(
+          await requester("attach", {
+            scope: "session",
+            sessionId: spawned.sessionId,
+            start: {
+              mode: "after",
+              cursor: encodeResumeCursor({
+                target: { scope: "session", sessionId: spawned.sessionId },
+                runtimeScopeId: initialized.runtimeScopeId,
+                daemonGeneration: v.parse(
+                  daemonGenerationSchema,
+                  initialized.daemonGeneration,
+                ),
+                eventId: 4,
+              }),
+            },
+          }),
+        ),
+      ).toMatchObject({ initial: { mode: "after", replayed: 3 } });
+      await waitFor(() =>
+        wire
+          .slice(recoveryStart)
+          .some(
+            (message) =>
+              message.kind === "notification" &&
+              message.method === "attach.ended" &&
+              message.params.lastEventId === 7,
+          ),
+      );
+      const recoveryEvents = wire
+        .slice(recoveryStart)
+        .filter(
+          (message) =>
+            message.kind === "notification" && message.method === "event",
+        );
+      expect(recoveryEvents.map((message) => message.params.eventId)).toEqual([
+        5, 6, 7,
+      ]);
+      expect(
+        recoveryEvents.map((message) => message.params.event.type),
+      ).toEqual(["permission.resolved", "turn.completed", "session.killed"]);
+    } finally {
+      connection.close();
+      await daemon.stop();
+      await running;
+    }
+  });
+
   test("explicit turn scope excludes older turn history", async () => {
     const fake = createFakeHarness({
       harness: "codex",
