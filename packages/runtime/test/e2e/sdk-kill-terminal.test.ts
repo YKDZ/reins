@@ -17,6 +17,7 @@ import { resolveDaemonState } from "@reins/daemon/state";
 import {
   connect as connectSdk,
   parseRuntimeScopeId,
+  ReinsSdkError,
   type AgentFact,
   type ReinsConnection,
   type SessionHandle,
@@ -185,11 +186,14 @@ test("kill commits exactly one killed turn before the session terminal", async (
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {
-    for await (const fact of subscription) events.push(fact);
+    for await (const fact of subscription) {
+      events.push(fact);
+      subscription.acknowledge(fact);
+    }
   })();
   await nativeReady(callerCwd);
   const killed = await killSession(connection, spawned.sessionHandle);
@@ -215,6 +219,208 @@ test("kill commits exactly one killed turn before the session terminal", async (
   ]);
 });
 
+test("重连后仍可通过 SDK 查询已完成的关闭操作", async () => {
+  const { callerCwd, sdk, spawnSession } = await fixture();
+  const connection = await sdk();
+  const spawned = await spawnSession(
+    connection,
+    "query-kill-operation",
+    callerCwd,
+    "caller busy task",
+  );
+  await nativeReady(callerCwd);
+
+  const operationKey = connection.prepareOperation("kill");
+  const result = await connection.kill(
+    { sessionHandle: spawned.sessionHandle },
+    { operationKey },
+  );
+  expect(result).toMatchObject({ status: "killed" });
+
+  connection.close();
+  const reconnected = await sdk();
+  await expect(reconnected.getOperation(operationKey)).resolves.toEqual({
+    status: "succeeded",
+    operationKey,
+    result: {
+      sessionHandle: spawned.sessionHandle,
+      status: "killed",
+    },
+  });
+});
+
+test("官方关闭已确认但本地资源释放失败时保留关闭效果且不发布终态", async () => {
+  const { callerCwd, sdk, spawnSession, killSession } = await fixture();
+  const connection = await sdk();
+  const spawned = await spawnSession(
+    connection,
+    "partial-close-effect",
+    callerCwd,
+    "fail local release after official close",
+  );
+  const subscription = await connection.attach(
+    { scope: "session", sessionHandle: spawned.sessionHandle },
+    { mode: "history" },
+  );
+  const facts: AgentFact[] = [];
+  const collect = (async () => {
+    for await (const fact of subscription) facts.push(fact);
+  })();
+  await nativeReady(callerCwd);
+
+  const failedCloseKey = connection.prepareOperation("kill");
+  const failure = await connection
+    .kill(
+      { sessionHandle: spawned.sessionHandle },
+      { operationKey: failedCloseKey },
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
+  if (!(failure instanceof ReinsSdkError)) throw failure;
+  expect(failure.failure).toMatchObject({
+    code: "internal_error",
+    facts: {
+      cause: { kind: "closed" },
+      effect: {
+        kind: "session_closed",
+        sessionHandle: spawned.sessionHandle,
+      },
+    },
+  });
+  await expect(connection.getOperation(failedCloseKey)).resolves.toMatchObject({
+    status: "failed",
+    operationKey: failedCloseKey,
+    error: {
+      code: "internal_error",
+      facts: {
+        effect: {
+          kind: "session_closed",
+          sessionHandle: spawned.sessionHandle,
+        },
+      },
+    },
+  });
+  expect(
+    facts.filter(
+      (fact) =>
+        fact.type === "turn.completed" || fact.type === "session.killed",
+    ),
+  ).toEqual([]);
+
+  await expect(
+    killSession(connection, spawned.sessionHandle),
+  ).resolves.toMatchObject({
+    status: "killed",
+    sessionHandle: spawned.sessionHandle,
+  });
+  await collect;
+  await expect(subscription.done).resolves.toMatchObject({
+    reason: "session_killed",
+  });
+  expect(
+    facts.filter(
+      (fact) =>
+        fact.type === "turn.completed" || fact.type === "session.killed",
+    ),
+  ).toMatchObject([
+    {
+      type: "turn.completed",
+      turnHandle: spawned.turnHandle,
+      stopReason: "killed",
+    },
+    { type: "session.killed", sessionHandle: spawned.sessionHandle },
+  ]);
+});
+
+test("关闭开始后拒绝新发送并等待在途发送再发布终态事实", async () => {
+  const { callerCwd, sdk, spawnSession, killSession } = await fixture();
+  const connection = await sdk();
+  const spawned = await spawnSession(
+    connection,
+    "in-flight-send-kill",
+    callerCwd,
+    "hold steer for kill",
+  );
+  const subscription = await connection.attach(
+    { scope: "session", sessionHandle: spawned.sessionHandle },
+    { mode: "history" },
+  );
+  const facts: AgentFact[] = [];
+  const collect = (async () => {
+    for await (const fact of subscription) facts.push(fact);
+  })();
+  await nativeReady(callerCwd);
+
+  const inFlightSend = connection.send(
+    {
+      placement: "active_turn",
+      turnHandle: spawned.turnHandle,
+      message: "already dispatched",
+    },
+    { operationKey: connection.prepareOperation("send") },
+  );
+  await vi.waitFor(async () =>
+    expect(await readFile(join(callerCwd, "steer-started.txt"), "utf8")).toBe(
+      "started",
+    ),
+  );
+
+  try {
+    let killSettled = false;
+    const killing = killSession(connection, spawned.sessionHandle).then(
+      (result) => {
+        killSettled = true;
+        return result;
+      },
+      (error: unknown) => {
+        killSettled = true;
+        throw error;
+      },
+    );
+    await expect(
+      connection.send(
+        {
+          placement: "active_turn",
+          turnHandle: spawned.turnHandle,
+          message: "must be rejected after kill begins",
+        },
+        { operationKey: connection.prepareOperation("send") },
+      ),
+    ).rejects.toMatchObject({ failure: { code: "session_terminating" } });
+    expect(killSettled).toBe(false);
+
+    await writeFile(join(callerCwd, "release-steer.txt"), "continue");
+    await expect(inFlightSend).resolves.toMatchObject({
+      deliveryPoint: "active_turn",
+      turnHandle: spawned.turnHandle,
+    });
+    await expect(killing).resolves.toMatchObject({ status: "killed" });
+    await collect;
+    await expect(subscription.done).resolves.toMatchObject({
+      reason: "session_killed",
+    });
+    const callerFactIndex = facts.findIndex(
+      (fact) =>
+        fact.type === "message" &&
+        fact.role === "caller" &&
+        fact.content === "already dispatched",
+    );
+    const completedIndex = facts.findIndex(
+      (fact) => fact.type === "turn.completed",
+    );
+    const killedIndex = facts.findIndex(
+      (fact) => fact.type === "session.killed",
+    );
+    expect(callerFactIndex).toBeGreaterThanOrEqual(0);
+    expect(completedIndex).toBeGreaterThan(callerFactIndex);
+    expect(killedIndex).toBeGreaterThan(completedIndex);
+  } finally {
+    await writeFile(join(callerCwd, "release-steer.txt"), "continue");
+  }
+});
+
 test("kill stops the actual writer and its held FD while another session survives", async () => {
   const { callerCwd, root, daemon, sdk, spawnSession, killSession } =
     await fixture();
@@ -235,7 +441,7 @@ test("kill stops the actual writer and its held FD while another session survive
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   let statesAtTerminal: string[] | undefined;
   let pids: { parent: number; writer: number } | undefined;
@@ -248,6 +454,7 @@ test("kill stops the actual writer and its held FD while another session survive
           processState(pids.parent),
           processState(pids.writer),
         ];
+      subscription.acknowledge(fact);
     }
   })();
   await nativeReady(callerCwd);
@@ -332,11 +539,14 @@ test.each(["complete during kill", "complete naturally"])(
     );
     const subscription = await connection.attach(
       { scope: "session", sessionHandle: spawned.sessionHandle },
-      { mode: "available" },
+      { mode: "history" },
     );
     const events: AgentFact[] = [];
     const collect = (async () => {
-      for await (const fact of subscription) events.push(fact);
+      for await (const fact of subscription) {
+        events.push(fact);
+        subscription.acknowledge(fact);
+      }
     })();
     await nativeReady(callerCwd);
     if (message === "complete naturally")
@@ -388,11 +598,14 @@ test("failed termination leaves the real writer and original turn alive for a fr
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {
-    for await (const fact of subscription) events.push(fact);
+    for await (const fact of subscription) {
+      events.push(fact);
+      subscription.acknowledge(fact);
+    }
   })();
   await nativeReady(callerCwd);
   await expect(

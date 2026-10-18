@@ -15,11 +15,15 @@ import {
   type ModelCatalogFailure,
   type ModelCatalogResult,
   type DiagnosticId,
+  type KillResult,
+  type MessageKey,
+  type OperationRecord,
   type OperationKey,
   type ReinsConnection,
   type ReinsFailure,
   type ResumeCursor,
   type SendInput,
+  type SendResult,
   type SessionHandle,
   type SessionInfo,
   type SessionState,
@@ -59,8 +63,72 @@ const activeTurnSend: SendInput = {
 const newTurnSend: SendInput = {
   placement: "new_turn",
   sessionHandle,
+  ifLastCompletedTurn: turnHandle,
   message: "next turn",
 };
+const sendOperationKey = connection.prepareOperation("send");
+const interruptOperationKey = connection.prepareOperation("interrupt");
+const generatedSend = connection.send(newTurnSend);
+const keyedSend = connection.send(newTurnSend, {
+  operationKey: sendOperationKey,
+});
+const sendOperationQuery: Promise<OperationRecord<"send">> =
+  connection.getOperation(sendOperationKey);
+const killOperationKey = connection.prepareOperation("kill");
+const killOperationQuery: Promise<OperationRecord<"kill">> =
+  connection.getOperation(killOperationKey);
+async function inspectKillOperation(): Promise<SessionHandle | undefined> {
+  const operation = await killOperationQuery;
+  if (operation.status === "succeeded") {
+    const result: KillResult = operation.result;
+    return result.sessionHandle;
+  }
+  if (
+    operation.status === "partial_effect_uncommitted" ||
+    operation.status === "partial_effect_unconfirmed"
+  ) {
+    const closedSession: SessionHandle =
+      operation.error.facts.effect.sessionHandle;
+    return closedSession;
+  }
+  return undefined;
+}
+void inspectKillOperation;
+const wrongKillOperation: OperationRecord<"kill"> = {
+  status: "succeeded",
+  // @ts-expect-error Kill results remain accurately associated with kill keys.
+  operationKey: sendOperationKey,
+  result: { sessionHandle, status: "killed" },
+};
+void wrongKillOperation;
+const interruptOperationQuery: Promise<OperationRecord<"interrupt">> =
+  connection.getOperation(interruptOperationKey);
+void interruptOperationQuery;
+function inspectUncommittedSendFailure(record: OperationRecord<"send">): void {
+  if (
+    record.status !== "not_accepted_uncommitted" &&
+    record.status !== "not_accepted_unconfirmed" &&
+    record.status !== "partial_effect_uncommitted" &&
+    record.status !== "partial_effect_unconfirmed"
+  )
+    return;
+  if (record.cause.kind === "io") {
+    const causeKind: "io" = record.cause.kind;
+    void causeKind;
+  }
+  const failureCode: ReinsFailure["code"] = record.error.code;
+  void failureCode;
+  if (
+    record.status === "partial_effect_uncommitted" ||
+    record.status === "partial_effect_unconfirmed"
+  ) {
+    const phase: "execution_phase_cancelled" = record.error.facts.effect.kind;
+    const target: TurnHandle = record.error.facts.effect.turnHandle;
+    void phase;
+    void target;
+  }
+}
+void inspectUncommittedSendFailure;
 const target: AgentTarget = { scope: "turn", turnHandle };
 const waitInput: WaitInput = {
   targets: [turnHandle],
@@ -98,6 +166,21 @@ async function inspectSpawnOperation(): Promise<
   }
   return undefined;
 }
+
+async function inspectSendOperation(): Promise<MessageKey | undefined> {
+  const operation = await connection.getOperation(sendOperationKey);
+  if (operation.status !== "succeeded") return undefined;
+  const result: SendResult = operation.result;
+  return result.messageKey;
+}
+
+async function inspectInterruptOperation(): Promise<"accepted" | undefined> {
+  const operation = await connection.getOperation(interruptOperationKey);
+  if (operation.status !== "succeeded") return undefined;
+  const result = operation.result;
+  return result.status;
+}
+void inspectInterruptOperation;
 
 function inspectUnknownSpawnFailure(
   failure: ReinsFailure,
@@ -204,11 +287,15 @@ void inspectModelCatalog;
 void inspectWaitResult;
 void inspectUnreachableSession;
 void inspectSpawnOperation;
+void inspectSendOperation;
 void inspectUnknownSpawnFailure;
 void started;
 void generatedOperation;
 void activeTurnSend;
 void newTurnSend;
+void generatedSend;
+void keyedSend;
+void sendOperationQuery;
 void waitInput;
 void resumed;
 void restoredSessionHandle;

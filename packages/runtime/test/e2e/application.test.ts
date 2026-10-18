@@ -441,11 +441,62 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   await expect(
     original.wait({ targets: [completed.turnHandle], completion: "all" }),
   ).resolves.toMatchObject({ status: "satisfied" });
+  const sendKey = original.prepareOperation("send");
+  const sent = await original.send(
+    {
+      placement: "new_turn",
+      sessionHandle: completed.sessionHandle,
+      ifLastCompletedTurn: completed.turnHandle,
+      message: "complete before daemon restart",
+    },
+    { operationKey: sendKey },
+  );
+  await expect(
+    original.wait({ targets: [sent.turnHandle], completion: "all" }),
+  ).resolves.toMatchObject({ status: "satisfied" });
+  const previousHistory = await original.attach(
+    { scope: "session", sessionHandle: completed.sessionHandle },
+    { mode: "history" },
+  );
+  const previousCursor = previousHistory.initial.cursor;
+  previousHistory.close();
+  await expect(previousHistory.done).resolves.toMatchObject({
+    reason: "closed",
+  });
 
   const active = await original.spawn({
     harness: "codex",
-    message: "hold across daemon restart",
+    message: "hold with pending permission across daemon restart",
     cwd: process.cwd(),
+  });
+  const activeTarget = {
+    scope: "session" as const,
+    sessionHandle: active.sessionHandle,
+  };
+  const activeHistory = await original.attach(activeTarget, {
+    mode: "history",
+  });
+  const activeCursor = activeHistory.initial.cursor;
+  let observedPendingPermission = false;
+  for await (const fact of activeHistory) {
+    activeHistory.acknowledge(fact);
+    if (fact.type === "permission.requested") {
+      observedPendingPermission = true;
+      break;
+    }
+  }
+  activeHistory.close();
+  await expect(activeHistory.done).resolves.toMatchObject({ reason: "closed" });
+  expect(observedPendingPermission).toBe(true);
+  const liveAuthorization = await original.attach(activeTarget, {
+    mode: "snapshot",
+  });
+  if (liveAuthorization.initial.mode !== "snapshot")
+    throw new Error("Expected a snapshot initial state");
+  expect(liveAuthorization.initial.baseline.pendingPermissions).toHaveLength(1);
+  liveAuthorization.close();
+  await expect(liveAuthorization.done).resolves.toMatchObject({
+    reason: "closed",
   });
   const killed = await original.spawn({
     harness: "codex",
@@ -462,7 +513,51 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   const reconnected = await openLocal(options);
   clients.push(reconnected);
   expect(reconnected.handshake.daemonGeneration).not.toBe(originalGeneration);
+  const resumedHistory = await reconnected.attach(
+    { scope: "session", sessionHandle: completed.sessionHandle },
+    { mode: "after", cursor: previousCursor },
+  );
+  const resumedFactTypes: string[] = [];
+  for await (const fact of resumedHistory) {
+    resumedFactTypes.push(fact.type);
+    resumedHistory.acknowledge(fact);
+  }
+  expect(resumedFactTypes).toContain("turn.completed");
+  await expect(resumedHistory.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
+  const oldAuthorization = await reconnected.attach(activeTarget, {
+    mode: "snapshot",
+  });
+  if (oldAuthorization.initial.mode !== "snapshot")
+    throw new Error("Expected a snapshot initial state");
+  expect(oldAuthorization.initial.baseline.session).toMatchObject({
+    state: "unreachable",
+    unreachableReason: "previous_generation",
+  });
+  expect(oldAuthorization.initial.baseline.pendingPermissions).toEqual([]);
+  await expect(oldAuthorization.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
+  const oldAuthorizationHistory = await reconnected.attach(activeTarget, {
+    mode: "after",
+    cursor: activeCursor,
+  });
+  let replayedOldPermission = false;
+  for await (const fact of oldAuthorizationHistory) {
+    if (fact.type === "permission.requested") replayedOldPermission = true;
+    oldAuthorizationHistory.acknowledge(fact);
+  }
+  expect(replayedOldPermission).toBe(true);
+  await expect(oldAuthorizationHistory.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
   expect(await reconnected.list()).toEqual([]);
+  await expect(reconnected.getOperation(sendKey)).resolves.toEqual({
+    status: "succeeded",
+    operationKey: sendKey,
+    result: sent,
+  });
   expect(
     await reconnected.list({ sessionHandle: completed.sessionHandle }),
   ).toMatchObject([
@@ -470,7 +565,7 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
       state: "unreachable",
       lastKnownState: "idle",
       lastCompletedTurn: {
-        turnHandle: completed.turnHandle,
+        turnHandle: sent.turnHandle,
         stopReason: "end_turn",
       },
     },
@@ -1147,6 +1242,12 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       sessionHandle: active.sessionHandle,
       message: "unknown placement",
     },
+    {
+      placement: "active_turn",
+      turnHandle: active.turnHandle,
+      ifLastCompletedTurn: active.turnHandle,
+      message: "conflicting active turn precondition",
+    },
   ]) {
     await expect(
       connection.send(input as unknown as SendInput, {
@@ -1161,18 +1262,19 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     await connection.list({ sessionHandle: active.sessionHandle }),
   ).toMatchObject([{ state: "busy", activeTurn: active.turnHandle }]);
   const activeMessage = "  exact active input\nkeep spacing  ";
+  const activeSendKey = connection.prepareOperation("send");
   const subscription = await connection.attach(
     { scope: "turn", turnHandle: active.turnHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const callerFactPromise = (async () => {
     for await (const fact of subscription) {
-      if (
+      const isCallerFact =
         fact.type === "message" &&
         fact.role === "caller" &&
-        fact.content === activeMessage
-      )
-        return fact;
+        fact.content === activeMessage;
+      subscription.acknowledge(fact);
+      if (isCallerFact) return fact;
     }
     throw new Error("The active caller message was not published as a fact");
   })();
@@ -1182,7 +1284,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       turnHandle: active.turnHandle,
       message: activeMessage,
     },
-    { operationKey: connection.prepareOperation("send") },
+    { operationKey: activeSendKey },
   );
   expect(activeSend).toMatchObject({
     sessionHandle: active.sessionHandle,
@@ -1194,6 +1296,33 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   expect(parseMessageKey(serializeMessageKey(activeSend.messageKey))).toBe(
     callerFact.messageKey,
   );
+  expect(await connection.getOperation(activeSendKey)).toMatchObject({
+    status: "succeeded",
+    result: activeSend,
+  });
+  await expect(
+    connection.send(
+      {
+        placement: "active_turn",
+        turnHandle: active.turnHandle,
+        message: activeMessage,
+      },
+      { operationKey: activeSendKey },
+    ),
+  ).resolves.toEqual(activeSend);
+  await expect(
+    connection.send(
+      {
+        placement: "active_turn",
+        turnHandle: active.turnHandle,
+        message: `${activeMessage} changed`,
+      },
+      { operationKey: activeSendKey },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: { code: "operation_key_conflict" },
+  });
   const cursor = subscription.checkpoint;
   expect(parseResumeCursor(serializeResumeCursor(cursor))).toBe(cursor);
   subscription.close();
@@ -1236,6 +1365,64 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     }),
   ).toMatchObject({ status: "satisfied" });
 
+  const partiallyCancelled = await connection.spawn(
+    {
+      harness: "codex",
+      message: "hold before continuation",
+      sessionLabel: "partial-steer",
+      cwd: process.cwd(),
+    },
+    { operationKey: connection.prepareOperation("spawn") },
+  );
+  const partialSendKey = connection.prepareOperation("send");
+  await expect(
+    connection.send(
+      {
+        placement: "active_turn",
+        turnHandle: partiallyCancelled.turnHandle,
+        message: "partial-cancel then continue",
+      },
+      { operationKey: partialSendKey },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: {
+      code: "internal_error",
+      facts: {
+        effect: {
+          kind: "execution_phase_cancelled",
+          sessionHandle: partiallyCancelled.sessionHandle,
+          turnHandle: partiallyCancelled.turnHandle,
+        },
+      },
+    },
+  });
+  expect(await connection.getOperation(partialSendKey)).toMatchObject({
+    status: "failed",
+    error: {
+      code: "internal_error",
+      facts: {
+        effect: {
+          kind: "execution_phase_cancelled",
+          sessionHandle: partiallyCancelled.sessionHandle,
+          turnHandle: partiallyCancelled.turnHandle,
+        },
+      },
+    },
+  });
+  expect(
+    await connection.wait({
+      targets: [partiallyCancelled.turnHandle],
+      completion: "all",
+      timeoutMs: 5_000,
+    }),
+  ).toMatchObject({
+    status: "satisfied",
+    completed: [
+      { turnHandle: partiallyCancelled.turnHandle, stopReason: "cancelled" },
+    ],
+  });
+
   const held = await connection.spawn(
     {
       harness: "codex",
@@ -1245,12 +1432,19 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     },
     { operationKey: connection.prepareOperation("spawn") },
   );
-  expect(
-    await connection.interrupt(
-      { turnHandle: held.turnHandle },
-      { operationKey: connection.prepareOperation("interrupt") },
-    ),
-  ).toEqual({ turnHandle: held.turnHandle, status: "accepted" });
+  const interruptOperationKey = connection.prepareOperation("interrupt");
+  const interruptResult = await connection.interrupt(
+    { turnHandle: held.turnHandle },
+    { operationKey: interruptOperationKey },
+  );
+  expect(interruptResult).toEqual({
+    turnHandle: held.turnHandle,
+    status: "accepted",
+  });
+  expect(await connection.getOperation(interruptOperationKey)).toMatchObject({
+    status: "succeeded",
+    result: interruptResult,
+  });
   expect(
     await connection.wait({
       targets: [held.turnHandle],
@@ -1286,7 +1480,115 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   const delivered = observed.filter(
     (record) => record.type === "message_delivered",
   );
-  expect(delivered).toHaveLength(2);
+  expect(delivered).toHaveLength(3);
   expect(delivered[0]).toMatchObject({ message: activeMessage });
   expect(delivered[1]).toMatchObject({ message: nextMessage });
+  expect(delivered[2]).toMatchObject({
+    message: "partial-cancel then continue",
+  });
+});
+
+test("SDK new-turn preconditions are exact, persisted, and checked before delivery", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "reins-sdk-new-turn-condition-"),
+  );
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  const observations = join(directory, "adapter-observations.ndjson");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const connection = await openLocal({
+    consumerContext: "sdk-new-turn-condition",
+    env: {
+      ...process.env,
+      REINS_SOCKET: join(directory, "reins.sock"),
+      REINS_STATE_DIR: join(directory, "state"),
+      REINS_DAEMON_BIN: daemonLauncher,
+      REINS_ADAPTERS_MODULE: adaptersModule,
+      REINS_FIXTURE_REQUESTS_FILE: observations,
+      REINS_IDLE_TIMEOUT_MS: "120000",
+    },
+  });
+  clients.push(connection);
+
+  const first = await connection.spawn(
+    {
+      harness: "codex",
+      message: "complete first turn",
+      cwd: process.cwd(),
+    },
+    { operationKey: connection.prepareOperation("spawn") },
+  );
+  await connection.wait({ targets: [first.turnHandle], completion: "all" });
+
+  const sendIntent = {
+    placement: "new_turn" as const,
+    sessionHandle: first.sessionHandle,
+    ifLastCompletedTurn: first.turnHandle,
+    message: "start second turn",
+  };
+  const operationKey = connection.prepareOperation("send");
+  const second = await connection.send(sendIntent, { operationKey });
+  await connection.wait({ targets: [second.turnHandle], completion: "all" });
+
+  await expect(connection.send(sendIntent, { operationKey })).resolves.toEqual(
+    second,
+  );
+  await expect(
+    connection.send(
+      { ...sendIntent, message: "stale retry must not dispatch" },
+      { operationKey },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: { code: "operation_key_conflict" },
+  });
+  await expect(
+    connection.send(
+      {
+        ...sendIntent,
+        message: "stale predecessor must not dispatch",
+      },
+      { operationKey: connection.prepareOperation("send") },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: {
+      code: "turn_precondition_failed",
+      facts: {
+        sessionHandle: first.sessionHandle,
+        expected: first.turnHandle,
+      },
+    },
+  });
+
+  const recovered = await connection.getOperation(operationKey);
+  expect(recovered).toMatchObject({
+    status: "succeeded",
+    operationKey,
+    result: second,
+  });
+
+  const observedRecords = (
+    await readFile(join(directory, "adapter-observations.ndjson"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(
+    observedRecords.filter(
+      (record) =>
+        record.type === "message_delivered" &&
+        record.message === "start second turn",
+    ),
+  ).toHaveLength(1);
+  expect(
+    observedRecords.some(
+      (record) => record.message === "stale predecessor must not dispatch",
+    ),
+  ).toBe(false);
 });

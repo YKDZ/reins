@@ -6,6 +6,10 @@ import {
   modelCatalogResultSchema,
   modelCatalogEntrySchema,
   domainEventSchema,
+  operationKeyClaimsSchema,
+  operationRecordSchemaFor,
+  serializeOperationKey,
+  consumerContextSchema,
   harnessModelCatalogSchema,
   machineErrorSchema,
   protocolMessageSchema,
@@ -15,9 +19,12 @@ import {
   protocolResponseSchema,
   protocolParamsSchemaFor,
   protocolResultSchemaFor,
+  runtimeScopeIdSchema,
   sessionIdSchema,
+  daemonGenerationSchema,
   turnIdSchema,
   turnCompletedSchema,
+  encodeResumeCursor,
 } from "../../src/index.ts";
 
 const ok = (schema: v.GenericSchema, input: unknown): void => {
@@ -70,6 +77,86 @@ test("failed 与其他终态严格区分，事件和 wait 共用失败事实", (
     stopReason: "end_turn",
     failure,
   });
+});
+
+test("部分关闭事实只作为精确 kill 操作记录暴露", () => {
+  const runtimeScopeId = v.parse(
+    runtimeScopeIdSchema,
+    "00000000-0000-4000-8000-000000000000",
+  );
+  const consumer = v.parse(consumerContextSchema, "protocol-kill-test");
+  const generation = v.parse(daemonGenerationSchema, "killtest");
+  const nonce = "00000000-0000-4000-8000-000000000001";
+  const killKey = serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, {
+      runtimeScopeId,
+      consumer,
+      kind: "kill",
+      generation,
+      nonce,
+    }),
+  );
+  const spawnKey = serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, {
+      runtimeScopeId,
+      consumer,
+      kind: "spawn",
+      generation,
+      nonce: "00000000-0000-4000-8000-000000000002",
+    }),
+  );
+  const partial = {
+    status: "partial_effect_uncommitted",
+    operationKey: killKey,
+    error: {
+      code: "internal_error",
+      cause: { kind: "closed", message: "owned resource release failed" },
+      effect: {
+        kind: "session_closed",
+        sessionId: `session:${runtimeScopeId}:${generation}:1`,
+      },
+    },
+    cause: { kind: "io", message: "failure record could not be written" },
+  };
+
+  ok(operationRecordSchemaFor("kill"), partial);
+  bad(operationRecordSchemaFor("spawn"), {
+    ...partial,
+    operationKey: spawnKey,
+  });
+});
+
+test("部分取消效果只属于 send 操作记录", () => {
+  const baseClaims = {
+    runtimeScopeId: v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000000",
+    ),
+    consumer: v.parse(consumerContextSchema, "protocol-test"),
+    generation: v.parse(daemonGenerationSchema, "protocoltest"),
+    nonce: "00000000-0000-4000-8000-000000000001",
+  };
+  const operationKey = serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, { ...baseClaims, kind: "send" }),
+  );
+  const record = {
+    status: "partial_effect_uncommitted",
+    operationKey,
+    error: {
+      code: "internal_error",
+      effect: {
+        kind: "execution_phase_cancelled",
+        sessionId: v.parse(
+          sessionIdSchema,
+          "session:00000000-0000-4000-8000-000000000000:protocoltest:1",
+        ),
+        turnId: v.parse(turnIdSchema, "t1"),
+      },
+    },
+    cause: { kind: "io", message: "record unavailable" },
+  };
+  ok(operationRecordSchemaFor("send"), record);
+  bad(operationRecordSchemaFor("interrupt"), record);
 });
 
 describe("协议 envelope", () => {
@@ -293,7 +380,30 @@ describe("per-method 参数与结果 schema", () => {
     ok(protocolParamsSchemaFor("attach"), {
       sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       scope: "session",
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
+    });
+    const conflictingStart = {
+      mode: "snapshot",
+      cursor: encodeResumeCursor({
+        target: {
+          scope: "session",
+          sessionId: v.parse(
+            sessionIdSchema,
+            "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+          ),
+        },
+        runtimeScopeId: v.parse(
+          runtimeScopeIdSchema,
+          "00000000-0000-4000-8000-000000000000",
+        ),
+        daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+        eventId: 0,
+      }),
+    };
+    bad(protocolParamsSchemaFor("attach"), {
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      scope: "session",
+      start: conflictingStart,
     });
     ok(protocolParamsSchemaFor("resolvePermission"), {
       sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
@@ -379,33 +489,47 @@ describe("per-method 参数与结果 schema", () => {
     bad(protocolResultSchemaFor("list"), [
       { ...snapshot, state: "killed", activeTurnId: "t1" },
     ]);
+    const sessionId = v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+    );
+    const target = { scope: "session" as const, sessionId };
+    const cursor = encodeResumeCursor({
+      target,
+      runtimeScopeId: v.parse(
+        runtimeScopeIdSchema,
+        "00000000-0000-4000-8000-000000000000",
+      ),
+      daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+      eventId: 0,
+    });
     ok(protocolResultSchemaFor("attach"), {
-      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       subscriptionId: "subscription-1",
-      target: {
-        scope: "session",
-        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      initial: {
+        mode: "history",
+        target,
+        cursor,
+        window: { oldest: null, head: null, truncated: false },
+        replayed: 0,
       },
-      window: { oldest: null, head: null, truncated: false },
-      replayed: 0,
     });
     bad(protocolResultSchemaFor("attach"), {
-      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       subscriptionId: "subscription-1",
-      target: {
-        scope: "session",
-        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      initial: {
+        mode: "history",
+        target,
+        cursor,
+        window: { oldest: null, head: null, truncated: false },
+        replayed: 0,
+        replayPrefixes: [
+          {
+            turnId: "t1",
+            messageId: "m1",
+            prefix: "missing",
+            sessionId,
+          },
+        ],
       },
-      window: { oldest: null, head: null, truncated: false },
-      replayed: 0,
-      replayPrefixes: [
-        {
-          turnId: "t1",
-          messageId: "m1",
-          prefix: "missing",
-          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
-        },
-      ],
     });
     ok(protocolResultSchemaFor("resolvePermission"), {
       sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",

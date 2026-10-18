@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { openSync, writeSync, writeFileSync } from "node:fs";
+import { existsSync, openSync, writeSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
@@ -49,6 +49,11 @@ if (process.argv[2] === "writer") {
       message = request.params?.input?.[0]?.text ?? "";
       writeFileSync(join(cwd, "turn-started.txt"), message);
     }
+    if (request.method === "turn/steer" && message === "hold steer for kill") {
+      writeFileSync(join(cwd, "steer-started.txt"), "started");
+      while (!existsSync(join(cwd, "release-steer.txt")))
+        await new Promise<void>((resolve) => setTimeout(resolve, 5));
+    }
     if (
       request.method === "thread/delete" &&
       message === "complete during kill"
@@ -74,7 +79,9 @@ if (process.argv[2] === "writer") {
         ? { thread: { id: "native-thread" } }
         : request.method === "turn/start"
           ? { turn: { id: "native-turn" } }
-          : {};
+          : request.method === "turn/steer"
+            ? { turnId: "native-turn" }
+            : {};
     process.stdout.write(JSON.stringify({ id: request.id, result }) + "\n");
     if (request.method === "turn/start" && message === "complete naturally") {
       process.stdout.write(

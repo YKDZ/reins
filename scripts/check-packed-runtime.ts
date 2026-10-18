@@ -1533,10 +1533,11 @@ async function runRuntimeFactsAcceptance(options: {
     );
     assert(
       disconnected.code === "daemon_disconnected" &&
-        disconnected.cursorMatchesDeliveredFact === true &&
+        disconnected.cursorMatchesAcknowledgedFact === true &&
         typeof disconnected.checkpoint === "string" &&
-        typeof disconnected.deliveredFactCount === "number",
-      "消费者断开后未返回最后已交付事实的游标",
+        typeof disconnected.deliveredFactCount === "number" &&
+        typeof disconnected.acknowledgedFactCount === "number",
+      "消费者断开后未返回最后已确认事实的游标",
     );
     const kill = await runSdkMode(
       options.sdkConsumer,
@@ -1564,12 +1565,14 @@ async function runRuntimeFactsAcceptance(options: {
       "replay-facts",
       {
         REINS_TARGET_SESSION: String(factResult.sessionHandle),
-        REINS_RESUME_FACT_COUNT: String(disconnected.deliveredFactCount),
+        REINS_RESUME_ACKNOWLEDGED_FACT_COUNT: String(
+          disconnected.acknowledgedFactCount,
+        ),
         REINS_RESUME_CURSOR: String(disconnected.checkpoint),
       },
     );
     assert(
-      resumed.checkpointWasDelivered === true &&
+      resumed.checkpointWasAcknowledged === true &&
         resumed.resumedAfterDisconnect === true &&
         Array.isArray(resumed.resumedFacts),
       "SDK 未从断连 checkpoint 精确续接事件",
@@ -1874,11 +1877,19 @@ async function runControlChannelAcceptance(options: {
 }): Promise<void> {
   const directory = join(options.temporaryRoot, "installed-control-channel");
   mkdirSync(directory, { recursive: true });
+  const otherDirectory = join(directory, "other-target");
+  mkdirSync(otherDirectory, { recursive: true });
   const socketPath = join(directory, "reins.sock");
   const pidPath = join(directory, "daemon.pid");
   const launchLogPath = join(directory, "daemon-launches.log");
+  const otherSocketPath = join(otherDirectory, "reins.sock");
+  const otherPidPath = join(otherDirectory, "daemon.pid");
+  const otherLaunchLogPath = join(otherDirectory, "daemon-launches.log");
   const workerCwd = join(directory, "workspace");
   mkdirSync(workerCwd, { recursive: true });
+  const openGate = join(directory, "channel-open.release");
+  const recoveryGate = join(directory, "channel-recovery.release");
+  const backpressureGate = join(directory, "channel-backpressure.release");
   const daemonPath = join(
     options.runtimeConsumer,
     "node_modules",
@@ -1886,9 +1897,15 @@ async function runControlChannelAcceptance(options: {
     "reins-daemon",
   );
   const launcherPath = join(directory, "daemon-launcher");
+  const otherLauncherPath = join(otherDirectory, "daemon-launcher");
   writeFileSync(
     launcherPath,
     `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(pidPath)}\nprintf '%s\\n' launch >> ${shellQuote(launchLogPath)}\nexec ${shellQuote(daemonPath)} "$@"\n`,
+    { mode: 0o700 },
+  );
+  writeFileSync(
+    otherLauncherPath,
+    `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(otherPidPath)}\nprintf '%s\\n' launch >> ${shellQuote(otherLaunchLogPath)}\nexec ${shellQuote(daemonPath)} "$@"\n`,
     { mode: 0o700 },
   );
   const env: NodeJS.ProcessEnv = {
@@ -1899,13 +1916,31 @@ async function runControlChannelAcceptance(options: {
     REINS_ADAPTERS_MODULE: join(
       options.runtimeConsumer,
       "fixtures",
-      "adapter-fixture.ts",
+      "adapter-registry.ts",
     ),
     REINS_IDLE_TIMEOUT_MS: "120000",
     REINS_PACKED_FIXTURE_OBSERVATIONS: join(directory, "observations.ndjson"),
     REINS_PACKED_FIXTURE_ACTIVITY: join(directory, "activity.ndjson"),
+    REINS_PACKED_CHANNEL_OPEN_GATE: openGate,
+    REINS_PACKED_CHANNEL_FACT_GATE: recoveryGate,
+    REINS_PACKED_CHANNEL_BACKPRESSURE_GATE: backpressureGate,
+    REINS_CONTROL_FAILURE_SOCKET: join(directory, "failure.sock"),
+    REINS_CONTROL_FAILURE_STATE: join(directory, "failure-state"),
     REINS_WORKER_CWD: workerCwd,
   };
+  const otherEnv: NodeJS.ProcessEnv = {
+    ...env,
+    REINS_SOCKET: otherSocketPath,
+    REINS_STATE_DIR: join(otherDirectory, "state"),
+    REINS_DAEMON_BIN: otherLauncherPath,
+    REINS_PACKED_FIXTURE_OBSERVATIONS: join(
+      otherDirectory,
+      "observations.ndjson",
+    ),
+    REINS_PACKED_FIXTURE_ACTIVITY: join(otherDirectory, "activity.ndjson"),
+    REINS_WORKER_CWD: join(otherDirectory, "workspace"),
+  };
+  mkdirSync(otherEnv.REINS_WORKER_CWD!, { recursive: true });
   try {
     const targetResult = await runFixture(
       options.runtimeConsumer,
@@ -1924,12 +1959,33 @@ async function runControlChannelAcceptance(options: {
         typeof target.runtimeScopeId === "string",
       "安装运行包没有从目标部署材料描述控制入口",
     );
+    const otherTargetResult = await runFixture(
+      options.runtimeConsumer,
+      "runtime-control-target.ts",
+      otherEnv,
+      options.logsDirectory,
+      "installed-other-control-target",
+    );
+    const otherTarget = readLastJsonRecord(
+      "other control target",
+      otherTargetResult.stdout,
+    );
+    assert(
+      typeof otherTarget.command === "string" &&
+        Array.isArray(otherTarget.args) &&
+        typeof otherTarget.runtimeScopeId === "string",
+      "第二个安装目标没有描述正式控制入口",
+    );
     const result = await runFixture(
       options.sdkConsumer,
       "sdk-control-channel.ts",
       {
         ...env,
         REINS_CONTROL_RUNTIME_TARGET: JSON.stringify(target),
+        REINS_CONTROL_OTHER_TARGET: JSON.stringify(otherTarget),
+        REINS_CONTROL_OTHER_SOCKET: otherSocketPath,
+        REINS_CONTROL_OTHER_STATE: otherEnv.REINS_STATE_DIR,
+        REINS_CONTROL_OTHER_DAEMON_BIN: otherLauncherPath,
       },
       options.logsDirectory,
       "installed-sdk-control-channel",
@@ -1943,17 +1999,26 @@ async function runControlChannelAcceptance(options: {
     const launchAttempts = readFileSync(launchLogPath, "utf8")
       .split("\n")
       .filter(Boolean);
+    const otherLaunchAttempts = existsSync(otherLaunchLogPath)
+      ? readFileSync(otherLaunchLogPath, "utf8").split("\n").filter(Boolean)
+      : [];
     assert(
       value.status === "byte-channel-accepted" &&
         value.sessionSurvivedClose === true &&
         value.sessionSurvivedReconnect === true &&
         value.scopeMismatch === "handshake" &&
         value.diagnosticsWereSeparate === true &&
-        launchAttempts.length === 1,
+        value.fragmentedResponses === true &&
+        value.processPipeBackpressureDrained === true &&
+        value.operationAndCursorRecovered === true &&
+        value.otherTargetRejectedOldIdentity === true &&
+        launchAttempts.length === 1 &&
+        otherLaunchAttempts.length === 1,
       "已安装 SDK 没有经正式 stdio byte 通道完成握手、会话复用与清理",
     );
   } finally {
     await stopInstalledDaemon(pidPath);
+    await stopInstalledDaemon(otherPidPath);
   }
 }
 

@@ -3,6 +3,8 @@ export {
   openControlStore,
   type ControlOperation,
   type ControlOperationInput,
+  type KillControlOperationInput,
+  type SendControlOperationInput,
   type ControlStore,
   type SessionEventsPage,
   type SessionEventsPageInput,

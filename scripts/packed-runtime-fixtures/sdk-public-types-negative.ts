@@ -6,12 +6,14 @@ import {
   type MessageContentPart,
   type MessageKey,
   type OperationKey,
+  type OperationRecord,
   type PermissionHandle,
-  type ReplayPolicy,
+  type SubscriptionStart,
   type ResumeCursor,
   type ReinsFailure,
   type ReinsConnection,
   type SendInput,
+  type SendResult,
   type SessionHandle,
   type SessionInfo,
   type ToolKey,
@@ -32,6 +34,7 @@ declare const sessionHandle: SessionHandle;
 declare const turnHandle: TurnHandle;
 declare const spawnOperationKey: OperationKey<"spawn">;
 declare const sendOperationKey: OperationKey<"send">;
+declare const interruptOperationKey: OperationKey<"interrupt">;
 declare const resumeCursor: ResumeCursor;
 declare const completed: CompletedTurn;
 declare const diagnosticId: DiagnosticId;
@@ -133,10 +136,35 @@ const wrongSpawnOperationKey: OperationKey<"spawn"> =
   connection.prepareOperation("send");
 // @ts-expect-error 操作键会在泛型推断中保留操作类型。
 const wrongOperation: OperationKey<"send"> = spawnOperationKey;
+const activeTurnVariableWithPrecondition = {
+  placement: "active_turn" as const,
+  turnHandle,
+  ifLastCompletedTurn: turnHandle,
+  message: "invalid active turn precondition",
+};
+// @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
+const invalidActiveTurnSend: SendInput = activeTurnVariableWithPrecondition;
+// @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
+void connection.send(activeTurnVariableWithPrecondition);
+void invalidActiveTurnSend;
+declare const sendRecord: OperationRecord<"send">;
+// @ts-expect-error send 查询记录不能伪装成 spawn 查询记录。
+const wrongSendRecord: OperationRecord<"spawn"> = sendRecord;
+declare const interruptRecord: OperationRecord<"interrupt">;
+// @ts-expect-error interrupt 操作记录不能被当作 send 查询记录。
+const wrongInterruptRecord: OperationRecord<"send"> = interruptRecord;
+void wrongInterruptRecord;
 // @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
 parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
-// @ts-expect-error 仅创建记录在本票提供可恢复结果查询。
-void connection.getOperation(sendOperationKey);
+async function inspectSendRecordKind(): Promise<void> {
+  const operation = await connection.getOperation(sendOperationKey);
+  if (operation.status !== "succeeded") return;
+  const result: SendResult = operation.result;
+  // @ts-expect-error send 结果不能读取 spawn 专属的工作目录。
+  const cwd: string = operation.result.cwd;
+  void result;
+  void cwd;
+}
 void connection.spawn(
   { harness: "codex", cwd: "/tmp", message: "x" },
   {
@@ -152,7 +180,6 @@ const invalidSend: SendInput = {
   sessionHandle,
   message: "ambiguous target",
 };
-
 const unreachableSessionFields = {
   sessionHandle,
   harness: "qoder" as const,
@@ -197,10 +224,25 @@ void unreachableIdleWithoutCompletedTurn;
 void unreachableWaitWithoutTargets;
 const missingCursor = { mode: "after" } as const;
 // @ts-expect-error 续接操作必须提供精确的恢复游标。
-const invalidReplay: ReplayPolicy = missingCursor;
+const invalidAfterStart: SubscriptionStart = missingCursor;
+const conflictingSnapshotStart = {
+  mode: "snapshot",
+  cursor: resumeCursor,
+} as const;
+// @ts-expect-error snapshot 开始方式不能夹带 after 游标变量。
+const invalidSnapshotStart: SubscriptionStart = conflictingSnapshotStart;
 const sessionTarget: AgentTarget = { scope: "session", sessionHandle };
 // @ts-expect-error 目标范围决定可接受的句柄类型。
 const mismatchedTarget: AgentTarget = { scope: "turn", sessionHandle };
+function attachWithStart<Start extends SubscriptionStart>(start: Start) {
+  return connection.attach(sessionTarget, start);
+}
+// @ts-expect-error 泛型入口也必须拒绝互相矛盾的开始方式字段。
+void attachWithStart(conflictingSnapshotStart);
+// @ts-expect-error 公开 attach 不能接受带冲突游标的变量。
+void connection.attach(sessionTarget, conflictingSnapshotStart);
+void invalidAfterStart;
+void invalidSnapshotStart;
 
 const eventFailureWithoutSession: Extract<
   ReinsFailure,
@@ -244,9 +286,20 @@ if (completed.stopReason === "end_turn") {
 void wrongTurn;
 void wrongToolKey;
 void wrongOperation;
+void wrongSendRecord;
+void inspectSendRecordKind;
+async function inspectInterruptRecordKind(): Promise<void> {
+  const operation = await connection.getOperation(interruptOperationKey);
+  if (operation.status !== "succeeded") return;
+  // @ts-expect-error interrupt 结果只有精确中断确认，不包含 send 的 messageKey。
+  const messageKey: MessageKey = operation.result.messageKey;
+  void messageKey;
+}
+void inspectInterruptRecordKind;
 void wrongSpawnOperationKey;
 void invalidSend;
-void invalidReplay;
+void invalidAfterStart;
+void invalidSnapshotStart;
 void sessionTarget;
 void mismatchedTarget;
 void eventFailureWithoutSession;

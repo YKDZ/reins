@@ -5,6 +5,7 @@ import {
   type ReinsClient as ControlClient,
   type AgentFact as ClientAgentFact,
   type AgentTarget as ClientAgentTarget,
+  type AgentSubscriptionInitial as ClientAgentSubscriptionInitial,
 } from "@reins/client/control";
 import type {
   AttachParams,
@@ -16,6 +17,8 @@ import type {
   ProtocolResult,
   OperationKey as ProtocolOperationKey,
   OperationRecord as ProtocolOperationRecord,
+  OperationEffect as ProtocolOperationEffect,
+  DaemonGeneration as ProtocolDaemonGeneration,
   RuntimeScopeId as ProtocolRuntimeScopeId,
   SideEffectMethod,
   SessionInfo as ProtocolSessionInfo,
@@ -32,12 +35,14 @@ import {
   encodePermissionHandle,
   encodeTurnHandle,
   messageKeySchema,
+  operationRecordSchemaFor,
   permissionHandleSchema,
   parseOperationKey as parseProtocolOperationKey,
   REINS_PROTOCOL_MAJOR_VERSION,
   resumeCursorSchema,
   sessionIdSchema,
   runtimeScopeIdSchema,
+  subscriptionStartSchema,
   toolKeySchema,
   turnHandleSchema,
 } from "@reins/protocol";
@@ -55,6 +60,7 @@ import {
   type OperationKey,
   type OperationKind,
   type OperationOptions,
+  type OperationEffect,
   type OperationRecord,
   type ReinsConnection,
   type ReinsFailure,
@@ -62,8 +68,10 @@ import {
   type AgentFact,
   type AgentFactId,
   type AgentSubscriptionEnd,
+  type AgentSubscriptionBaseline,
+  type AgentSubscriptionInitial,
   type AgentTarget,
-  type ReplayPolicy,
+  type SubscriptionStart,
   type ResumeCursor,
   type FactSubscription,
   type SessionHandle,
@@ -74,6 +82,7 @@ import {
   type TurnHandle,
   type SendInput,
   type SendResult,
+  type SpawnResult,
   type WaitInput,
   type WaitResult,
   type InterruptInput,
@@ -159,6 +168,7 @@ export type {
   DiagnosticsResult,
   KillInput,
   KillResult,
+  SessionCloseEffect,
   SendInput,
   SendResult,
   WaitInput,
@@ -170,6 +180,7 @@ export type {
   OperationKey,
   OperationKind,
   OperationOptions,
+  OperationEffect,
   OperationRecord,
   HarnessModelCatalog,
   HarnessFailure,
@@ -192,14 +203,15 @@ export type {
   MessageContent,
   MessageContentPart,
   AgentSubscriptionEnd,
-  AgentSubscriptionEstablishment,
+  AgentSubscriptionBaseline,
+  AgentSubscriptionInitial,
   AgentTarget,
   FactSubscription,
   MessageKey,
   PermissionOption,
   PermissionHandle,
   PermissionResolution,
-  ReplayPolicy,
+  SubscriptionStart,
   ResumeCursor,
   ToolKey,
 } from "./contracts.ts";
@@ -532,11 +544,11 @@ async function connectClient(
         );
         return projectDiagnosticsResult(result);
       },
-      async attach(target, replay, signal) {
+      async attach(target, start, signal) {
         let source: Awaited<ReturnType<ControlClient["subscribeFacts"]>>;
         try {
           source = await client!.subscribeFacts(
-            projectAttachParams(target, replay),
+            projectAttachParams(target, start),
             signal,
           );
         } catch (error) {
@@ -551,14 +563,30 @@ async function connectClient(
         }));
         void projectedDone.catch(() => undefined);
         let finished = false;
+        const sourceFacts = new WeakMap<object, ClientAgentFact>();
         const subscription: FactSubscription = {
-          establishment: {
-            ...source.establishment,
-            target: projectAgentTarget(source.establishment.target),
-          },
+          initial: projectAgentSubscriptionInitial(source.initial),
           done: projectedDone as Promise<AgentSubscriptionEnd>,
           get checkpoint() {
             return parseResumeCursor(source.checkpoint);
+          },
+          acknowledge(fact) {
+            const sourceFact =
+              typeof fact === "object" && fact !== null
+                ? sourceFacts.get(fact)
+                : undefined;
+            if (sourceFact === undefined)
+              throw new ReinsSdkError({
+                code: "invalid_params",
+                facts: {
+                  issues: [{ issue: "invalid_value", path: "factId" }],
+                },
+              });
+            try {
+              source.acknowledge(sourceFact);
+            } catch (error) {
+              throw projectSubscriptionError(error);
+            }
           },
           async next() {
             if (finished) return { value: undefined, done: true };
@@ -568,7 +596,9 @@ async function connectClient(
                 finished = true;
                 return { value: undefined, done: true };
               }
-              return { value: projectAgentFact(item.value), done: false };
+              const fact = projectAgentFact(item.value);
+              sourceFacts.set(fact, item.value);
+              return { value: fact, done: false };
             } catch (error) {
               throw projectSubscriptionError(error);
             }
@@ -610,9 +640,22 @@ async function connectClient(
           );
         }
       },
-      async getOperation(operationKey: OperationKey<"spawn">) {
+      async getOperation<Kind extends "spawn" | "send" | "interrupt" | "kill">(
+        operationKey: OperationKey<Kind>,
+      ): Promise<OperationRecord<Kind>> {
+        let kind: "spawn" | "send" | "interrupt" | "kill";
+        let generation: ProtocolDaemonGeneration;
         try {
-          parseOperationKey(operationKey, "spawn");
+          const claims = parseProtocolOperationKey(operationKey);
+          if (
+            claims.kind !== "spawn" &&
+            claims.kind !== "send" &&
+            claims.kind !== "interrupt" &&
+            claims.kind !== "kill"
+          )
+            throw new Error("Operation kind is not recoverable");
+          kind = claims.kind;
+          generation = claims.generation;
         } catch {
           throw invalidInput("operationKey", "query");
         }
@@ -621,7 +664,14 @@ async function connectClient(
             operationKey,
           ) as ProtocolOperationKey,
         });
-        return projectOperationRecord(result);
+        return projectOperationRecord(
+          v.parse(
+            operationRecordSchemaFor(kind),
+            result,
+          ) as ProtocolOperationRecord,
+          kind,
+          generation,
+        ) as OperationRecord<Kind>;
       },
       async spawn(input, options) {
         return projectSpawnResult(
@@ -690,6 +740,8 @@ async function connectClient(
           throw invalidInput("placement", "operation");
         let params: ProtocolParams<"send">;
         if (input.placement === "active_turn") {
+          if (Object.hasOwn(input, "ifLastCompletedTurn"))
+            throw invalidInput("ifLastCompletedTurn", "operation");
           const target = targetFromHandle(input.turnHandle, "turnHandle");
           params = {
             placement: "active_turn",
@@ -697,12 +749,28 @@ async function connectClient(
             message: input.message,
           };
         } else {
+          const sessionId = sessionIdFromHandle(
+            input.sessionHandle,
+            "sessionHandle",
+          );
+          const ifLastCompletedTurn =
+            input.ifLastCompletedTurn === undefined
+              ? undefined
+              : targetFromHandle(
+                  input.ifLastCompletedTurn,
+                  "ifLastCompletedTurn",
+                );
+          if (
+            ifLastCompletedTurn !== undefined &&
+            ifLastCompletedTurn.sessionId !== sessionId
+          )
+            throw invalidInput("ifLastCompletedTurn", "operation");
           params = {
             placement: "new_turn",
-            sessionId: sessionIdFromHandle(
-              input.sessionHandle,
-              "sessionHandle",
-            ),
+            sessionId,
+            ...(ifLastCompletedTurn === undefined
+              ? {}
+              : { ifLastCompletedTurn }),
             message: input.message,
           };
         }
@@ -789,16 +857,13 @@ async function connectClient(
       },
       async interrupt(input: InterruptInput, options) {
         const target = targetFromHandle(input.turnHandle, "turnHandle");
-        await perform(
+        const result = await perform(
           client!,
           "interrupt",
           target,
           operationKeyFor(client!, "interrupt", options),
         );
-        return {
-          turnHandle: input.turnHandle,
-          status: "accepted",
-        } satisfies InterruptResult;
+        return projectInterruptResult(result);
       },
       close() {
         client?.close();
@@ -839,18 +904,22 @@ async function connectClient(
 
 function projectAttachParams(
   target: AgentTarget,
-  replay: ReplayPolicy,
+  start: SubscriptionStart,
 ): AttachParams {
-  const protocolReplay =
-    replay.mode === "after"
+  const parsed = v.safeParse(subscriptionStartSchema, start);
+  if (!parsed.success)
+    throw new ReinsSdkError({
+      code: "invalid_params",
+      facts: { issues: [{ issue: "invalid_value", path: "start" }] },
+    });
+  const parsedStart = parsed.output;
+  const protocolStart =
+    parsedStart.mode === "after"
       ? {
           mode: "after" as const,
-          cursor: v.parse(
-            resumeCursorSchema,
-            serializeResumeCursor(replay.cursor),
-          ),
+          cursor: v.parse(resumeCursorSchema, parsedStart.cursor),
         }
-      : replay;
+      : parsedStart;
   if (target.scope === "session")
     return {
       scope: "session",
@@ -859,12 +928,38 @@ function projectAttachParams(
         "sessionHandle",
         "query",
       ),
-      replay: protocolReplay,
+      start: protocolStart,
     };
   return {
     scope: "turn",
     ...decodeTurnHandle(target.turnHandle),
-    replay: protocolReplay,
+    start: protocolStart,
+  };
+}
+
+function projectAgentSubscriptionInitial(
+  initial: ClientAgentSubscriptionInitial,
+): AgentSubscriptionInitial {
+  const target = projectAgentTarget(initial.target);
+  if (initial.mode !== "snapshot")
+    return {
+      ...initial,
+      target,
+      cursor: parseResumeCursor(initial.cursor),
+    };
+  return {
+    ...initial,
+    target,
+    cursor: parseResumeCursor(initial.cursor),
+    baseline: {
+      session: mapSessionInfo(initial.baseline.session),
+      confirmedTerminals: initial.baseline.confirmedTerminals.map(
+        projectAgentFact,
+      ) as AgentSubscriptionBaseline["confirmedTerminals"],
+      pendingPermissions: initial.baseline.pendingPermissions.map(
+        projectAgentFact,
+      ) as AgentSubscriptionBaseline["pendingPermissions"],
+    },
   };
 }
 
@@ -1094,15 +1189,35 @@ function projectSpawnResult(
   };
 }
 
-function projectOperationRecord(
+function projectKillResult(
+  result: ProtocolResult<"kill">,
+): import("./contracts.ts").KillResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    status: result.status,
+  };
+}
+
+type ProjectedOperationResultByKind = {
+  spawn: SpawnResult;
+  send: SendResult;
+  interrupt: InterruptResult;
+  kill: import("./contracts.ts").KillResult;
+};
+
+function projectOperationRecord<
+  Kind extends "spawn" | "send" | "interrupt" | "kill",
+>(
   record: ProtocolOperationRecord,
-): OperationRecord {
-  const operationKey = parseOperationKey(record.operationKey, "spawn");
+  kind: Kind,
+  generation: ProtocolDaemonGeneration,
+): OperationRecord<Kind> {
+  const operationKey = parseOperationKey(record.operationKey, kind);
   switch (record.status) {
     case "unknown":
     case "unavailable":
     case "pending":
-      return { status: record.status, operationKey };
+      return { status: record.status, operationKey } as OperationRecord<Kind>;
     case "outcome_unknown":
       return {
         status: "outcome_unknown",
@@ -1114,40 +1229,142 @@ function projectOperationRecord(
         ...(record.diagnosticId === undefined
           ? {}
           : { diagnosticId: parseDiagnosticId(record.diagnosticId) }),
-      };
+        ...(record.effect === undefined
+          ? {}
+          : { effect: projectOperationEffect(record.effect) }),
+      } as OperationRecord<Kind>;
     case "succeeded":
       return {
         status: "succeeded",
         operationKey,
-        result: projectSpawnResult(record.result),
-      };
+        result: projectOperationResult(kind, record.result, generation),
+      } as OperationRecord<Kind>;
     case "failed":
       return {
         status: "failed",
         operationKey,
         error: projectFailure(record.error),
-      };
+      } as OperationRecord<Kind>;
+    case "not_accepted_uncommitted":
+    case "not_accepted_unconfirmed":
+      return {
+        status: record.status,
+        operationKey,
+        error: projectFailure(record.error),
+        cause: record.cause,
+      } as OperationRecord<Kind>;
     case "accepted_uncommitted":
       return {
         status: "accepted_uncommitted",
         operationKey,
-        result: projectSpawnResult(record.result),
+        result: projectOperationResult(kind, record.result, generation),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
-      };
+      } as OperationRecord<Kind>;
     case "accepted_unconfirmed":
       return {
         status: "accepted_unconfirmed",
         operationKey,
-        result: projectSpawnResult(record.result),
+        result: projectOperationResult(kind, record.result, generation),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
-      };
+      } as OperationRecord<Kind>;
+    case "partial_effect_uncommitted":
+    case "partial_effect_unconfirmed":
+      return {
+        status: record.status,
+        operationKey,
+        error: projectFailure(record.error),
+        cause: record.cause,
+      } as OperationRecord<Kind>;
   }
+}
+
+function projectOperationEffect(
+  effect: ProtocolOperationEffect,
+): OperationEffect {
+  if (effect.kind === "session_closed")
+    return {
+      kind: effect.kind,
+      sessionHandle: parseSessionHandle(effect.sessionId),
+    };
+  return {
+    kind: effect.kind,
+    sessionHandle: parseSessionHandle(effect.sessionId),
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: effect.sessionId,
+        turnId: effect.turnId,
+      }),
+    ),
+  };
+}
+
+function projectOperationResult<
+  Kind extends "spawn" | "send" | "interrupt" | "kill",
+>(
+  kind: Kind,
+  result: ProtocolResult<Kind>,
+  generation: ProtocolDaemonGeneration,
+): ProjectedOperationResultByKind[Kind] {
+  if (kind === "spawn")
+    return projectSpawnResult(
+      result as ProtocolResult<"spawn">,
+    ) as ProjectedOperationResultByKind[Kind];
+  if (kind === "send")
+    return projectSendResult(
+      result as ProtocolResult<"send">,
+      generation,
+    ) as ProjectedOperationResultByKind[Kind];
+  if (kind === "kill")
+    return projectKillResult(
+      result as ProtocolResult<"kill">,
+    ) as ProjectedOperationResultByKind[Kind];
+  return projectInterruptResult(
+    result as ProtocolResult<"interrupt">,
+  ) as ProjectedOperationResultByKind[Kind];
+}
+
+function projectSendResult(
+  result: ProtocolResult<"send">,
+  generation: ProtocolDaemonGeneration,
+): SendResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+      }),
+    ),
+    messageKey: parseMessageKey(
+      encodeMessageKey({
+        generation,
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+        messageId: result.messageId,
+      }),
+    ),
+    deliveryPoint: result.deliveryPoint,
+  };
+}
+
+function projectInterruptResult(
+  result: ProtocolResult<"interrupt">,
+): InterruptResult {
+  return {
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+      }),
+    ),
+    status: "accepted",
+  };
 }
 
 function projectClientFailure(
@@ -1175,6 +1392,11 @@ function projectFailure(
         code: failure.code,
         facts: { oldest: failure.oldest, head: failure.head },
       };
+    case "event_history_unavailable":
+      return {
+        code: failure.code,
+        facts: { sessionHandle: parseSessionHandle(failure.sessionId) },
+      };
     case "operation_key_conflict":
     case "operation_key_scope_mismatch":
     case "stale_operation_key":
@@ -1196,6 +1418,9 @@ function projectFailure(
           ...(failure.diagnosticId === undefined
             ? {}
             : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+          ...(failure.effect === undefined
+            ? {}
+            : { effect: projectOperationEffect(failure.effect) }),
         },
       };
     case "control_store_unavailable":
@@ -1249,10 +1474,36 @@ function projectFailure(
           cause: failure.cause,
           ...(failure.acceptedResult === undefined
             ? {}
-            : { acceptedResult: projectSpawnResult(failure.acceptedResult) }),
+            : {
+                acceptedResult: (() => {
+                  const kind = parseProtocolOperationKey(
+                    failure.operationKey,
+                  ).kind;
+                  if (kind === "send")
+                    return projectSendResult(
+                      failure.acceptedResult as ProtocolResult<"send">,
+                      parseProtocolOperationKey(failure.operationKey)
+                        .generation,
+                    );
+                  if (kind === "kill")
+                    return projectKillResult(
+                      failure.acceptedResult as ProtocolResult<"kill">,
+                    );
+                  if (kind === "interrupt")
+                    return projectInterruptResult(
+                      failure.acceptedResult as ProtocolResult<"interrupt">,
+                    );
+                  return projectSpawnResult(
+                    failure.acceptedResult as ProtocolResult<"spawn">,
+                  );
+                })(),
+              }),
           ...(failure.cleanupCause === undefined
             ? {}
             : { cleanupCause: failure.cleanupCause }),
+          ...(failure.effect === undefined
+            ? {}
+            : { effect: projectOperationEffect(failure.effect) }),
         },
       };
     case "protocol_version_mismatch":
@@ -1304,6 +1555,25 @@ function projectFailure(
         code: failure.code,
         facts: {
           sessionHandle: parseSessionHandle(failure.sessionId),
+        },
+      };
+    case "turn_precondition_failed":
+      return {
+        code: failure.code,
+        facts: {
+          sessionHandle: parseSessionHandle(failure.sessionId),
+          expected: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.expected,
+            }),
+          ),
+          actual: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.actual,
+            }),
+          ),
         },
       };
     case "session_not_found":
@@ -1363,6 +1633,9 @@ function projectFailure(
           ...(failure.cleanupCause === undefined
             ? {}
             : { cleanupCause: failure.cleanupCause }),
+          ...(failure.effect === undefined
+            ? {}
+            : { effect: projectOperationEffect(failure.effect) }),
         },
       };
     case "daemon_start_failed":

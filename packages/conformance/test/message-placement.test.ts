@@ -94,7 +94,7 @@ test("active_turn 的 ACK 与 caller 事实等待精确原生接受", async () =
   await client.request("attach", {
     scope: "session",
     sessionId: spawned.result.sessionId,
-    replay: { mode: "available" },
+    start: { mode: "history" },
   });
   let settled = false;
   const sending = client
@@ -181,7 +181,7 @@ test("原生接受先于终态时，caller 事实仍归原回合且在终态之�
   await client.request("attach", {
     scope: "session",
     sessionId: spawned.result.sessionId,
-    replay: { mode: "available" },
+    start: { mode: "history" },
   });
   events.length = 0;
   const sending = client.request("send", {
@@ -242,7 +242,7 @@ test("idle new_turn 原子预留且等待接受，并发请求不会重复创建
   await client.request("attach", {
     scope: "session",
     sessionId: spawned.result.sessionId,
-    replay: { mode: "available" },
+    start: { mode: "history" },
   });
   events.length = 0;
   let settled = false;
@@ -303,7 +303,7 @@ test("错误父级和已结束目标拒绝，消息不会流入后继回合", as
   await client.request("attach", {
     scope: "session",
     sessionId: first.result.sessionId,
-    replay: { mode: "available" },
+    start: { mode: "history" },
   });
   events.length = 0;
   expect(
@@ -381,7 +381,7 @@ test("结束先于原生拒绝时，没有 caller 事实或后继回合残留", 
   await client.request("attach", {
     scope: "session",
     sessionId: spawned.result.sessionId,
-    replay: { mode: "available" },
+    start: { mode: "history" },
   });
   events.length = 0;
   const sending = client.request("send", {
@@ -457,7 +457,7 @@ test.each(["active_turn", "new_turn"] as const)(
     await client.request("attach", {
       scope: "session",
       sessionId: spawned.result.sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     events.length = 0;
     const sending = client.request(

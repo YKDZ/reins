@@ -1,5 +1,6 @@
 import {
   REINS_PROTOCOL_MAJOR_VERSION,
+  encodeResumeCursor,
   parseOperationKey,
 } from "@reins/protocol";
 import { createInMemoryTransportPair } from "@reins/transport";
@@ -156,20 +157,32 @@ test("a malformed notification after a valid response preserves invalid_daemon_r
   const pending = client.request("attach", {
     scope: "session",
     sessionId: "session:00000000-0000-4000-8000-000000000000:prompt:1" as never,
-    replay: { mode: "available" },
+    start: { mode: "history" },
   });
   pair.server.send({
     kind: "response",
     requestId: "req1",
     result: {
-      sessionId: "session:00000000-0000-4000-8000-000000000000:prompt:1",
       subscriptionId: "subscription-1",
-      target: {
-        scope: "session",
-        sessionId: "session:00000000-0000-4000-8000-000000000000:prompt:1",
+      initial: {
+        mode: "history",
+        target: {
+          scope: "session",
+          sessionId: "session:00000000-0000-4000-8000-000000000000:prompt:1",
+        },
+        cursor: encodeResumeCursor({
+          target: {
+            scope: "session",
+            sessionId:
+              "session:00000000-0000-4000-8000-000000000000:prompt:1" as never,
+          },
+          runtimeScopeId: binding.runtimeScopeId,
+          daemonGeneration: "gtest" as never,
+          eventId: 0,
+        }),
+        window: { oldest: null, head: null, truncated: false },
+        replayed: 0,
       },
-      window: { oldest: null, head: null, truncated: false },
-      replayed: 0,
     },
   });
   await expect(pending).resolves.toMatchObject({ kind: "response" });

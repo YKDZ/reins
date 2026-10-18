@@ -109,56 +109,106 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type OperationRecord =
+export type RecoverableOperationKind = "spawn" | "send" | "interrupt" | "kill";
+type OperationResultByKind = {
+  spawn: SpawnResult;
+  send: SendResult;
+  interrupt: InterruptResult;
+  kill: KillResult;
+};
+type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
       status: "unknown" | "unavailable" | "pending";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
     }
   | {
       status: "outcome_unknown";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
       cause?: ErrorCause;
       cleanupCause?: ErrorCause;
       diagnosticId?: DiagnosticId;
+      effect?: OperationEffect;
     }
   | {
       status: "succeeded";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
     }
   | {
       status: "failed";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
       error: ReinsFailure;
     }
   | {
+      status: "not_accepted_uncommitted" | "not_accepted_unconfirmed";
+      operationKey: OperationKey<Kind>;
+      error: ReinsFailure;
+      cause: ErrorCause;
+    }
+  | {
       status: "accepted_uncommitted";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
     }
   | {
       status: "accepted_unconfirmed";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
-    };
+    }
+  | (Kind extends "send"
+      ? {
+          status: "partial_effect_uncommitted" | "partial_effect_unconfirmed";
+          operationKey: OperationKey<Kind>;
+          error: Extract<ReinsFailure, { code: "internal_error" }> & {
+            facts: {
+              effect: Extract<
+                OperationEffect,
+                { kind: "execution_phase_cancelled" }
+              >;
+            };
+          };
+          cause: ErrorCause;
+        }
+      : never)
+  | (Kind extends "kill"
+      ? {
+          status: "partial_effect_uncommitted" | "partial_effect_unconfirmed";
+          operationKey: OperationKey<"kill">;
+          error: Extract<ReinsFailure, { code: "internal_error" }> & {
+            facts: { effect: SessionCloseEffect };
+          };
+          cause: ErrorCause;
+        }
+      : never);
+export type OperationRecord<
+  Kind extends RecoverableOperationKind = RecoverableOperationKind,
+> = Kind extends RecoverableOperationKind
+  ? OperationRecordForKind<Kind>
+  : never;
 export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
   status: "killed" | "not_found";
 };
+export type SessionCloseEffect = {
+  kind: "session_closed";
+  sessionHandle: SessionHandle;
+};
 export type SendInput =
   | {
       placement: "new_turn";
       sessionHandle: SessionHandle;
+      ifLastCompletedTurn?: TurnHandle;
       message: string;
     }
   | {
       placement: "active_turn";
       turnHandle: TurnHandle;
+      ifLastCompletedTurn?: never;
       message: string;
     };
 export type SendResult = {
@@ -247,14 +297,40 @@ export type ModelCatalogResult = {
 export type AgentTarget =
   | { scope: "session"; sessionHandle: SessionHandle }
   | { scope: "turn"; turnHandle: TurnHandle };
-export type ReplayPolicy =
-  | { mode: "none" }
-  | { mode: "available" }
+export type SubscriptionStart =
+  | { mode: "snapshot"; cursor?: never }
+  | { mode: "history"; cursor?: never }
   | { mode: "after"; cursor: ResumeCursor };
-export type AgentSubscriptionEstablishment = {
-  target: AgentTarget;
-  window: { oldest: number | null; head: number | null; truncated: boolean };
-  replayed: number;
+export type AgentSubscriptionInitial =
+  | {
+      mode: "snapshot";
+      target: AgentTarget;
+      cursor: ResumeCursor;
+      window: {
+        oldest: number | null;
+        head: number | null;
+        truncated: boolean;
+      };
+      baseline: AgentSubscriptionBaseline;
+    }
+  | {
+      mode: "history" | "after";
+      target: AgentTarget;
+      cursor: ResumeCursor;
+      window: {
+        oldest: number | null;
+        head: number | null;
+        truncated: boolean;
+      };
+      replayed: number;
+    };
+export type AgentSubscriptionBaseline = {
+  session: SessionInfo;
+  confirmedTerminals: Extract<
+    AgentFact,
+    { type: "turn.completed" | "session.killed" }
+  >[];
+  pendingPermissions: Extract<AgentFact, { type: "permission.requested" }>[];
 };
 export type AgentSubscriptionEnd = {
   target: AgentTarget;
@@ -264,6 +340,7 @@ export type AgentSubscriptionEnd = {
     | "failed"
     | "killed"
     | "session_killed"
+    | "control_unavailable"
     | "closed";
 };
 type FactBase = {
@@ -762,9 +839,10 @@ export type AgentFact =
     })
   | (FactBase & { type: "session.killed" });
 export type FactSubscription = AsyncIterableIterator<AgentFact> & {
-  readonly establishment: AgentSubscriptionEstablishment;
+  readonly initial: AgentSubscriptionInitial;
   readonly done: Promise<AgentSubscriptionEnd>;
   readonly checkpoint: ResumeCursor;
+  acknowledge(fact: AgentFact): void;
   close(): void;
 };
 
@@ -848,6 +926,14 @@ export type ErrorCause = {
   message: string;
 };
 
+export type OperationEffect =
+  | { kind: "session_closed"; sessionHandle: SessionHandle }
+  | {
+      kind: "execution_phase_cancelled";
+      sessionHandle: SessionHandle;
+      turnHandle: TurnHandle;
+    };
+
 type ControlEventType =
   | "session.created"
   | "turn.started"
@@ -891,6 +977,7 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     cleanupCause?: ErrorCause;
     diagnosticId?: DiagnosticId;
+    effect?: OperationEffect;
   };
   control_store_unavailable:
     | {
@@ -898,8 +985,13 @@ type FailureFactsByCode = {
         stage: "register" | "dispatch" | "commit" | "failure";
         acceptance: "not_dispatched" | "unknown" | "accepted";
         cause: ErrorCause;
-        acceptedResult?: SpawnResult;
+        acceptedResult?:
+          | SpawnResult
+          | SendResult
+          | InterruptResult
+          | KillResult;
         cleanupCause?: ErrorCause;
+        effect?: OperationEffect;
       }
     | {
         stage: "event";
@@ -928,6 +1020,11 @@ type FailureFactsByCode = {
   unknown_harness: { harness: HarnessId; availableHarnesses: HarnessId[] };
   unsupported_feature: { feature: string };
   session_busy: { sessionHandle: SessionHandle };
+  turn_precondition_failed: {
+    sessionHandle: SessionHandle;
+    expected: TurnHandle;
+    actual: TurnHandle;
+  };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
@@ -940,6 +1037,7 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     diagnosticId?: DiagnosticId;
     cleanupCause?: ErrorCause;
+    effect?: OperationEffect;
   };
   diagnostics_store_corrupt: {
     cause?: ErrorCause;
@@ -952,6 +1050,7 @@ type FailureFactsByCode = {
   };
   unexpected_failure: { remoteCode?: string };
   event_cursor_expired: { oldest: number | null; head: number | null };
+  event_history_unavailable: { sessionHandle: SessionHandle };
 };
 
 /** 失败事实按 code 区分，并使用 SDK 公开术语表达。 */
@@ -1013,11 +1112,13 @@ export type ReinsConnection = {
   list(filter?: SessionFilter): Promise<SessionInfo[]>;
   attach(
     target: AgentTarget,
-    replay: ReplayPolicy,
+    start: SubscriptionStart,
     signal?: AbortSignal,
   ): Promise<FactSubscription>;
   prepareOperation<Kind extends OperationKind>(kind: Kind): OperationKey<Kind>;
-  getOperation(operationKey: OperationKey<"spawn">): Promise<OperationRecord>;
+  getOperation<Kind extends RecoverableOperationKind>(
+    operationKey: OperationKey<Kind>,
+  ): Promise<OperationRecord<Kind>>;
   spawn(
     input: SpawnInput,
     options?: OperationOptions<"spawn">,

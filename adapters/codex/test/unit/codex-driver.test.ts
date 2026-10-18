@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { WorkerStartFailure } from "@reins/protocol";
+import { WorkerDeliveryFailure, WorkerStartFailure } from "@reins/protocol";
 import type {
   DriverDiagnosticFact,
   DomainEvent,
@@ -17,6 +17,7 @@ import { describe, expect, test } from "vitest";
 
 import { createCodexDriver } from "#/codex-driver";
 import {
+  CodexTransportClosedError,
   CodexRequestError,
   createCodexTransport,
   type CodexChild,
@@ -255,8 +256,46 @@ describe("codex driver", () => {
     await writeFile(imagePath, imageBytes);
     await writeFile(audioPath, audioBytes);
     const messageId = "m-core-first" as MessageId;
+    const events: DomainEvent[] = [];
+    let resolveCallerMessage!: (
+      event: Extract<DomainEvent, { type: "message" }>,
+    ) => void;
+    let rejectCallerMessage!: (error: Error) => void;
+    const callerMessageObserved = new Promise<
+      Extract<DomainEvent, { type: "message" }>
+    >((resolve, reject) => {
+      resolveCallerMessage = resolve;
+      rejectCallerMessage = reject;
+    });
+    const fake = createFakeTransport();
+    const driver = createCodexDriver({
+      transportFactory: () => fake.transport,
+    })({
+      emit(event) {
+        events.push(event);
+        if (
+          event.type === "message" &&
+          event.role === "caller" &&
+          event.messageId === messageId
+        )
+          resolveCallerMessage(event);
+      },
+      async diagnostics(input) {
+        if (input.kind === "stream_failure")
+          rejectCallerMessage(
+            new Error(`${input.reason}: ${input.message.text}`),
+          );
+        return undefined;
+      },
+    });
     try {
-      const { events, fake } = await setup("interactive", undefined, {
+      await driver.start({
+        sessionId,
+        turnId: firstTurnId,
+        harness: "codex",
+        message: "检查",
+        cwd: "/tmp/demo",
+        authorizationMode: "interactive",
         messageId,
       });
       fake.controls.pushInbound({
@@ -298,7 +337,7 @@ describe("codex driver", () => {
           },
         },
       });
-      await flush();
+      await callerMessageObserved;
 
       expect(events).toEqual([
         {
@@ -332,7 +371,11 @@ describe("codex driver", () => {
       ]);
       expect(JSON.stringify(events)).not.toContain(directory);
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      try {
+        await driver.terminate(sessionId);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     }
   });
 
@@ -1203,12 +1246,39 @@ describe("codex driver", () => {
     ).toEqual(["initialized", "closed"]);
   });
 
-  test("terminate 的 delete 超时仍强制关闭资源树并成功完成 kill", async () => {
+  test("thread/delete 在途 EOF 只证明传输结束，不确认会话关闭", async () => {
+    const { diagnostics, fake, driver } = await setup();
+    await flush();
+    fake.controls.setResponse(
+      "thread/delete",
+      Promise.reject(new CodexTransportClosedError()),
+    );
+
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "closed" },
+    });
+
+    expect(fake.controls.closed()).toBe(true);
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
+      expect.objectContaining({
+        kind: "request_failure",
+        operation: "kill",
+        stage: "terminate",
+        reason: "closed",
+      }),
+    ]);
+  });
+
+  test("terminate 的 delete 超时强制关闭资源树但不能确认 kill", async () => {
     const { diagnostics, fake, driver } = await setup("interactive", 5);
     await flush();
     fake.controls.setResponse("thread/delete", new Promise(() => {}));
 
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "timeout" },
+    });
 
     expect(fake.controls.closed()).toBe(true);
     expect(
@@ -1224,9 +1294,13 @@ describe("codex driver", () => {
         reason: "timeout",
       }),
     ]);
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "timeout" },
+    });
   });
 
-  test("terminate 的 delete 拒绝仍关闭资源树且只记录一次失败", async () => {
+  test("terminate 的 delete 拒绝关闭资源树但不能确认 kill", async () => {
     const { diagnostics, fake, driver } = await setup();
     await flush();
     fake.controls.setResponse(
@@ -1234,7 +1308,10 @@ describe("codex driver", () => {
       Promise.reject(new Error("delete rejected")),
     );
 
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "upstream" },
+    });
 
     expect(fake.controls.closed()).toBe(true);
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
@@ -1257,7 +1334,11 @@ describe("codex driver", () => {
     await flush();
     fake.controls.setCloseError(new Error("close rejected"));
 
-    await expect(driver.terminate(sessionId)).rejects.toThrow("close rejected");
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { message: expect.stringContaining("close rejected") },
+      effect: { kind: "session_closed", sessionId },
+    });
 
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
@@ -1283,7 +1364,10 @@ describe("codex driver", () => {
       await setupWithMalformedResponse("thread/delete");
     await flush();
 
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "upstream" },
+    });
 
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
@@ -1413,7 +1497,10 @@ describe("codex driver", () => {
     ).toHaveLength(completedBeforeEof);
 
     const requestsBeforeTerminate = fake.controls.requests().length;
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "closed" },
+    });
     expect(fake.controls.requests()).toHaveLength(requestsBeforeTerminate);
     expect(
       diagnostics
@@ -1538,7 +1625,21 @@ test("原生拒绝的精确分类依据已观察终态，不依据自由文本",
       "rejected while target is unclassified",
       "active_turn",
     ),
-  ).rejects.toBe(noActiveText);
+  ).rejects.toMatchObject({
+    name: "WorkerDeliveryFailure",
+    acceptance: "not_accepted",
+    cause: noActiveText,
+  } satisfies Partial<WorkerDeliveryFailure>);
+  const transportDropped = new Error("Codex transport closed before receipt");
+  fake.controls.setResponse("turn/steer", Promise.reject(transportDropped));
+  await expect(
+    driver.deliver(
+      sessionId,
+      firstTurnId,
+      "rejected by lost transport receipt",
+      "active_turn",
+    ),
+  ).rejects.toBe(transportDropped);
   let reject!: (error: unknown) => void;
   fake.controls.setResponse(
     "turn/steer",

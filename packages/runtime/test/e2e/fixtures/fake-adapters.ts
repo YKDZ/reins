@@ -8,7 +8,11 @@ import type {
   WorkerDriver,
   AdapterDriverFactory,
 } from "@reins/protocol";
-import { messageIdSchema } from "@reins/protocol";
+import {
+  messageIdSchema,
+  permissionIdSchema,
+  WorkerDeliveryFailure,
+} from "@reins/protocol";
 import * as v from "valibot";
 
 function modelCatalog(
@@ -45,6 +49,21 @@ function fakeAdapter(options: {
           spec.captureHarnessStderr === true || !spec.message.startsWith("hold")
             ? "complete"
             : "hang";
+        if (spec.message.startsWith("hold with pending permission"))
+          queueMicrotask(() =>
+            emit({
+              type: "permission.requested",
+              sessionId: spec.sessionId,
+              turnId: spec.turnId,
+              permissionId: v.parse(permissionIdSchema, "approval"),
+              kind: "write",
+              input: { path: "approval.txt" },
+              options: [
+                { outcome: "allow", scope: "once" },
+                { outcome: "deny", feedback: false },
+              ],
+            }),
+          );
         const observationsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
         if (observationsFile !== undefined) {
           appendFileSync(
@@ -96,6 +115,25 @@ function fakeAdapter(options: {
           appendFileSync(
             requestsFile,
             `${JSON.stringify({ type: "message_delivered", sessionId, turnId, message })}\n`,
+          );
+        }
+        if (message.startsWith("partial-cancel ")) {
+          emit({
+            type: "turn.completed",
+            sessionId,
+            turnId,
+            stopReason: "cancelled",
+            finalReply: "",
+          });
+          throw new WorkerDeliveryFailure(
+            "活跃执行阶段取消后，原生拒绝了续接请求",
+            "not_accepted",
+            undefined,
+            {
+              kind: "execution_phase_cancelled",
+              sessionId,
+              turnId,
+            },
           );
         }
         queueMicrotask(() => {

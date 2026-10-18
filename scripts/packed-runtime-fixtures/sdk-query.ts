@@ -60,10 +60,14 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.code;
     case "turn_not_active":
       return failure.facts.turnHandle;
+    case "turn_precondition_failed":
+      return `${failure.facts.expected}:${failure.facts.actual}`;
     case "unsupported_feature":
       return failure.facts.feature;
     case "event_cursor_expired":
       return `${failure.facts.oldest ?? "empty"}:${failure.facts.head ?? "empty"}`;
+    case "event_history_unavailable":
+      return failure.facts.sessionHandle;
     case "method_not_found":
       return failure.facts.method;
     case "operation_key_conflict":

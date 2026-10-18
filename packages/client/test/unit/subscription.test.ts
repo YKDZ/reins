@@ -2,6 +2,9 @@ import {
   domainEventSchema,
   eventIdSchema,
   decodeResumeCursor,
+  encodeResumeCursor,
+  daemonGenerationSchema,
+  runtimeScopeIdSchema,
   type ProtocolMessage,
   type ProtocolRequest,
 } from "@reins/protocol";
@@ -35,14 +38,30 @@ async function fixture(autoAck = true) {
       kind: "response",
       requestId: attach.requestId,
       result: {
-        sessionId: "session:00000000-0000-4000-8000-000000000000:readable:1",
         subscriptionId: "subscription-1",
-        target: {
-          scope: "session",
-          sessionId: "session:00000000-0000-4000-8000-000000000000:readable:1",
+        initial: {
+          mode: "history",
+          target: {
+            scope: "session",
+            sessionId:
+              "session:00000000-0000-4000-8000-000000000000:readable:1",
+          },
+          cursor: encodeResumeCursor({
+            target: {
+              scope: "session",
+              sessionId:
+                "session:00000000-0000-4000-8000-000000000000:readable:1",
+            } as never,
+            runtimeScopeId: v.parse(
+              runtimeScopeIdSchema,
+              "00000000-0000-4000-8000-000000000000",
+            ),
+            daemonGeneration: v.parse(daemonGenerationSchema, "gtest"),
+            eventId: 0,
+          }),
+          window: { oldest: null, head: null, truncated: false },
+          replayed: 0,
         },
-        window: { oldest: null, head: null, truncated: false },
-        replayed: 0,
       },
     });
   };
@@ -55,7 +74,7 @@ async function fixture(autoAck = true) {
         kind: "response",
         requestId: request.requestId,
         result: {
-          protocolMajorVersion: 2,
+          protocolMajorVersion: 3,
           daemonGeneration: "gtest",
           runtimeScopeId: "00000000-0000-4000-8000-000000000000",
         },
@@ -98,7 +117,7 @@ async function fixture(autoAck = true) {
 const params = {
   scope: "session",
   sessionId: "session:00000000-0000-4000-8000-000000000000:readable:1",
-  replay: { mode: "none" },
+  start: { mode: "history" },
 } as const;
 const flush = async (): Promise<void> => {
   await new Promise<void>((resolve) => setImmediate(resolve));
@@ -183,11 +202,13 @@ test("message content tool references use the same public tool key", async () =>
   subscription.close();
 });
 
-test("a disconnect cursor stops at the last fact delivered to the iterator", async () => {
+test("a disconnect cursor stops at the last explicitly acknowledged fact", async () => {
   const f = await fixture();
   const subscription = await f.client.subscribeFacts(params as never);
   f.emit({ type: "text.delta", messageId: "m1", delta: "delivered" });
   const delivered = await subscription.next();
+  if (delivered.done) throw new Error("Missing delivered fact");
+  subscription.acknowledge(delivered.value);
   f.emit({ type: "text.delta", messageId: "m2", delta: "queued" });
   f.client.close();
   const error = await subscription.done.catch((reason: unknown) => reason);
@@ -203,7 +224,7 @@ test("a disconnect cursor stops at the last fact delivered to the iterator", asy
   ).toBe(1);
 });
 
-test("a disconnect error cursor advances only as queued facts reach the iterator", async () => {
+test("a disconnect error cursor advances only after ordered acknowledgement", async () => {
   const f = await fixture();
   const subscription = await f.client.subscribeFacts(params as never);
   f.emit({ type: "text.delta", messageId: "m1", delta: "first" });
@@ -216,20 +237,26 @@ test("a disconnect error cursor advances only as queued facts reach the iterator
   );
   const first = await subscription.next();
   const second = await subscription.next();
-  const iteratorFailure = await subscription
-    .next()
-    .catch((reason: unknown) => reason as AgentSubscriptionError);
-
   expect(first.value).toMatchObject({ type: "text.delta", delta: "first" });
   expect(second.value).toMatchObject({ type: "text.delta", delta: "second" });
   expect(doneFailure).toBeInstanceOf(AgentSubscriptionError);
-  expect(iteratorFailure).toBeInstanceOf(AgentSubscriptionError);
   expect(decodeResumeCursor(doneFailure.resumeCursor!).eventId).toBe(0);
+  expect(decodeResumeCursor(subscription.checkpoint).eventId).toBe(0);
+  if (first.done || second.done) throw new Error("Missing queued facts");
+  expect(() => subscription.acknowledge({ ...first.value } as never)).toThrow();
+  expect(() => subscription.acknowledge(second.value)).toThrow();
+  subscription.acknowledge(first.value);
+  expect(decodeResumeCursor(subscription.checkpoint).eventId).toBe(1);
+  subscription.acknowledge(second.value);
   expect(decodeResumeCursor(subscription.checkpoint).eventId).toBe(2);
+  const iteratorFailure = await subscription
+    .next()
+    .catch((reason: unknown) => reason as AgentSubscriptionError);
+  expect(iteratorFailure).toBeInstanceOf(AgentSubscriptionError);
   expect(decodeResumeCursor(iteratorFailure.resumeCursor!).eventId).toBe(2);
 });
 
-test("an abort during attach establishment rejects promptly and closes a late subscription", async () => {
+test("attach initial 期间取消会及时拒绝并关闭迟到的订阅", async () => {
   const f = await fixture(false);
   const controller = new AbortController();
   const establishing = f.client.subscribeFacts(
@@ -250,7 +277,7 @@ test("an abort during attach establishment rejects promptly and closes a late su
   expect(f.requestMethods).toEqual(["initialize", "attach"]);
 });
 
-test("an abort after attach establishment closes only the observation", async () => {
+test("attach initial 后取消只关闭观察", async () => {
   const f = await fixture();
   const controller = new AbortController();
   const subscription = await f.client.subscribeFacts(
@@ -271,7 +298,7 @@ test("an abort after attach establishment closes only the observation", async ()
   expect(f.requestMethods).toEqual(["initialize", "attach"]);
 });
 
-test("attach establishment has no inherited thirty-second request deadline", async () => {
+test("attach initial 不继承三十秒请求期限", async () => {
   const f = await fixture(false);
   vi.useFakeTimers();
   let settled = false;
@@ -286,6 +313,6 @@ test("attach establishment has no inherited thirty-second request deadline", asy
   f.ack();
   await vi.advanceTimersByTimeAsync(0);
   const established = await subscription;
-  expect(established).toHaveProperty("establishment");
+  expect(established).toHaveProperty("initial");
   established.close();
 });

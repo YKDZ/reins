@@ -35,6 +35,7 @@ import type {
 import {
   isSideEffectMethod,
   encodeResumeCursor,
+  attachResultSchema,
   operationKeyClaimsSchema,
   parseOperationKey,
   serializeOperationKey,
@@ -46,6 +47,7 @@ import {
   sessionIdSchema,
   consumerContextSchema,
   spawnParamsSchema,
+  WorkerDeliveryFailure,
   WorkerStartFailure,
 } from "@reins/protocol";
 import {
@@ -369,6 +371,11 @@ function createFakeHarness(options: {
   autoPermission?: { options: PermissionOption[] };
   canCaptureHarnessStderr?: boolean;
   terminate?: (sessionId: SessionId) => Promise<void>;
+  deliver?: (
+    sessionId: SessionId,
+    turnId: TurnId,
+    message: string,
+  ) => Promise<void>;
 }): {
   adapter: HarnessAdapter;
   calls: FakeCalls;
@@ -415,6 +422,7 @@ function createFakeHarness(options: {
     async deliver(sessionId, turnId, message) {
       current = { sessionId, turnId };
       calls.delivered.push({ sessionId, turnId, message });
+      await options.deliver?.(sessionId, turnId, message);
     },
     async interrupt(sessionId) {
       calls.interrupted.push(sessionId);
@@ -573,9 +581,9 @@ describe("daemon 公共接口", () => {
         requester.request("attach", {
           scope: "session",
           sessionId,
-          replay: { mode: "none" },
+          start: { mode: "snapshot" },
         }),
-      ).resolves.toMatchObject({ result: { sessionId, replayed: 0 } });
+      ).resolves.toMatchObject({ result: { initial: { mode: "snapshot" } } });
       expect(machine.list({ sessionId })).toHaveLength(1);
       expect(replayHookCalls).toBe(0);
     } finally {
@@ -895,11 +903,11 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId, replayed: 3 },
+      result: { initial: { mode: "history", replayed: 3 } },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "turn.started",
@@ -1368,6 +1376,80 @@ describe("daemon 协议面（缝 C）", () => {
     ]);
   });
 
+  test("新回合提交期间到达的终态仍进入已提交观察", async () => {
+    let fake!: ReturnType<typeof createFakeHarness>;
+    fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      deliver: async () => {
+        let remaining = 4;
+        const emitAfterCommitStarts = (): void => {
+          remaining -= 1;
+          if (remaining === 0) fake.controls.completeTurn();
+          else queueMicrotask(emitAfterCommitStarts);
+        };
+        queueMicrotask(emitAfterCommitStarts);
+      },
+    });
+    const controlStore = createInMemoryControlStore();
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    void daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "start the first turn",
+      }),
+    ) as { sessionId: SessionId };
+    fake.controls.completeTurn();
+
+    const sent = resultOf(
+      await requester("send", {
+        placement: "new_turn",
+        sessionId: spawned.sessionId,
+        message: "start the second turn",
+      }),
+    ) as { turnId: TurnId };
+    expect(
+      controlStore
+        .sessionEvents(spawned.sessionId)
+        .filter(({ event }) => event.type === "turn.completed")
+        .map(({ event }) =>
+          event.type === "turn.completed" ? event.turnId : "",
+        ),
+    ).toEqual(["t1", sent.turnId]);
+    expect(resultOf(await requester("list", {}))).toMatchObject([
+      { sessionId: spawned.sessionId, state: "idle", turns: 2 },
+    ]);
+    expect(
+      await requester("wait", {
+        targets: [{ sessionId: spawned.sessionId, turnId: sent.turnId }],
+        completion: "all",
+        timeoutMs: 50,
+      }),
+    ).toMatchObject({
+      result: {
+        status: "satisfied",
+        completed: [{ turnId: sent.turnId }],
+        pending: [],
+      },
+    });
+    connection.close();
+    await daemon.stop();
+    daemons.splice(daemons.indexOf(daemon), 1);
+  });
+
   test("跨连接 attach + send 后会话保持存活，连接断开不杀会话", async () => {
     const fake = createFakeHarness({
       harness: "codex",
@@ -1392,7 +1474,7 @@ describe("daemon 协议面（缝 C）", () => {
     await requesterA("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     const sent = await requesterB("send", {
       placement: "new_turn",
@@ -1540,7 +1622,7 @@ describe("daemon 协议面（缝 C）", () => {
     await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
     const permissionEvent = collector.events.find(
@@ -1601,9 +1683,11 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t2",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
-    expect(attached).toMatchObject({ result: { sessionId } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", target: { sessionId } } },
+    });
     expect(collector.ended).toEqual([]);
     expect(
       collector.events.some(
@@ -1659,9 +1743,11 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 3 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 3 } },
+    });
     expect(order).toEqual([
       "response",
       "session.created",
@@ -1697,10 +1783,12 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 7 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 7 } },
+    });
     expect(
       collector.events.filter(
         (event) =>
@@ -1758,10 +1846,12 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
-    expect(attached).toMatchObject({ result: { replayed: 5 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 5 } },
+    });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
@@ -1794,10 +1884,10 @@ describe("daemon 协议面（缝 C）", () => {
     const active = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
-    expect(active).toMatchObject({ result: { replayed: 0 } });
+    expect(active).toMatchObject({ result: { initial: { mode: "snapshot" } } });
     expect(activeCollector.events).toEqual([]);
 
     fake.controls.emitSnapshot(messageId, "hello");
@@ -1807,9 +1897,9 @@ describe("daemon 协议面（缝 C）", () => {
     const idle = await makeRequester(idleClient)("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
-    expect(idle).toMatchObject({ result: { replayed: 0 } });
+    expect(idle).toMatchObject({ result: { initial: { mode: "snapshot" } } });
     expect(idleCollector.events).toEqual([]);
   });
 
@@ -1836,10 +1926,16 @@ describe("daemon 协议面（缝 C）", () => {
     const active = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(active).toMatchObject({
-      result: { replayed: 7, window: { truncated: false } },
+      result: {
+        initial: {
+          mode: "history",
+          replayed: 7,
+          window: { truncated: false },
+        },
+      },
     });
     expect(activeCollector.events).toHaveLength(7);
 
@@ -1850,10 +1946,16 @@ describe("daemon 协议面（缝 C）", () => {
     const completed = await makeRequester(idleClient)("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(completed).toMatchObject({
-      result: { replayed: 8, window: { truncated: false } },
+      result: {
+        initial: {
+          mode: "history",
+          replayed: 8,
+          window: { truncated: false },
+        },
+      },
     });
     expect(idleCollector.events.at(-1)).toMatchObject({
       type: "turn.completed",
@@ -1887,9 +1989,11 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
-    expect(attached).toMatchObject({ result: { replayed: 4 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 4 } },
+    });
     expect(
       collector.events.filter((event) => event.type === "text.delta"),
     ).toEqual([
@@ -1929,7 +2033,7 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     await flush();
 
@@ -1965,7 +2069,7 @@ describe("daemon 协议面（缝 C）", () => {
       requester("attach", {
         scope: "session",
         sessionId,
-        replay: { mode: "available" },
+        start: { mode: "history" },
       }),
     ).resolves.toMatchObject({
       error: { code: "internal_error" },
@@ -1978,10 +2082,10 @@ describe("daemon 协议面（缝 C）", () => {
       requester("attach", {
         scope: "session",
         sessionId,
-        replay: { mode: "available" },
+        start: { mode: "history" },
       }),
     ).resolves.toMatchObject({
-      result: { sessionId },
+      result: { initial: { mode: "history", target: { sessionId } } },
     });
   });
 
@@ -2008,10 +2112,16 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 0 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "snapshot", target: { sessionId } } },
+    });
+    const initial = v.parse(attachResultSchema, resultOf(attached)).initial;
+    if (initial.mode !== "snapshot")
+      throw new Error("Expected attach to return a snapshot");
+    expect(initial.baseline.confirmedTerminals).toHaveLength(1);
     expect(collector.events).toEqual([]);
     expect(collector.ended).toEqual([{ sessionId, reason: "end_turn" }]);
   });
@@ -2036,7 +2146,7 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
     fake.controls.completeTurn("failed");
@@ -2070,7 +2180,7 @@ describe("daemon 协议面（缝 C）", () => {
     await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
     fake.controls.completeTurn();
@@ -2114,10 +2224,12 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t2",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
-    expect(attached).toMatchObject({ result: { replayed: 2 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 2 } },
+    });
     expect(collector.ended).toEqual([]);
     fake.controls.completeTurn();
     await waitFor(() => collector.ended.length === 1);
@@ -2131,7 +2243,7 @@ describe("daemon 协议面（缝 C）", () => {
     const response = await makeRequester(client).request("attach", {
       scope: "session",
       sessionId: "session:00000000-0000-4000-8000-000000000000:missing:1",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -2161,11 +2273,11 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId, replayed: 5 },
+      result: { initial: { mode: "history", replayed: 5 } },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
@@ -2586,6 +2698,7 @@ describe("daemon 空闲退出", () => {
   test("存储故障后仍尝试kill，已关闭但未提交时不返回成功", async () => {
     let writeUnavailable = false;
     let spawnCommits = 0;
+    let killCommits = 0;
     const backingStore = createInMemoryControlStore();
     const controlStore: ControlStore = {
       ...backingStore,
@@ -2617,6 +2730,11 @@ describe("daemon 空闲退出", () => {
       recordEvent(event, session) {
         if (writeUnavailable) throw new Error("injected event commit failure");
         return backingStore.recordEvent(event, session);
+      },
+      commitKill(input) {
+        killCommits += 1;
+        if (writeUnavailable) throw new Error("injected kill commit failure");
+        return backingStore.commitKill(input);
       },
     };
     const fake = createFakeHarness({
@@ -2661,21 +2779,34 @@ describe("daemon 空闲退出", () => {
     expect(stopped).toMatchObject({
       error: {
         code: "control_store_unavailable",
-        stage: "event_commit",
+        stage: "commit",
         acceptance: "accepted",
-        sessionId: first.sessionId,
-        eventType: "turn.completed",
+        acceptedResult: {
+          sessionId: first.sessionId,
+          status: "killed",
+        },
         operationKey: expect.any(String),
       },
     });
     if (
       !("error" in stopped) ||
       stopped.error.code !== "control_store_unavailable" ||
-      stopped.error.stage !== "event_commit"
+      stopped.error.stage !== "commit"
     )
       throw new Error("预期主动停止提交故障");
     expect(parseOperationKey(stopped.error.operationKey).kind).toBe("kill");
+    expect(
+      resultOf(
+        await requester("getOperation", {
+          operationKey: stopped.error.operationKey,
+        }),
+      ),
+    ).toMatchObject({
+      status: "accepted_uncommitted",
+      result: { sessionId: first.sessionId, status: "killed" },
+    });
     expect(fake.calls.terminated).toContain(first.sessionId);
+    expect(killCommits).toBe(1);
     expect(await requester("list", {})).toMatchObject({
       result: [
         {
@@ -2686,9 +2817,365 @@ describe("daemon 空闲退出", () => {
         },
       ],
     });
+    writeUnavailable = false;
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-accepted-result-retry-commit",
+        method: "kill",
+        params: { sessionId: first.sessionId },
+        operationKey: stopped.error.operationKey,
+      }),
+    ).resolves.toMatchObject({
+      result: { sessionId: first.sessionId, status: "killed" },
+    });
+    expect(killCommits).toBe(2);
+    expect(
+      fake.calls.terminated.filter(
+        (sessionId) => sessionId === first.sessionId,
+      ),
+    ).toHaveLength(1);
+    expect(
+      resultOf(
+        await requester("getOperation", {
+          operationKey: stopped.error.operationKey,
+        }),
+      ),
+    ).toMatchObject({
+      status: "succeeded",
+      result: { sessionId: first.sessionId, status: "killed" },
+    });
     connection.close();
-    await expect(daemon.stop()).rejects.toThrow();
-    await expect(running).rejects.toThrow();
+    await expect(daemon.stop()).resolves.toBeUndefined();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  test("kill 注册失败仍执行关闭，查询确认结果未入账", async () => {
+    const backingStore = createInMemoryControlStore();
+    const controlStore: ControlStore = {
+      ...backingStore,
+      registerKill() {
+        throw new Error("kill registration failed");
+      },
+      markKillDispatched() {
+        throw new Error("kill dispatch marker failed");
+      },
+      commitKill() {
+        throw new Error("kill result commit failed");
+      },
+    };
+    let terminationAttempts = 0;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async () => {
+        terminationAttempts += 1;
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "kill-registration-failure",
+        message: "启动后注入停止登记失败",
+      }),
+    ) as { sessionId: SessionId };
+    const other = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "kill-registration-failure-other",
+        message: "验证已接受结果的参数绑定",
+      }),
+    ) as { sessionId: SessionId };
+    const operationKey = testOperationKey(connection, "kill");
+
+    const stopped = await sendRaw(connection, {
+      kind: "request",
+      requestId: "kill-registration-failure",
+      method: "kill",
+      params: { sessionId: spawned.sessionId },
+      operationKey,
+    });
+
+    expect(stopped).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+        acceptedResult: { sessionId: spawned.sessionId, status: "killed" },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    expect(backingStore.getOperation(operationKey as never)).toBeUndefined();
+    const queried = resultOf(
+      await requester("getOperation", { operationKey }),
+    ) as { status: string };
+    expect(queried.status).toBe("accepted_uncommitted");
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-registration-failure-reused",
+        method: "kill",
+        params: { sessionId: other.sessionId },
+        operationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(terminationAttempts).toBe(1);
+    expect(backingStore.getSession(other.sessionId)?.info.state).toBe("busy");
+    expect(backingStore.getSession(spawned.sessionId)?.info.state).toBe("busy");
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(({ event }) => event.type === "session.killed"),
+    ).toBe(false);
+
+    connection.close();
+    await daemon.stop();
+    await running;
+  });
+
+  test("kill 注册故障时核实既有操作后才可派发", async () => {
+    const backingStore = createInMemoryControlStore();
+    let registerUnavailable = false;
+    let readUnavailable = false;
+    let failKillUnavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      registerKill(input) {
+        if (registerUnavailable)
+          throw new Error("kill registration read failed");
+        return backingStore.registerKill(input);
+      },
+      markKillDispatched(operationKey) {
+        if (registerUnavailable)
+          throw new Error("kill dispatch marker unavailable");
+        return backingStore.markKillDispatched(operationKey);
+      },
+      failKill(operationKey, error) {
+        if (failKillUnavailable) throw new Error("kill failure write failed");
+        return backingStore.failKill(operationKey, error);
+      },
+      getOperation(operationKey) {
+        if (readUnavailable) throw new Error("operation read failed");
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    const attempts = new Map<SessionId, number>();
+    let unknownSessionId: SessionId | undefined;
+    let partialSessionId: SessionId | undefined;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async (sessionId) => {
+        const count = (attempts.get(sessionId) ?? 0) + 1;
+        attempts.set(sessionId, count);
+        if (sessionId === unknownSessionId && count === 1)
+          throw {
+            code: "internal_error",
+            cause: {
+              kind: "timeout",
+              message: "official deletion confirmation absent",
+            },
+          };
+        if (sessionId === partialSessionId && count === 1)
+          throw {
+            code: "internal_error",
+            cause: { kind: "closed", message: "owned resource release failed" },
+            effect: { kind: "session_closed", sessionId },
+          };
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const sessions = new Map<string, SessionId>();
+    for (const label of [
+      "A",
+      "B",
+      "unknown",
+      "dispatched",
+      "unreadable",
+      "partial",
+    ]) {
+      const spawned = resultOf(
+        await requester("spawn", {
+          harness: "codex",
+          sessionLabel: `kill-register-${label}`,
+          message: `创建 ${label} 的关闭测试会话`,
+        }),
+      ) as { sessionId: SessionId };
+      sessions.set(label, spawned.sessionId);
+    }
+    const sendKill = (
+      requestId: string,
+      operationKey: string,
+      sessionId: SessionId,
+    ) =>
+      sendRaw(connection, {
+        kind: "request",
+        requestId,
+        method: "kill",
+        params: { sessionId },
+        operationKey,
+      });
+    const seedDispatched = (operationKey: string, sessionId: SessionId) => {
+      const claims = parseOperationKey(operationKey);
+      backingStore.registerKill({
+        operationKey: operationKey as never,
+        runtimeScopeId: claims.runtimeScopeId,
+        consumer: claims.consumer,
+        generation: claims.generation,
+        request: { sessionId },
+      });
+      backingStore.markKillDispatched(operationKey as never);
+    };
+
+    const boundKey = testOperationKey(connection, "kill");
+    await expect(
+      sendKill("kill-register-a", boundKey, sessions.get("A")!),
+    ).resolves.toMatchObject({
+      result: { sessionId: sessions.get("A"), status: "killed" },
+    });
+    registerUnavailable = true;
+    await expect(
+      sendKill("kill-register-reused-on-b", boundKey, sessions.get("B")!),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(attempts.get(sessions.get("A")!)).toBe(1);
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+    expect(backingStore.getSession(sessions.get("B")!)?.info.state).toBe(
+      "busy",
+    );
+    expect(backingStore.getOperation(boundKey as never)).toMatchObject({
+      kind: "kill",
+      request: { sessionId: sessions.get("A") },
+      status: "succeeded",
+      result: { sessionId: sessions.get("A"), status: "killed" },
+    });
+
+    registerUnavailable = false;
+    unknownSessionId = sessions.get("unknown");
+    const unknownKey = testOperationKey(connection, "kill");
+    await expect(
+      sendKill("kill-register-unknown-first", unknownKey, unknownSessionId!),
+    ).resolves.toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        cause: {
+          kind: "timeout",
+          message: "official deletion confirmation absent",
+        },
+      },
+    });
+    expect(backingStore.getOperation(unknownKey as never)).toMatchObject({
+      status: "outcome_unknown",
+    });
+    registerUnavailable = true;
+    await expect(
+      sendKill("kill-register-unknown-retry", unknownKey, unknownSessionId!),
+    ).resolves.toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        operationKey: unknownKey,
+        cause: {
+          kind: "timeout",
+          message: "official deletion confirmation absent",
+        },
+      },
+    });
+    expect(attempts.get(unknownSessionId!)).toBe(1);
+    await expect(
+      sendKill("kill-register-unknown-reused", unknownKey, sessions.get("B")!),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+
+    const dispatchedKey = testOperationKey(connection, "kill");
+    seedDispatched(dispatchedKey, sessions.get("dispatched")!);
+    await expect(
+      sendKill(
+        "kill-register-dispatched-retry",
+        dispatchedKey,
+        sessions.get("dispatched")!,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        operationKey: dispatchedKey,
+      },
+    });
+    expect(attempts.get(sessions.get("dispatched")!)).toBeUndefined();
+
+    const unreadableKey = testOperationKey(connection, "kill");
+    seedDispatched(unreadableKey, sessions.get("unreadable")!);
+    readUnavailable = true;
+    await expect(
+      sendKill(
+        "kill-register-unreadable-retry",
+        unreadableKey,
+        sessions.get("B")!,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        operationKey: unreadableKey,
+        stage: "register",
+        acceptance: "unknown",
+      },
+    });
+    expect(attempts.get(sessions.get("unreadable")!)).toBeUndefined();
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+
+    readUnavailable = false;
+    partialSessionId = sessions.get("partial");
+    failKillUnavailable = true;
+    const partialKey = testOperationKey(connection, "kill");
+    await expect(
+      sendKill("kill-register-partial-first", partialKey, partialSessionId!),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        effect: { kind: "session_closed", sessionId: partialSessionId },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+      },
+    });
+    await expect(
+      sendKill("kill-register-partial-reused", partialKey, sessions.get("B")!),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(attempts.get(partialSessionId!)!).toBe(1);
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+    failKillUnavailable = false;
+    connection.close();
+    await daemon.stop();
+    await running;
   });
 
   test("既有事件写故障不覆盖失败的原生停止原因", async () => {
@@ -2842,6 +3329,576 @@ describe("daemon 空闲退出", () => {
     await expect(running).rejects.toThrow();
   });
 
+  test("自有资源释放失败且故障记录未落盘时查询保留已确认关闭效果", async () => {
+    const backingStore = createInMemoryControlStore();
+    let queryUnavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      failKill() {
+        throw new Error("kill failure write failed");
+      },
+      getOperation(operationKey) {
+        if (queryUnavailable) throw new Error("operation query unavailable");
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    let terminationAttempts = 0;
+    let closedSessionId: SessionId | undefined;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async (sessionId) => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1) {
+          closedSessionId = sessionId;
+          throw {
+            code: "internal_error",
+            cause: { kind: "closed", message: "owned resource release failed" },
+            effect: { kind: "session_closed", sessionId },
+          };
+        }
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "partially closed worker",
+      }),
+    ) as { sessionId: SessionId };
+    const other = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "worker outside the original kill request",
+      }),
+    ) as { sessionId: SessionId };
+    await requester("list", {});
+    const operationKey = testOperationKey(connection, "kill");
+    const stopped = await sendRaw(connection, {
+      kind: "request",
+      requestId: "kill-partial-effect",
+      method: "kill",
+      params: { sessionId: spawned.sessionId },
+      operationKey,
+    });
+    expect(stopped).toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { kind: "closed" },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-partial-effect-same-key-retry",
+        method: "kill",
+        params: { sessionId: spawned.sessionId },
+        operationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { kind: "closed" },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    expect(closedSessionId).toBe(spawned.sessionId);
+    const uncommitted = await requester("getOperation", { operationKey });
+    expect(resultOf(uncommitted)).toMatchObject({
+      status: "partial_effect_uncommitted",
+      operationKey,
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+      cause: { kind: "io", message: "kill failure write failed" },
+    });
+
+    queryUnavailable = true;
+    expect(
+      resultOf(await requester("getOperation", { operationKey })),
+    ).toMatchObject({
+      status: "partial_effect_unconfirmed",
+      operationKey,
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+      cause: { kind: "io" },
+    });
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-partial-effect-unconfirmed-retry",
+        method: "kill",
+        params: { sessionId: spawned.sessionId },
+        operationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { kind: "closed" },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-partial-effect-changed-target",
+        method: "kill",
+        params: { sessionId: other.sessionId },
+        operationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(terminationAttempts).toBe(1);
+    expect(backingStore.getSession(spawned.sessionId)?.info.state).toBe("busy");
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(({ event }) => event.type === "session.killed"),
+    ).toBe(false);
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-partial-effect-new-key",
+        method: "kill",
+        params: { sessionId: spawned.sessionId },
+        operationKey: testOperationKey(connection, "kill"),
+      }),
+    ).resolves.toMatchObject({
+      result: { sessionId: spawned.sessionId, status: "killed" },
+    });
+    expect(terminationAttempts).toBe(2);
+    connection.close();
+    await daemon.stop();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  test("关闭效果已知但操作查询失败时同一key不重复释放资源", async () => {
+    const backingStore = createInMemoryControlStore();
+    let queryUnavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      failKill() {
+        throw new Error("kill failure write failed");
+      },
+      getOperation(operationKey) {
+        if (queryUnavailable) throw new Error("operation query unavailable");
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    let terminationAttempts = 0;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async (sessionId) => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1)
+          throw {
+            code: "internal_error",
+            cause: { kind: "closed", message: "owned resource release failed" },
+            effect: { kind: "session_closed", sessionId },
+          };
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "close confirmed while result persistence is unreadable",
+      }),
+    ) as { sessionId: SessionId };
+    const operationKey = testOperationKey(connection, "kill");
+    queryUnavailable = true;
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-partial-effect-unconfirmed-first",
+        method: "kill",
+        params: { sessionId: spawned.sessionId },
+        operationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { kind: "closed" },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    expect(
+      resultOf(await requester("getOperation", { operationKey })),
+    ).toMatchObject({
+      status: "partial_effect_unconfirmed",
+      operationKey,
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-partial-effect-unconfirmed-same-key",
+        method: "kill",
+        params: { sessionId: spawned.sessionId },
+        operationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { kind: "closed" },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+
+    queryUnavailable = false;
+    expect(
+      resultOf(await requester("getOperation", { operationKey })),
+    ).toMatchObject({
+      status: "partial_effect_uncommitted",
+      operationKey,
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-partial-effect-unconfirmed-new-key",
+        method: "kill",
+        params: { sessionId: spawned.sessionId },
+        operationKey: testOperationKey(connection, "kill"),
+      }),
+    ).resolves.toMatchObject({
+      result: { sessionId: spawned.sessionId, status: "killed" },
+    });
+    expect(terminationAttempts).toBe(2);
+    connection.close();
+    await daemon.stop();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  test("部分关闭已知后不因pending或缺少记录而重复清理", async () => {
+    const backingStore = createInMemoryControlStore();
+    let pendingOperationKey: string | undefined;
+    let unregisteredOperationKey: string | undefined;
+    let failPendingMarker = true;
+    let failUnregisteredOnce = true;
+    let pendingMarkerAttempts = 0;
+    let unregisteredAttempts = 0;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      registerKill(input) {
+        if (input.operationKey === unregisteredOperationKey) {
+          unregisteredAttempts += 1;
+          if (failUnregisteredOnce) {
+            failUnregisteredOnce = false;
+            throw new Error("kill registration failed before writing");
+          }
+        }
+        return backingStore.registerKill(input);
+      },
+      markKillDispatched(operationKey) {
+        if (operationKey === pendingOperationKey) pendingMarkerAttempts += 1;
+        if (operationKey === pendingOperationKey && failPendingMarker) {
+          failPendingMarker = false;
+          throw new Error("kill dispatch marker failed before writing");
+        }
+        if (backingStore.getOperation(operationKey) === undefined)
+          throw new Error("kill dispatch marker has no registered operation");
+        return backingStore.markKillDispatched(operationKey);
+      },
+      failKill() {
+        throw new Error("kill failure write failed");
+      },
+    };
+    const attempts = new Map<SessionId, number>();
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async (sessionId) => {
+        const count = (attempts.get(sessionId) ?? 0) + 1;
+        attempts.set(sessionId, count);
+        if (count === 1)
+          throw {
+            code: "internal_error",
+            cause: { kind: "closed", message: "owned resource release failed" },
+            effect: { kind: "session_closed", sessionId },
+          };
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const pendingSession = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "pending kill record after marker write failure",
+      }),
+    ) as { sessionId: SessionId };
+    const unregisteredSession = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "no kill record after registration write failure",
+      }),
+    ) as { sessionId: SessionId };
+    pendingOperationKey = testOperationKey(connection, "kill");
+    unregisteredOperationKey = testOperationKey(connection, "kill");
+
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-pending-partial-first",
+        method: "kill",
+        params: { sessionId: pendingSession.sessionId },
+        operationKey: pendingOperationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: pendingSession.sessionId,
+        },
+      },
+    });
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-pending-partial-same-key",
+        method: "kill",
+        params: { sessionId: pendingSession.sessionId },
+        operationKey: pendingOperationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: pendingSession.sessionId,
+        },
+      },
+    });
+    expect(attempts.get(pendingSession.sessionId)).toBe(1);
+    expect(pendingMarkerAttempts).toBe(1);
+
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-unregistered-partial-first",
+        method: "kill",
+        params: { sessionId: unregisteredSession.sessionId },
+        operationKey: unregisteredOperationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: unregisteredSession.sessionId,
+        },
+      },
+    });
+    expect(
+      resultOf(
+        await requester("getOperation", {
+          operationKey: unregisteredOperationKey,
+        }),
+      ),
+    ).toMatchObject({
+      status: "partial_effect_uncommitted",
+      operationKey: unregisteredOperationKey,
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: unregisteredSession.sessionId,
+        },
+      },
+    });
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-unregistered-partial-same-key",
+        method: "kill",
+        params: { sessionId: unregisteredSession.sessionId },
+        operationKey: unregisteredOperationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: unregisteredSession.sessionId,
+        },
+      },
+    });
+    expect(attempts.get(unregisteredSession.sessionId)).toBe(1);
+    expect(unregisteredAttempts).toBe(1);
+    connection.close();
+    await daemon.stop();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  test("关闭未知时查询保留确认失败与自有资源清理次因", async () => {
+    const backingStore = createInMemoryControlStore();
+    let terminationAttempts = 0;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async () => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1)
+          throw {
+            code: "internal_error",
+            cause: { kind: "timeout", message: "thread/delete timed out" },
+            cleanupCause: {
+              kind: "closed",
+              message: "owned transport cleanup failed",
+            },
+          };
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore: backingStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "kill-close-unknown",
+        message: "等待官方关闭确认",
+      }),
+    ) as { sessionId: SessionId };
+    const operationKey = testOperationKey(connection, "kill");
+    const stopped = await sendRaw(connection, {
+      kind: "request",
+      requestId: "kill-close-unknown",
+      method: "kill",
+      params: { sessionId: spawned.sessionId },
+      operationKey,
+    });
+
+    expect(stopped).toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        operationKey,
+        cause: { kind: "timeout", message: "thread/delete timed out" },
+        cleanupCause: {
+          kind: "closed",
+          message: "owned transport cleanup failed",
+        },
+      },
+    });
+    expect(
+      resultOf(await requester("getOperation", { operationKey })),
+    ).toMatchObject({
+      status: "outcome_unknown",
+      operationKey,
+      cause: { kind: "timeout", message: "thread/delete timed out" },
+      cleanupCause: {
+        kind: "closed",
+        message: "owned transport cleanup failed",
+      },
+    });
+    expect(backingStore.getSession(spawned.sessionId)?.info.state).toBe("busy");
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(({ event }) => event.type === "session.killed"),
+    ).toBe(false);
+    expect(terminationAttempts).toBe(1);
+
+    connection.close();
+    await daemon.stop();
+    await running;
+  });
+
   test("普通事件写入失败会停止对应worker并隔离其他会话", async () => {
     const backingStore = createInMemoryControlStore();
     let failEventWrite = false;
@@ -2891,13 +3948,126 @@ describe("daemon 空闲退出", () => {
       }),
     ) as { sessionId: SessionId };
 
+    const observations = collectNotifications(connection);
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: first.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({ initial: { mode: "snapshot" } });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: second.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({ initial: { mode: "snapshot" } });
+    codex.controls.emitWorkerMessage("A 已提交正文");
+    qoder.controls.emitWorkerMessage("B 已提交正文");
+    await vi.waitFor(() =>
+      expect(
+        observations.events.filter(
+          (event) =>
+            event.type === "message" &&
+            (event.sessionId === first.sessionId ||
+              event.sessionId === second.sessionId),
+        ),
+      ).toHaveLength(2),
+    );
+
     failEventWrite = true;
     codex.controls.emitWorkerMessage("正文无法提交");
     await waitFor(() => codex.calls.terminated.includes(first.sessionId));
+    await vi.waitFor(() => expect(observations.ended).toHaveLength(2));
 
     expect(codex.calls.terminated).toEqual([first.sessionId]);
     expect(qoder.calls.terminated).toEqual([]);
     expect(second.sessionId).not.toBe(first.sessionId);
+    expect(observations.events).toMatchObject([
+      {
+        type: "message",
+        sessionId: first.sessionId,
+        content: "A 已提交正文",
+      },
+      {
+        type: "message",
+        sessionId: second.sessionId,
+        content: "B 已提交正文",
+      },
+    ]);
+    expect(observations.events).not.toContainEqual(
+      expect.objectContaining({
+        type: "message",
+        sessionId: first.sessionId,
+        content: "正文无法提交",
+      }),
+    );
+    expect(observations.ended).toEqual([
+      { sessionId: first.sessionId, reason: "control_unavailable" },
+      { sessionId: second.sessionId, reason: "control_unavailable" },
+    ]);
+    expect(
+      resultOf(
+        await requester("wait", {
+          targets: [{ sessionId: first.sessionId, turnId: "t1" }],
+          completion: "all",
+          timeoutMs: 0,
+        }),
+      ),
+    ).toMatchObject({
+      status: "unreachable",
+      unreachable: [
+        { sessionId: first.sessionId, reason: "commit_unavailable" },
+      ],
+    });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: first.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({
+      initial: {
+        mode: "snapshot",
+        baseline: {
+          session: {
+            state: "unreachable",
+            unreachableReason: "commit_unavailable",
+          },
+        },
+      },
+    });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: second.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({
+      initial: {
+        mode: "snapshot",
+        baseline: {
+          session: {
+            state: "unreachable",
+            unreachableReason: "commit_unavailable",
+          },
+        },
+      },
+    });
+    await vi.waitFor(() => expect(observations.ended).toHaveLength(4));
+    expect(observations.ended.slice(2)).toEqual([
+      { sessionId: first.sessionId, reason: "control_unavailable" },
+      { sessionId: second.sessionId, reason: "control_unavailable" },
+    ]);
     connection.close();
     await expect(daemon.stop()).rejects.toThrow();
     await expect(running).rejects.toThrow();
@@ -3732,7 +4902,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const attached = await beta("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(attached).toMatchObject({ error: { code: "session_not_found" } });
 
@@ -3819,7 +4989,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     await alpha("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     const permissionEvent = collector.events.find(
       (event) => event.type === "permission.requested",
@@ -3940,9 +5110,11 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
     await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     }),
-  ).toMatchObject({ result: { sessionId } });
+  ).toMatchObject({
+    result: { initial: { mode: "history", target: { sessionId } } },
+  });
   expect(resultOf(await requester("diagnostics", { limit: 1 }))).toEqual({
     records: [],
     truncated: false,
@@ -4379,6 +5551,60 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
   connection.close();
 });
 
+test("active_turn send 同键正文冲突仍沿原操作指纹缓存拒绝", async () => {
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
+  });
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
+  const connection = server.connect();
+  const requester = makeRequester(connection);
+  const spawned = resultOf(
+    await requester("spawn", {
+      sessionLabel: "active-send-fingerprint",
+      harness: "codex",
+      message: "start the original turn",
+    }),
+  ) as { sessionId: SessionId; turnId: TurnId };
+  const operationKey = testOperationKey(
+    connection,
+    "send",
+    "00000006-0123-4123-8123-0123456789ab",
+  );
+  const original = {
+    kind: "request",
+    method: "send",
+    operationKey,
+    params: {
+      placement: "active_turn",
+      sessionId: spawned.sessionId,
+      turnId: spawned.turnId,
+      message: "deliver once",
+    },
+  } as const;
+  expect(
+    await sendRaw(connection, {
+      ...original,
+      requestId: "active-send-original",
+    }),
+  ).toHaveProperty("result");
+  expect(
+    await sendRaw(connection, {
+      ...original,
+      requestId: "active-send-conflict",
+      params: { ...original.params, message: "must not dispatch" },
+    }),
+  ).toMatchObject({ error: { code: "operation_key_conflict" } });
+  expect(fake.calls.delivered).toEqual([
+    {
+      sessionId: spawned.sessionId,
+      turnId: spawned.turnId,
+      message: "deliver once",
+    },
+  ]);
+  connection.close();
+});
+
 test("模型目录查询失败时不把 harness 误判为未知或拒绝模型", async () => {
   const fake = createFakeHarness({
     harness: "codex",
@@ -4401,6 +5627,116 @@ test("模型目录查询失败时不把 harness 误判为未知或拒绝模型",
   expect(fake.calls.starts).toBe(1);
   expect(fake.calls.specs[0]).toMatchObject({ model: "live-model" });
   connection.close();
+});
+
+test("新回合明确未接受但失败记录不可写时查询保留已知拒绝", async () => {
+  const backingStore = createInMemoryControlStore();
+  let failureWrites = 0;
+  const controlStore: ControlStore = {
+    ...backingStore,
+    failSend() {
+      failureWrites += 1;
+      throw new Error("send failure record unavailable");
+    },
+  };
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
+    deliver: async () => {
+      throw new WorkerDeliveryFailure(
+        "native queue rejected the turn",
+        "not_accepted",
+      );
+    },
+  });
+  const server = createInMemoryTransportServer<ProtocolMessage>();
+  const daemon = createDaemon({
+    transport: server,
+    adapters: new Map([["codex", fake.adapter]]),
+    identity: testIdentity,
+    diagnostics: testDiagnostics,
+    runtimeScopeId: testRuntimeScopeId,
+    controlStore,
+    idleTimeoutMs: 60_000,
+  });
+  daemons.push(daemon);
+  const running = daemon.start();
+  const connection = server.connect();
+  await makeRequester(connection)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "test-consumer",
+  });
+  const spawned = resultOf(
+    await makeRequester(connection)("spawn", {
+      sessionLabel: "send-not-accepted",
+      harness: "codex",
+      message: "initial turn",
+    }),
+  ) as { sessionId: SessionId };
+  fake.controls.completeTurn();
+  await makeRequester(connection)("list", {});
+
+  const request = {
+    kind: "request",
+    method: "send",
+    testOperationId: "00000007-0123-4123-8123-0123456789ab",
+    params: {
+      sessionId: spawned.sessionId,
+      message: "rejected turn",
+      placement: "new_turn",
+    },
+  } as const;
+  const first = await sendRaw(connection, {
+    ...request,
+    requestId: "send-not-accepted-first",
+  });
+  expect(first).toMatchObject({
+    error: {
+      code: "control_store_unavailable",
+      stage: "failure",
+      acceptance: "not_dispatched",
+      cause: { message: expect.stringContaining("native queue rejected") },
+    },
+  });
+  const operationKey = testOperationKey(
+    connection,
+    "send",
+    request.testOperationId,
+  );
+  const queried = await sendRaw(connection, {
+    kind: "request",
+    requestId: "send-not-accepted-query",
+    method: "getOperation",
+    params: { operationKey },
+  });
+  expect(queried).toMatchObject({
+    result: {
+      status: "not_accepted_uncommitted",
+      error: {
+        code: "internal_error",
+        cause: { message: "native queue rejected the turn" },
+      },
+      cause: { kind: "io", message: "send failure record unavailable" },
+    },
+  });
+  expect(backingStore.getOperation(operationKey as never)?.status).toBe(
+    "dispatched",
+  );
+  const retry = await sendRaw(connection, {
+    ...request,
+    requestId: "send-not-accepted-retry",
+  });
+  expect(retry).toMatchObject({
+    error: {
+      code: "internal_error",
+      cause: { message: "native queue rejected the turn" },
+    },
+  });
+  expect(fake.calls.delivered).toHaveLength(1);
+  expect(failureWrites).toBe(1);
+  connection.close();
+  await daemon.stop();
+  await running;
 });
 
 test("kill 恢复返回原清理失败，新身份才会重试", async () => {
@@ -4630,7 +5966,7 @@ test("none turn scope ends from authoritative terminal state while retaining ful
     await request("attach", {
       scope: "turn",
       ...target,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     }),
   ).toHaveProperty("result");
   await flush();
@@ -4640,7 +5976,7 @@ test("none turn scope ends from authoritative terminal state while retaining ful
   ]);
 });
 
-test("after freezes its replay prefix and buffers live events before the establishment ACK", async () => {
+test("after 固定历史前缀并在 initial 响应前缓存实时事件", async () => {
   const fake = createFakeHarness({
     harness: "codex",
     modelCatalog: emptyModelCatalog("codex"),
@@ -4673,10 +6009,14 @@ test("after freezes its replay prefix and buffers live events before the establi
     scope: "turn",
     sessionId,
     turnId: "t1",
-    replay: {
+    start: {
       mode: "after",
       cursor: encodeResumeCursor({
         target: { scope: "turn", sessionId, turnId: "t1" as TurnId },
+        runtimeScopeId: v.parse(
+          runtimeScopeIdSchema,
+          "00000000-0000-4000-8000-000000000000",
+        ),
         daemonGeneration: v.parse(daemonGenerationSchema, "test"),
         eventId: 1,
       }),
@@ -4684,7 +6024,13 @@ test("after freezes its replay prefix and buffers live events before the establi
   });
   await flush();
   expect(ack).toMatchObject({
-    result: { replayed: 3, window: { oldest: 1, head: 4, truncated: false } },
+    result: {
+      initial: {
+        mode: "after",
+        replayed: 3,
+        window: { oldest: 1, head: 4, truncated: false },
+      },
+    },
   });
   expect(wire[0]).toMatchObject({
     kind: "response",
@@ -4702,4 +6048,42 @@ test("after freezes its replay prefix and buffers live events before the establi
     method: "attach.ended",
     params: { reason: "end_turn", lastEventId: 7 },
   });
+});
+
+test("after 游标按运行范围绑定，即使会话、世代和序号相同也拒绝串用", async () => {
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
+  });
+  const { server, daemon } = startDaemon(new Map([["codex", fake.adapter]]));
+  const client = server.connect();
+  await flush();
+  const requester = makeRequester(client);
+  const spawned = await requester("spawn", {
+    harness: "codex",
+    message: "scope-bound cursor",
+    cwd: "/tmp",
+  });
+  const { sessionId, turnId } = resultOf(spawned) as {
+    sessionId: SessionId;
+    turnId: TurnId;
+  };
+  const cursor = encodeResumeCursor({
+    target: { scope: "turn", sessionId, turnId },
+    runtimeScopeId: v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000001",
+    ),
+    daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+    eventId: 0,
+  });
+  expect(
+    await requester("attach", {
+      scope: "turn",
+      sessionId,
+      turnId,
+      start: { mode: "after", cursor },
+    }),
+  ).toMatchObject({ error: { code: "invalid_params" } });
+  await daemon.stop();
 });
