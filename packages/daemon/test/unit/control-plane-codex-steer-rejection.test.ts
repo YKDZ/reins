@@ -51,7 +51,11 @@ function operationKey(kind: "spawn" | "send"): OperationKey {
   return serializeOperationKey(claims);
 }
 
-test.each(["explicit_rejection", "transport_eof"] as const)(
+test.each([
+  "explicit_rejection",
+  "transport_eof",
+  "accepted_commit_failure",
+] as const)(
   "Codex active_turn %s 保留准确接受状态与清理事实",
   async (failureMode) => {
     const stdin = new PassThrough();
@@ -98,26 +102,40 @@ test.each(["explicit_rejection", "transport_eof"] as const)(
           continue;
         }
         const response =
-          request.method === "turn/steer"
+          request.method === "turn/steer" &&
+          failureMode === "explicit_rejection"
             ? {
                 id: request.id,
                 error: { code: -32600, message: "no active turn" },
               }
-            : {
-                id: request.id,
-                result:
-                  request.method === "thread/start"
-                    ? { thread: { id: "native-thread" } }
-                    : request.method === "turn/start"
-                      ? { turn: { id: "native-turn" } }
-                      : {},
-              };
+            : request.method === "turn/steer"
+              ? {
+                  id: request.id,
+                  result: { turnId: "native-turn" },
+                }
+              : {
+                  id: request.id,
+                  result:
+                    request.method === "thread/start"
+                      ? { thread: { id: "native-thread" } }
+                      : request.method === "turn/start"
+                        ? { turn: { id: "native-turn" } }
+                        : {},
+                };
         queueMicrotask(() => stdout.write(`${JSON.stringify(response)}\n`));
       }
     });
 
     const baseStore = createInMemoryControlStore();
-    const store: ControlStore = baseStore;
+    const store: ControlStore =
+      failureMode === "accepted_commit_failure"
+        ? {
+            ...baseStore,
+            commitSend() {
+              throw new Error("injected send commit failure");
+            },
+          }
+        : baseStore;
     let sessionCounter = 0;
     const diagnosticsRuntime: DiagnosticsRuntime = {
       generation,
@@ -233,7 +251,7 @@ test.each(["explicit_rejection", "transport_eof"] as const)(
           operationKey: sendKey,
           error: { code: "internal_error" },
         });
-      } else {
+      } else if (failureMode === "transport_eof") {
         expect(rejected).toMatchObject({
           error: {
             code: "operation_outcome_unknown",
@@ -260,6 +278,28 @@ test.each(["explicit_rejection", "transport_eof"] as const)(
             ),
           },
         });
+      } else {
+        expect(rejected).toMatchObject({
+          error: {
+            code: "control_store_unavailable",
+            stage: "commit",
+            acceptance: "accepted",
+            acceptedResult: {
+              sessionId: target.sessionId,
+              turnId: target.turnId,
+              deliveryPoint: "active_turn",
+            },
+          },
+        });
+        expect(record).toMatchObject({
+          status: "accepted_uncommitted",
+          operationKey: sendKey,
+          result: {
+            sessionId: target.sessionId,
+            turnId: target.turnId,
+            deliveryPoint: "active_turn",
+          },
+        });
       }
       expect(await execute("send", params, sendKey)).toEqual(rejected);
       if (failureMode === "transport_eof") {
@@ -281,17 +321,34 @@ test.each(["explicit_rejection", "transport_eof"] as const)(
       ).toHaveLength(1);
       expect(
         requests.some((request) => request.method === "thread/delete"),
-      ).toBe(false);
+      ).toBe(failureMode === "accepted_commit_failure");
+      await plane.settleEvents();
       const eventTypes = store
         .sessionEvents(target.sessionId)
         .map((entry) => entry.event.type);
-      expect(childClosed).toBe(failureMode === "transport_eof");
-      expect(eventTypes.includes("session.killed")).toBe(false);
+      expect(childClosed).toBe(failureMode !== "explicit_rejection");
+      expect(eventTypes.includes("session.killed")).toBe(
+        failureMode === "accepted_commit_failure",
+      );
+      if (failureMode === "accepted_commit_failure")
+        expect(
+          store
+            .sessionEvents(target.sessionId)
+            .some(
+              ({ event }) =>
+                event.type === "message" && event.content === "rejected steer",
+            ),
+        ).toBe(false);
       expect(
         plane.list({ sessionId: target.sessionId }, consumer)[0],
       ).toMatchObject({
         // 这是已提交投影；EOF 结果仍未知，准入栅栏阻止新 turn。
-        state: failureMode === "transport_eof" ? "idle" : "busy",
+        state:
+          failureMode === "transport_eof"
+            ? "idle"
+            : failureMode === "accepted_commit_failure"
+              ? "killed"
+              : "busy",
       });
     } finally {
       try {
