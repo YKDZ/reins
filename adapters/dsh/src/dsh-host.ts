@@ -3,7 +3,9 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import type { Agent, AssistantStreamFrame } from "@deepseek-ai/dsh-agent";
+import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
+import type {} from "@deepseek-ai/dsh-session-projection";
 import type { runProfile } from "@deepseek-ai/dsh/profile-boot";
 import {
   messageIdSchema,
@@ -46,9 +48,21 @@ const hostCommandSchema = v.union([
   v.strictObject({
     id: v.number(),
     type: v.literal("deliver"),
+    placement: v.picklist(["active_turn", "new_turn"]),
     turnId: turnIdSchema,
     messageId: v.optional(messageIdSchema),
     message: v.string(),
+  }),
+  v.strictObject({
+    id: v.number(),
+    type: v.literal("interrupt"),
+    turnId: turnIdSchema,
+  }),
+  v.strictObject({
+    id: v.number(),
+    type: v.literal("bind-turn"),
+    nativeTurn: v.number(),
+    turnId: turnIdSchema,
   }),
   v.strictObject({ id: v.number(), type: v.literal("close") }),
   v.strictObject({ id: v.number(), type: v.literal("catalog") }),
@@ -122,16 +136,21 @@ async function createOfficialProfile(): Promise<DshProfileRuntime> {
 function acceptanceRecorded(
   agent: import("@deepseek-ai/dsh-agent").Agent,
   nativeMessageId: string,
+  target: "next-turn" | "next-step",
 ): boolean {
-  // followup 的公开签名返回 void；只以同一原生 turn 队列中的精确 ID 确认接受。
-  if (agent.inbox.nextTurn.some((message) => message.id === nativeMessageId))
+  // steer/followup 的公开签名返回 void；只以目标队列中的精确 ID 确认接受。
+  if (
+    agent.inbox[target === "next-turn" ? "nextTurn" : "nextStep"].some(
+      (message) => message.id === nativeMessageId,
+    )
+  )
     return true;
   return agent.session
     .snapshotEvents()
     .some(
       (event) =>
         event.type === "agent/inbox/spliced" &&
-        event.data.target === "next-turn" &&
+        event.data.target === target &&
         event.data.inserted.some((message) => message.id === nativeMessageId),
     );
 }
@@ -146,19 +165,26 @@ function sendSessionEvent(
   event: SessionEvent,
   turnId?: TurnId,
   callerMessageId?: MessageId,
+  nativeTurn?: number,
 ): void {
   send({
     type: "session-event",
     event,
+    ...(nativeTurn === undefined ? {} : { nativeTurn }),
     ...(turnId === undefined ? {} : { turnId }),
     ...(callerMessageId === undefined ? {} : { callerMessageId }),
   });
 }
 
-function sendStreamFrame(frame: AssistantStreamFrame, turnId?: TurnId): void {
+function sendStreamFrame(
+  frame: AssistantStreamFrame,
+  turnId?: TurnId,
+  nativeTurn?: number,
+): void {
   send({
     type: "assistant-stream",
     frame,
+    ...(nativeTurn === undefined ? {} : { nativeTurn }),
     ...(turnId === undefined ? {} : { turnId }),
   });
 }
@@ -215,7 +241,10 @@ export async function runDshRuntimeHost(): Promise<void> {
   const nativeTurnIds = new Map<number, TurnId>();
   const nativeMessageTurns = new Map<string, TurnId>();
   const nativeCallerMessageIds = new Map<string, NativeCaller>();
+  const activePreSteps = new Map<number, AbortSignal>();
   const attemptTurnIds = new Map<string, TurnId>();
+  const attemptNativeTurns = new Map<string, number>();
+  let openNativeTurn: number | undefined;
   let closed = false;
   let closing: Promise<void> | undefined;
 
@@ -267,7 +296,6 @@ export async function runDshRuntimeHost(): Promise<void> {
         readonly failure?: ReturnType<typeof safeFailureFrom>;
       }
   > => {
-    const { createUserMessage } = await import("@deepseek-ai/dsh-llm");
     const message = createUserMessage({
       content: [{ type: "text", text }],
       source: { kind: "user" },
@@ -291,12 +319,125 @@ export async function runDshRuntimeHost(): Promise<void> {
         failure: safeFailureFrom(error),
       };
     }
-    if (acceptanceRecorded(agent, message.id)) {
+    if (acceptanceRecorded(agent, message.id, "next-turn")) {
       return { accepted: true, nativeMessageId: message.id };
     }
     const pendingIndex = pendingNativeTurns.indexOf(pending);
     if (pendingIndex !== -1) pendingNativeTurns.splice(pendingIndex, 1);
     return { accepted: false, acceptance: "unknown" };
+  };
+
+  const activeNativeTurn = (
+    agent: Agent,
+    turnId: TurnId,
+  ): number | undefined => {
+    const boundary = profile.ctx.sessionProjections.stateOf(
+      agent.session,
+      "turnBoundary",
+    );
+    if (
+      agent.status !== "running" ||
+      boundary === undefined ||
+      boundary.openTurnStartSeq === null
+    )
+      return undefined;
+    const nativeTurn = boundary.lastTurn;
+    const signal = activePreSteps.get(nativeTurn);
+    if (
+      signal === undefined ||
+      signal.aborted ||
+      nativeTurnIds.get(nativeTurn) !== turnId
+    )
+      return undefined;
+    return nativeTurn;
+  };
+
+  const bindNativeTurn = (
+    agent: Agent,
+    nativeTurn: number,
+    turnId: TurnId,
+  ): boolean => {
+    const boundary = profile.ctx.sessionProjections.stateOf(
+      agent.session,
+      "turnBoundary",
+    );
+    const signal = activePreSteps.get(nativeTurn);
+    const existingTurnId = nativeTurnIds.get(nativeTurn);
+    if (
+      agent.status !== "running" ||
+      boundary === undefined ||
+      boundary.openTurnStartSeq === null ||
+      boundary.lastTurn !== nativeTurn ||
+      signal === undefined ||
+      signal.aborted ||
+      (existingTurnId !== undefined && existingTurnId !== turnId)
+    )
+      return false;
+    nativeTurnIds.set(nativeTurn, turnId);
+    return true;
+  };
+
+  const acceptSteer = (
+    agent: Agent,
+    turnId: TurnId,
+    text: string,
+    messageId?: MessageId,
+  ):
+    | { readonly accepted: true; readonly nativeMessageId: string }
+    | {
+        readonly accepted: false;
+        readonly acceptance: "not_accepted" | "unknown";
+        readonly failure?: ReturnType<typeof safeFailureFrom>;
+      } => {
+    if (activeNativeTurn(agent, turnId) === undefined)
+      return { accepted: false, acceptance: "not_accepted" };
+    const message = createUserMessage({
+      content: [{ type: "text", text }],
+      source: { kind: "user" },
+    });
+    nativeMessageTurns.set(message.id, turnId);
+    if (messageId !== undefined)
+      nativeCallerMessageIds.set(message.id, { turnId, messageId });
+    try {
+      agent.steer(message);
+    } catch (error) {
+      return {
+        accepted: false,
+        acceptance: "unknown",
+        failure: safeFailureFrom(error),
+      };
+    }
+    if (acceptanceRecorded(agent, message.id, "next-step"))
+      return { accepted: true, nativeMessageId: message.id };
+    return { accepted: false, acceptance: "unknown" };
+  };
+
+  const reject = (
+    id: number,
+    acceptance: "not_accepted" | "unknown",
+    failure?: ReturnType<typeof safeFailureFrom>,
+  ): void => {
+    send({
+      id,
+      type: "rejected",
+      acceptance,
+      ...(failure === undefined ? {} : { failure }),
+    });
+  };
+
+  const acceptResponse = (
+    id: number,
+    accepted: ReturnType<typeof acceptSteer>,
+  ): void => {
+    if (accepted.accepted) {
+      send({
+        id,
+        type: "accepted",
+        nativeMessageId: accepted.nativeMessageId,
+      });
+    } else {
+      reject(id, accepted.acceptance, accepted.failure);
+    }
   };
 
   const handleCommand = async (command: DshHostCommand): Promise<void> => {
@@ -386,7 +527,10 @@ export async function runDshRuntimeHost(): Promise<void> {
             if (pending !== undefined)
               nativeTurnIds.set(event.data.turn, pending.turnId);
           }
-          const nativeTurn = nativeTurnOf(event);
+          const eventNativeTurn = nativeTurnOf(event);
+          const nativeTurn =
+            eventNativeTurn ??
+            (event.type === "user/message" ? openNativeTurn : undefined);
           const messageTurn =
             event.type === "user/message"
               ? nativeMessageTurns.get(event.data.id)
@@ -403,12 +547,14 @@ export async function runDshRuntimeHost(): Promise<void> {
             event.type === "user/message"
               ? nativeCallerMessageIds.get(event.data.id)
               : undefined;
-          sendSessionEvent(event, turnId, caller?.messageId);
+          sendSessionEvent(event, turnId, caller?.messageId, nativeTurn);
+          if (event.type === "turn/start") openNativeTurn = event.data.turn;
           if (event.type === "user/message") {
             nativeCallerMessageIds.delete(event.data.id);
             nativeMessageTurns.delete(event.data.id);
           }
           if (event.type === "turn/end") {
+            activePreSteps.delete(event.data.turn);
             nativeTurnIds.delete(event.data.turn);
             for (const [
               nativeMessageId,
@@ -419,22 +565,39 @@ export async function runDshRuntimeHost(): Promise<void> {
                 nativeMessageTurns.delete(nativeMessageId);
               }
             }
+            if (openNativeTurn === event.data.turn) openNativeTurn = undefined;
           }
         },
       );
+      handle.agent.ctx.on("agent/pre-step", ({ turn, signal }, next) => {
+        activePreSteps.set(turn, signal);
+        return next();
+      });
       streamSubscription = handle.agent.ctx.on(
         "agent/assistant-stream",
         ({ frame }) => {
           if (frame.type === "start") {
             const turnId = nativeTurnIds.get(frame.turn);
+            attemptNativeTurns.set(String(frame.attemptId), frame.turn);
             if (turnId !== undefined)
               attemptTurnIds.set(String(frame.attemptId), turnId);
-            sendStreamFrame(frame, turnId);
+            sendStreamFrame(frame, turnId, frame.turn);
           } else if (frame.type === "chunk") {
-            sendStreamFrame(frame, attemptTurnIds.get(String(frame.attemptId)));
+            const attemptId = String(frame.attemptId);
+            sendStreamFrame(
+              frame,
+              attemptTurnIds.get(attemptId),
+              attemptNativeTurns.get(attemptId),
+            );
           } else {
-            sendStreamFrame(frame, attemptTurnIds.get(String(frame.attemptId)));
-            attemptTurnIds.delete(String(frame.attemptId));
+            const attemptId = String(frame.attemptId);
+            sendStreamFrame(
+              frame,
+              attemptTurnIds.get(attemptId),
+              attemptNativeTurns.get(attemptId),
+            );
+            attemptTurnIds.delete(attemptId);
+            attemptNativeTurns.delete(attemptId);
           }
         },
       );
@@ -470,28 +633,48 @@ export async function runDshRuntimeHost(): Promise<void> {
       });
       return;
     }
-    const accepted = await acceptFollowup(
-      handle.agent,
-      command.turnId,
-      command.message,
-      command.messageId,
-    );
-    if (accepted.accepted) {
-      send({
-        id: command.id,
-        type: "accepted",
-        nativeMessageId: accepted.nativeMessageId,
-      });
-    } else {
-      send({
-        id: command.id,
-        type: "rejected",
-        acceptance: accepted.acceptance,
-        ...(accepted.failure === undefined
-          ? {}
-          : { failure: accepted.failure }),
-      });
+    if (command.type === "bind-turn") {
+      if (bindNativeTurn(handle.agent, command.nativeTurn, command.turnId))
+        send({ id: command.id, type: "bound" });
+      else reject(command.id, "not_accepted");
+      return;
     }
+    if (command.type === "interrupt") {
+      const nativeTurn = activeNativeTurn(handle.agent, command.turnId);
+      if (nativeTurn === undefined) {
+        reject(command.id, "not_accepted");
+        return;
+      }
+      const signal = activePreSteps.get(nativeTurn);
+      if (signal === undefined) {
+        reject(command.id, "not_accepted");
+        return;
+      }
+      try {
+        handle.agent.cancel({ kind: "user" });
+      } catch (error) {
+        reject(command.id, "unknown", safeFailureFrom(error));
+        return;
+      }
+      if (signal.aborted) send({ id: command.id, type: "interrupted" });
+      else reject(command.id, "unknown");
+      return;
+    }
+    const accepted =
+      command.placement === "active_turn"
+        ? acceptSteer(
+            handle.agent,
+            command.turnId,
+            command.message,
+            command.messageId,
+          )
+        : await acceptFollowup(
+            handle.agent,
+            command.turnId,
+            command.message,
+            command.messageId,
+          );
+    acceptResponse(command.id, accepted);
   };
 
   process.on("message", (value: unknown) => {
@@ -527,6 +710,7 @@ export async function runDshRuntimeHost(): Promise<void> {
           ? {
               id: command.id,
               type: "deliver",
+              placement: command.placement,
               turnId: command.turnId,
               ...(command.messageId === undefined
                 ? {}
