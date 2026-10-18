@@ -2235,6 +2235,9 @@ async function runDshRuntimeAcceptance(options: {
           .length === 1 &&
         serializedRequest("initial").includes('"name":"read"') &&
         serializedRequest("tool-result").includes("OFFICIAL_TOOL_READ_ONCE") &&
+        serializedRequest("tool-result").includes(
+          "DSH_ACTIVE_STEER_CONFIRMED",
+        ) &&
         serializedRequest("new-turn").includes("DSH_NEW_TURN_CONFIRMED"),
       "完整官方 DSH profile 未完成标题、原生 Read 工具及同会话后续回合",
     );

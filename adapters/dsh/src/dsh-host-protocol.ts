@@ -24,6 +24,7 @@ export type DshHostCommand =
   | {
       readonly id: number;
       readonly type: "deliver";
+      readonly placement: "active_turn" | "new_turn";
       readonly turnId: TurnId;
       readonly messageId?: MessageId;
       readonly message: string;

@@ -322,7 +322,8 @@ export function createDshDriver(): AdapterDriverFactory {
       if (response.type === "accepted") return response;
       throw new DshHostRequestError(
         "The official DSH did not accept the request input",
-        "unknown",
+        response.type === "rejected" ? response.acceptance : "unknown",
+        "failure" in response ? response.failure : undefined,
       );
     }
 
@@ -417,15 +418,11 @@ export function createDshDriver(): AdapterDriverFactory {
           session.sessionId !== sessionId
         )
           throw { code: "session_not_found", sessionId } satisfies MachineError;
-        if (placement === "active_turn")
-          throw {
-            code: "unsupported_feature",
-            feature: "active_turn",
-          } satisfies MachineError;
-        session.beginTurn(turnId);
+        if (placement === "new_turn") session.beginTurn(turnId);
         try {
           const response = await host.request({
             type: "deliver",
+            placement,
             turnId,
             ...(messageId === undefined ? {} : { messageId }),
             message,
@@ -436,7 +433,7 @@ export function createDshDriver(): AdapterDriverFactory {
             error instanceof DshHostRequestError ? error.acceptance : "unknown";
           if (acceptance === "not_accepted") session.turnId = null;
           throw new WorkerDeliveryFailure(
-            "The official DSH host did not confirm new-turn message acceptance",
+            `The official DSH host did not confirm ${placement} message acceptance`,
             acceptance,
             { cause: error },
           );

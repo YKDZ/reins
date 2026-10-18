@@ -43,6 +43,7 @@
     "@deepseek-ai/dsh-sandbox": "catalog:",
     "@deepseek-ai/dsh-session": "catalog:",
     "@deepseek-ai/dsh-session-persistence": "catalog:",
+    "@deepseek-ai/dsh-session-projection": "catalog:",
     "@deepseek-ai/dsh-session-query": "catalog:",
     "@deepseek-ai/dsh-session-title-llm": "catalog:",
     "@deepseek-ai/dsh-shell": "catalog:",

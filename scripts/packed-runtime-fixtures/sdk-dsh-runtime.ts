@@ -90,6 +90,20 @@ try {
   const ready = await fetch(`${baseUrl}/wait-first`);
   assert(ready.ok, "确定性 DSH provider 未收到首个请求");
 
+  const activeSteer = await connection.send(
+    {
+      placement: "active_turn",
+      turnHandle: started.turnHandle,
+      message: "Please include DSH_ACTIVE_STEER_CONFIRMED after reading.",
+    },
+    { operationKey: connection.prepareOperation("send") },
+  );
+  assert(
+    activeSteer.turnHandle === started.turnHandle &&
+      activeSteer.deliveryPoint === "active_turn",
+    "公开 SDK 未将纠偏准确送入指定的活动回合",
+  );
+
   connection.close();
   connection = await openLocal({
     consumerContext: "packed-dsh-runtime",
@@ -128,6 +142,11 @@ try {
       fact.type === "message" && fact.role === "caller",
   );
   const callerMessageKey = callerMessages[0]?.messageKey;
+  const activeSteerSnapshots = callerMessages.filter(
+    (fact) =>
+      Array.isArray(fact.content) &&
+      containsMessageText(fact.content, "DSH_ACTIVE_STEER_CONFIRMED"),
+  );
   const callerSnapshots = callerMessages.filter(
     (fact) =>
       Array.isArray(fact.content) &&
@@ -144,11 +163,13 @@ try {
       fact.type === "message" && fact.role === "worker",
   );
   assert(
-    callerMessages.length > 0 &&
-      new Set(callerMessages.map((fact) => fact.messageKey)).size === 1 &&
+    callerMessages.length >= 2 &&
+      new Set(callerMessages.map((fact) => fact.messageKey)).size === 2 &&
       callerSnapshots.length === 1 &&
-      callerSnapshots[0]?.messageKey === callerMessageKey,
-    "DSH 未保留精确 caller 消息",
+      callerSnapshots[0]?.messageKey === callerMessageKey &&
+      activeSteerSnapshots.length === 1 &&
+      activeSteerSnapshots[0]?.messageKey === activeSteer.messageKey,
+    "DSH 未按各自身份保留原始输入与活动回合纠偏",
   );
   assert(
     toolRequested?.name === "read" &&
