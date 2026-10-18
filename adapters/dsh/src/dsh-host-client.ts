@@ -46,6 +46,7 @@ function acceptanceAfterSend(
     type === "deliver" ||
     type === "interrupt" ||
     type === "bind-turn" ||
+    type === "resolve-approval" ||
     type === "close"
     ? "unknown"
     : "not_accepted";

@@ -1,13 +1,17 @@
+import { access, readFile } from "node:fs/promises";
+
 import { openLocal } from "@ykdz/reins";
 import type {
   AgentFact,
   MessageContent,
   ReinsConnection,
+  TurnHandle,
 } from "@ykdz/reins-sdk";
 
 declare const process: {
   env: Record<string, string | undefined>;
   stdout: { write(value: string): void };
+  kill(pid: number, signal?: number): boolean;
 };
 
 function required(name: string): string {
@@ -49,6 +53,41 @@ async function collectHistory(
     subscription.close();
   }
   return facts;
+}
+
+async function waitForPermission(
+  connection: ReinsConnection,
+  turnHandle: TurnHandle,
+): Promise<Extract<AgentFact, { type: "permission.requested" }>> {
+  const subscription = await connection.attach(
+    { scope: "turn", turnHandle },
+    { mode: "history" },
+  );
+  try {
+    for await (const fact of subscription) {
+      if (fact.type === "permission.requested") return fact;
+    }
+  } finally {
+    subscription.close();
+  }
+  throw new Error("官方 DSH 未向公开 SDK 发出授权请求");
+}
+
+async function fileExists(path: string): Promise<boolean> {
+  try {
+    await access(path);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function waitForFile(path: string): Promise<void> {
+  for (let attempt = 0; attempt < 200; attempt += 1) {
+    if (await fileExists(path)) return;
+    await new Promise<void>((resolve) => setTimeout(resolve, 25));
+  }
+  throw new Error(`DSH 工具未创建验收文件 ${path}`);
 }
 
 function containsMessageText(
@@ -716,12 +755,257 @@ try {
     "旧自主回合输入污染或阻止了后续 caller 回合",
   );
 
+  const permissionAllowPath = required("REINS_DSH_PERMISSION_ALLOW_PATH");
+  const permissionCancelPath = required("REINS_DSH_PERMISSION_CANCEL_PATH");
+  const closeJobGatePath = required("REINS_DSH_CLOSE_JOB_GATE_PATH");
+  const closeJobPidPath = required("REINS_DSH_CLOSE_JOB_PID_PATH");
+  const closeJobResultPath = required("REINS_DSH_CLOSE_JOB_RESULT_PATH");
+  const authorized = await connection.spawn(
+    {
+      harness: "dsh",
+      model: model.id,
+      authorizationMode: "interactive",
+      cwd: required("REINS_DSH_WORKSPACE"),
+      message:
+        "Run the requested bash tool that writes DSH_PERMISSION_ALLOW_TOOL, then report the exact result.",
+    },
+    { operationKey: connection.prepareOperation("spawn") },
+  );
+  const permissionRequested = await waitForPermission(
+    connection,
+    authorized.turnHandle,
+  );
+  assert(
+    permissionRequested.kind === "tool:bash" &&
+      permissionRequested.options.length === 2 &&
+      permissionRequested.options[0]?.outcome === "allow" &&
+      permissionRequested.options[0].scope === "once" &&
+      permissionRequested.options[1]?.outcome === "deny" &&
+      permissionRequested.options[1].feedback === false &&
+      containsValueText(permissionRequested.input, "bash"),
+    "官方 DSH 原生问询未按其一次性授权能力完整呈现",
+  );
+  const permissionOperationKey =
+    connection.prepareOperation("resolvePermission");
+  const permissionResolution = { outcome: "allow", scope: "once" } as const;
+  const acceptedPermission = await connection.resolvePermission(
+    permissionRequested.permissionHandle,
+    permissionResolution,
+    { operationKey: permissionOperationKey },
+  );
+  const repeatedPermission = await connection.resolvePermission(
+    permissionRequested.permissionHandle,
+    permissionResolution,
+    { operationKey: permissionOperationKey },
+  );
+  const permissionOperation = await connection.getOperation(
+    permissionOperationKey,
+  );
+  assert(
+    acceptedPermission.status === "resolved" &&
+      repeatedPermission.permissionHandle ===
+        acceptedPermission.permissionHandle &&
+      permissionOperation.status === "succeeded",
+    "公开 SDK 未通过统一操作账本确认原生授权决议或精确重试",
+  );
+  const authorizedWait = await connection.wait({
+    targets: [authorized.turnHandle],
+    completion: "all",
+  });
+  const authorizedFacts = await collectHistory(
+    await connection.attach(
+      { scope: "turn", turnHandle: authorized.turnHandle },
+      { mode: "history" },
+    ),
+  );
+  const authorizedTool = authorizedFacts.find(
+    (fact) => fact.type === "tool.requested" && fact.name === "bash",
+  );
+  const authorizedToolResult = authorizedFacts.find(
+    (fact) => fact.type === "tool.completed" && fact.name === "bash",
+  );
+  assert(
+    authorizedWait.status === "satisfied" &&
+      authorizedWait.completed[0]?.finalReply ===
+        "DSH_PERMISSION_TOOL_CONFIRMED" &&
+      authorizedTool?.type === "tool.requested" &&
+      authorizedToolResult?.type === "tool.completed" &&
+      authorizedTool.toolKey === authorizedToolResult.toolKey &&
+      containsValueText(authorizedTool.input, permissionAllowPath) &&
+      containsValueText(
+        authorizedToolResult.result,
+        "DSH_PERMISSION_ALLOWED",
+      ) &&
+      containsValueText(authorizedFacts, "permission.resolved") &&
+      (await fileExists(permissionAllowPath)),
+    "DSH 的一次性原生授权未执行对应工具，或未保留关联工具事实",
+  );
+
+  const cancelled = await connection.spawn(
+    {
+      harness: "dsh",
+      model: model.id,
+      authorizationMode: "interactive",
+      cwd: required("REINS_DSH_WORKSPACE"),
+      message:
+        "Run the requested bash tool that writes DSH_PERMISSION_CANCEL_TOOL, then report the exact result.",
+    },
+    { operationKey: connection.prepareOperation("spawn") },
+  );
+  const cancelledPermission = await waitForPermission(
+    connection,
+    cancelled.turnHandle,
+  );
+  const cancellation = await connection.interrupt(
+    { turnHandle: cancelled.turnHandle },
+    { operationKey: connection.prepareOperation("interrupt") },
+  );
+  const cancellationWait = await connection.wait({
+    targets: [cancelled.turnHandle],
+    completion: "all",
+  });
+  const latePermissionOperationKey =
+    connection.prepareOperation("resolvePermission");
+  let latePermissionRejected = false;
+  try {
+    await connection.resolvePermission(
+      cancelledPermission.permissionHandle,
+      permissionResolution,
+      { operationKey: latePermissionOperationKey },
+    );
+  } catch {
+    latePermissionRejected = true;
+  }
+  const latePermissionOperation = await connection.getOperation(
+    latePermissionOperationKey,
+  );
+  const cancelledFacts = await collectHistory(
+    await connection.attach(
+      { scope: "turn", turnHandle: cancelled.turnHandle },
+      { mode: "history" },
+    ),
+  );
+  assert(
+    cancellation.status === "accepted" &&
+      cancellationWait.status === "satisfied" &&
+      cancellationWait.completed[0]?.stopReason === "cancelled" &&
+      latePermissionRejected &&
+      latePermissionOperation.status === "failed" &&
+      latePermissionOperation.error.code === "permission_not_pending" &&
+      cancelledFacts.some((fact) => fact.type === "permission.requested") &&
+      !cancelledFacts.some((fact) => fact.type === "permission.resolved") &&
+      !(await fileExists(permissionCancelPath)),
+    "取消后的 DSH 授权迟到决议仍被接受或执行了工具正文",
+  );
+
+  const closeJobStart = await connection.send(
+    {
+      placement: "new_turn",
+      sessionHandle: started.sessionHandle,
+      message:
+        "Start one DSH_CLOSE_BACKGROUND_START bash job and report when it is running.",
+    },
+    { operationKey: connection.prepareOperation("send") },
+  );
+  const closeJobWait = await connection.wait({
+    targets: [closeJobStart.turnHandle],
+    completion: "all",
+  });
+  assert(
+    closeJobWait.status === "satisfied" &&
+      closeJobWait.completed[0]?.finalReply ===
+        "DSH_CLOSE_BACKGROUND_TOOL_STARTED",
+    "官方 DSH 未接受用于关闭验收的后台工具",
+  );
+  await waitForFile(closeJobPidPath);
+  const closeJobPid = Number((await readFile(closeJobPidPath, "utf8")).trim());
+  assert(
+    Number.isSafeInteger(closeJobPid) && closeJobPid > 0,
+    "后台工具 PID 无效",
+  );
+  const closeJobHistory = await collectHistory(
+    await connection.attach(
+      { scope: "turn", turnHandle: closeJobStart.turnHandle },
+      { mode: "history" },
+    ),
+  );
+  const closeJobRequested = closeJobHistory.find(
+    (fact) => fact.type === "tool.requested" && fact.name === "bash",
+  );
+  const closeJobCompleted = closeJobHistory.find(
+    (fact) => fact.type === "tool.completed" && fact.name === "bash",
+  );
+  assert(
+    closeJobRequested?.type === "tool.requested" &&
+      closeJobCompleted?.type === "tool.completed" &&
+      containsValueText(
+        closeJobCompleted.result,
+        "started background job bash-",
+      ),
+    "关闭验收的 Bash 工具未形成官方后台 job",
+  );
+
+  const closedSession = await connection.kill(
+    { sessionHandle: started.sessionHandle },
+    { operationKey: connection.prepareOperation("kill") },
+  );
+  assert(
+    closedSession.status === "killed" &&
+      closedSession.sessionHandle === started.sessionHandle,
+    "关闭一个 DSH 会话未完成其官方 AgentHandle 关闭",
+  );
+  let closeJobAlive = true;
+  try {
+    process.kill(closeJobPid, 0);
+  } catch {
+    closeJobAlive = false;
+  }
+  const releasedCloseJob = await fetch(`${baseUrl}/release-close-job`);
+  assert(releasedCloseJob.ok, "确定性 provider 未释放关闭验收后台 job");
+  await new Promise<void>((resolve) => setTimeout(resolve, 150));
+  assert(
+    !closeJobAlive && !(await fileExists(closeJobResultPath)),
+    "官方 DSH 会话关闭后仍有后台 Bash 资源存活或执行",
+  );
+
+  const isolationTurn = await connection.send(
+    {
+      placement: "new_turn",
+      sessionHandle: authorized.sessionHandle,
+      message:
+        "Continue in this separate official DSH session and say DSH_ISOLATION_KEEPALIVE.",
+    },
+    { operationKey: connection.prepareOperation("send") },
+  );
+  const isolationWait = await connection.wait({
+    targets: [isolationTurn.turnHandle],
+    completion: "all",
+  });
+  assert(
+    isolationWait.status === "satisfied" &&
+      isolationWait.completed[0]?.finalReply ===
+        "DSH_ISOLATION_KEEPALIVE_CONFIRMED" &&
+      (await connection.list({ sessionHandle: authorized.sessionHandle }))[0]
+        ?.state === "idle",
+    "关闭一个 DSH 会话影响了另一个独立官方会话",
+  );
+  const cancelledClosed = await connection.kill(
+    { sessionHandle: cancelled.sessionHandle },
+    { operationKey: connection.prepareOperation("kill") },
+  );
+  const authorizedClosed = await connection.kill(
+    { sessionHandle: authorized.sessionHandle },
+    { operationKey: connection.prepareOperation("kill") },
+  );
+
   const killed = await connection.kill(
     { sessionHandle: started.sessionHandle },
     { operationKey: connection.prepareOperation("kill") },
   );
   assert(
-    killed.status === "killed" &&
+    cancelledClosed.status === "killed" &&
+      authorizedClosed.status === "killed" &&
+      killed.status === "killed" &&
       killed.sessionHandle === started.sessionHandle,
     "公开 SDK 未能关闭官方 DSH profile",
   );
@@ -748,6 +1032,11 @@ try {
       firstFactTypes: firstFacts.map((fact) => fact.type),
       newTurnDeliveryPoint: second.deliveryPoint,
       closeStatus: killed.status,
+      permissionStatus: permissionOperation.status,
+      latePermissionStatus: latePermissionOperation.status,
+      activeJobPid: closeJobPid,
+      cancelledSession: cancelledClosed.status,
+      isolatedSession: authorizedClosed.status,
     })}\n`,
   );
 } finally {

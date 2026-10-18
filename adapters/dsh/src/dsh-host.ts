@@ -6,6 +6,11 @@ import type { Agent, AssistantStreamFrame } from "@deepseek-ai/dsh-agent";
 import { createUserMessage } from "@deepseek-ai/dsh-llm";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import type {} from "@deepseek-ai/dsh-session-projection";
+import type {} from "@deepseek-ai/dsh-user-approval";
+import type {
+  ApprovalOutcome,
+  ApprovalRequestEvent,
+} from "@deepseek-ai/dsh-user-approval/types";
 import type { runProfile } from "@deepseek-ai/dsh/profile-boot";
 import {
   messageIdSchema,
@@ -30,6 +35,22 @@ type NativeTurn = {
 type NativeCaller = {
   readonly turnId: TurnId;
   readonly messageId: MessageId;
+};
+
+type NativeApproval = {
+  readonly id: string;
+  readonly toolName: string;
+  readonly callId?: string;
+  readonly reason?: string;
+  readonly nativeTurn?: number;
+  readonly turnId?: TurnId;
+  claimed: boolean;
+  aborted: boolean;
+  outcome?: ApprovalOutcome;
+  answer?: (outcome: ApprovalOutcome) => void;
+  readonly decided: Promise<ApprovalOutcome>;
+  decide(outcome: ApprovalOutcome): void;
+  removeAbortListener?: () => void;
 };
 
 const hostCommandSchema = v.union([
@@ -63,6 +84,12 @@ const hostCommandSchema = v.union([
     type: v.literal("bind-turn"),
     nativeTurn: v.number(),
     turnId: turnIdSchema,
+  }),
+  v.strictObject({
+    id: v.number(),
+    type: v.literal("resolve-approval"),
+    approvalId: v.string(),
+    outcome: v.picklist(["allowed-once", "rejected", "unavailable"]),
   }),
   v.strictObject({ id: v.number(), type: v.literal("close") }),
   v.strictObject({ id: v.number(), type: v.literal("catalog") }),
@@ -237,11 +264,13 @@ export async function runDshRuntimeHost(): Promise<void> {
   let handle: import("@deepseek-ai/dsh-agent").AgentHandle | undefined;
   let sessionSubscription: (() => void) | undefined;
   let streamSubscription: (() => void) | undefined;
+  let approvalSubscription: (() => void) | undefined;
   const pendingNativeTurns: NativeTurn[] = [];
   const nativeTurnIds = new Map<number, TurnId>();
   const nativeMessageTurns = new Map<string, TurnId>();
   const nativeCallerMessageIds = new Map<string, NativeCaller>();
   const activePreSteps = new Map<number, AbortSignal>();
+  const nativeApprovals = new Map<string, NativeApproval>();
   const attemptTurnIds = new Map<string, TurnId>();
   const attemptNativeTurns = new Map<string, number>();
   let openNativeTurn: number | undefined;
@@ -259,6 +288,7 @@ export async function runDshRuntimeHost(): Promise<void> {
       }
       sessionSubscription?.();
       streamSubscription?.();
+      approvalSubscription?.();
       try {
         await profile.shutdown.shutdown(0);
       } catch (error) {
@@ -522,6 +552,40 @@ export async function runDshRuntimeHost(): Promise<void> {
         "session/event",
         (nativeSession, event) => {
           if (nativeSession.id !== handle?.agent.session.id) return;
+          if (event.type === "approval/asked") {
+            const nativeTurn = nativeTurnOf(event) ?? openNativeTurn;
+            const turnId =
+              nativeTurn === undefined
+                ? undefined
+                : nativeTurnIds.get(nativeTurn);
+            let decide!: (outcome: ApprovalOutcome) => void;
+            const decided = new Promise<ApprovalOutcome>((resolve) => {
+              decide = resolve;
+            });
+            nativeApprovals.set(String(event.data.id), {
+              id: String(event.data.id),
+              toolName: event.data.toolName,
+              ...(event.data.callId === undefined
+                ? {}
+                : { callId: String(event.data.callId) }),
+              ...(event.data.reason === undefined
+                ? {}
+                : { reason: event.data.reason }),
+              ...(nativeTurn === undefined ? {} : { nativeTurn }),
+              ...(turnId === undefined ? {} : { turnId }),
+              claimed: false,
+              aborted: false,
+              decided,
+              decide,
+            });
+          } else if (event.type === "approval/decided") {
+            const approval = nativeApprovals.get(String(event.data.id));
+            if (approval !== undefined) {
+              approval.removeAbortListener?.();
+              approval.decide(event.data.outcome);
+              nativeApprovals.delete(approval.id);
+            }
+          }
           if (event.type === "turn/start") {
             const pending = pendingNativeTurns.shift();
             if (pending !== undefined)
@@ -573,6 +637,66 @@ export async function runDshRuntimeHost(): Promise<void> {
         activePreSteps.set(turn, signal);
         return next();
       });
+      approvalSubscription = handle.agent.ctx.on(
+        "approval/request",
+        async (request: ApprovalRequestEvent): Promise<ApprovalOutcome> => {
+          const callId =
+            request.callId === undefined ? undefined : String(request.callId);
+          const candidates = [...nativeApprovals.values()].filter(
+            (approval) =>
+              !approval.claimed &&
+              approval.toolName === request.toolName &&
+              approval.callId === callId &&
+              approval.reason === request.reason,
+          );
+          if (
+            candidates.length !== 1 ||
+            candidates[0]?.nativeTurn === undefined ||
+            candidates[0].turnId === undefined ||
+            request.signal?.aborted === true
+          )
+            return request.signal?.aborted === true
+              ? "cancelled"
+              : "unavailable";
+          const approval = candidates[0];
+          if (approval === undefined) return "unavailable";
+          approval.claimed = true;
+          return await new Promise<ApprovalOutcome>((resolve) => {
+            approval.answer = resolve;
+            const abort = (): void => {
+              approval.aborted = true;
+              if (approval.outcome === undefined) {
+                approval.outcome = "unavailable";
+                approval.answer?.("unavailable");
+              }
+            };
+            if (request.signal !== undefined) {
+              if (request.signal.aborted) abort();
+              else {
+                request.signal.addEventListener("abort", abort, {
+                  once: true,
+                });
+                approval.removeAbortListener = () =>
+                  request.signal?.removeEventListener("abort", abort);
+              }
+            }
+            if (!approval.aborted)
+              send({
+                type: "approval-requested",
+                approvalId: approval.id,
+                nativeTurn: approval.nativeTurn!,
+                turnId: approval.turnId!,
+                toolName: approval.toolName,
+                ...(approval.callId === undefined
+                  ? {}
+                  : { callId: approval.callId }),
+                ...(approval.reason === undefined
+                  ? {}
+                  : { reason: approval.reason }),
+              });
+          });
+        },
+      );
       streamSubscription = handle.agent.ctx.on(
         "agent/assistant-stream",
         ({ frame }) => {
@@ -631,6 +755,31 @@ export async function runDshRuntimeHost(): Promise<void> {
         type: "rejected",
         acceptance: "not_accepted",
       });
+      return;
+    }
+    if (command.type === "resolve-approval") {
+      const approval = nativeApprovals.get(command.approvalId);
+      if (
+        approval === undefined ||
+        !approval.claimed ||
+        approval.aborted ||
+        approval.outcome !== undefined ||
+        approval.answer === undefined
+      ) {
+        reject(command.id, "not_accepted");
+        return;
+      }
+      approval.outcome = command.outcome;
+      approval.answer(command.outcome);
+      const outcome = await approval.decided;
+      if (outcome === command.outcome)
+        send({
+          id: command.id,
+          type: "approval-decided",
+          approvalId: approval.id,
+          outcome,
+        });
+      else reject(command.id, "not_accepted");
       return;
     }
     if (command.type === "bind-turn") {

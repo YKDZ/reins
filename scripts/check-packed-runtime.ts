@@ -2054,10 +2054,15 @@ function dshMessagesResponse(
     .join("");
 }
 
-async function startDshProviderFixture(
-  backgroundGatePath: string,
-  backgroundInterruptGatePath: string,
-): Promise<{
+async function startDshProviderFixture(options: {
+  readonly backgroundGatePath: string;
+  readonly backgroundInterruptGatePath: string;
+  readonly permissionAllowPath: string;
+  readonly permissionCancelPath: string;
+  readonly closeJobGatePath: string;
+  readonly closeJobPidPath: string;
+  readonly closeJobResultPath: string;
+}): Promise<{
   readonly baseUrl: string;
   readonly requests: JsonRecord[];
   readonly scenarios: string[];
@@ -2132,7 +2137,7 @@ async function startDshProviderFixture(
       return;
     }
     if (request.method === "GET" && request.url === "/release-background-job") {
-      writeFileSync(backgroundGatePath, "released\n");
+      writeFileSync(options.backgroundGatePath, "released\n");
       response.writeHead(200, { "content-type": "text/plain" });
       response.end("released");
       return;
@@ -2141,7 +2146,13 @@ async function startDshProviderFixture(
       request.method === "GET" &&
       request.url === "/release-background-interrupt-job"
     ) {
-      writeFileSync(backgroundInterruptGatePath, "released\n");
+      writeFileSync(options.backgroundInterruptGatePath, "released\n");
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("released");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/release-close-job") {
+      writeFileSync(options.closeJobGatePath, "released\n");
       response.writeHead(200, { "content-type": "text/plain" });
       response.end("released");
       return;
@@ -2219,6 +2230,18 @@ async function startDshProviderFixture(
         const afterAutonomousInterruptIndex = messages.lastIndexOf(
           "DSH_AUTONOMOUS_OLD_TARGET_NEW_TURN",
         );
+        const permissionAllowRequestIndex = messages.lastIndexOf(
+          "DSH_PERMISSION_ALLOW_TOOL",
+        );
+        const permissionAllowResultIndex = messages.lastIndexOf(
+          "DSH_PERMISSION_ALLOWED",
+        );
+        const closeJobStartIndex = messages.lastIndexOf(
+          "DSH_CLOSE_BACKGROUND_START",
+        );
+        const closeJobResultIndex = messages.lastIndexOf(
+          "started background job bash-",
+        );
         let scenario: string;
         if (
           messages.includes("Generate the session title from this JSON array")
@@ -2229,6 +2252,24 @@ async function startDshProviderFixture(
           afterAutonomousInterruptIndex !== -1
         ) {
           scenario = "after-autonomous-interrupt";
+        } else if (
+          closeJobStartIndex !== -1 &&
+          closeJobResultIndex > closeJobStartIndex
+        ) {
+          scenario = "close-background-result";
+        } else if (closeJobStartIndex !== -1) {
+          scenario = "close-background-start";
+        } else if (messages.includes("DSH_ISOLATION_KEEPALIVE")) {
+          scenario = "isolation-keepalive";
+        } else if (messages.includes("DSH_PERMISSION_CANCEL_TOOL")) {
+          scenario = "permission-cancel-request";
+        } else if (
+          permissionAllowRequestIndex !== -1 &&
+          permissionAllowResultIndex > permissionAllowRequestIndex
+        ) {
+          scenario = "permission-allow-result";
+        } else if (permissionAllowRequestIndex !== -1) {
+          scenario = "permission-allow-request";
         } else if (interruptJobStartIndex !== -1) {
           scenario =
             interruptJobResultIndex <= interruptJobStartIndex
@@ -2277,7 +2318,10 @@ async function startDshProviderFixture(
         const toolCall =
           scenario === "initial" ||
           scenario === "background-start" ||
-          scenario === "background-interrupt-start";
+          scenario === "background-interrupt-start" ||
+          scenario === "permission-allow-request" ||
+          scenario === "permission-cancel-request" ||
+          scenario === "close-background-start";
         const text =
           scenario === "session-title"
             ? "DSH_TITLE_CONFIRMED"
@@ -2295,7 +2339,13 @@ async function startDshProviderFixture(
                         ? "DSH_BACKGROUND_WAKE_CONFIRMED"
                         : scenario === "after-autonomous-interrupt"
                           ? "DSH_AUTONOMOUS_OLD_TARGET_NEW_TURN_CONFIRMED"
-                          : "DSH_NEW_TURN_CONFIRMED";
+                          : scenario === "permission-allow-result"
+                            ? "DSH_PERMISSION_TOOL_CONFIRMED"
+                            : scenario === "close-background-result"
+                              ? "DSH_CLOSE_BACKGROUND_TOOL_STARTED"
+                              : scenario === "isolation-keepalive"
+                                ? "DSH_ISOLATION_KEEPALIVE_CONFIRMED"
+                                : "DSH_NEW_TURN_CONFIRMED";
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(
           dshMessagesResponse(
@@ -2327,12 +2377,48 @@ async function startDshProviderFixture(
                         run_in_background: true,
                       },
                     }
-                  : {
-                      type: "tool_use",
-                      id: "packed-dsh-read-once",
-                      name: "read",
-                      input: { file_path: "evidence.txt" },
-                    }
+                  : scenario === "permission-allow-request"
+                    ? {
+                        type: "tool_use",
+                        id: "packed-dsh-permission-allow-bash",
+                        name: "bash",
+                        input: {
+                          command: `printf 'DSH_PERMISSION_ALLOWED' > ${shellQuote(options.permissionAllowPath)}; printf 'DSH_PERMISSION_ALLOWED'`,
+                          description:
+                            "Write the packed DSH permission approval marker outside the workspace",
+                          run_in_background: false,
+                        },
+                      }
+                    : scenario === "permission-cancel-request"
+                      ? {
+                          type: "tool_use",
+                          id: "packed-dsh-permission-cancel-bash",
+                          name: "bash",
+                          input: {
+                            command: `printf 'DSH_PERMISSION_CANCELLED' > ${shellQuote(options.permissionCancelPath)}; printf 'DSH_PERMISSION_CANCELLED'`,
+                            description:
+                              "Write the packed DSH permission cancellation marker outside the workspace",
+                            run_in_background: false,
+                          },
+                        }
+                      : scenario === "close-background-start"
+                        ? {
+                            type: "tool_use",
+                            id: "packed-dsh-close-background-bash",
+                            name: "bash",
+                            input: {
+                              command: `printf '%s\\n' "$$" > ${shellQuote(options.closeJobPidPath)}; while [ ! -f ${shellQuote(options.closeJobGatePath)} ]; do sleep 0.02; done; printf 'DSH_CLOSED_JOB_RESULT' > ${shellQuote(options.closeJobResultPath)}`,
+                              description:
+                                "Wait for the packed DSH official-close test gate",
+                              run_in_background: true,
+                            },
+                          }
+                        : {
+                            type: "tool_use",
+                            id: "packed-dsh-read-once",
+                            name: "read",
+                            input: { file_path: "evidence.txt" },
+                          }
               : {
                   type: "text",
                   text,
@@ -2366,8 +2452,9 @@ async function startDshProviderFixture(
       releaseBackgroundInterruptWakeRequest();
       afterAutonomousInterruptStarted();
       releaseAfterAutonomousInterruptRequest();
-      writeFileSync(backgroundGatePath, "released\n");
-      writeFileSync(backgroundInterruptGatePath, "released\n");
+      writeFileSync(options.backgroundGatePath, "released\n");
+      writeFileSync(options.backgroundInterruptGatePath, "released\n");
+      writeFileSync(options.closeJobGatePath, "released\n");
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => {
         server.close((error) =>
@@ -2389,6 +2476,11 @@ async function runDshRuntimeAcceptance(options: {
   const pidPath = join(directory, "daemon.pid");
   const workerCwd = join(directory, "workspace");
   const launcherPath = join(directory, "daemon-launcher");
+  const closeJobGatePath = join(workerCwd, "release-close-job");
+  const closeJobPidPath = join(workerCwd, "close-job.pid");
+  const closeJobResultPath = join(workerCwd, "close-job-result");
+  const permissionAllowPath = join(directory, "permission-allow-result");
+  const permissionCancelPath = join(directory, "permission-cancel-result");
   mkdirSync(workerCwd, { recursive: true });
   writeFileSync(join(workerCwd, "evidence.txt"), "OFFICIAL_TOOL_READ_ONCE\n");
   writeFileSync(
@@ -2396,10 +2488,18 @@ async function runDshRuntimeAcceptance(options: {
     `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(pidPath)}\nexec ${shellQuote(options.daemonPath)} "$@"\n`,
     { mode: 0o700 },
   );
-  const provider = await startDshProviderFixture(
-    join(workerCwd, "release-background-job"),
-    join(workerCwd, "release-background-interrupt-job"),
-  );
+  const provider = await startDshProviderFixture({
+    backgroundGatePath: join(workerCwd, "release-background-job"),
+    backgroundInterruptGatePath: join(
+      workerCwd,
+      "release-background-interrupt-job",
+    ),
+    permissionAllowPath,
+    permissionCancelPath,
+    closeJobGatePath,
+    closeJobPidPath,
+    closeJobResultPath,
+  });
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     REINS_SOCKET: socketPath,
@@ -2409,13 +2509,18 @@ async function runDshRuntimeAcceptance(options: {
     REINS_IDLE_TIMEOUT_MS: "120000",
     REINS_DSH_WORKSPACE: workerCwd,
     REINS_DSH_FIXTURE_BASE_URL: provider.baseUrl,
+    REINS_DSH_PERMISSION_ALLOW_PATH: permissionAllowPath,
+    REINS_DSH_PERMISSION_CANCEL_PATH: permissionCancelPath,
+    REINS_DSH_CLOSE_JOB_GATE_PATH: closeJobGatePath,
+    REINS_DSH_CLOSE_JOB_PID_PATH: closeJobPidPath,
+    REINS_DSH_CLOSE_JOB_RESULT_PATH: closeJobResultPath,
     DSH_HOME: join(directory, "dsh-home"),
-    DSH_PERMISSION_MODE: "danger-full-access",
     DSH_TELEMETRY_DISABLED: "1",
     DEEPSEEK_API_KEY: "LOCAL_FIXTURE_NO_VENDOR_CALL",
     DEEPSEEK_BASE_URL: provider.baseUrl,
   };
   delete env.REINS_ADAPTERS_MODULE;
+  delete env.DSH_PERMISSION_MODE;
   try {
     await runFixture(
       options.runtimeConsumer,
@@ -2433,11 +2538,11 @@ async function runDshRuntimeAcceptance(options: {
     const serializedRequest = (scenario: string): string =>
       JSON.stringify(requestFor(scenario)) ?? "";
     assert(
-      provider.requests.length === 13 &&
+      provider.requests.length === provider.scenarios.length &&
         provider.scenarios.filter((scenario) => scenario === "initial")
           .length === 1 &&
         provider.scenarios.filter((scenario) => scenario === "session-title")
-          .length === 1 &&
+          .length === 3 &&
         provider.scenarios.filter((scenario) => scenario === "tool-result")
           .length === 1 &&
         provider.scenarios.filter((scenario) => scenario === "new-turn")
@@ -2464,6 +2569,24 @@ async function runDshRuntimeAcceptance(options: {
         ).length === 1 &&
         provider.scenarios.filter(
           (scenario) => scenario === "after-autonomous-interrupt",
+        ).length === 1 &&
+        provider.scenarios.filter(
+          (scenario) => scenario === "permission-allow-request",
+        ).length === 1 &&
+        provider.scenarios.filter(
+          (scenario) => scenario === "permission-allow-result",
+        ).length === 1 &&
+        provider.scenarios.filter(
+          (scenario) => scenario === "permission-cancel-request",
+        ).length === 1 &&
+        provider.scenarios.filter(
+          (scenario) => scenario === "close-background-start",
+        ).length === 1 &&
+        provider.scenarios.filter(
+          (scenario) => scenario === "close-background-result",
+        ).length === 1 &&
+        provider.scenarios.filter(
+          (scenario) => scenario === "isolation-keepalive",
         ).length === 1 &&
         serializedRequest("initial").includes('"name":"read"') &&
         serializedRequest("tool-result").includes("OFFICIAL_TOOL_READ_ONCE") &&
@@ -2498,7 +2621,26 @@ async function runDshRuntimeAcceptance(options: {
         ) &&
         serializedRequest("after-autonomous-interrupt").includes(
           "DSH_AUTONOMOUS_OLD_TARGET_NEW_TURN",
-        ),
+        ) &&
+        serializedRequest("permission-allow-request").includes(
+          '"name":"bash"',
+        ) &&
+        serializedRequest("permission-allow-request").includes(
+          permissionAllowPath,
+        ) &&
+        serializedRequest("permission-cancel-request").includes(
+          '"name":"bash"',
+        ) &&
+        serializedRequest("close-background-start").includes('"name":"bash"') &&
+        serializedRequest("close-background-result").includes(
+          "started background job bash-",
+        ) &&
+        serializedRequest("isolation-keepalive").includes(
+          "DSH_ISOLATION_KEEPALIVE",
+        ) &&
+        existsSync(permissionAllowPath) &&
+        !existsSync(permissionCancelPath) &&
+        !existsSync(closeJobResultPath),
       "完整官方 DSH profile 未完成标题、原生 Read 工具及同会话后续回合",
     );
   } finally {

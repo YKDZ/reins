@@ -10,6 +10,8 @@ import type {
   MessageContent,
   MessageContentPart,
   MessageId,
+  PermissionId,
+  PermissionResolution,
   SessionId,
   TurnId,
   ToolCallId,
@@ -20,7 +22,9 @@ import {
   makeTextEvidence,
   WorkerDeliveryFailure,
   WorkerInterruptFailure,
+  WorkerPermissionFailure,
   WorkerStartFailure,
+  isPermissionResolutionAllowed,
 } from "@reins/protocol";
 
 import { DshHostClient, DshHostRequestError } from "./dsh-host-client.ts";
@@ -46,6 +50,12 @@ type NativeToolCall = {
 type NativeJob = {
   readonly source: BackgroundActivitySource;
   readonly causedBy?: BackgroundActivityCause;
+};
+
+type NativeApproval = {
+  readonly approvalId: string;
+  readonly callId?: string;
+  readonly toolCallId?: ToolCallId;
 };
 
 type NativeTurnBindingResult =
@@ -105,7 +115,7 @@ function textContent(
 
 function nativeContent(
   content: readonly import("@deepseek-ai/dsh-llm").ContentBlock[],
-  session: HarnessSession,
+  session: HarnessSession<NativeApproval>,
 ): MessageContent {
   const parts: MessageContentPart[] = content.map((block) => {
     switch (block.type) {
@@ -144,7 +154,7 @@ export function createDshDriver(): AdapterDriverFactory {
   return ({ emit, beginAutonomousTurn, diagnostics }) => {
     const diagnosticSink: DiagnosticSink = diagnostics;
     let host: DshHostClient | undefined;
-    let session: HarnessSession | undefined;
+    let session: HarnessSession<NativeApproval> | undefined;
     let disposeHostEvents: (() => void) | undefined;
     let disposeHostExit: (() => void) | undefined;
     let terminating = false;
@@ -161,6 +171,7 @@ export function createDshDriver(): AdapterDriverFactory {
     >();
     const nativeToolCalls = new Map<string, NativeToolCall>();
     const nativeJobs = new Map<string, NativeJob>();
+    const nativeApprovals = new Map<PermissionId, NativeApproval>();
     let hostEventQueue = Promise.resolve();
 
     function emitFailureTurn(failure: HarnessFailure): void {
@@ -516,6 +527,43 @@ export function createDshDriver(): AdapterDriverFactory {
         handleAssistantFrame(event);
       } else if (event.type === "session-event") {
         await handleSessionEvent(event);
+      } else if (event.type === "approval-requested") {
+        if (session === undefined || session.turnId !== event.turnId) {
+          try {
+            await host?.request({
+              type: "resolve-approval",
+              approvalId: event.approvalId,
+              outcome: "unavailable",
+            });
+          } catch {
+            // 原生问询因目标回合已失效而失败关闭。
+          }
+          return;
+        }
+        const nativeCall =
+          event.callId === undefined
+            ? undefined
+            : nativeToolCalls.get(event.callId);
+        const approval: NativeApproval = {
+          approvalId: event.approvalId,
+          ...(event.callId === undefined ? {} : { callId: event.callId }),
+          ...(nativeCall === undefined
+            ? {}
+            : { toolCallId: nativeCall.toolCallId }),
+        };
+        const permissionId = session.requestPermission(
+          `tool:${event.toolName}`,
+          {
+            toolName: event.toolName,
+            ...(event.reason === undefined ? {} : { reason: event.reason }),
+          },
+          [
+            { outcome: "allow", scope: "once" },
+            { outcome: "deny", feedback: false },
+          ],
+          approval,
+        );
+        nativeApprovals.set(permissionId, approval);
       } else if (event.type === "fatal") {
         if (!startAccepted || terminating) return;
         emitFailureTurn(failureFromSafeFacts(event.failure));
@@ -552,9 +600,7 @@ export function createDshDriver(): AdapterDriverFactory {
             ? "agent"
             : spec.sandbox !== undefined
               ? "sandbox"
-              : spec.authorizationMode === "interactive"
-                ? "interactive_authorization"
-                : undefined;
+              : undefined;
         if (unsupported !== undefined)
           throw {
             code: "unsupported_feature",
@@ -577,10 +623,18 @@ export function createDshDriver(): AdapterDriverFactory {
         pendingNativeTurnBindings.clear();
         nativeToolCalls.clear();
         nativeJobs.clear();
+        nativeApprovals.clear();
         session = new HarnessSession({
           sessionId: spec.sessionId,
           emit,
           diagnostics: diagnosticSink,
+          onClearPending(attachments) {
+            for (const approval of attachments) {
+              for (const [permissionId, pending] of nativeApprovals) {
+                if (pending === approval) nativeApprovals.delete(permissionId);
+              }
+            }
+          },
         });
         session.beginTurn(spec.turnId);
         let hostStartSent = false;
@@ -706,11 +760,76 @@ export function createDshDriver(): AdapterDriverFactory {
           );
         }
       },
-      resolvePermission(): void {
-        throw {
-          code: "unsupported_feature",
-          feature: "interactive_authorization",
-        } satisfies MachineError;
+      async resolvePermission(
+        sessionId: SessionId,
+        permissionId: PermissionId,
+        resolution: PermissionResolution,
+      ): Promise<void> {
+        const currentSession = session;
+        const currentHost = host;
+        if (
+          currentSession === undefined ||
+          currentSession.sessionId !== sessionId ||
+          currentHost === undefined
+        )
+          throw new WorkerPermissionFailure(
+            "The official DSH approval request is unavailable",
+            "not_accepted",
+          );
+        const approval = nativeApprovals.get(permissionId);
+        if (approval === undefined)
+          throw {
+            code: "permission_not_pending",
+            sessionId,
+            permissionId,
+          } satisfies MachineError;
+        if (
+          !isPermissionResolutionAllowed(
+            [
+              { outcome: "allow", scope: "once" },
+              { outcome: "deny", feedback: false },
+            ],
+            resolution,
+          )
+        )
+          throw {
+            code: "permission_resolution_mismatch",
+            sessionId,
+            permissionId,
+          } satisfies MachineError;
+        const expectedOutcome =
+          resolution.outcome === "allow" ? "allowed-once" : "rejected";
+        try {
+          const response = await currentHost.request({
+            type: "resolve-approval",
+            approvalId: approval.approvalId,
+            outcome: expectedOutcome,
+          });
+          if (
+            response.type !== "approval-decided" ||
+            response.approvalId !== approval.approvalId
+          )
+            throw new DshHostRequestError(
+              "The official DSH did not confirm its approval decision",
+              "unknown",
+            );
+          if (response.outcome !== expectedOutcome)
+            throw new WorkerPermissionFailure(
+              "The official DSH approval request settled with another outcome",
+              "not_accepted",
+            );
+          currentSession.takePending(permissionId, resolution);
+          nativeApprovals.delete(permissionId);
+        } catch (error) {
+          if (error instanceof WorkerPermissionFailure) throw error;
+          const acceptance =
+            error instanceof DshHostRequestError ? error.acceptance : "unknown";
+          throw new WorkerPermissionFailure(
+            "The official DSH approval decision was not confirmed",
+            acceptance,
+            { cause: error },
+          );
+        }
       },
       async terminate(sessionId: SessionId): Promise<void> {
         if (session === undefined || session.sessionId !== sessionId) return;
