@@ -2722,6 +2722,89 @@ describe("daemon 空闲退出", () => {
     expect(terminationAttempts).toBe(2);
   });
 
+  test("先前会话写故障保留主因并关联目标会话停止失败", async () => {
+    const backingStore = createInMemoryControlStore();
+    let failEventWrite = false;
+    let allowStopB = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      recordEvent(event, session) {
+        if (failEventWrite) throw new Error("A_EVENT_WRITE_IO");
+        return backingStore.recordEvent(event, session);
+      },
+    };
+    const codex = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const qoder = createFakeHarness({
+      harness: "qoder",
+      modelCatalog: emptyModelCatalog("qoder"),
+      terminate: async () => {
+        if (!allowStopB) throw new Error("B_STOP_NATIVE");
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([
+        ["codex", codex.adapter],
+        ["qoder", qoder.adapter],
+      ]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const a = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "event-store-target-a",
+        message: "start A",
+      }),
+    ) as { sessionId: SessionId };
+    const b = resultOf(
+      await requester("spawn", {
+        harness: "qoder",
+        sessionLabel: "stop-target-b",
+        message: "start B",
+      }),
+    ) as { sessionId: SessionId };
+
+    failEventWrite = true;
+    codex.controls.emitWorkerMessage("A body");
+    await vi.waitFor(() =>
+      expect(codex.calls.terminated).toContain(a.sessionId),
+    );
+    const stopped = await requester("kill", { sessionId: b.sessionId });
+
+    expect(stopped).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "event",
+        sessionId: a.sessionId,
+        eventType: "message",
+        cause: { kind: "io", message: "A_EVENT_WRITE_IO" },
+        cleanupCause: {
+          kind: "closed",
+          message: expect.stringContaining("B_STOP_NATIVE"),
+        },
+        cleanupSessionId: b.sessionId,
+      },
+    });
+    expect(stopped).not.toHaveProperty("error.operationKey");
+    expect(qoder.calls.terminated).toContain(b.sessionId);
+
+    allowStopB = true;
+    connection.close();
+    await expect(daemon.stop()).rejects.toThrow();
+    await expect(running).rejects.toThrow();
+  });
+
   test("普通事件写入失败会停止对应worker并隔离其他会话", async () => {
     const backingStore = createInMemoryControlStore();
     let failEventWrite = false;

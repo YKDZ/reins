@@ -115,6 +115,69 @@ describe("driver event ingress ownership", () => {
     ]);
   });
 
+  test("accepts one late native caller snapshot for the core-assigned message", async () => {
+    const diagnostics: CoreDiagnosticFact[] = [];
+    const fake = createFakeDriver();
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const { sessionId, turnId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("late-caller-snapshot"),
+      harness: "codex",
+      message: "caller input",
+      cwd: "/tmp/demo",
+    });
+    const fallback = events.find(
+      (event) => event.type === "message" && event.role === "caller",
+    );
+    if (fallback?.type !== "message")
+      throw new Error("Expected the accepted caller message");
+    const complete = {
+      type: "message",
+      sessionId,
+      turnId,
+      messageId: fallback.messageId,
+      role: "caller",
+      content: [
+        { type: "text", text: "caller input" },
+        { type: "image", source: "bytes", data: "AAEC" },
+      ],
+    } satisfies DomainEvent;
+
+    fake.controls.emit(complete);
+    fake.controls.emit({
+      ...complete,
+      content: "duplicate caller snapshot",
+    });
+
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(1));
+    const callerSnapshots = events.filter(
+      (event): event is Extract<DomainEvent, { type: "message" }> =>
+        event.type === "message" && event.role === "caller",
+    );
+    expect(callerSnapshots).toHaveLength(2);
+    expect(callerSnapshots.map((event) => event.messageId)).toEqual([
+      fallback.messageId,
+      fallback.messageId,
+    ]);
+    expect(callerSnapshots.at(-1)).toEqual(complete);
+    expect(diagnostics[0]).toMatchObject({
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+      reason: "message_already_completed",
+      messageId: fallback.messageId,
+    });
+  });
+
   test("reports each worker lifecycle rejection from its causal event sequence", async () => {
     const fake = createFakeDriver();
     const diagnostics: CoreDiagnosticFact[] = [];

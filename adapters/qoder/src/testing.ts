@@ -22,7 +22,13 @@ import type { QoderQuery, QoderSdk } from "./sdk-seam.ts";
 export type RecordedQoderFixtureFacts = {
   textDeltaCount: number;
   messages: Array<{ deltaHash: string; snapshotHash: string }>;
-  tools: Array<{ name: string; resultHash: string; isError: boolean }>;
+  thinkingHashes: string[];
+  tools: Array<{
+    input: unknown;
+    name: string;
+    resultHash: string;
+    isError: boolean;
+  }>;
   terminal: {
     stopReason: string;
     finalReplyHash: string;
@@ -40,8 +46,9 @@ function deriveFixtureFacts(
   let currentMessageId: string | undefined;
   const deltasById = new Map<string, string[]>();
   const snapshotsById = new Map<string, string>();
-  const toolsById = new Map<string, { name: string }>();
+  const toolsById = new Map<string, { input: unknown; name: string }>();
   const resultsById = new Map<string, { content: unknown; isError: boolean }>();
+  const thinkingHashes: string[] = [];
   let terminalUsage: RecordedUsage | undefined;
   let terminalStopReason: string | undefined;
   let resultCount = 0;
@@ -68,7 +75,10 @@ function deriveFixtureFacts(
         ) {
           throw new Error("Recorded Qoder fixture fact mismatch");
         }
-        toolsById.set(id, { name });
+        toolsById.set(id, {
+          input: message.event.content_block.input ?? {},
+          name,
+        });
       } else if (
         message.event.type === "message_delta" &&
         message.event.delta.stop_reason === "end_turn"
@@ -82,6 +92,9 @@ function deriveFixtureFacts(
     }
     if (message.type === "assistant") {
       for (const block of message.message.content) {
+        if (block.type === "thinking") {
+          thinkingHashes.push(sha256(block.thinking));
+        }
         if (block.type === "tool_use") {
           const existing = toolsById.get(block.id);
           if (
@@ -91,7 +104,7 @@ function deriveFixtureFacts(
           ) {
             throw new Error("Recorded Qoder fixture fact mismatch");
           }
-          toolsById.set(block.id, { name: block.name });
+          toolsById.set(block.id, { input: block.input, name: block.name });
         }
       }
       const content = message.message.content
@@ -138,6 +151,7 @@ function deriveFixtureFacts(
       throw new Error("Recorded Qoder fixture fact mismatch");
     }
     return {
+      input: tool.input,
       name: tool.name,
       resultHash: sha256(
         typeof result.content === "string"
@@ -164,6 +178,7 @@ function deriveFixtureFacts(
   return {
     textDeltaCount,
     messages: messageFacts,
+    thinkingHashes,
     tools: toolFacts,
     terminal: {
       stopReason: terminalStopReason,

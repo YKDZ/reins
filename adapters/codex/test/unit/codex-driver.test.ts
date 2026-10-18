@@ -261,6 +261,18 @@ describe("codex driver", () => {
       });
       fake.controls.pushInbound({
         kind: "notification",
+        method: "item/started",
+        params: {
+          item: {
+            type: "userMessage",
+            id: "native-user-1",
+            clientId: null,
+            content: [{ type: "text", text: "检查", text_elements: [] }],
+          },
+        },
+      });
+      fake.controls.pushInbound({
+        kind: "notification",
         method: "item/completed",
         params: {
           turnId: "turn1",

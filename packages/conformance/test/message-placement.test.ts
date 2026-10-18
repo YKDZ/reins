@@ -104,23 +104,34 @@ test("active_turn 的 ACK 与 caller 事实等待精确原生接受", async () =
       turnId: spawned.result.turnId,
       message: "explicit active task",
     })
-    .then((ack) => {
-      settled = true;
-      return ack;
-    });
+    .then(
+      (response) => {
+        settled = true;
+        return { ok: true as const, response };
+      },
+      (error: unknown) => {
+        settled = true;
+        return { ok: false as const, error };
+      },
+    );
   try {
     for (let i = 0; i < 20; i++) await Promise.resolve();
     expect(calls.delivered).toHaveLength(1);
     expect(settled).toBe(false);
     expect(
       events.filter(
-        (event) => event.type === "message" && event.role === "caller",
+        (event) =>
+          event.type === "message" &&
+          event.role === "caller" &&
+          event.content === "explicit active task",
       ),
     ).toEqual([]);
   } finally {
     accept();
   }
-  expect(await sending).toMatchObject({
+  const sendOutcome = await sending;
+  if (!sendOutcome.ok) throw sendOutcome.error;
+  expect(sendOutcome.response).toMatchObject({
     result: {
       sessionId: spawned.result.sessionId,
       turnId: spawned.result.turnId,
@@ -128,7 +139,10 @@ test("active_turn 的 ACK 与 caller 事实等待精确原生接受", async () =
   });
   expect(
     events.filter(
-      (event) => event.type === "message" && event.role === "caller",
+      (event) =>
+        event.type === "message" &&
+        event.role === "caller" &&
+        event.content === "explicit active task",
     ),
   ).toEqual([
     expect.objectContaining({
@@ -136,6 +150,15 @@ test("active_turn 的 ACK 与 caller 事实等待精确原生接受", async () =
       content: "explicit active task",
     }),
   ]);
+  const sentCaller = events.find(
+    (event) =>
+      event.type === "message" &&
+      event.role === "caller" &&
+      event.content === "explicit active task",
+  );
+  if (sentCaller?.type !== "message")
+    throw new Error("missing accepted caller message");
+  expect(calls.delivered[0]?.[4]).toBe(sentCaller.messageId);
 });
 
 test("原生接受先于终态时，caller 事实仍归原回合且在终态之前提交", async () => {
@@ -320,13 +343,19 @@ test("错误父级和已结束目标拒绝，消息不会流入后继回合", as
       expect.any(String),
       "next explicit task",
       "new_turn",
+      expect.any(String),
     ],
   ]);
-  expect(
-    events.filter(
-      (event) => event.type === "message" && event.role === "caller",
-    ),
-  ).toEqual([expect.objectContaining({ content: "next explicit task" })]);
+  const nextCaller = events.find(
+    (event) =>
+      event.type === "message" &&
+      event.role === "caller" &&
+      event.content === "next explicit task",
+  );
+  expect(nextCaller).toMatchObject({ content: "next explicit task" });
+  if (nextCaller?.type !== "message")
+    throw new Error("missing accepted new-turn caller message");
+  expect(calls.delivered[0]?.[4]).toBe(nextCaller.messageId);
 });
 
 test("结束先于原生拒绝时，没有 caller 事实或后继回合残留", async () => {

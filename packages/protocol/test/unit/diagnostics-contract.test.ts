@@ -7,12 +7,15 @@ import {
   diagnosticRecordSchema,
   diagnosticsParamsSchema,
   diagnosticsResultSchema,
+  consumerContextSchema,
+  daemonGenerationSchema,
   diagnosticIdSchema,
   errorCauseSchema,
   makeDiagnosticId,
   makeErrorCause,
   machineErrorSchema,
   messageIdSchema,
+  operationKeyClaimsSchema,
   parseTransportFailureFact,
   permissionIdSchema,
   protocolParamsSchemaFor,
@@ -53,10 +56,13 @@ const runtimeScopeId = v.parse(
 const diagnosticId = makeDiagnosticId(runtimeScopeId, "7", "42");
 const killOperationKey = serializeOperationKey({
   runtimeScopeId,
-  consumer: "reviewer",
+  consumer: v.parse(consumerContextSchema, "reviewer"),
   kind: "kill",
-  generation: "generation7",
-  nonce: "00000000-0000-4000-8000-000000000007",
+  generation: v.parse(daemonGenerationSchema, "generation7"),
+  nonce: v.parse(
+    operationKeyClaimsSchema.entries.nonce,
+    "00000000-0000-4000-8000-000000000007",
+  ),
 });
 
 describe("worker event rejection contract", () => {

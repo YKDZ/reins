@@ -64,7 +64,12 @@ function mapItemStarted(
   session: TurnJournal,
   item: CodexInboundItem,
 ): DomainEvent[] {
-  if (item.type === "agentMessage" || session.turnId === null) return [];
+  if (
+    item.type === "agentMessage" ||
+    item.type === "userMessage" ||
+    session.turnId === null
+  )
+    return [];
   session.toolNames.set(item.id, item.type);
   const input =
     item.type === "commandExecution"

@@ -10,6 +10,7 @@ const output = (value: unknown): void => {
 async function run(input: {
   sessionId: string;
   turnId: string;
+  messageId: string;
   message: string;
 }): Promise<void> {
   const { sessionId, turnId } = input;
@@ -20,6 +21,7 @@ async function run(input: {
     permission?: boolean;
     messages?: number;
     deltas?: number;
+    nativeCallerSnapshot?: boolean;
     replacement?: { draft: string; corrected: string };
     resolutionFile?: string;
     stopReason?: string;
@@ -34,6 +36,16 @@ async function run(input: {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   const emit = (event: object): void =>
     output({ kind: "event", event: { sessionId, turnId, ...event } });
+  if (task.nativeCallerSnapshot)
+    emit({
+      type: "message",
+      messageId: input.messageId,
+      role: "caller",
+      content: [
+        { type: "text", text: input.message },
+        { type: "image", source: "bytes", data: "AAEC" },
+      ],
+    });
   for (let index = 0; index < (task.deltas ?? 0); index += 1)
     emit({ type: "text.delta", messageId: "unclosed", delta: "x" });
   for (let index = 0; index < (task.messages ?? 0); index += 1)

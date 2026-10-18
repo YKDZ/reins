@@ -225,7 +225,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         if (!eventFailureCleanupFailures.has(sessionId))
           eventFailureCleanupFailures.set(
             sessionId,
-            error === undefined ? new Error("worker 停止失败") : error,
+            error === undefined ? new Error("Worker shutdown failed") : error,
           );
       }
     });
@@ -1849,8 +1849,26 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 eventFailure.code === "control_store_unavailable" &&
                 (eventFailure.stage === "event" ||
                   eventFailure.stage === "event_commit")
-              )
+              ) {
+                if (
+                  eventFailure.stage === "event" &&
+                  killSessionId !== undefined &&
+                  eventFailure.sessionId !== killSessionId
+                ) {
+                  const failedEvent = eventWriteFailures.get(
+                    eventFailure.sessionId,
+                  );
+                  if (failedEvent !== undefined)
+                    return {
+                      error: eventStoreUnavailable(
+                        failedEvent,
+                        eventWriteFailure ?? eventFailure.cause,
+                        { sessionId: killSessionId, error: result.error },
+                      ),
+                    };
+                }
                 return { error: eventFailure };
+              }
               const cleanupError =
                 result.error.code === "internal_error"
                   ? result.error

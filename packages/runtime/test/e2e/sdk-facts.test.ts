@@ -133,6 +133,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
     gate,
     reply: "done",
     permission: true,
+    nativeCallerSnapshot: true,
     resolutionFile,
   });
   const spawned = await f.spawnSession(control, spawnMessage);
@@ -163,6 +164,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   expect(facts.map((fact) => fact.type)).toEqual([
     "turn.started",
     "message",
+    "message",
     "text.delta",
     "text.delta",
     "message",
@@ -173,16 +175,30 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
     "turn.completed",
   ]);
 
-  const callerMessage = facts.find(
+  const callerMessages = facts.filter(
     (fact): fact is Extract<AgentFact, { type: "message" }> =>
       fact.type === "message" && fact.role === "caller",
   );
+  const callerMessage = callerMessages.at(-1);
+  const callerFallback = callerMessages[0];
+  expect(callerMessages).toHaveLength(2);
+  expect(callerFallback?.messageKey).toBe(callerMessage?.messageKey);
+  expect(callerFallback?.content).toBe(spawnMessage);
+  expect(callerMessage?.content).toEqual([
+    { type: "text", text: spawnMessage },
+    { type: "image", source: "bytes", data: "AAEC" },
+  ]);
   const textFacts = facts.filter((fact) => fact.type === "text.delta");
   const workerMessage = facts.find(
     (fact): fact is Extract<AgentFact, { type: "message" }> =>
       fact.type === "message" && fact.role === "worker",
   );
-  expect(callerMessage).toMatchObject({ content: spawnMessage });
+  expect(callerMessage).toMatchObject({
+    content: [
+      { type: "text", text: spawnMessage },
+      { type: "image", source: "bytes", data: "AAEC" },
+    ],
+  });
   if (callerMessage === undefined)
     throw new Error("missing caller message fact");
   expect(parseMessageKey(serializeMessageKey(callerMessage.messageKey))).toBe(
