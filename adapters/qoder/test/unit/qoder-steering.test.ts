@@ -306,6 +306,122 @@ test("a permission callback from a stopped root cannot enter its continuation", 
   }
 });
 
+test("a permission callback can arrive before its assistant tool-use message", async () => {
+  const fake = createFakeSdk({ interrupt: async () => ({ still_queued: [] }) });
+  const events: DomainEvent[] = [];
+  const driver = createQoderDriver({ sdk: fake.sdk })({
+    emit(event) {
+      events.push(event);
+    },
+    diagnostics: async () => undefined,
+  });
+
+  try {
+    await driver.start({
+      sessionId,
+      turnId,
+      harness: "qoder",
+      message: "initial request",
+      cwd: "/tmp/qoder-steering",
+      authorizationMode: "interactive",
+    });
+    const initial = fake.controls.delivered()[0];
+    if (initial?.uuid === undefined)
+      throw new Error("Qoder did not receive the initial input UUID");
+    fake.controls.acknowledge(initial.uuid, "started");
+    const callback = fake.controls.lastOptions()?.canUseTool;
+    if (callback === undefined)
+      throw new Error("Qoder did not register canUseTool");
+
+    const permission = callback(
+      "Bash",
+      { command: "true" },
+      {
+        signal: new AbortController().signal,
+        toolUseID: "tool-before-assistant-message",
+      },
+    );
+    await flush();
+    expect(
+      events.filter((event) => event.type === "permission.requested"),
+    ).toHaveLength(0);
+
+    fake.controls.pushRaw(assistantToolUse("tool-before-assistant-message"));
+    await flush();
+    const requested = events.find(
+      (event) => event.type === "permission.requested",
+    );
+    expect(requested?.type).toBe("permission.requested");
+    if (requested?.type !== "permission.requested")
+      throw new Error(
+        "Qoder did not expose permission after its tool-use owner",
+      );
+    expect(
+      driver.resolvePermission(sessionId, requested.permissionId, {
+        outcome: "allow",
+        scope: "once",
+      }),
+    ).toBeUndefined();
+    await expect(permission).resolves.toMatchObject({ behavior: "allow" });
+
+    const lateSignal = new AbortController();
+    const latePermission = callback(
+      "Bash",
+      { command: "stale" },
+      {
+        signal: lateSignal.signal,
+        toolUseID: "late-tool-use-from-closed-phase",
+      },
+    );
+    await flush();
+    expect(
+      events.filter((event) => event.type === "permission.requested"),
+    ).toHaveLength(1);
+
+    const continuation = driver.deliver(
+      sessionId,
+      turnId,
+      "replace the unfinished request",
+      "active_turn",
+    );
+    await flush();
+    fake.controls.acknowledge(initial.uuid, "cancelled");
+    fake.controls.pushRaw({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      errors: ["Operation aborted"],
+      uuid: "result-initial",
+      session_id: nativeSessionId,
+    } as unknown as SDKMessage);
+    await continuation;
+
+    await expect(latePermission).rejects.toThrow(
+      "Qoder permission callback belongs to a closed input root",
+    );
+    // The SDK aborts a callback when its native control request is cancelled.
+    lateSignal.abort();
+    fake.controls.pushRaw(assistantToolUse("late-tool-use-from-closed-phase"));
+    await flush();
+    await expect(
+      callback(
+        "Bash",
+        { command: "stale" },
+        {
+          signal: lateSignal.signal,
+          toolUseID: "late-tool-use-from-closed-phase",
+        },
+      ),
+    ).rejects.toThrow("Qoder permission request was aborted");
+    expect(
+      events.filter((event) => event.type === "permission.requested"),
+    ).toHaveLength(1);
+    expect(fake.controls.delivered()).toHaveLength(2);
+  } finally {
+    await driver.terminate(sessionId);
+  }
+});
+
 test.each([false, true])(
   "a natural root completion wins before correction dispatch (lifecycleFirst=%s)",
   async (lifecycleFirst) => {

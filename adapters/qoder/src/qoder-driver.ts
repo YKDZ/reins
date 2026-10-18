@@ -64,6 +64,11 @@ type NativePhase = {
   permissionsOpen: boolean;
   closed: boolean;
 };
+type ToolUseOwnerWaiter = {
+  readonly phase: NativePhase;
+  readonly resolve: (phase: NativePhase) => void;
+  readonly reject: (error: unknown) => void;
+};
 
 class UnownedQueuedInputError extends Error {
   constructor() {
@@ -250,6 +255,7 @@ export function createQoderDriver(deps: {
     const phasesByUuid = new Map<string, NativePhase>();
     let currentPhase: NativePhase | null = null;
     const phaseByToolUseId = new Map<string, NativePhase>();
+    const toolUseOwnerWaiters = new Map<string, Set<ToolUseOwnerWaiter>>();
     let initialInputSent = false;
     let nativeSessionId: string | null = null;
     let startSettled = false;
@@ -289,6 +295,18 @@ export function createQoderDriver(deps: {
     function stopPhasePermissions(phase: NativePhase): void {
       phase.permissionsOpen = false;
       session?.clearPending();
+      for (const [toolUseId, waiters] of toolUseOwnerWaiters) {
+        for (const waiter of waiters) {
+          if (waiter.phase !== phase) continue;
+          waiters.delete(waiter);
+          waiter.reject(
+            new Error(
+              "Qoder permission callback belongs to a closed input root",
+            ),
+          );
+        }
+        if (waiters.size === 0) toolUseOwnerWaiters.delete(toolUseId);
+      }
     }
 
     function recordToolUseOwners(
@@ -299,7 +317,58 @@ export function createQoderDriver(deps: {
       for (const block of message.message.content) {
         if (block.type !== "tool_use" || typeof block.id !== "string") continue;
         phaseByToolUseId.set(block.id, phase);
+        const waiters = toolUseOwnerWaiters.get(block.id);
+        if (waiters === undefined) continue;
+        for (const waiter of waiters) {
+          waiters.delete(waiter);
+          if (waiter.phase === phase) waiter.resolve(phase);
+          else
+            waiter.reject(
+              new Error(
+                "Qoder permission callback belongs to a closed input root",
+              ),
+            );
+        }
+        if (waiters.size === 0) toolUseOwnerWaiters.delete(block.id);
       }
+    }
+
+    function waitForToolUseOwner(
+      toolUseId: string,
+      phase: NativePhase,
+      signal: AbortSignal,
+    ): Promise<NativePhase> {
+      return new Promise<NativePhase>((resolve, reject) => {
+        let waiter!: ToolUseOwnerWaiter;
+        const abort = () => {
+          const waiters = toolUseOwnerWaiters.get(toolUseId);
+          waiters?.delete(waiter);
+          if (waiters?.size === 0) toolUseOwnerWaiters.delete(toolUseId);
+          waiter.reject(new Error("Qoder permission request was aborted"));
+        };
+        waiter = {
+          phase,
+          resolve: (owner) => {
+            signal.removeEventListener("abort", abort);
+            resolve(owner);
+          },
+          reject: (error) => {
+            signal.removeEventListener("abort", abort);
+            reject(error);
+          },
+        };
+        if (signal.aborted) {
+          abort();
+          return;
+        }
+        let waiters = toolUseOwnerWaiters.get(toolUseId);
+        if (waiters === undefined) {
+          waiters = new Set();
+          toolUseOwnerWaiters.set(toolUseId, waiters);
+        }
+        waiters.add(waiter);
+        signal.addEventListener("abort", abort, { once: true });
+      });
     }
 
     async function settlePhase(phase: NativePhase): Promise<void> {
@@ -444,9 +513,34 @@ export function createQoderDriver(deps: {
           // 不变式失败：回调只在 start 注册后才可达。
           throw new Error("canUseTool called before session creation");
         }
-        const phase = phaseByToolUseId.get(options.toolUseID);
+        if (options.signal.aborted)
+          throw new Error("Qoder permission request was aborted");
+        const owner = phaseByToolUseId.get(options.toolUseID);
+        let phase: NativePhase;
+        if (owner !== undefined) {
+          phase = owner;
+        } else {
+          // SDK control 回调与消息迭代独立派发；未知 ID 等待精确 assistant
+          // tool_use 消息归属，不按回调抵达时的当前 phase 授权。
+          const candidate = currentPhase;
+          if (
+            candidate === null ||
+            candidate.closed ||
+            !candidate.permissionsOpen ||
+            candidate.turnId !== session.turnId
+          )
+            throw new Error(
+              "Qoder permission callback belongs to a closed input root",
+            );
+          phase = await waitForToolUseOwner(
+            options.toolUseID,
+            candidate,
+            options.signal,
+          );
+        }
+        if (options.signal.aborted)
+          throw new Error("Qoder permission request was aborted");
         if (
-          phase === undefined ||
           phase !== currentPhase ||
           phase.closed ||
           !phase.permissionsOpen ||
@@ -455,6 +549,7 @@ export function createQoderDriver(deps: {
           throw new Error(
             "Qoder permission callback belongs to a closed input root",
           );
+        if (owner === undefined) phaseByToolUseId.set(options.toolUseID, phase);
         const entry: PendingEntry = {
           resolve: () => {},
           reject: () => {},
