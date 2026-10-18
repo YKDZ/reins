@@ -82,12 +82,7 @@
     "RUSTUP_HOME",
     "RUSTUP_TOOLCHAIN",
     "TMPDIR",
-    "REINS_RELEASE_CANDIDATE_DIR",
-    "GITHUB_RUN_ID",
-    "GITHUB_RUN_ATTEMPT",
-    "GITHUB_WORKFLOW_REF",
-    "GITHUB_SHA",
-    "GITHUB_REPOSITORY"
+    "GITHUB_OUTPUT"
   ],
   "tasks": {
     "//#boundaries": {
@@ -158,11 +153,6 @@
     "//#release:verify": {
       "cache": false,
       "dependsOn": ["//#release:build"],
-      "tags": ["work:preparation"]
-    },
-    "//#release:npm-smoke": {
-      "cache": false,
-      "dependsOn": ["//#release:verify"],
       "tags": ["quality:heavy"]
     },
     "//#check": {
@@ -189,26 +179,6 @@
       "tags": ["quality:heavy"],
       "cache": false,
       "dependsOn": ["@ykdz/reins#build", "@reins/daemon#build"]
-    },
-    "//#publication:readiness": {
-      "tags": ["quality:light"],
-      "cache": false
-    },
-    "//#publication:candidate": {
-      "tags": ["work:preparation"],
-      "cache": false
-    },
-    "//#publication:setup": {
-      "tags": ["work:release"],
-      "cache": false
-    },
-    "//#publication:publish": {
-      "tags": ["work:release"],
-      "cache": false
-    },
-    "//#publication:release": {
-      "tags": ["work:release"],
-      "cache": false
     }
   }
 }

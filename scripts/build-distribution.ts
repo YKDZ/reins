@@ -1,5 +1,4 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
 import {
   chmodSync,
   copyFileSync,
@@ -16,7 +15,6 @@ import { fileURLToPath } from "node:url";
 
 import { rolldown, type OutputChunk } from "rolldown";
 
-import { acceptPublicationGroup } from "./npm-publication/handoff.ts";
 import {
   assertReleaseVersionAuthority,
   createReleaseStagingManifest,
@@ -37,24 +35,6 @@ const runtimeStagingDirectory = join(stagingRoot, "reins");
 const sdkStagingDirectory = join(stagingRoot, "reins-sdk");
 const runtimeDistributionDirectory = join(runtimeStagingDirectory, "dist");
 const sdkDistributionDirectory = join(sdkStagingDirectory, "dist");
-
-const retainedCandidate = process.env.REINS_RELEASE_CANDIDATE_DIR;
-if (retainedCandidate !== undefined && retainedCandidate !== "") {
-  const accepted = acceptPublicationGroup({
-    repository,
-    artifactDirectory: resolve(retainedCandidate),
-    requireClean: true,
-    ...(process.env.GITHUB_SHA === undefined
-      ? {}
-      : { expectedCommit: process.env.GITHUB_SHA }),
-  });
-  if (resolve(retainedCandidate) !== releaseDirectory) {
-    rmSync(releaseDirectory, { recursive: true, force: true });
-    cpSync(accepted.directory, releaseDirectory, { recursive: true });
-  }
-  process.stdout.write(`复用已验收候选 ${accepted.version}，不重新打包\n`);
-  process.exit(0);
-}
 
 function packageName(specifier: string): string {
   if (!specifier.startsWith("@"))
@@ -331,18 +311,6 @@ const sdkTarball = pack(sdkStagingDirectory, expectedSdkTarball);
 if (relative(releaseDirectory, sdkTarball) !== expectedSdkTarball) {
   throw new Error(`Unexpected SDK tarball name: ${sdkTarball}`);
 }
-const digestLines = [runtimeTarball, sdkTarball]
-  .map((tarball) => ({
-    name: relative(releaseDirectory, tarball),
-    digest: createHash("sha256").update(readFileSync(tarball)).digest("hex"),
-  }))
-  .map(({ digest, name }) => `${digest}  ${name}`)
-  .sort((left, right) => left.localeCompare(right));
-writeFileSync(
-  join(releaseDirectory, "SHA256SUMS"),
-  `${digestLines.join("\n")}\n`,
-);
-
 process.stdout.write(
   `${relative(repository, runtimeTarball)}\n${relative(repository, sdkTarball)}\n`,
 );
