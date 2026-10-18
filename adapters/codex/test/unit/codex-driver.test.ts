@@ -13,7 +13,7 @@ import type {
   TurnId,
   WorkerSpec,
 } from "@reins/protocol";
-import { describe, expect, test } from "vitest";
+import { describe, expect, test, vi } from "vitest";
 
 import { createCodexDriver } from "#/codex-driver";
 import {
@@ -1046,7 +1046,15 @@ describe("codex driver", () => {
           },
         },
       });
-      await flush();
+      await vi.waitFor(() => {
+        expect(
+          events.some(
+            (event) =>
+              event.type === "tool.completed" &&
+              event.name === "imageGeneration",
+          ),
+        ).toBe(true);
+      });
 
       expect(events).toContainEqual(
         expect.objectContaining({
