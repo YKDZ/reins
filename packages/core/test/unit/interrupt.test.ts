@@ -141,7 +141,7 @@ describe("interrupt", () => {
     ).rejects.toEqual(expect.objectContaining({ code: "session_killed" }));
     await expect(
       machine.interrupt({
-        sessionId: ids.session("session:missing:gtest"),
+        sessionId: ids.session("session:missing:1"),
         turnId: ids.turn("t1"),
       }),
     ).rejects.toEqual(expect.objectContaining({ code: "session_not_found" }));

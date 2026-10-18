@@ -14,6 +14,7 @@ import {
   type TurnHandle,
   serializeDiagnosticId,
   serializeMessageKey,
+  serializeOperationCredential,
   serializePermissionHandle,
   serializeResumeCursor,
   serializeToolKey,
@@ -24,6 +25,7 @@ declare const connection: ReinsConnection;
 declare const sessionHandle: SessionHandle;
 declare const turnHandle: TurnHandle;
 declare const spawnCredential: OperationCredential<"spawn">;
+declare const sendCredential: OperationCredential<"send">;
 declare const resumeCursor: ResumeCursor;
 declare const completed: CompletedTurn;
 declare const diagnosticId: DiagnosticId;
@@ -52,6 +54,8 @@ const wrongSpawnCredential: OperationCredential<"spawn"> =
   connection.prepareOperation("send");
 // @ts-expect-error 凭据会在泛型推断中保留操作类型。
 const wrongOperation: OperationCredential<"send"> = spawnCredential;
+// @ts-expect-error 序列化器的显式操作种类决定所接受的凭据类型。
+serializeOperationCredential("spawn", sendCredential);
 
 const invalidSend: SendInput = {
   placement: "active_turn",

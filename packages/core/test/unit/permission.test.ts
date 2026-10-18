@@ -208,7 +208,7 @@ describe("resolvePermission", () => {
     await expect(
       machine.resolvePermission({
         turnId: ids.turn("t1"),
-        sessionId: ids.session("session:missing:gtest"),
+        sessionId: ids.session("session:missing:1"),
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       }),

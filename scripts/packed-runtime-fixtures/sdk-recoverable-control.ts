@@ -1014,7 +1014,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
       );
     const mismatchedSession = await expectFailure(() =>
       connection.diagnostics({
-        sessionHandle: "session:different:g1" as SessionHandle,
+        sessionHandle: "session:different:1" as SessionHandle,
         turnHandle: spawned.turnHandle,
       }),
     );

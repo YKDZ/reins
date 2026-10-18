@@ -145,16 +145,16 @@ test("a malformed notification after a valid response preserves invalid_daemon_r
   const client = createReinsClient(pair.client as never, binding);
   const pending = client.request("attach", {
     scope: "session",
-    sessionId: "session:prompt:g1" as never,
+    sessionId: "session:prompt:1" as never,
     replay: { mode: "available" },
   });
   pair.server.send({
     kind: "response",
     requestId: "req1",
     result: {
-      sessionId: "session:prompt:g1",
+      sessionId: "session:prompt:1",
       subscriptionId: "subscription-1",
-      target: { scope: "session", sessionId: "session:prompt:g1" },
+      target: { scope: "session", sessionId: "session:prompt:1" },
       window: { oldest: null, head: null, truncated: false },
       replayed: 0,
     },
@@ -268,16 +268,16 @@ test.each([
     "send",
     {
       placement: "new_turn",
-      sessionId: "session:worker:gab12cd",
+      sessionId: "session:worker:12",
       message: "private-message",
     },
   ],
-  ["interrupt", { sessionId: "session:worker:gab12cd", turnId: "t1" }],
-  ["kill", { sessionId: "session:worker:gab12cd" }],
+  ["interrupt", { sessionId: "session:worker:12", turnId: "t1" }],
+  ["kill", { sessionId: "session:worker:12" }],
   [
     "resolvePermission",
     {
-      sessionId: "session:worker:gab12cd",
+      sessionId: "session:worker:12",
       permissionId: "p1",
       resolution: { outcome: "deny", feedback: "private-feedback" },
     },
@@ -315,7 +315,7 @@ test.each([
       code: "command_outcome_unknown",
       cause: "disconnected",
       method,
-      targets: ["session:worker:gab12cd"],
+      targets: ["session:worker:12"],
     });
     expect(JSON.stringify(error)).not.toContain("private-message");
     expect(JSON.stringify(error)).not.toContain("private-feedback");
@@ -399,7 +399,7 @@ test("显式恢复保留原目录事实，不要求调用方重填目录对象�
     kind: "response",
     requestId: "req3",
     result: {
-      sessionId: "session:original-dir:gab12cd",
+      sessionId: "session:originaldir:1",
       turnId: "t1",
       cwd: original.cwd,
     },
@@ -428,7 +428,7 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
       sessionLabel: "invalid" as never,
       message: "private task",
     }),
-    client.request("kill", { sessionId: "session:worker:gab12cd" as never }),
+    client.request("kill", { sessionId: "session:worker:12" as never }),
     client.request("modelCatalog", {}),
   ]);
   pair.server.send({ kind: "response", requestId: "req2", result: {} });
@@ -473,12 +473,12 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
   await initialized;
   const failed = client.request("send", {
     placement: "new_turn",
-    sessionId: "session:missing:gab12cd" as never,
+    sessionId: "session:missing:12" as never,
     message: "caller task",
   });
   const error = {
     code: "session_not_found",
-    sessionId: "session:missing:gab12cd",
+    sessionId: "session:missing:12",
   };
   pair.server.send({ kind: "response", requestId: "req2", error });
   await expect(failed).resolves.toEqual({
@@ -487,17 +487,17 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
     error,
   });
   const succeeded = client.request("kill", {
-    sessionId: "session:worker:gab12cd" as never,
+    sessionId: "session:worker:12" as never,
   });
   pair.server.send({
     kind: "response",
     requestId: "req3",
-    result: { sessionId: "session:worker:gab12cd", status: "killed" },
+    result: { sessionId: "session:worker:12", status: "killed" },
   });
   await expect(succeeded).resolves.toEqual({
     kind: "response",
     requestId: "req3",
-    result: { sessionId: "session:worker:gab12cd", status: "killed" },
+    result: { sessionId: "session:worker:12", status: "killed" },
   });
   client.close();
 });
@@ -513,7 +513,7 @@ test.each([undefined, 60_000])(
       const waiting = client
         .request("wait", {
           targets: [
-            { sessionId: "session:worker:g1" as never, turnId: "t1" as never },
+            { sessionId: "session:worker:1" as never, turnId: "t1" as never },
           ],
           completion: "all",
           ...(timeoutMs === undefined ? {} : { timeoutMs }),
@@ -530,7 +530,7 @@ test.each([undefined, 60_000])(
           status: "satisfied",
           completed: [
             {
-              sessionId: "session:worker:g1",
+              sessionId: "session:worker:1",
               turnId: "t1",
               stopReason: "end_turn",
               finalReply: "caller result",
@@ -556,7 +556,7 @@ test.each(["disconnect", "malformed"])(
     const client = createReinsClient(pair.client as never, binding);
     const waiting = client.request("wait", {
       targets: [
-        { sessionId: "session:worker:g1" as never, turnId: "t1" as never },
+        { sessionId: "session:worker:1" as never, turnId: "t1" as never },
       ],
       completion: "all",
       timeoutMs: 0,

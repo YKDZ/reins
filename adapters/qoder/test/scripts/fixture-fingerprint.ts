@@ -92,7 +92,7 @@ export async function qoderPublicEventFingerprint(
     diagnostics: async () => undefined,
   });
   driver.start({
-    sessionId: "session:fixture:g1" as SessionId,
+    sessionId: "session:fixture:1" as SessionId,
     turnId: "t1" as TurnId,
     harness: "qoder",
     message: "fixture replay",
@@ -103,7 +103,7 @@ export async function qoderPublicEventFingerprint(
   for (const message of messages) fake.controls.push(message);
   fake.controls.end();
   await terminal;
-  await driver.terminate("session:fixture:g1" as SessionId);
+  await driver.terminate("session:fixture:1" as SessionId);
   return events.map(fingerprintEvent);
 }
 

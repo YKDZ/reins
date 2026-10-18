@@ -28,7 +28,7 @@ function encodeMessage(value) {
       result: {
         ...value.result,
         subscriptionId: "subscription-fixture",
-        target: { scope: "turn", sessionId: "session:prompt:g1", turnId: "t1" },
+        target: { scope: "turn", sessionId: "session:prompt:1", turnId: "t1" },
         window: { oldest: null, head: null, truncated: false },
       },
     };
@@ -241,7 +241,7 @@ const server = createServer((socket) => {
               method: "event",
               params: {
                 type: "permission.requested",
-                sessionId: "session:prompt:g1",
+                sessionId: "session:prompt:1",
                 turnId: "t1",
                 permissionId,
                 kind: "tool:Bash",
@@ -257,7 +257,7 @@ const server = createServer((socket) => {
           `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
-            result: { sessionId: "session:prompt:g1", replayed: 1 },
+            result: { sessionId: "session:prompt:1", replayed: 1 },
           })}\n`,
         );
         setTimeout(() => socket.end(), 100);

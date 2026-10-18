@@ -2,12 +2,8 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-import type {
-  DiagnosticId,
-  DriverDiagnosticFact,
-  SessionId,
-  TurnId,
-} from "@reins/protocol";
+import type { DriverDiagnosticFact, SessionId, TurnId } from "@reins/protocol";
+import { makeDiagnosticId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createCodexDriver } from "#/codex-driver";
@@ -50,7 +46,7 @@ describe("Codex 模型目录", () => {
     modelCatalogFake.transport.start = () => {
       modelCatalogStarts += 1;
     };
-    const sessionId = "session:capabilities-worker:g1" as SessionId;
+    const sessionId = "session:capabilitiesworker:1" as SessionId;
     const worker = createCodexDriver({
       transportFactory: () => workerFake.transport,
     })({
@@ -185,7 +181,7 @@ describe("Codex 模型目录", () => {
       }
     });
     const diagnostics: DriverDiagnosticFact[] = [];
-    const diagnosticId = "d1-098" as DiagnosticId;
+    const diagnosticId = makeDiagnosticId("modelcatalog", "98");
     const query = createCodexModelCatalog({
       transportFactory: (options) =>
         createCodexTransport({ ...options, spawnChild: () => child }),

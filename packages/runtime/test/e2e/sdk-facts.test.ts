@@ -196,6 +196,12 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   expect(parseToolKey(serializeToolKey(toolRequested.toolKey))).toBe(
     toolRequested.toolKey,
   );
+  expect(() =>
+    parseMessageKey(serializeToolKey(toolRequested.toolKey)),
+  ).toThrow();
+  expect(() =>
+    parseToolKey(serializeMessageKey(callerMessage.messageKey)),
+  ).toThrow();
   expect(toolRequested?.toolKey).toBe(toolCompleted?.toolKey);
   expect(toolCompleted).toMatchObject({
     name: "native-result-name",
@@ -219,6 +225,12 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
       serializePermissionHandle(requested.permissionHandle),
     ),
   ).toBe(requested.permissionHandle);
+  expect(() =>
+    parseTurnHandle(serializePermissionHandle(requested.permissionHandle)),
+  ).toThrow();
+  expect(() =>
+    parsePermissionHandle(serializeTurnHandle(spawned.turnHandle)),
+  ).toThrow();
   expect(JSON.parse(await readFile(resolutionFile, "utf8"))).toEqual({
     outcome: "deny",
     feedback: "caller feedback",
@@ -242,6 +254,12 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
       serializeOperationCredential("spawn", credential),
     ),
   ).toBe(credential);
+  expect(() =>
+    parseOperationCredential(
+      "send",
+      serializeOperationCredential("spawn", credential),
+    ),
+  ).toThrow();
   expect(parseAgentFactId(serializeAgentFactId(callerMessage.factId))).toBe(
     callerMessage.factId,
   );
@@ -251,6 +269,15 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   expect(parseTurnHandle(serializeTurnHandle(spawned.turnHandle))).toBe(
     spawned.turnHandle,
   );
+  expect(() =>
+    parseSessionHandle(serializeTurnHandle(spawned.turnHandle)),
+  ).toThrow();
+  expect(() =>
+    parseTurnHandle(serializeSessionHandle(spawned.sessionHandle)),
+  ).toThrow();
+  expect(() =>
+    parseResumeCursor(serializeSessionHandle(spawned.sessionHandle)),
+  ).toThrow();
 
   const available = await observer.attach(target, { mode: "available" });
   const availableFacts: AgentFact[] = [];

@@ -143,7 +143,7 @@ describe("wait", () => {
       machine.wait({
         targets: [
           {
-            sessionId: ids.session("session:missing:gtest"),
+            sessionId: ids.session("session:missing:1"),
             turnId: ids.turn("t1"),
           },
         ],
@@ -151,7 +151,7 @@ describe("wait", () => {
       }),
     ).rejects.toEqual({
       code: "session_not_found",
-      sessionId: ids.session("session:missing:gtest"),
+      sessionId: ids.session("session:missing:1"),
     });
   });
 });

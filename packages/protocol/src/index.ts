@@ -11,7 +11,10 @@ const identifier = <T extends string>(name: T, pattern: RegExp) =>
 const opaqueIdentity = <T extends string>(name: T) =>
   v.pipe(v.string(), v.minLength(1), v.brand<string, T>(name));
 
-export const sessionIdSchema = opaqueIdentity("SessionId");
+export const sessionIdSchema = identifier(
+  "SessionId",
+  /^session:[a-z0-9]+:[1-9][0-9]*$/u,
+);
 export type SessionId = v.InferOutput<typeof sessionIdSchema>;
 export const turnIdSchema = opaqueIdentity("TurnId");
 export type TurnId = v.InferOutput<typeof turnIdSchema>;
@@ -214,7 +217,10 @@ export function makeDiagnosticId(
 ): DiagnosticId {
   return v.parse(diagnosticIdSchema, `diagnostic:${generation}:${counter}`);
 }
-export const diagnosticIdSchema = opaqueIdentity("DiagnosticId");
+export const diagnosticIdSchema = identifier(
+  "DiagnosticId",
+  /^diagnostic:[a-z0-9]+:[1-9a-z][0-9a-z]*$/u,
+);
 export type DiagnosticId = v.InferOutput<typeof diagnosticIdSchema>;
 
 export function isDiagnosticId(value: unknown): value is DiagnosticId {
