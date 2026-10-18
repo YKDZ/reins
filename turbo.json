@@ -151,6 +151,11 @@
       "cache": false,
       "dependsOn": ["build"]
     },
+    "@ykdz/reins#test:live:codex-control": {
+      "cache": false,
+      "dependsOn": ["build"],
+      "tags": ["quality:conditional"]
+    },
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "outputs": []
