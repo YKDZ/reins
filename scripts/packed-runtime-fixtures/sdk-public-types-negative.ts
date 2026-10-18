@@ -17,30 +17,30 @@ declare const spawnCredential: OperationCredential<"spawn">;
 declare const resumeCursor: ResumeCursor;
 declare const completed: CompletedTurn;
 
-// @ts-expect-error session and turn handles have separate public identities.
+// @ts-expect-error 会话句柄与回合句柄具有不同的公开身份。
 const wrongTurn: TurnHandle = sessionHandle;
-// @ts-expect-error a spawn operation cannot consume a send credential.
+// @ts-expect-error spawn 操作不能使用 send 凭据。
 const wrongSpawnCredential: OperationCredential<"spawn"> =
   connection.prepareOperation("send");
-// @ts-expect-error credentials retain the operation kind in generic inference.
+// @ts-expect-error 凭据会在泛型推断中保留操作类型。
 const wrongOperation: OperationCredential<"send"> = spawnCredential;
 
 const invalidSend: SendInput = {
   placement: "active_turn",
   turnHandle,
-  // @ts-expect-error an active turn cannot also include a session target.
+  // @ts-expect-error 活跃回合目标不能同时包含会话目标。
   sessionHandle,
   message: "ambiguous target",
 };
 const missingCursor = { mode: "after" } as const;
-// @ts-expect-error continuation requires its exact resume cursor.
+// @ts-expect-error 续接操作必须提供精确的恢复游标。
 const invalidReplay: ReplayPolicy = missingCursor;
 const sessionTarget: AgentTarget = { scope: "session", sessionHandle };
-// @ts-expect-error target scope determines which handle is accepted.
+// @ts-expect-error 目标范围决定可接受的句柄类型。
 const mismatchedTarget: AgentTarget = { scope: "turn", sessionHandle };
 
 if (completed.stopReason === "end_turn") {
-  // @ts-expect-error a successful end-turn result has no failure branch.
+  // @ts-expect-error 成功结束回合的结果没有失败分支。
   void completed.failure;
 }
 
