@@ -32,6 +32,7 @@ export function createEventBus(options: {
   }
 
   function dispatch(event: DomainEvent): void {
+    options.apply(event);
     for (const listener of Array.from(listeners)) {
       try {
         listener(event);
@@ -39,7 +40,6 @@ export function createEventBus(options: {
         reportListenerError(error, event);
       }
     }
-    options.apply(event);
   }
 
   function drain(): void {
