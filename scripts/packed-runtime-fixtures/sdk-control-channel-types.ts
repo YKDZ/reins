@@ -1,7 +1,9 @@
 import {
   connect,
+  openControl,
   parseRuntimeScopeId,
   type ConnectOptions,
+  type OpenControlOptions,
   type ControlByteChannel,
   type ControlChannelOpener,
   type ControlRuntimeTarget,
@@ -27,7 +29,7 @@ const opener: ControlChannelOpener = async (runtime, signal) => {
   return byteChannel;
 };
 
-const injectedOptions: ConnectOptions = {
+const injectedOptions: OpenControlOptions = {
   consumerContext: "packed-consumer",
   runtimeTarget: target,
   openControlChannel: opener,
@@ -44,6 +46,13 @@ function connectGeneric<const Options extends ConnectOptions>(
   return connect(options);
 }
 
+function openControlGeneric<const Options extends OpenControlOptions>(
+  options: Options,
+) {
+  return openControl(options);
+}
+
 void injectedOptions;
 void socketOptions;
 void connectGeneric;
+void openControlGeneric;

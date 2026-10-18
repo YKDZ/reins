@@ -448,6 +448,7 @@ export type ControlByteChannel = {
   readonly readable: AsyncIterable<Uint8Array>;
   readonly diagnostics: AsyncIterable<Uint8Array>;
   write(bytes: Uint8Array): Promise<void>;
+  /** 关闭通道并解除阻塞的读写；已收到的 readable 字节仍须先按序交付。 */
   close(): Promise<void>;
   readonly terminated: Promise<ControlChannelTermination>;
 };
@@ -459,21 +460,20 @@ type ConnectBaseOptions = {
   consumerContext: string;
   timeoutMs?: number;
 };
-export type ConnectOptions =
-  | (ConnectBaseOptions & {
-      socketPath: string;
-      runtimeScopeId?: RuntimeScopeId;
-      runtimeTarget?: never;
-      openControlChannel?: never;
-      signal?: never;
-    })
-  | (ConnectBaseOptions & {
-      socketPath?: never;
-      runtimeScopeId?: never;
-      runtimeTarget: ControlRuntimeTarget;
-      openControlChannel: ControlChannelOpener;
-      signal?: AbortSignal;
-    });
+export type ConnectOptions = ConnectBaseOptions & {
+  socketPath: string;
+  runtimeScopeId?: RuntimeScopeId;
+  runtimeTarget?: never;
+  openControlChannel?: never;
+  signal?: never;
+};
+export type OpenControlOptions = ConnectBaseOptions & {
+  socketPath?: never;
+  runtimeScopeId?: never;
+  runtimeTarget: ControlRuntimeTarget;
+  openControlChannel: ControlChannelOpener;
+  signal?: AbortSignal;
+};
 export type ReinsConnection = {
   readonly handshake: ReinsHandshake;
   modelCatalog(): Promise<ModelCatalogResult>;

@@ -1,5 +1,6 @@
 import {
   connect,
+  openControl,
   parseRuntimeScopeId,
   ReinsSdkError,
   type ControlByteChannel,
@@ -184,7 +185,7 @@ async function connectTarget(
     channel = await openTarget(runtimeTarget, signal);
     return channel;
   };
-  const connection = await connect({
+  const connection = await openControl({
     consumerContext: "packed-byte-consumer",
     runtimeTarget: target,
     openControlChannel,
@@ -217,6 +218,291 @@ async function waitForExit(
   return waitForTermination(channel.terminated);
 }
 
+function deferred<Value>() {
+  let resolve!: (value: Value) => void;
+  const promise = new Promise<Value>((accept) => {
+    resolve = accept;
+  });
+  return { promise, resolve };
+}
+
+function wireResponse(
+  request: {
+    readonly requestId: string;
+    readonly method: string;
+    readonly params?: { readonly protocolMajorVersion?: number };
+  },
+  result: unknown,
+): Uint8Array {
+  return new TextEncoder().encode(
+    `${JSON.stringify({ kind: "response", requestId: request.requestId, result })}\n`,
+  );
+}
+
+function handshakeChannel(runtimeScopeId: string): ControlByteChannel {
+  const responseBytes = deferred<Uint8Array>();
+  const termination = deferred<{
+    exitCode: number | null;
+    signal: string | null;
+  }>();
+  return {
+    readable: (async function* () {
+      yield await responseBytes.promise;
+    })(),
+    diagnostics: (async function* () {})(),
+    async write(bytes) {
+      const request = JSON.parse(new TextDecoder().decode(bytes)) as {
+        requestId: string;
+        method: string;
+        params?: { protocolMajorVersion?: number };
+      };
+      if (request.method === "initialize")
+        responseBytes.resolve(
+          wireResponse(request, {
+            protocolMajorVersion: request.params?.protocolMajorVersion,
+            daemonGeneration: "ab12cd",
+            runtimeScopeId,
+          }),
+        );
+    },
+    async close() {
+      termination.resolve({ exitCode: 0, signal: null });
+    },
+    terminated: termination.promise,
+  };
+}
+
+async function verifyRuntimeScopeRequired(
+  target: ControlRuntimeTarget,
+): Promise<void> {
+  let openedWithoutScope = false;
+  const targetWithoutScope = { ...target } as Record<string, unknown>;
+  delete targetWithoutScope.runtimeScopeId;
+  try {
+    const connection = await openControl({
+      consumerContext: "packed-byte-consumer",
+      runtimeTarget: targetWithoutScope as unknown as ControlRuntimeTarget,
+      openControlChannel: async () => {
+        openedWithoutScope = true;
+        return handshakeChannel(target.runtimeScopeId);
+      },
+    });
+    connection.close();
+    throw new Error("An injected target without runtime scope was accepted");
+  } catch (error) {
+    if (
+      !(error instanceof ReinsSdkError) ||
+      error.failure.code !== "runtime_scope_invalid" ||
+      error.stage !== "connect"
+    )
+      throw error;
+  }
+  if (openedWithoutScope)
+    throw new Error("An incomplete injected target opened a byte channel");
+}
+
+async function verifyMixedSocketAndTargetRejected(
+  target: ControlRuntimeTarget,
+): Promise<void> {
+  let openedMixedConnection = false;
+  try {
+    await connect({
+      consumerContext: "packed-byte-consumer",
+      socketPath: `${required("REINS_SOCKET")}.invalid-mixed-config`,
+      runtimeTarget: target,
+      openControlChannel: async () => {
+        openedMixedConnection = true;
+        return handshakeChannel(target.runtimeScopeId);
+      },
+    } as never);
+    throw new Error("A mixed socket and injected connection was accepted");
+  } catch (error) {
+    if (
+      !(error instanceof ReinsSdkError) ||
+      error.failure.code !== "invalid_params" ||
+      error.stage !== "connect"
+    )
+      throw error;
+  }
+  if (openedMixedConnection)
+    throw new Error("A mixed connection opened its injected byte channel");
+
+  let openedSocketOnInjectedEntry = false;
+  try {
+    await openControl({
+      consumerContext: "packed-byte-consumer",
+      socketPath: `${required("REINS_SOCKET")}.invalid-mixed-config`,
+      runtimeTarget: target,
+      openControlChannel: async () => {
+        openedSocketOnInjectedEntry = true;
+        return handshakeChannel(target.runtimeScopeId);
+      },
+    } as never);
+    throw new Error("The injected entry accepted a mixed socket configuration");
+  } catch (error) {
+    if (
+      !(error instanceof ReinsSdkError) ||
+      error.failure.code !== "invalid_params" ||
+      error.stage !== "connect"
+    )
+      throw error;
+  }
+  if (openedSocketOnInjectedEntry)
+    throw new Error(
+      "The injected entry ignored its mixed socket configuration",
+    );
+}
+
+async function verifyAbortClosesBlockedWrite(
+  target: ControlRuntimeTarget,
+): Promise<void> {
+  const writeStarted = deferred<void>();
+  const releaseWrite = deferred<void>();
+  const readableEnd = deferred<void>();
+  const closed = deferred<void>();
+  const termination = deferred<{
+    exitCode: number | null;
+    signal: string | null;
+  }>();
+  let closeCalls = 0;
+  const channel: ControlByteChannel = {
+    readable: (async function* () {
+      await readableEnd.promise;
+      yield new Uint8Array(0);
+    })(),
+    diagnostics: (async function* () {})(),
+    async write(_bytes) {
+      writeStarted.resolve(undefined);
+      await releaseWrite.promise;
+    },
+    async close() {
+      closeCalls += 1;
+      releaseWrite.resolve(undefined);
+      readableEnd.resolve(undefined);
+      termination.resolve({ exitCode: 0, signal: null });
+      closed.resolve(undefined);
+    },
+    terminated: termination.promise,
+  };
+  const controller = new AbortController();
+  const result = openControl({
+    consumerContext: "packed-byte-consumer",
+    runtimeTarget: target,
+    signal: controller.signal,
+    openControlChannel: async () => channel,
+  }).then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+
+  await writeStarted.promise;
+  controller.abort();
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  let closeStarted: boolean;
+  try {
+    closeStarted = await Promise.race([
+      closed.promise.then(() => true),
+      new Promise<boolean>((resolve) => {
+        timer = setTimeout(() => resolve(false), 300);
+      }),
+    ]);
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+  if (!closeStarted) {
+    await channel.close();
+    await result;
+    throw new Error(
+      "Abort waited for a blocked write before closing the channel",
+    );
+  }
+  const error = await result;
+  if (!(error instanceof Error) || error.name !== "AbortError")
+    throw new Error("A blocked-write cancellation did not return AbortError");
+  if (closeCalls !== 1)
+    throw new Error(
+      "Abort did not close the blocked byte channel exactly once",
+    );
+}
+
+async function verifyExitDrainsTailResponse(
+  target: ControlRuntimeTarget,
+): Promise<void> {
+  const handshakeBytes = deferred<Uint8Array>();
+  const tailResponseBytes = deferred<Uint8Array>();
+  const readableEnd = deferred<void>();
+  const termination = deferred<{
+    exitCode: number | null;
+    signal: string | null;
+  }>();
+  let closeCalls = 0;
+  const channel: ControlByteChannel = {
+    readable: (async function* () {
+      yield await handshakeBytes.promise;
+      yield await tailResponseBytes.promise;
+      await readableEnd.promise;
+    })(),
+    diagnostics: (async function* () {})(),
+    async write(bytes) {
+      const request = JSON.parse(new TextDecoder().decode(bytes)) as {
+        requestId: string;
+        method: string;
+        params?: { protocolMajorVersion?: number };
+      };
+      if (request.method === "initialize")
+        handshakeBytes.resolve(
+          wireResponse(request, {
+            protocolMajorVersion: request.params?.protocolMajorVersion,
+            daemonGeneration: "ab12cd",
+            runtimeScopeId: target.runtimeScopeId,
+          }),
+        );
+      else if (request.method === "list") {
+        tailResponseBytes.resolve(wireResponse(request, []));
+        termination.resolve({ exitCode: 1, signal: null });
+        throw new Error("The target exited after accepting the request bytes");
+      }
+    },
+    async close() {
+      closeCalls += 1;
+      readableEnd.resolve(undefined);
+    },
+    terminated: termination.promise,
+  };
+  const connection = await openControl({
+    consumerContext: "packed-byte-consumer",
+    runtimeTarget: target,
+    openControlChannel: async () => channel,
+  });
+  try {
+    const sessions = await connection.list();
+    if (sessions.length !== 0)
+      throw new Error("The buffered response before process exit was lost");
+    if (closeCalls === 0)
+      throw new Error("Target termination did not close the byte channel");
+    const pendingAfterExit = connection.list().then(
+      () => false,
+      () => true,
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejectedAfterExit: boolean;
+    try {
+      rejectedAfterExit = await Promise.race([
+        pendingAfterExit,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), 300);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (!rejectedAfterExit)
+      throw new Error("A request remained pending after target termination");
+  } finally {
+    connection.close();
+  }
+}
+
 async function main(): Promise<void> {
   const target = JSON.parse(
     required("REINS_CONTROL_RUNTIME_TARGET"),
@@ -226,7 +512,7 @@ async function main(): Promise<void> {
     alreadyAborted.abort();
     let openedAfterAbort = false;
     try {
-      await connect({
+      await openControl({
         consumerContext: "packed-byte-consumer",
         runtimeTarget: target,
         signal: alreadyAborted.signal,
@@ -242,13 +528,39 @@ async function main(): Promise<void> {
     if (openedAfterAbort)
       throw new Error("Abort did not cancel target opening");
 
+    const regressionFailures: string[] = [];
+    for (const [name, verify] of [
+      ["required runtime scope", () => verifyRuntimeScopeRequired(target)],
+      [
+        "mutually exclusive socket configuration",
+        () => verifyMixedSocketAndTargetRejected(target),
+      ],
+      ["abort of blocked writes", () => verifyAbortClosesBlockedWrite(target)],
+      [
+        "tail response after target exit",
+        () => verifyExitDrainsTailResponse(target),
+      ],
+    ] as const) {
+      try {
+        await verify();
+      } catch (error) {
+        regressionFailures.push(
+          `${name}: ${error instanceof Error ? error.message : String(error)}`,
+        );
+      }
+    }
+    if (regressionFailures.length > 0)
+      throw new Error(
+        `Control channel regressions: ${regressionFailures.join("; ")}`,
+      );
+
     const openingAbort = new AbortController();
     let markOpeningStarted = (): void => {};
     const openingStarted = new Promise<void>((resolve) => {
       markOpeningStarted = resolve;
     });
     const openingChildCount = children.length;
-    const opening = connect({
+    const opening = openControl({
       consumerContext: "packed-byte-consumer",
       runtimeTarget: target,
       signal: openingAbort.signal,

@@ -47,6 +47,7 @@ import * as v from "valibot";
 import {
   type ConnectOptions,
   type ControlByteChannel,
+  type OpenControlOptions,
   type DiagnosticId,
   type DiagnosticRecord,
   type DiagnosticsQuery,
@@ -144,6 +145,7 @@ export type {
   ControlChannelOpener,
   ControlChannelTermination,
   ControlRuntimeTarget,
+  OpenControlOptions,
   DiagnosticId,
   DiagnosticKind,
   DiagnosticRecord,
@@ -295,8 +297,19 @@ function projectAgentFact(fact: ClientAgentFact): AgentFact {
   return projected as AgentFact;
 }
 
-export async function connect(
-  options: ConnectOptions,
+export function connect(options: ConnectOptions): Promise<ReinsConnection> {
+  return connectClient(options, false);
+}
+
+export function openControl(
+  options: OpenControlOptions,
+): Promise<ReinsConnection> {
+  return connectClient(options, true);
+}
+
+async function connectClient(
+  options: ConnectOptions | OpenControlOptions,
+  injected: boolean,
 ): Promise<ReinsConnection> {
   let client: ControlClient | undefined;
   let byteTransport: ReturnType<typeof createControlByteTransport> | undefined;
@@ -307,6 +320,28 @@ export async function connect(
   let connectionSignal: AbortSignal | undefined;
   let stage: "connect" | "handshake" = "connect";
   try {
+    if (typeof options !== "object" || options === null)
+      throw invalidConnectInput("options");
+    const fields = options as unknown as Record<string, unknown>;
+    if (injected) {
+      if (Object.hasOwn(fields, "socketPath"))
+        throw invalidConnectInput("socketPath");
+      if (Object.hasOwn(fields, "runtimeScopeId"))
+        throw invalidConnectInput("runtimeScopeId");
+      if (typeof fields.openControlChannel !== "function")
+        throw invalidConnectInput("openControlChannel");
+    } else {
+      if (
+        typeof fields.socketPath !== "string" ||
+        fields.socketPath.length === 0
+      )
+        throw invalidConnectInput("socketPath");
+      if (Object.hasOwn(fields, "runtimeTarget"))
+        throw invalidConnectInput("runtimeTarget");
+      if (Object.hasOwn(fields, "openControlChannel"))
+        throw invalidConnectInput("openControlChannel");
+      if (Object.hasOwn(fields, "signal")) throw invalidConnectInput("signal");
+    }
     const consumerContext = v.safeParse(
       consumerContextSchema,
       options.consumerContext,
@@ -319,10 +354,14 @@ export async function connect(
         },
         stage,
       );
-    if (options.socketPath === undefined) {
+    const injectedOptions = injected
+      ? (options as OpenControlOptions)
+      : undefined;
+    const localOptions = injected ? undefined : (options as ConnectOptions);
+    if (injected) {
       openingAbort = new AbortController();
       connectionSignal = openingAbort.signal;
-      const externalSignal = options.signal;
+      const externalSignal = injectedOptions!.signal;
       if (externalSignal !== undefined) {
         const forwardAbort = (): void =>
           openingAbort?.abort(externalSignal.reason);
@@ -336,12 +375,11 @@ export async function connect(
         }
       }
     }
-    const injected = options.socketPath === undefined;
     const configuredScopeId = injected
-      ? options.runtimeTarget.runtimeScopeId
-      : options.runtimeScopeId;
+      ? injectedOptions!.runtimeTarget?.runtimeScopeId
+      : localOptions!.runtimeScopeId;
     let runtimeScopeId: RuntimeScopeId | undefined;
-    if (configuredScopeId !== undefined) {
+    if (injected || configuredScopeId !== undefined) {
       const parsed = v.safeParse(runtimeScopeIdSchema, configuredScopeId);
       if (!parsed.success)
         throw new ReinsSdkError(
@@ -351,8 +389,14 @@ export async function connect(
       runtimeScopeId = parsed.output as unknown as RuntimeScopeId;
     }
     let transport: import("@reins/transport").TransportConnection<ProtocolMessage>;
-    if (options.socketPath === undefined) {
-      const target = options.runtimeTarget;
+    if (injected) {
+      const target = injectedOptions!.runtimeTarget;
+      if (
+        typeof target !== "object" ||
+        target === null ||
+        Array.isArray(target)
+      )
+        throw invalidConnectInput("runtimeTarget");
       if (typeof target.command !== "string" || target.command.length === 0)
         throw invalidConnectInput("runtimeTarget.command");
       if (
@@ -363,14 +407,14 @@ export async function connect(
       const signal = connectionSignal!;
       if (signal.aborted) throw abortError(signal);
       openingChannel = Promise.resolve().then(() =>
-        options.openControlChannel(target, signal),
+        injectedOptions!.openControlChannel(target, signal),
       );
       openedChannel = await raceWithAbort(openingChannel, signal);
       byteTransport = createControlByteTransport(openedChannel);
       transport = byteTransport.connection;
     } else {
       transport = await createUnixSocketClient<ProtocolMessage>(
-        options.socketPath,
+        localOptions!.socketPath,
       );
     }
     client = createReinsClient(transport, {

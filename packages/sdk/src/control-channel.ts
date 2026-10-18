@@ -48,6 +48,9 @@ export function createControlByteTransport(
   let closing = false;
   let failureEmitted = false;
   let writeFailed = false;
+  let terminationFailed = false;
+  let terminationObserved = false;
+  let deferredFailure: TransportError | undefined;
   let writeQueue = Promise.resolve();
   let closePromise: Promise<void> | undefined;
 
@@ -61,11 +64,25 @@ export function createControlByteTransport(
     emit({ kind: "error", error });
   }
 
+  function failAfterDrain(error: TransportError): void {
+    if (closed || failureEmitted || deferredFailure !== undefined) return;
+    deferredFailure = error;
+    void requestChannelClose().catch(() => {
+      if (!terminationObserved) emitFailure(error);
+    });
+  }
+
   function finish(): void {
     if (closed) return;
     decoder.end();
+    if (terminationFailed && deferredFailure === undefined)
+      deferredFailure = ioFailure("connection");
+    if (deferredFailure !== undefined) emitFailure(deferredFailure);
     closed = true;
     emit({ kind: "closed" });
+    void requestChannelClose().catch(() => {
+      if (!terminationObserved) emitFailure(ioFailure("connection"));
+    });
   }
 
   const decoder = createNdjsonDecoder({
@@ -82,29 +99,44 @@ export function createControlByteTransport(
       for await (const bytes of channel.readable) {
         if (closed) break;
         if (!(bytes instanceof Uint8Array)) {
-          emitFailure(ioFailure("read"));
+          failAfterDrain(ioFailure("read"));
           break;
         }
         decoder.push(bytes);
       }
       finish();
     } catch {
-      emitFailure(ioFailure("read"));
+      failAfterDrain(ioFailure("read"));
       finish();
     }
   }
 
-  function closeAndWait(): Promise<void> {
+  function requestChannelClose(): Promise<void> {
     closing = true;
-    closePromise ??= writeQueue.then(() => channel.close());
+    closePromise ??= Promise.resolve().then(() => channel.close());
     return closePromise;
+  }
+
+  function closeAndWait(): Promise<void> {
+    return requestChannelClose().then(() => writeQueue);
   }
 
   void consume();
   void channel.terminated.then(
-    () => undefined,
+    (termination) => {
+      terminationObserved = true;
+      terminationFailed =
+        termination.exitCode !== 0 || termination.signal !== null;
+      void requestChannelClose().catch(() => {
+        if (!terminationObserved) emitFailure(ioFailure("connection"));
+      });
+    },
     () => {
-      emitFailure(ioFailure("connection"));
+      terminationObserved = true;
+      terminationFailed = true;
+      void requestChannelClose().catch(() => {
+        if (!terminationObserved) emitFailure(ioFailure("connection"));
+      });
     },
   );
 
@@ -114,15 +146,12 @@ export function createControlByteTransport(
         if (closed || closing || writeFailed) throw disconnectedFailure();
         const bytes = encoder.encode(encodeNdjson(message));
         writeQueue = writeQueue.then(async () => {
-          if (closed || writeFailed) return;
+          if (closed || closing || writeFailed) return;
           try {
             await channel.write(bytes);
           } catch {
             writeFailed = true;
-            emitFailure(ioFailure("write"));
-            void closeAndWait().catch(() => {
-              emitFailure(ioFailure("connection"));
-            });
+            failAfterDrain(ioFailure("write"));
           }
         });
       },
