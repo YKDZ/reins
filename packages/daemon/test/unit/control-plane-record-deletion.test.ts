@@ -52,6 +52,8 @@ function createFixture() {
   const baseStore = createInMemoryControlStore();
   let failInterruptRegistration = false;
   let failKillAdmission = false;
+  let failKillOutcomeUnknownWrite = false;
+  let failKillTermination = false;
   const store: ControlStore = {
     ...baseStore,
     registerInterrupt(input) {
@@ -71,6 +73,11 @@ function createFixture() {
     commitKill(input) {
       if (failKillAdmission) throw new Error("kill result write rejected");
       return baseStore.commitKill(input);
+    },
+    recordKillOutcomeUnknown(operationKey, error) {
+      if (failKillOutcomeUnknownWrite)
+        throw new Error("kill outcome write rejected");
+      return baseStore.recordKillOutcomeUnknown(operationKey, error);
     },
   };
   let sessionCounter = 0;
@@ -140,6 +147,11 @@ function createFixture() {
         resolvePermission() {},
         async terminate() {
           stopCount += 1;
+          if (failKillTermination)
+            throw {
+              code: "internal_error",
+              cause: { kind: "timeout", message: "native close timed out" },
+            };
         },
       };
     },
@@ -192,6 +204,12 @@ function createFixture() {
     },
     setFailKillAdmission(value: boolean) {
       failKillAdmission = value;
+    },
+    setFailKillOutcomeUnknownWrite(value: boolean) {
+      failKillOutcomeUnknownWrite = value;
+    },
+    setFailKillTermination(value: boolean) {
+      failKillTermination = value;
     },
     setWriterLease(check: () => Promise<void>) {
       assertWriterLease = check;
@@ -328,6 +346,106 @@ describe("记录删除与现场操作归属", () => {
         ),
       ).toMatchObject({ error: { code: "operation_key_conflict" } });
       expect(fixture.counts()).toEqual(beforeRetry);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("删除时按原目标清除未登记的 kill 未知结果", async () => {
+    const fixture = createFixture();
+    try {
+      const firstSpawnKey = operationKey("spawn");
+      const secondSpawnKey = operationKey("spawn");
+      const firstSpawn = await fixture.execute(
+        "spawn",
+        { harness: "codex", cwd: "/tmp", message: "first" },
+        firstSpawnKey,
+      );
+      const secondSpawn = await fixture.execute(
+        "spawn",
+        { harness: "codex", cwd: "/tmp", message: "second" },
+        secondSpawnKey,
+      );
+      if (!("result" in firstSpawn) || !("result" in secondSpawn))
+        throw new Error("测试会话创建失败");
+      const firstTarget = firstSpawn.result as SpawnAck;
+      const secondTarget = secondSpawn.result as SpawnAck;
+      const unknownKillKey = operationKey("kill");
+
+      fixture.setFailKillAdmission(true);
+      fixture.setFailKillOutcomeUnknownWrite(true);
+      fixture.setFailKillTermination(true);
+      expect(
+        await fixture.execute(
+          "kill",
+          { sessionId: firstTarget.sessionId },
+          unknownKillKey,
+        ),
+      ).toMatchObject({ error: { code: "operation_outcome_unknown" } });
+      expect(
+        await fixture.plane.dispatch(
+          "getOperation",
+          { operationKey: unknownKillKey },
+          consumer,
+        ),
+      ).toMatchObject({
+        status: "outcome_unknown",
+        operationKey: unknownKillKey,
+      });
+      expect(fixture.store.isOperationDeleted(unknownKillKey)).toBe(false);
+
+      fixture.setFailKillAdmission(false);
+      fixture.setFailKillOutcomeUnknownWrite(false);
+      fixture.setFailKillTermination(false);
+      expect(
+        await fixture.execute(
+          "kill",
+          { sessionId: firstTarget.sessionId },
+          operationKey("kill"),
+        ),
+      ).toMatchObject({
+        result: { sessionId: firstTarget.sessionId, status: "killed" },
+      });
+      const stopCountBeforeDelete = fixture.counts().stopCount;
+
+      expect(
+        await fixture.execute("deleteRecords", {
+          sessionId: firstTarget.sessionId,
+        }),
+      ).toMatchObject({ result: { status: "deleted" } });
+      expect(fixture.store.isOperationDeleted(unknownKillKey)).toBe(true);
+      const deletedOperation = await fixture.plane.dispatch(
+        "getOperation",
+        { operationKey: unknownKillKey },
+        consumer,
+      );
+      expect(deletedOperation).toMatchObject({
+        status: "deleted",
+        operationKey: unknownKillKey,
+      });
+      expect(deletedOperation).not.toHaveProperty("cause");
+      expect(
+        await fixture.execute(
+          "kill",
+          { sessionId: secondTarget.sessionId },
+          unknownKillKey,
+        ),
+      ).toMatchObject({ error: { code: "operation_key_conflict" } });
+      expect(fixture.counts().stopCount).toBe(stopCountBeforeDelete);
+      expect(
+        await fixture.plane.dispatch(
+          "getOperation",
+          { operationKey: firstSpawnKey },
+          consumer,
+        ),
+      ).toMatchObject({ status: "deleted", operationKey: firstSpawnKey });
+      expect(
+        await fixture.plane.dispatch(
+          "getOperation",
+          { operationKey: secondSpawnKey },
+          consumer,
+        ),
+      ).toMatchObject({ status: "succeeded", operationKey: secondSpawnKey });
     } finally {
       await fixture.close();
     }

@@ -443,9 +443,32 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     });
   }
 
+  function operationFingerprintSessionId(
+    fingerprint: string,
+  ): SessionId | undefined {
+    try {
+      const parsed = JSON.parse(fingerprint) as {
+        readonly params?: { readonly sessionId?: unknown };
+        readonly request?: { readonly sessionId?: unknown };
+      };
+      const target = parsed.params ?? parsed.request;
+      const sessionId = v.safeParse(sessionIdSchema, target?.sessionId);
+      return sessionId.success ? sessionId.output : undefined;
+    } catch {
+      // 指纹无法解析时不猜测操作归属。
+      return undefined;
+    }
+  }
+
   function operationSessionId(value: unknown): SessionId | undefined {
     if (typeof value !== "object" || value === null) return undefined;
     const record = value as Record<string, unknown>;
+    if (typeof record.fingerprint === "string") {
+      const fingerprintSessionId = operationFingerprintSessionId(
+        record.fingerprint,
+      );
+      if (fingerprintSessionId !== undefined) return fingerprintSessionId;
+    }
     const result = record.result;
     if (typeof result === "object" && result !== null) {
       const resultSessionId = v.safeParse(
@@ -472,18 +495,13 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
 
   function knownOperationKeysForSession(sessionId: SessionId): OperationKey[] {
     const keys = new Set<OperationKey>();
-    for (const [key, fingerprint] of interruptRequestFingerprints) {
-      try {
-        const request = (
-          JSON.parse(fingerprint) as {
-            readonly request?: { readonly sessionId?: unknown };
-          }
-        ).request;
-        const target = v.safeParse(sessionIdSchema, request?.sessionId);
-        if (target.success && target.output === sessionId)
+    for (const fingerprints of [
+      permissionRequestFingerprints,
+      interruptRequestFingerprints,
+    ]) {
+      for (const [key, fingerprint] of fingerprints) {
+        if (operationFingerprintSessionId(fingerprint) === sessionId)
           keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
-      } catch {
-        // 本地规范请求指纹损坏时，不推断操作归属。
       }
     }
     for (const [key, value] of spawnResults)
