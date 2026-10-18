@@ -11,7 +11,11 @@ import type {
   WorkerDriver,
   WorkerSpec,
 } from "@reins/protocol";
-import { makeTextEvidence, WorkerStartFailure } from "@reins/protocol";
+import {
+  makeTextEvidence,
+  WorkerDeliveryFailure,
+  WorkerStartFailure,
+} from "@reins/protocol";
 
 import { DshHostClient, DshHostRequestError } from "./dsh-host-client.ts";
 import { failureFromSafeFacts, safeFailureFrom } from "./dsh-host-protocol.ts";
@@ -27,26 +31,6 @@ type PendingAssistantMessage = {
   readonly event: AssistantSessionEvent;
   readonly turnId: TurnId;
 };
-
-function hostFailure(error: unknown): MachineError {
-  if (error instanceof DshHostRequestError) {
-    if (error.acceptance === "not_accepted")
-      return {
-        code: "internal_error",
-        cause: {
-          kind: "upstream",
-          message: "The official DSH did not accept the request input",
-        },
-      };
-  }
-  return {
-    code: "internal_error",
-    cause: {
-      kind: "upstream",
-      message: "The official DSH host did not confirm input acceptance",
-    },
-  };
-}
 
 type TurnFailureEvidence = Parameters<HarnessSession["failTurn"]>[1];
 
@@ -448,12 +432,14 @@ export function createDshDriver(): AdapterDriverFactory {
           });
           assertHostResponse(response);
         } catch (error) {
-          if (
-            error instanceof DshHostRequestError &&
-            error.acceptance === "not_accepted"
-          )
-            session.turnId = null;
-          throw hostFailure(error);
+          const acceptance =
+            error instanceof DshHostRequestError ? error.acceptance : "unknown";
+          if (acceptance === "not_accepted") session.turnId = null;
+          throw new WorkerDeliveryFailure(
+            "The official DSH host did not confirm new-turn message acceptance",
+            acceptance,
+            { cause: error },
+          );
         }
       },
       async interrupt(): Promise<void> {
