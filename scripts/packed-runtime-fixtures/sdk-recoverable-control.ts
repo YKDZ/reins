@@ -1193,6 +1193,10 @@ async function disconnectAfterFirstFact(): Promise<void> {
   let acknowledgedFactCount = 0;
   subscription.acknowledge(first.value);
   acknowledgedFactCount += 1;
+  const unacknowledged = await subscription.next();
+  if (unacknowledged.done)
+    throw new Error("The installed SDK received no unacknowledged fact");
+  deliveredFacts.push(unacknowledged.value);
   connection.close();
   let disconnected: ReinsSdkError | undefined;
   try {
