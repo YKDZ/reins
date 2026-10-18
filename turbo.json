@@ -194,6 +194,12 @@
       "tags": ["quality:heavy"],
       "cache": false,
       "dependsOn": ["@ykdz/reins#build", "@reins/daemon#build"]
+    },
+    "//#test:e2e:qoder-live": {
+      "tags": ["quality:conditional"],
+      "cache": false,
+      "env": ["QODERCLI_PATH"],
+      "dependsOn": ["@ykdz/reins#build", "@reins/daemon#build"]
     }
   }
 }

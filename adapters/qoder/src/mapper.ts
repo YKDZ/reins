@@ -524,18 +524,7 @@ async function mapAssistant(
     session.setUsage(message.message.usage);
   }
 
-  if (message.aborted === true && session.cancelling) {
-    events.push(
-      ...flushPendingText(
-        session,
-        state,
-        nativeMessageId ?? undefined,
-        nativeMessageId ?? undefined,
-      ),
-    );
-    state.currentAssistantId = null;
-    events.push(session.endTurn("cancelled"));
-  } else if (message.aborted === true) {
+  if (message.aborted === true) {
     events.push(
       ...flushPendingText(
         session,
@@ -633,7 +622,7 @@ function mapSystemMessage(
   if (message.state !== "idle" || session.turnId === null) return [];
   const events = flushPendingText(session, state);
   state.currentAssistantId = null;
-  events.push(session.endTurn(session.cancelling ? "cancelled" : "end_turn"));
+  events.push(session.endTurn("end_turn"));
   return events;
 }
 
