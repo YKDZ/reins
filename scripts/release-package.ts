@@ -53,6 +53,39 @@ export function readJsonObject(path: string): JsonObject {
   return parseJsonObject(readFileSync(path, "utf8"), path);
 }
 
+export function parseReleaseNotes(
+  changelog: string,
+  version: string,
+): { readonly releaseDate: string; readonly releaseNotes: string } {
+  const sections = changelog
+    .split(/^## /mu)
+    .filter((section) => section.startsWith(`[${version}] - `));
+  const section = sections[0];
+  const header = section?.split("\n", 1)[0];
+  const match =
+    header === undefined
+      ? undefined
+      : /^\[\d+\.\d+\.\d+\] - (\d{4}-\d{2}-\d{2})$/u.exec(header);
+  const releaseDate = match?.[1];
+  const parsedDate =
+    releaseDate === undefined
+      ? undefined
+      : new Date(`${releaseDate}T00:00:00.000Z`);
+  const bodyStart = section?.indexOf("\n") ?? -1;
+  const notes = bodyStart < 0 ? "" : section?.slice(bodyStart + 1).trim();
+  if (
+    sections.length !== 1 ||
+    releaseDate === undefined ||
+    parsedDate === undefined ||
+    Number.isNaN(parsedDate.getTime()) ||
+    parsedDate.toISOString().slice(0, 10) !== releaseDate ||
+    !notes
+  ) {
+    throw new Error("变更说明须包含唯一的当前版本、有效日期与实际发布内容");
+  }
+  return { releaseDate, releaseNotes: notes };
+}
+
 function readManifest(repository: string, directory: string): JsonObject {
   return readJsonObject(join(repository, directory, "package.json"));
 }
@@ -61,6 +94,8 @@ export function assertReleaseVersionAuthority(repository: string): {
   authority: JsonObject;
   name: string;
   version: string;
+  releaseDate: string;
+  releaseNotes: string;
 } {
   const authority = readManifest(repository, releaseAuthorityDirectory);
   if (
@@ -87,10 +122,15 @@ export function assertReleaseVersionAuthority(repository: string): {
       );
     }
   }
+  const releaseNotes = parseReleaseNotes(
+    readFileSync(join(repository, "CHANGELOG.md"), "utf8"),
+    authority.version,
+  );
   return {
     authority,
     name: authority.name,
     version: authority.version,
+    ...releaseNotes,
   };
 }
 

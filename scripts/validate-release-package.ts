@@ -1,6 +1,6 @@
 import { spawnSync } from "node:child_process";
-import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, readFileSync, readdirSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { appendFileSync, readdirSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { isDeepStrictEqual } from "node:util";
@@ -22,22 +22,18 @@ export type ReleaseArtifact = {
   readonly version: string;
   readonly file: string;
   readonly path: string;
-  readonly sha256: string;
-  readonly sha512: string;
-  readonly integrity: string;
-  readonly size: number;
   readonly manifest: Record<string, unknown>;
 };
 export type ReleasePackageGroup = {
   readonly name: string;
   readonly version: string;
+  readonly releaseDate: string;
+  readonly releaseNotes: string;
   readonly artifacts: readonly ReleaseArtifact[];
-  readonly sha512Sums: string;
 };
 export function validateReleasePackages(options: {
   readonly repository: string;
   readonly artifactDirectory?: string;
-  readonly expectedTag?: string;
 }): ReleasePackageGroup {
   const repository = resolve(options.repository);
   const artifactDirectory = resolve(
@@ -47,26 +43,16 @@ export function validateReleasePackages(options: {
   if (entries.some((entry) => !entry.isFile())) {
     throw new Error("Release artifact directory must contain only files");
   }
-  const files = entries
-    .map((entry) => entry.name)
-    .filter(
-      (name) =>
-        name !== "SHA512SUMS" && name !== "verified-publication-artifact.json",
-    )
-    .sort();
+  const files = entries.map((entry) => entry.name).sort();
 
-  const { authority, name, version } =
+  const { authority, name, version, releaseDate, releaseNotes } =
     assertReleaseVersionAuthority(repository);
   const runtimeTarballName = releaseTarballName(name, version);
   const sdkTarballName = releaseTarballName("@ykdz/reins-sdk", version);
-  const expectedFiles = [
-    "SHA256SUMS",
-    runtimeTarballName,
-    sdkTarballName,
-  ].sort();
+  const expectedFiles = [runtimeTarballName, sdkTarballName].sort();
   if (!isDeepStrictEqual(files, expectedFiles)) {
     throw new Error(
-      `Expected both same-version tarballs and SHA256SUMS; found: ${files.join(", ")}`,
+      `Expected exactly both same-version tarballs; found: ${files.join(", ")}`,
     );
   }
 
@@ -158,70 +144,42 @@ export function validateReleasePackages(options: {
     "@ykdz/reins-sdk",
   );
 
-  const expectedTag = options.expectedTag ?? "";
-  if (expectedTag !== "" && expectedTag !== `v${version}`) {
-    throw new Error(
-      `Tag ${expectedTag} does not match manifest version ${version}`,
-    );
-  }
-
-  function sha256File(tarballName: string): string {
-    return createHash("sha256")
-      .update(readFileSync(join(artifactDirectory, tarballName)))
-      .digest("hex");
-  }
-
-  const runtimeSha256 = sha256File(runtimeTarballName);
-  const sdkSha256 = sha256File(sdkTarballName);
-  const runtimeSha512 = createHash("sha512")
-    .update(readFileSync(join(artifactDirectory, runtimeTarballName)))
-    .digest("hex");
-  const sdkSha512 = createHash("sha512")
-    .update(readFileSync(join(artifactDirectory, sdkTarballName)))
-    .digest("hex");
-  const checksums = readFileSync(join(artifactDirectory, "SHA256SUMS"), "utf8");
-  const expectedChecksums = [
-    `${runtimeSha256}  ${runtimeTarballName}`,
-    `${sdkSha256}  ${sdkTarballName}`,
-  ]
-    .sort((left, right) => left.localeCompare(right))
-    .join("\n");
-  if (checksums !== `${expectedChecksums}\n`) {
-    throw new Error("SHA256SUMS does not exactly match both release tarballs");
-  }
-
   const artifacts = [
     {
       packageName: "@ykdz/reins-sdk",
       file: sdkTarballName,
-      sha256: sdkSha256,
-      sha512: sdkSha512,
     },
     {
       packageName: name,
       file: runtimeTarballName,
-      sha256: runtimeSha256,
-      sha512: runtimeSha512,
     },
   ].map((item) => ({
     ...item,
     version,
     path: join(artifactDirectory, item.file),
-    integrity: "sha512-" + Buffer.from(item.sha512, "hex").toString("base64"),
-    size: readFileSync(join(artifactDirectory, item.file)).length,
     manifest: packedManifest(item.file),
   }));
-  const sha512Sums =
-    artifacts
-      .map((item) => item.sha512 + "  " + item.file)
-      .sort((a, b) => a.localeCompare(b))
-      .join("\n") + "\n";
-  if (
-    existsSync(join(artifactDirectory, "SHA512SUMS")) &&
-    readFileSync(join(artifactDirectory, "SHA512SUMS"), "utf8") !== sha512Sums
-  )
-    throw new Error("SHA512SUMS does not match both release artifacts");
-  return { name, version, artifacts, sha512Sums };
+  return { name, version, releaseDate, releaseNotes, artifacts };
+}
+
+export function writeReleaseOutputs(group: ReleasePackageGroup): void {
+  const output = process.env.GITHUB_OUTPUT;
+  if (output === undefined || output === "") {
+    process.stdout.write("Release package validation passed\n");
+    return;
+  }
+  const delimiter = `REINS_RELEASE_NOTES_${randomUUID()}`;
+  appendFileSync(
+    output,
+    [
+      `release-version=${group.version}`,
+      `release-tag=v${group.version}`,
+      `release-notes<<${delimiter}`,
+      group.releaseNotes,
+      delimiter,
+      "",
+    ].join("\n"),
+  );
 }
 
 if (
@@ -230,27 +188,6 @@ if (
 ) {
   const group = validateReleasePackages({
     repository: process.env.GITHUB_WORKSPACE ?? process.cwd(),
-    ...(process.env.EXPECTED_TAG === undefined
-      ? {}
-      : { expectedTag: process.env.EXPECTED_TAG }),
   });
-  const output = process.env.GITHUB_OUTPUT;
-  if (output) {
-    appendFileSync(
-      output,
-      group.artifacts
-        .flatMap((item) => {
-          const prefix = item.packageName === group.name ? "" : "sdk-";
-          return [
-            prefix + "name=" + item.packageName,
-            prefix + "version=" + item.version,
-            prefix + "tarball=" + item.path,
-            prefix + "tarball-name=" + item.file,
-            prefix + "sha256=" + item.sha256,
-            prefix + "sha512=" + item.sha512,
-          ];
-        })
-        .join("\n") + "\n",
-    );
-  } else process.stdout.write("Release package validation passed\n");
+  writeReleaseOutputs(group);
 }

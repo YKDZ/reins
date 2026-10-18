@@ -53,20 +53,3 @@ jobs:
         with:
           path: .turbo/cache
           key: ${{ steps.turbo-cache.outputs.cache-primary-key }}
-      - name: 上传已验证的双包候选
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: release-package
-          path: .artifacts/release/*
-          include-hidden-files: true
-          if-no-files-found: error
-          retention-days: 30
-      - name: 上传运行包消费者验收证据
-        if: always()
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
-        with:
-          name: npm-smoke-evidence
-          path: .artifacts/packed-runtime-smoke/**
-          include-hidden-files: true
-          if-no-files-found: warn
-          retention-days: 7
