@@ -256,8 +256,46 @@ describe("codex driver", () => {
     await writeFile(imagePath, imageBytes);
     await writeFile(audioPath, audioBytes);
     const messageId = "m-core-first" as MessageId;
+    const events: DomainEvent[] = [];
+    let resolveCallerMessage!: (
+      event: Extract<DomainEvent, { type: "message" }>,
+    ) => void;
+    let rejectCallerMessage!: (error: Error) => void;
+    const callerMessageObserved = new Promise<
+      Extract<DomainEvent, { type: "message" }>
+    >((resolve, reject) => {
+      resolveCallerMessage = resolve;
+      rejectCallerMessage = reject;
+    });
+    const fake = createFakeTransport();
+    const driver = createCodexDriver({
+      transportFactory: () => fake.transport,
+    })({
+      emit(event) {
+        events.push(event);
+        if (
+          event.type === "message" &&
+          event.role === "caller" &&
+          event.messageId === messageId
+        )
+          resolveCallerMessage(event);
+      },
+      async diagnostics(input) {
+        if (input.kind === "stream_failure")
+          rejectCallerMessage(
+            new Error(`${input.reason}: ${input.message.text}`),
+          );
+        return undefined;
+      },
+    });
     try {
-      const { events, fake } = await setup("interactive", undefined, {
+      await driver.start({
+        sessionId,
+        turnId: firstTurnId,
+        harness: "codex",
+        message: "检查",
+        cwd: "/tmp/demo",
+        authorizationMode: "interactive",
         messageId,
       });
       fake.controls.pushInbound({
@@ -299,7 +337,7 @@ describe("codex driver", () => {
           },
         },
       });
-      await flush();
+      await callerMessageObserved;
 
       expect(events).toEqual([
         {
@@ -333,7 +371,11 @@ describe("codex driver", () => {
       ]);
       expect(JSON.stringify(events)).not.toContain(directory);
     } finally {
-      await rm(directory, { recursive: true, force: true });
+      try {
+        await driver.terminate(sessionId);
+      } finally {
+        await rm(directory, { recursive: true, force: true });
+      }
     }
   });
 
