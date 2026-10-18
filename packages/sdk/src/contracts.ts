@@ -74,6 +74,7 @@ export type OperationRecord =
       operationKey: OperationKey<"spawn">;
       cause?: ErrorCause;
       cleanupCause?: ErrorCause;
+      diagnosticId?: DiagnosticId;
     }
   | {
       status: "succeeded";
@@ -792,6 +793,7 @@ type FailureFactsByCode = {
     operationKey: OperationKey<OperationKind>;
     cause?: ErrorCause;
     cleanupCause?: ErrorCause;
+    diagnosticId?: DiagnosticId;
   };
   control_store_unavailable: {
     operationKey: OperationKey<OperationKind>;

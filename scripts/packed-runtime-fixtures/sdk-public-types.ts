@@ -14,6 +14,7 @@ import {
   type ModelCatalogResult,
   type DiagnosticId,
   type ReinsConnection,
+  type ReinsFailure,
   type ResumeCursor,
   type SendInput,
   type SessionHandle,
@@ -76,10 +77,24 @@ const restoredDiagnosticId = parseDiagnosticId(
 );
 
 const supportedHarness: HarnessId = "qoder";
-async function inspectSpawnOperation() {
+async function inspectSpawnOperation(): Promise<DiagnosticId | undefined> {
   const operation = await connection.getOperation(spawnOperationKey);
-  if (operation.status === "succeeded") return operation.result.cwd;
+  if (operation.status === "succeeded") return undefined;
+  if (operation.status === "outcome_unknown" && operation.diagnosticId) {
+    const evidence = await connection.diagnostics({
+      diagnosticId: operation.diagnosticId,
+    });
+    if ("record" in evidence) return evidence.record.diagnosticId;
+  }
   return undefined;
+}
+
+function inspectUnknownSpawnFailure(
+  failure: ReinsFailure,
+): DiagnosticId | undefined {
+  return failure.code === "operation_outcome_unknown"
+    ? failure.facts.diagnosticId
+    : undefined;
 }
 
 function spawnWithHarness<Harness extends SpawnInput["harness"]>(
@@ -113,6 +128,7 @@ void invalidHarness;
 void invalidSpawn;
 void inspectModelCatalog;
 void inspectSpawnOperation;
+void inspectUnknownSpawnFailure;
 void started;
 void generatedOperation;
 void activeTurnSend;

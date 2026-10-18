@@ -511,6 +511,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         ...(error?.cleanupCause === undefined
           ? {}
           : { cleanupCause: error.cleanupCause }),
+        ...(error?.diagnosticId === undefined
+          ? {}
+          : { diagnosticId: error.diagnosticId }),
       });
     };
     if (transientOperations.get(operationKey)?.method === "spawn")
@@ -591,6 +594,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             ...(operation.error.cleanupCause === undefined
               ? {}
               : { cleanupCause: operation.error.cleanupCause }),
+            ...(operation.error.diagnosticId === undefined
+              ? {}
+              : { diagnosticId: operation.error.diagnosticId }),
           });
         case "succeeded":
           return v.parse(operationRecordSchema, {
@@ -808,6 +814,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 code: "operation_outcome_unknown",
                 operationKey: key,
                 cause: failureCause(error.failure),
+                ...(error.failure.code !== "internal_error" ||
+                error.failure.diagnosticId === undefined
+                  ? {}
+                  : { diagnosticId: error.failure.diagnosticId }),
                 ...(error.terminationError === undefined
                   ? {}
                   : {

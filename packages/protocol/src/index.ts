@@ -2292,6 +2292,7 @@ export const machineErrorSchema = v.union([
     operationKey: operationKeySchema,
     cause: v.optional(errorCauseSchema),
     cleanupCause: v.optional(errorCauseSchema),
+    diagnosticId: v.optional(diagnosticIdSchema),
   }),
   v.strictObject({
     code: v.literal("control_store_unavailable"),
@@ -2640,6 +2641,7 @@ export const operationRecordSchema = v.union([
     operationKey: operationKeySchema,
     cause: v.optional(errorCauseSchema),
     cleanupCause: v.optional(errorCauseSchema),
+    diagnosticId: v.optional(diagnosticIdSchema),
   }),
   v.strictObject({
     status: v.literal("succeeded"),

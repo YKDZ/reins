@@ -1087,6 +1087,9 @@ function projectOperationRecord(
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
+        ...(record.diagnosticId === undefined
+          ? {}
+          : { diagnosticId: parseDiagnosticId(record.diagnosticId) }),
       };
     case "succeeded":
       return {
@@ -1166,6 +1169,9 @@ function projectFailure(
           ...(failure.cleanupCause === undefined
             ? {}
             : { cleanupCause: failure.cleanupCause }),
+          ...(failure.diagnosticId === undefined
+            ? {}
+            : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
         },
       };
     case "control_store_unavailable":
