@@ -938,6 +938,155 @@ describe("SQLite控制存储", () => {
     await rm(directory, { recursive: true, force: true });
   });
 
+  test("删除已关闭会话时清理事实与结果并保留防重放标记", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
+    let store = await openControlStore({ directory });
+    const key = operationKey();
+    const turnId = "delete-turn" as never;
+    const busySession = {
+      info: {
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: "2026-10-18T00:00:00.000Z",
+        turns: 0,
+        state: "busy" as const,
+        activeTurnId: turnId,
+      },
+      runtimeScopeId,
+      consumer,
+      generation,
+    };
+    const spawnResult: SpawnAck = { sessionId, turnId, cwd: request.cwd };
+    store.registerSpawn({
+      operationKey: key,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request,
+    });
+    store.markSpawnDispatched(key);
+    store.commitSpawn({
+      operationKey: key,
+      result: spawnResult,
+      session: busySession,
+      events: [
+        {
+          type: "session.created",
+          sessionId,
+          sessionLabel: request.sessionLabel,
+          harness: request.harness,
+          model: null,
+          reasoning: null,
+          cwd: request.cwd,
+          spawnedAt: busySession.info.spawnedAt,
+        },
+        { type: "turn.started", sessionId, turnId },
+      ],
+    });
+    const deleteInput = {
+      sessionId,
+      runtimeScopeId,
+      consumer,
+      currentGeneration: generation,
+      unreachable: false,
+    } as const;
+    expect(store.deleteSessionRecords(deleteInput)).toEqual({
+      status: "live",
+    });
+
+    const { activeTurnId: _activeTurnId, ...completedFields } =
+      busySession.info;
+    const idleSession = {
+      ...completedFields,
+      state: "idle" as const,
+      turns: 1,
+      lastCompletedTurn: { turnId, stopReason: "end_turn" as const },
+    };
+    store.recordEvent(
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId,
+        stopReason: "end_turn",
+        finalReply: null,
+      },
+      idleSession,
+    );
+    const killedSession = {
+      ...idleSession,
+      state: "killed" as const,
+    };
+    store.recordEvent({ type: "session.killed", sessionId }, killedSession);
+    store.close();
+
+    const blockedDatabase = new DatabaseSync(join(directory, "control.sqlite"));
+    blockedDatabase.exec(
+      "CREATE TRIGGER block_record_deletion BEFORE DELETE ON session_events BEGIN SELECT RAISE(ABORT, 'record deletion rejected'); END",
+    );
+    blockedDatabase.close();
+    store = await openControlStore({ directory });
+    expect(() => store.deleteSessionRecords(deleteInput)).toThrow();
+    expect(store.health()).toEqual({ status: "unavailable" });
+    expect(store.getSession(sessionId)).toMatchObject({
+      info: { state: "killed" },
+    });
+    expect(store.sessionEvents(sessionId)).toHaveLength(4);
+    expect(store.getOperation(key)).toMatchObject({ status: "succeeded" });
+    expect(store.isOperationDeleted(key)).toBe(false);
+    store.close();
+
+    const repairedDatabase = new DatabaseSync(
+      join(directory, "control.sqlite"),
+    );
+    repairedDatabase.exec("DROP TRIGGER block_record_deletion");
+    repairedDatabase.close();
+    store = await openControlStore({ directory });
+    expect(store.deleteSessionRecords(deleteInput)).toMatchObject({
+      status: "deleted",
+      session: { sessionId, runtimeScopeId, consumer, generation },
+      operationKeys: [key],
+    });
+    expect(store.getSession(sessionId)).toBeUndefined();
+    expect(store.getSessionOwner(sessionId)).toBe(consumer);
+    expect(store.getOperation(key)).toBeUndefined();
+    expect(store.isOperationDeleted(key)).toBe(true);
+    expect(() =>
+      store.registerSpawn({
+        operationKey: key,
+        runtimeScopeId,
+        consumer,
+        generation,
+        request,
+      }),
+    ).toThrow(expect.objectContaining({ code: "operation_key_conflict" }));
+    expect(() => store.sessionEvents(sessionId)).toThrow(
+      expect.objectContaining({
+        code: "event_history_unavailable",
+        sessionId,
+      }),
+    );
+    store.close();
+
+    store = await openControlStore({ directory });
+    expect(store.getDeletedSession(sessionId)).toEqual({
+      sessionId,
+      runtimeScopeId,
+      consumer,
+      generation,
+    });
+    expect(store.isOperationDeleted(key)).toBe(true);
+    expect(store.deleteSessionRecords(deleteInput)).toMatchObject({
+      status: "deleted",
+      operationKeys: [key],
+    });
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   test("重开后保留接受结果未知的主因和停止次因", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
     const store = await openControlStore({ directory });

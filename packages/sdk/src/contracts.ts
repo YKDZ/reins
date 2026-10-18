@@ -151,6 +151,10 @@ type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       operationKey: OperationKey<Kind>;
     }
   | {
+      status: "deleted";
+      operationKey: OperationKey<Kind>;
+    }
+  | {
       status: "outcome_unknown";
       operationKey: OperationKey<Kind>;
       cause?: ErrorCause;
@@ -222,6 +226,10 @@ export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
   status: "killed" | "not_found";
+};
+export type DeleteRecordsResult = {
+  sessionHandle: SessionHandle;
+  status: "deleted";
 };
 export type SessionCloseEffect = {
   kind: "session_closed";
@@ -376,6 +384,7 @@ export type AgentSubscriptionEnd = {
     | "failed"
     | "killed"
     | "session_killed"
+    | "session_deleted"
     | "control_unavailable"
     | "closed";
 };
@@ -1073,6 +1082,11 @@ type FailureFactsByCode = {
         cause: ErrorCause;
         cleanupCause?: ErrorCause;
         cleanupSessionHandle?: SessionHandle;
+      }
+    | {
+        stage: "record_deletion";
+        sessionHandle: SessionHandle;
+        cause: ErrorCause;
       };
   permission_not_pending: { permissionHandle: PermissionHandle };
   permission_resolution_mismatch: { permissionHandle: PermissionHandle };
@@ -1081,6 +1095,7 @@ type FailureFactsByCode = {
   unknown_harness: { harness: HarnessId; availableHarnesses: HarnessId[] };
   unsupported_feature: { feature: string };
   session_busy: { sessionHandle: SessionHandle };
+  session_records_live: { sessionHandle: SessionHandle };
   turn_precondition_failed: {
     sessionHandle: SessionHandle;
     expected: TurnHandle;
@@ -1180,6 +1195,7 @@ export type ReinsConnection = {
   getOperation<Kind extends RecoverableOperationKind>(
     operationKey: OperationKey<Kind>,
   ): Promise<OperationRecord<Kind>>;
+  deleteRecords(sessionHandle: SessionHandle): Promise<DeleteRecordsResult>;
   spawn(
     input: SpawnInput,
     options?: OperationOptions<"spawn">,

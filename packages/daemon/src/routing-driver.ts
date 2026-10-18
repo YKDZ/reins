@@ -132,7 +132,7 @@ export function createRoutingDriverFactory(
         await driverFor(sessionId).interrupt(sessionId, turnId);
       },
       resolvePermission(sessionId, permissionId, resolution) {
-        driverFor(sessionId).resolvePermission(
+        return driverFor(sessionId).resolvePermission(
           sessionId,
           permissionId,
           resolution,

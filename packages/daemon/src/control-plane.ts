@@ -38,6 +38,8 @@ import type {
   MachineError,
   KillParams,
   KillResult,
+  DeleteRecordsParams,
+  DeleteRecordsResult,
   InterruptAck,
   InterruptParams,
   OperationKey,
@@ -63,6 +65,7 @@ import type {
 } from "@reins/protocol";
 import {
   decodeResumeCursor,
+  deleteRecordsParamsSchema,
   encodeResumeCursor,
   harnessModelCatalogSchema,
   isSideEffectMethod,
@@ -71,10 +74,12 @@ import {
   makeTextEvidence,
   machineErrorSchema,
   operationRecordSchemaFor,
+  operationKeySchema,
   interruptParamsSchema,
   parseOperationKey,
   resolvePermissionParamsSchema,
   sendParamsSchema,
+  sessionIdSchema,
   spawnParamsSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -231,6 +236,7 @@ export type ControlPlane = {
   settleEvents(): Promise<void>;
   subscribeEvents(listener: (entry: CommittedEvent) => void): () => void;
   subscribeControlUnavailable(listener: () => void): () => void;
+  subscribeSessionDeleted(listener: (sessionId: SessionId) => void): () => void;
   subscribeSessionUnavailable(
     listener: (sessionId: SessionId) => void,
   ): () => void;
@@ -282,6 +288,7 @@ function canonical(value: unknown): string {
 export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   const eventListeners = new Set<(entry: CommittedEvent) => void>();
   const controlUnavailableListeners = new Set<() => void>();
+  const sessionDeletedListeners = new Set<(sessionId: SessionId) => void>();
   const sessionUnavailableListeners = new Set<(sessionId: SessionId) => void>();
   const waitListeners = new Set<(entry?: CommittedEvent) => void>();
   const committedEvents = new Map<SessionId, StoredCommittedEvent[]>();
@@ -434,6 +441,125 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       ...result,
       fingerprint: canonical({ method: "kill", params: operation.request }),
     });
+  }
+
+  function operationFingerprintSessionId(
+    fingerprint: string,
+  ): SessionId | undefined {
+    try {
+      const parsed = JSON.parse(fingerprint) as {
+        readonly params?: { readonly sessionId?: unknown };
+        readonly request?: { readonly sessionId?: unknown };
+      };
+      const target = parsed.params ?? parsed.request;
+      const sessionId = v.safeParse(sessionIdSchema, target?.sessionId);
+      return sessionId.success ? sessionId.output : undefined;
+    } catch {
+      // 指纹无法解析时不猜测操作归属。
+      return undefined;
+    }
+  }
+
+  function operationSessionId(value: unknown): SessionId | undefined {
+    if (typeof value !== "object" || value === null) return undefined;
+    const record = value as Record<string, unknown>;
+    if (typeof record.fingerprint === "string") {
+      const fingerprintSessionId = operationFingerprintSessionId(
+        record.fingerprint,
+      );
+      if (fingerprintSessionId !== undefined) return fingerprintSessionId;
+    }
+    const result = record.result;
+    if (typeof result === "object" && result !== null) {
+      const resultSessionId = v.safeParse(
+        sessionIdSchema,
+        (result as Record<string, unknown>).sessionId,
+      );
+      if (resultSessionId.success) return resultSessionId.output;
+    }
+    const error = record.error;
+    if (typeof error !== "object" || error === null) return undefined;
+    const errorRecord = error as Record<string, unknown>;
+    const errorSessionId = v.safeParse(sessionIdSchema, errorRecord.sessionId);
+    if (errorSessionId.success) return errorSessionId.output;
+    const effect = errorRecord.effect;
+    if (typeof effect === "object" && effect !== null) {
+      const effectSessionId = v.safeParse(
+        sessionIdSchema,
+        (effect as Record<string, unknown>).sessionId,
+      );
+      if (effectSessionId.success) return effectSessionId.output;
+    }
+    return undefined;
+  }
+
+  function knownOperationKeysForSession(sessionId: SessionId): OperationKey[] {
+    const keys = new Set<OperationKey>();
+    for (const fingerprints of [
+      permissionRequestFingerprints,
+      interruptRequestFingerprints,
+    ]) {
+      for (const [key, fingerprint] of fingerprints) {
+        if (operationFingerprintSessionId(fingerprint) === sessionId)
+          keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
+      }
+    }
+    for (const [key, value] of spawnResults)
+      if (operationSessionId(value) === sessionId)
+        keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
+    for (const [key, value] of sendResults)
+      if (operationSessionId(value) === sessionId)
+        keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
+    for (const [key, value] of interruptResults)
+      if (operationSessionId(value) === sessionId)
+        keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
+    for (const [key, value] of permissionResults)
+      if (operationSessionId(value) === sessionId)
+        keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
+    for (const [key, value] of killResults)
+      if (operationSessionId(value) === sessionId)
+        keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
+    return Array.from(keys);
+  }
+
+  function transientOperationTargetsSession(sessionId: SessionId): boolean {
+    for (const operation of transientOperations.values()) {
+      try {
+        const fingerprint = JSON.parse(operation.fingerprint) as {
+          params?: { sessionId?: unknown };
+        };
+        if (fingerprint.params?.sessionId === sessionId) return true;
+      } catch {
+        // 指纹由本地规范编码器生成。
+      }
+    }
+    return false;
+  }
+
+  function clearSessionOperationCaches(
+    sessionId: SessionId,
+    operationKeys: readonly string[],
+  ): void {
+    for (const key of operationKeys) {
+      spawnResults.delete(key);
+      sendResults.delete(key);
+      interruptResults.delete(key);
+      permissionResults.delete(key);
+      killResults.delete(key);
+      permissionRequestFingerprints.delete(key);
+      interruptRequestFingerprints.delete(key);
+    }
+    for (const [key, value] of spawnResults)
+      if (operationSessionId(value) === sessionId) spawnResults.delete(key);
+    for (const [key, value] of sendResults)
+      if (operationSessionId(value) === sessionId) sendResults.delete(key);
+    for (const [key, value] of interruptResults)
+      if (operationSessionId(value) === sessionId) interruptResults.delete(key);
+    for (const [key, value] of permissionResults)
+      if (operationSessionId(value) === sessionId)
+        permissionResults.delete(key);
+    for (const [key, value] of killResults)
+      if (operationSessionId(value) === sessionId) killResults.delete(key);
   }
   let eventWriteFailure: unknown;
   const eventWriteFailures = new Map<SessionId, DomainEvent>();
@@ -1813,6 +1939,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       claims.consumer !== consumer
     )
       throw { code: "operation_key_scope_mismatch" } satisfies MachineError;
+    if (options.controlStore.isOperationDeleted(operationKey))
+      return v.parse(operationRecordSchemaFor(claims.kind), {
+        status: "deleted",
+        operationKey,
+      }) as OperationRecord;
     if (claims.kind === "resolvePermission")
       return getResolvePermissionOperation(
         operationKey as OperationKey<"resolvePermission">,
@@ -2086,6 +2217,130 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       !options.consumerScope.inScope(consumer, sessionId)
     )
       throw { code: "session_not_found", sessionId } satisfies MachineError;
+    if (options.controlStore.getDeletedSession(sessionId) !== undefined)
+      throw {
+        code: "event_history_unavailable",
+        sessionId,
+      } satisfies MachineError;
+  }
+
+  async function deleteRecords(
+    rawParams: DeleteRecordsParams,
+    consumer: ConsumerContext | undefined,
+  ): Promise<DeleteRecordsResult> {
+    const params = v.parse(deleteRecordsParamsSchema, rawParams);
+    const { sessionId } = params;
+    if (consumer === undefined)
+      throw { code: "consumer_context_required" } satisfies MachineError;
+    if (!options.consumerScope.inScope(consumer, sessionId))
+      throw { code: "session_not_found", sessionId } satisfies MachineError;
+
+    const deletionInput = (unreachable = false) => ({
+      sessionId,
+      runtimeScopeId: options.runtimeScopeId,
+      consumer,
+      currentGeneration: options.diagnostics.generation,
+      unreachable,
+      knownOperationKeys: knownOperationKeysForSession(sessionId),
+    });
+    const finishDeletion = (
+      result: Extract<
+        ReturnType<ControlStore["deleteSessionRecords"]>,
+        { status: "deleted" }
+      >,
+    ): DeleteRecordsResult => {
+      clearSessionOperationCaches(sessionId, result.operationKeys);
+      committedEvents.delete(sessionId);
+      eventWriteFailures.delete(sessionId);
+      eventOperationFailures.delete(sessionId);
+      eventFailureCleanupFailures.delete(sessionId);
+      wakeWaiters();
+      for (const listener of Array.from(sessionDeletedListeners)) {
+        try {
+          listener(sessionId);
+        } catch {
+          // 单个观察者不能撤销已提交删除或阻止其他观察者。
+        }
+      }
+      return { sessionId, status: "deleted" };
+    };
+
+    try {
+      await assertWriterLease();
+      if (
+        eventWriteFailure === undefined &&
+        options.controlStore.health().status === "available"
+      )
+        await settleEvents();
+
+      const deleted = options.controlStore.getDeletedSession(sessionId);
+      if (deleted !== undefined) {
+        if (
+          deleted.runtimeScopeId !== options.runtimeScopeId ||
+          deleted.consumer !== consumer
+        )
+          throw { code: "session_not_found", sessionId } satisfies MachineError;
+        const result =
+          options.controlStore.deleteSessionRecords(deletionInput());
+        if (result.status === "deleted") return finishDeletion(result);
+      }
+
+      const stored = options.controlStore.getSession(sessionId);
+      if (
+        stored === undefined ||
+        stored.runtimeScopeId !== options.runtimeScopeId ||
+        stored.consumer !== consumer
+      )
+        throw { code: "session_not_found", sessionId } satisfies MachineError;
+      const visible = list({ sessionId }, consumer)[0];
+      const unreachable = visible?.state === "unreachable";
+      if (stored.info.state !== "killed" && !unreachable)
+        throw {
+          code: "session_records_live",
+          sessionId,
+        } satisfies MachineError;
+      if (transientOperationTargetsSession(sessionId))
+        throw {
+          code: "session_records_live",
+          sessionId,
+        } satisfies MachineError;
+
+      const result = options.controlStore.deleteSessionRecords({
+        ...deletionInput(unreachable),
+      });
+      if (result.status === "not_found")
+        throw { code: "session_not_found", sessionId } satisfies MachineError;
+      if (result.status === "live")
+        throw {
+          code: "session_records_live",
+          sessionId,
+        } satisfies MachineError;
+      return finishDeletion(result);
+    } catch (error) {
+      const parsed = v.safeParse(machineErrorSchema, error);
+      if (parsed.success) throw parsed.output;
+
+      try {
+        const deleted = options.controlStore.getDeletedSession(sessionId);
+        if (
+          deleted !== undefined &&
+          deleted.runtimeScopeId === options.runtimeScopeId &&
+          deleted.consumer === consumer
+        ) {
+          const result =
+            options.controlStore.deleteSessionRecords(deletionInput());
+          if (result.status === "deleted") return finishDeletion(result);
+        }
+      } catch {
+        // Verification failure keeps the original deletion failure as primary cause.
+      }
+      throw {
+        code: "control_store_unavailable",
+        stage: "record_deletion",
+        sessionId,
+        cause: makeErrorCause("io", errorMessage(error)),
+      } satisfies MachineError;
+    }
   }
 
   async function resolvePermissionOperation(
@@ -2389,6 +2644,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           (rawParams as { operationKey: OperationKey }).operationKey,
           consumer,
         );
+      case "deleteRecords":
+        return await deleteRecords(rawParams as DeleteRecordsParams, consumer);
       case "modelCatalog":
         return await aggregateModelCatalog();
       case "spawn": {
@@ -3215,6 +3472,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     readonly harness: HarnessId;
     readonly cause?: AutonomousTurnCause;
   }): Promise<TurnId> {
+    if (options.controlStore.getDeletedSession(input.sessionId) !== undefined)
+      throw {
+        code: "event_history_unavailable",
+        sessionId: input.sessionId,
+      } satisfies MachineError;
     try {
       await assertWriterLease();
     } catch (error) {
@@ -3235,6 +3497,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
 
   function acceptEvent(event: DomainEvent): Promise<void> {
     try {
+      if (options.controlStore.getDeletedSession(event.sessionId) !== undefined)
+        return Promise.resolve();
       if (eventWriteFailure !== undefined) throw eventWriteFailure;
       const queue = committedEvents.get(event.sessionId);
       const committed = queue?.[0];
@@ -3390,11 +3654,20 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       let stored = sessions.get(target.sessionId);
       if (stored === undefined) {
         stored = options.controlStore.getSession(target.sessionId);
-        if (stored === undefined)
+        if (stored === undefined) {
+          if (
+            options.controlStore.getDeletedSession(target.sessionId) !==
+            undefined
+          )
+            throw {
+              code: "event_history_unavailable",
+              sessionId: target.sessionId,
+            } satisfies MachineError;
           throw {
             code: "session_not_found",
             sessionId: target.sessionId,
           } satisfies MachineError;
+        }
         sessions.set(target.sessionId, stored);
       }
       const historyKey = `${target.sessionId}:${target.turnId}`;
@@ -4037,6 +4310,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     consumer: ConsumerContext | undefined,
     perform: () => Promise<{ result: unknown } | { error: MachineError }>,
   ): Promise<{ result: unknown } | { error: MachineError }> {
+    if (request.method === "deleteRecords") return performSafely(perform);
     if (
       request.method === "getOperation" ||
       request.method === "list" ||
@@ -5219,6 +5493,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       controlUnavailableListeners.add(listener);
       return () => controlUnavailableListeners.delete(listener);
     },
+    subscribeSessionDeleted(listener) {
+      sessionDeletedListeners.add(listener);
+      return () => sessionDeletedListeners.delete(listener);
+    },
     subscribeSessionUnavailable(listener) {
       sessionUnavailableListeners.add(listener);
       return () => sessionUnavailableListeners.delete(listener);
@@ -5284,6 +5562,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       unsubscribeMachineControlUnavailable();
       eventListeners.clear();
       controlUnavailableListeners.clear();
+      sessionDeletedListeners.clear();
       sessionUnavailableListeners.clear();
       wakeWaiters();
       waitListeners.clear();

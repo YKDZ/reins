@@ -15,6 +15,7 @@ import {
   type ModelCatalogFailure,
   type ModelCatalogResult,
   type DiagnosticId,
+  type DeleteRecordsResult,
   type KillResult,
   type MessageKey,
   type OperationRecord,
@@ -109,6 +110,16 @@ const interruptOperationQuery: Promise<OperationRecord<"interrupt">> =
   connection.getOperation(interruptOperationKey);
 const permissionOperationQuery: Promise<OperationRecord<"resolvePermission">> =
   connection.getOperation(resolvePermissionOperationKey);
+const deleteRecords: Promise<DeleteRecordsResult> =
+  connection.deleteRecords(sessionHandle);
+async function inspectDeletedOperation(): Promise<
+  OperationKey<"spawn"> | undefined
+> {
+  const operation = await connection.getOperation(spawnOperationKey);
+  return operation.status === "deleted" ? operation.operationKey : undefined;
+}
+void inspectDeletedOperation;
+void deleteRecords;
 void interruptOperationQuery;
 void permissionOperationQuery;
 async function inspectPermissionOperation(): Promise<

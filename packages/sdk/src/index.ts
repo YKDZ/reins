@@ -57,6 +57,7 @@ import {
   type DiagnosticRecord,
   type DiagnosticsQuery,
   type DiagnosticsResult,
+  type DeleteRecordsResult,
   type OperationKey,
   type OperationKind,
   type OperationOptions,
@@ -174,6 +175,7 @@ export type {
   DiagnosticsFilter,
   DiagnosticsQuery,
   DiagnosticsResult,
+  DeleteRecordsResult,
   KillInput,
   KillResult,
   SessionCloseEffect,
@@ -719,6 +721,19 @@ async function connectClient(
           generation,
         ) as OperationRecord<Kind>;
       },
+      async deleteRecords(sessionHandle) {
+        const result = await query(client!, "deleteRecords", {
+          sessionId: sessionIdFromHandle(
+            sessionHandle,
+            "sessionHandle",
+            "query",
+          ),
+        });
+        return {
+          sessionHandle,
+          status: result.status,
+        } satisfies DeleteRecordsResult;
+      },
       async spawn(input, options) {
         return projectSpawnResult(
           await perform(
@@ -1073,7 +1088,13 @@ async function perform<M extends SideEffectMethod>(
 }
 
 async function query<
-  M extends "modelCatalog" | "list" | "diagnostics" | "wait" | "getOperation",
+  M extends
+    | "modelCatalog"
+    | "list"
+    | "diagnostics"
+    | "wait"
+    | "getOperation"
+    | "deleteRecords",
 >(
   client: ControlClient,
   method: M,
@@ -1272,6 +1293,7 @@ function projectOperationRecord<Kind extends RecoverableOperationKind>(
     case "unknown":
     case "unavailable":
     case "pending":
+    case "deleted":
       return { status: record.status, operationKey } as OperationRecord<Kind>;
     case "outcome_unknown":
       return {
@@ -1485,6 +1507,15 @@ function projectFailure(
         },
       };
     case "control_store_unavailable":
+      if (failure.stage === "record_deletion")
+        return {
+          code: failure.code,
+          facts: {
+            stage: failure.stage,
+            sessionHandle: parseSessionHandle(failure.sessionId),
+            cause: failure.cause,
+          },
+        };
       if (failure.stage === "event" || failure.stage === "event_commit") {
         const eventFacts = {
           sessionHandle: parseSessionHandle(failure.sessionId),
@@ -1628,6 +1659,11 @@ function projectFailure(
           sessionHandle: parseSessionHandle(failure.sessionId),
         },
       };
+    case "session_records_live":
+      return {
+        code: failure.code,
+        facts: { sessionHandle: parseSessionHandle(failure.sessionId) },
+      };
     case "turn_precondition_failed":
       return {
         code: failure.code,
@@ -1658,9 +1694,23 @@ function projectFailure(
       };
     case "permission_not_pending":
     case "permission_resolution_mismatch":
-      return permissionHandle === undefined
-        ? { code: "unexpected_failure", facts: { remoteCode: failure.code } }
-        : { code: failure.code, facts: { permissionHandle } };
+      if (failure.turnId === undefined) {
+        return permissionHandle === undefined
+          ? { code: "unexpected_failure", facts: { remoteCode: failure.code } }
+          : { code: failure.code, facts: { permissionHandle } };
+      }
+      return {
+        code: failure.code,
+        facts: {
+          permissionHandle: parsePermissionHandle(
+            encodePermissionHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.turnId,
+              permissionId: failure.permissionId,
+            }),
+          ),
+        },
+      };
     case "diagnostic_not_found":
       return {
         code: failure.code,

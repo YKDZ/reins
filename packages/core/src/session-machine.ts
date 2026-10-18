@@ -107,12 +107,6 @@ type IngressProjection = {
   readonly usedPermissionIds: Set<PermissionId>;
 };
 
-type IngressActionFrame = {
-  accepting: boolean;
-  readonly projections: Map<SessionId, IngressProjection>;
-  readonly nativeEvents: DomainEvent[];
-};
-
 type PendingDelivery = {
   readonly projection: IngressProjection;
   readonly events: DomainEvent[];
@@ -273,6 +267,27 @@ async function unexpectedFailure(
     ),
     ...(diagnosticId === undefined ? {} : { diagnosticId }),
   };
+}
+
+function addPermissionTargetToFailure(
+  error: unknown,
+  target: {
+    readonly sessionId: SessionId;
+    readonly turnId: TurnId;
+    readonly permissionId: PermissionId;
+  },
+): unknown {
+  const known = v.safeParse(machineErrorSchema, error);
+  if (
+    !known.success ||
+    (known.output.code !== "permission_not_pending" &&
+      known.output.code !== "permission_resolution_mismatch") ||
+    known.output.sessionId !== target.sessionId ||
+    known.output.permissionId !== target.permissionId ||
+    known.output.turnId !== undefined
+  )
+    return error;
+  return { ...known.output, turnId: target.turnId };
 }
 
 function recordBestEffort(
@@ -618,10 +633,10 @@ export function createSessionMachine(options: {
     SessionId,
     { readonly result: KillResult; readonly events: readonly DomainEvent[] }
   >();
-  const ingressActions: IngressActionFrame[] = [];
   const uncertainDeliveries = new Set<SessionId>();
   const interruptingTurns = new Set<string>();
   const acceptedInterrupts = new Set<string>();
+  const resolvingPermissions = new Set<SessionId>();
   // 接受响应与终态通知可能在同一轮到达；只暂存本会话事件，
   // 保证已接受 caller 事实先于该回合终态，拒绝后仍释放真实终态。
   const pendingDeliveries = new Map<SessionId, PendingDelivery>();
@@ -767,12 +782,6 @@ export function createSessionMachine(options: {
   function activeProjection(
     sessionId: SessionId,
   ): IngressProjection | undefined {
-    for (let index = ingressActions.length - 1; index >= 0; index -= 1) {
-      const frame = ingressActions[index];
-      if (frame?.accepting !== true) continue;
-      const projection = frame.projections.get(sessionId);
-      if (projection !== undefined) return projection;
-    }
     return pendingDeliveries.get(sessionId)?.projection;
   }
 
@@ -812,52 +821,6 @@ export function createSessionMachine(options: {
       pendingPermissions: new Map(source.pendingPermissions),
       usedPermissionIds: new Set(source.usedPermissionIds),
     };
-  }
-
-  function driverTransaction(
-    lead: readonly DomainEvent[],
-    projections: Map<SessionId, IngressProjection>,
-    run: () => void,
-  ): void {
-    for (const event of lead) {
-      const projection = projections.get(event.sessionId);
-      if (projection !== undefined) projectEvent(projection, event);
-    }
-    const frame: IngressActionFrame = {
-      accepting: true,
-      projections,
-      nativeEvents: [],
-    };
-    ingressActions.push(frame);
-    let committed = false;
-    let failed = false;
-    let failure: unknown;
-    try {
-      bus.transaction(lead, () => {
-        try {
-          run();
-        } finally {
-          frame.accepting = false;
-        }
-      });
-      committed = true;
-    } catch (error) {
-      failed = true;
-      failure = error;
-    } finally {
-      ingressActions.pop();
-      if (committed) {
-        const parent = ingressActions.at(-1);
-        if (parent !== undefined) {
-          for (const [sessionId, projection] of frame.projections) {
-            parent.projections.set(sessionId, projection);
-          }
-        }
-      }
-    }
-    // 原生事实不随本地操作记录的回滚而消失；lead 仍只在控制提交成功后发布。
-    if (frame.nativeEvents.length > 0) bus.publish(frame.nativeEvents);
-    if (failed) throw failure;
   }
 
   function projectEvent(
@@ -1268,9 +1231,7 @@ export function createSessionMachine(options: {
     }
     const delivering = pendingDeliveries.get(event.sessionId);
     if (delivering === undefined) {
-      const action = ingressActions.at(-1);
-      if (action?.accepting === true) action.nativeEvents.push(event);
-      else bus.publish(event);
+      bus.publish(event);
     } else if (delivering.phase === "accepting") delivering.events.push(event);
     else delivering.lateEvents.push(event);
   };
@@ -2065,6 +2026,12 @@ export function createSessionMachine(options: {
         throw machineError({ code: "session_killed", sessionId });
       }
       assertNotTerminating(sessionId);
+      if (
+        uncertainDeliveries.has(sessionId) ||
+        resolvingPermissions.has(sessionId) ||
+        pendingDeliveries.has(sessionId)
+      )
+        throw machineError({ code: "session_busy", sessionId });
       const pending = session.pendingPermissions.get(permissionId);
       if (pending === undefined) {
         throw machineError({
@@ -2104,45 +2071,84 @@ export function createSessionMachine(options: {
       const phase: {
         value: "beforeDispatch" | "native" | "commit";
       } = { value: "beforeDispatch" };
+      const delivery = createPendingDelivery(projectSession(sessionId), false);
+      projectEvent(delivery.projection, event);
+      delivery.count = 1;
+      pendingDeliveries.set(sessionId, delivery);
+      resolvingPermissions.add(sessionId);
+
+      function flushBuffered(includeResolution: boolean): void {
+        delivery.phase = "committing";
+        const acceptedEvents = delivery.events.splice(0);
+        const batch = includeResolution
+          ? [event, ...acceptedEvents]
+          : acceptedEvents;
+        if (batch.length > 0) bus.publish(batch);
+        while (delivery.lateEvents.length > 0) {
+          const lateBatch = delivery.lateEvents.splice(0);
+          bus.publish(lateBatch);
+        }
+      }
+
       try {
-        driverTransaction(
-          [event],
-          new Map([[sessionId, projectSession(sessionId)]]),
-          () => {
-            hooks?.beforeDispatch?.();
-            phase.value = "native";
-            driver.resolvePermission(sessionId, permissionId, resolution);
-            phase.value = "commit";
-            hooks?.commit?.(result, event);
-          },
-        );
-      } catch (error) {
-        if (error instanceof PermissionResolutionCommitFailure) throw error;
-        if (phase.value === "commit")
-          throw new PermissionResolutionCommitFailure(result, error);
-        const failure = await unexpectedFailure(options.diagnostics, error, {
-          sessionId,
-          turnId: pending.turnId,
-          kind: "authorization_failure",
-          operation: "resolve_permission",
-          stage: "deliver",
-          reason: "upstream_rejected",
-          permissionId,
-        });
-        if (hooks === undefined) throw failure;
-        throw new PermissionResolutionRequestFailure(
-          sessionId,
-          turnId,
-          permissionId,
-          phase.value === "beforeDispatch"
-            ? "not_accepted"
-            : error instanceof WorkerPermissionFailure
-              ? error.acceptance
-              : v.safeParse(machineErrorSchema, error).success
-                ? "not_accepted"
-                : "unknown",
-          failure,
-        );
+        try {
+          hooks?.beforeDispatch?.();
+          phase.value = "native";
+          await driver.resolvePermission(sessionId, permissionId, resolution);
+        } catch (error) {
+          const targetedError = addPermissionTargetToFailure(error, {
+            sessionId,
+            turnId: pending.turnId,
+            permissionId,
+          });
+          const acceptance =
+            phase.value === "beforeDispatch"
+              ? "not_accepted"
+              : error instanceof WorkerPermissionFailure
+                ? error.acceptance
+                : v.safeParse(machineErrorSchema, targetedError).success
+                  ? "not_accepted"
+                  : "unknown";
+          if (acceptance === "unknown" && hooks !== undefined)
+            uncertainDeliveries.add(sessionId);
+          const failure = await unexpectedFailure(
+            options.diagnostics,
+            targetedError,
+            {
+              sessionId,
+              turnId: pending.turnId,
+              kind: "authorization_failure",
+              operation: "resolve_permission",
+              stage: "deliver",
+              reason: "upstream_rejected",
+              permissionId,
+            },
+          );
+          flushBuffered(false);
+          if (hooks === undefined) throw failure;
+          throw new PermissionResolutionRequestFailure(
+            sessionId,
+            turnId,
+            permissionId,
+            acceptance,
+            failure,
+          );
+        }
+        phase.value = "commit";
+        try {
+          hooks?.commit?.(result, event);
+        } catch (commitError) {
+          flushBuffered(false);
+          if (commitError instanceof PermissionResolutionCommitFailure)
+            throw commitError;
+          throw new PermissionResolutionCommitFailure(result, commitError);
+        }
+        flushBuffered(true);
+      } finally {
+        if (pendingDeliveries.get(sessionId) === delivery)
+          pendingDeliveries.delete(sessionId);
+        delivery.settle();
+        resolvingPermissions.delete(sessionId);
       }
       return result;
     },

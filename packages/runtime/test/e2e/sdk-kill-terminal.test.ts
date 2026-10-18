@@ -249,6 +249,74 @@ test("重连后仍可通过 SDK 查询已完成的关闭操作", async () => {
   });
 });
 
+test("关闭会话可显式删除记录且旧操作不能重新派发", async () => {
+  const { callerCwd, sdk } = await fixture();
+  const connection = await sdk();
+  const spawnKey = connection.prepareOperation("spawn");
+  const spawned = await connection.spawn(
+    {
+      sessionLabel: "delete-closed-records",
+      harness: "codex",
+      message: "closed session records",
+      cwd: callerCwd,
+    },
+    { operationKey: spawnKey },
+  );
+  await nativeReady(callerCwd);
+  await expect(
+    connection.deleteRecords(spawned.sessionHandle),
+  ).rejects.toMatchObject({
+    failure: { code: "session_records_live" },
+  });
+
+  const killKey = connection.prepareOperation("kill");
+  await connection.kill(
+    { sessionHandle: spawned.sessionHandle },
+    { operationKey: killKey },
+  );
+  const history = await connection.attach(
+    { scope: "session", sessionHandle: spawned.sessionHandle },
+    { mode: "snapshot" },
+  );
+  const cursor = history.checkpoint;
+  history.close();
+
+  await expect(
+    connection.deleteRecords(spawned.sessionHandle),
+  ).resolves.toEqual({
+    sessionHandle: spawned.sessionHandle,
+    status: "deleted",
+  });
+  await expect(
+    connection.list({ sessionHandle: spawned.sessionHandle }),
+  ).resolves.toEqual([]);
+  await expect(connection.getOperation(spawnKey)).resolves.toEqual({
+    status: "deleted",
+    operationKey: spawnKey,
+  });
+  await expect(connection.getOperation(killKey)).resolves.toEqual({
+    status: "deleted",
+    operationKey: killKey,
+  });
+  await expect(
+    connection.spawn(
+      {
+        sessionLabel: "delete-closed-records",
+        harness: "codex",
+        message: "closed session records",
+        cwd: callerCwd,
+      },
+      { operationKey: spawnKey },
+    ),
+  ).rejects.toMatchObject({ failure: { code: "operation_key_conflict" } });
+  await expect(
+    connection.attach(
+      { scope: "session", sessionHandle: spawned.sessionHandle },
+      { mode: "after", cursor },
+    ),
+  ).rejects.toMatchObject({ failure: { code: "event_history_unavailable" } });
+});
+
 test("官方关闭已确认但本地资源释放失败时保留关闭效果且不发布终态", async () => {
   const { callerCwd, sdk, spawnSession, killSession } = await fixture();
   const connection = await sdk();

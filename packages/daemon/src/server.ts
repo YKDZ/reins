@@ -128,8 +128,8 @@ export function createProtocolServer(
   options: PublicProtocolServerOptions,
 ): ProtocolServer {
   const controlStore = options.controlStore ?? createInMemoryControlStore();
-  const consumerScope = createConsumerScope(
-    (sessionId) => controlStore.getSession(sessionId)?.consumer,
+  const consumerScope = createConsumerScope((sessionId) =>
+    controlStore.getSessionOwner(sessionId),
   );
   const diagnostics = orderDiagnosticsAcceptance(
     options.diagnostics,
@@ -457,6 +457,7 @@ export function createProtocolServerInternal(
       } finally {
         unsubscribeControlEvents();
         unsubscribeControlUnavailable();
+        unsubscribeSessionDeleted();
         unsubscribeSessionUnavailable();
         options.control.close();
         startedResolve?.();
@@ -472,7 +473,12 @@ export function createProtocolServerInternal(
 
   function endAttach(
     subscription: AttachSubscription,
-    reason: StopReason | "session_killed" | "control_unavailable" | "closed",
+    reason:
+      | StopReason
+      | "session_killed"
+      | "session_deleted"
+      | "control_unavailable"
+      | "closed",
   ): void {
     if (!subscription.active) return;
     subscription.active = false;
@@ -587,6 +593,13 @@ export function createProtocolServerInternal(
       for (const subscription of Array.from(attachSubscriptions))
         endAttach(subscription, "control_unavailable");
     });
+  const unsubscribeSessionDeleted = options.control.subscribeSessionDeleted(
+    (sessionId) => {
+      for (const subscription of Array.from(attachSubscriptions))
+        if (subscription.sessionId === sessionId)
+          endAttach(subscription, "session_deleted");
+    },
+  );
   const unsubscribeSessionUnavailable =
     options.control.subscribeSessionUnavailable((sessionId) => {
       for (const subscription of Array.from(attachSubscriptions))
@@ -760,6 +773,7 @@ export function createProtocolServerInternal(
       case "list":
       case "resolvePermission":
       case "getOperation":
+      case "deleteRecords":
         return await options.control.dispatch(
           request.method,
           request.params,

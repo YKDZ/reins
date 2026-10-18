@@ -1809,7 +1809,7 @@ describe("permission 桥", () => {
       ],
     });
 
-    driver.resolvePermission(sessionId, permissionId, {
+    await driver.resolvePermission(sessionId, permissionId, {
       outcome: "allow",
       scope: "session",
     });
@@ -1836,7 +1836,7 @@ describe("permission 桥", () => {
     );
     await flush();
 
-    driver.resolvePermission(sessionId, permissionId, {
+    await driver.resolvePermission(sessionId, permissionId, {
       outcome: "deny",
       feedback: "改用安全命令",
     });
@@ -1984,7 +1984,7 @@ test("adapter refuses unavailable session scope and preserves the caller feedbac
   ).toThrow(
     expect.objectContaining({ code: "permission_resolution_mismatch" }),
   );
-  driver.resolvePermission(sessionId, permissionId, {
+  await driver.resolvePermission(sessionId, permissionId, {
     outcome: "deny",
     feedback: "  caller feedback\nsecond line  ",
   });

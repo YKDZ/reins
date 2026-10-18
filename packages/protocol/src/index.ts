@@ -622,6 +622,19 @@ export const killParamsSchema = v.strictObject({
   sessionId: sessionIdSchema,
 });
 export type KillParams = v.InferOutput<typeof killParamsSchema>;
+export const deleteRecordsParamsSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+});
+export type DeleteRecordsParams = v.InferOutput<
+  typeof deleteRecordsParamsSchema
+>;
+export const deleteRecordsResultSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  status: v.literal("deleted"),
+});
+export type DeleteRecordsResult = v.InferOutput<
+  typeof deleteRecordsResultSchema
+>;
 
 export const listFilterSchema = v.strictObject({
   sessionId: v.optional(sessionIdSchema),
@@ -2374,6 +2387,7 @@ export type DiagnosticsResult = v.InferOutput<typeof diagnosticsResultSchema>;
 
 export const errorCodeSchema = v.union([
   v.literal("session_busy"),
+  v.literal("session_records_live"),
   v.literal("turn_precondition_failed"),
   v.literal("turn_not_active"),
   v.literal("session_not_found"),
@@ -2520,6 +2534,10 @@ export const machineErrorSchema = v.union([
     sessionId: sessionIdSchema,
   }),
   v.strictObject({
+    code: v.literal("session_records_live"),
+    sessionId: sessionIdSchema,
+  }),
+  v.strictObject({
     code: v.literal("turn_precondition_failed"),
     sessionId: sessionIdSchema,
     expected: turnIdSchema,
@@ -2612,6 +2630,12 @@ export const machineErrorSchema = v.union([
     cleanupSessionId: v.optional(sessionIdSchema),
   }),
   v.strictObject({
+    code: v.literal("control_store_unavailable"),
+    stage: v.literal("record_deletion"),
+    sessionId: sessionIdSchema,
+    cause: errorCauseSchema,
+  }),
+  v.strictObject({
     code: v.literal("session_not_found"),
     sessionId: sessionIdSchema,
   }),
@@ -2628,11 +2652,13 @@ export const machineErrorSchema = v.union([
   v.strictObject({
     code: v.literal("permission_not_pending"),
     sessionId: sessionIdSchema,
+    turnId: v.optional(turnIdSchema),
     permissionId: permissionIdSchema,
   }),
   v.strictObject({
     code: v.literal("permission_resolution_mismatch"),
     sessionId: sessionIdSchema,
+    turnId: v.optional(turnIdSchema),
     permissionId: permissionIdSchema,
   }),
   v.strictObject({
@@ -2808,12 +2834,12 @@ export interface WorkerDriver {
   // resolve 表示原生已接受 interrupt；WorkerInterruptFailure 区分未接受与接受未知。
   // 实际回合终态仍由 turn.completed 事件确认。
   interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;
-  // 同步返回表示 adapter 已把授权决议交给原生；不确定时必须抛 WorkerPermissionFailure。
+  // 返回（同步或异步）表示原生已确认授权决议；不确定时必须抛 WorkerPermissionFailure。
   resolvePermission(
     sessionId: SessionId,
     permissionId: PermissionId,
     resolution: PermissionResolution,
-  ): void;
+  ): void | Promise<void>;
   // 终止 worker 进程；会话的 session.killed 事件由 core 发出。
   // 只有底层 worker 及其进程树已经终止后才 resolve；失败必须 reject。
   terminate(sessionId: SessionId): Promise<void>;
@@ -2880,6 +2906,7 @@ export const protocolMethodSchema = v.union([
   v.literal("attach"),
   v.literal("resolvePermission"),
   v.literal("getOperation"),
+  v.literal("deleteRecords"),
   v.literal("modelCatalog"),
   v.literal("diagnostics"),
 ]);
@@ -2916,6 +2943,7 @@ export const attachEndedSchema = v.strictObject({
   reason: v.union([
     stopReasonSchema,
     v.literal("session_killed"),
+    v.literal("session_deleted"),
     v.literal("control_unavailable"),
     v.literal("closed"),
   ]),
@@ -3075,6 +3103,10 @@ export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       readonly operationKey: OperationKey<Kind>;
     }
   | {
+      readonly status: "deleted";
+      readonly operationKey: OperationKey<Kind>;
+    }
+  | {
       readonly status: "outcome_unknown";
       readonly operationKey: OperationKey<Kind>;
       readonly cause?: ErrorCause;
@@ -3169,6 +3201,10 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
   const schemas: v.GenericSchema[] = [
     v.strictObject({
       status: v.literal("unknown"),
+      operationKey: keySchema,
+    }),
+    v.strictObject({
+      status: v.literal("deleted"),
       operationKey: keySchema,
     }),
   ];
@@ -3281,6 +3317,7 @@ const protocolParamsSchemas = {
   attach: attachParamsSchema,
   resolvePermission: resolvePermissionParamsSchema,
   getOperation: v.strictObject({ operationKey: operationKeySchema }),
+  deleteRecords: deleteRecordsParamsSchema,
   modelCatalog: v.strictObject({}),
   diagnostics: diagnosticsParamsSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;
@@ -3306,6 +3343,7 @@ const protocolResultSchemas = {
   attach: attachResultSchema,
   resolvePermission: resolvePermissionAckSchema,
   getOperation: operationRecordSchema,
+  deleteRecords: deleteRecordsResultSchema,
   modelCatalog: modelCatalogResultSchema,
   diagnostics: diagnosticsResultSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;
