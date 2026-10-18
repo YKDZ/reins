@@ -836,6 +836,8 @@ export type AgentFact =
       type: "background.activity";
       source: BackgroundActivitySource;
       status: BackgroundActivityStatus;
+      description?: string;
+      summary?: string;
       causedBy?: BackgroundActivityCause;
     })
   | (TurnFactBase & {

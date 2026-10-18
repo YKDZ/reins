@@ -49,6 +49,9 @@ const adapters = fileURLToPath(
 const autonomousAdapters = fileURLToPath(
   new URL("./fixtures/autonomous-adapters.ts", import.meta.url),
 );
+const qoderBackgroundAdapters = fileURLToPath(
+  new URL("./fixtures/qoder-background-facts-adapters.ts", import.meta.url),
+);
 const clients: ReinsConnection[] = [];
 const fixtures: Array<{ directory: string; daemon: ChildProcess }> = [];
 
@@ -130,6 +133,156 @@ async function fixture(adapterModule = adapters) {
 
   return { directory, env, sdk, spawnSession };
 }
+
+test("Qoder 后台正文经 SQLite 在公开 SDK 会话历史中保留", async () => {
+  const f = await fixture(qoderBackgroundAdapters);
+  const owner = await f.sdk();
+  const gatePath = join(f.directory, "release-qoder-background-facts");
+  const spawned = await owner.spawn(
+    {
+      harness: "qoder",
+      sessionLabel: "qoder-background-facts",
+      message: JSON.stringify({ gatePath }),
+      cwd: f.directory,
+    },
+    { operationKey: owner.prepareOperation("spawn") },
+  );
+
+  const sessionTarget = {
+    scope: "session" as const,
+    sessionHandle: spawned.sessionHandle,
+  };
+  const baselineActivity = await vi.waitFor(async () => {
+    const snapshot = await owner.attach(sessionTarget, { mode: "snapshot" });
+    try {
+      if (snapshot.initial.mode !== "snapshot")
+        throw new Error("预期获得 Qoder 后台活动快照");
+      const activity = snapshot.initial.baseline.backgroundActivities.find(
+        (fact) =>
+          fact.source.kind === "qoder_task" &&
+          fact.source.id === "qoder-task-1",
+      );
+      expect(activity?.description).toBe("count-me.txt");
+      return activity;
+    } finally {
+      snapshot.close();
+    }
+  });
+  expect(baselineActivity).toMatchObject({
+    type: "background.activity",
+    status: "active",
+    causedBy: {
+      turnHandle: spawned.turnHandle,
+      toolKey: expect.any(String),
+    },
+  });
+
+  const liveHistory = await owner.attach(sessionTarget, { mode: "history" });
+  const liveFacts: AgentFact[] = [];
+  await writeFile(gatePath, "continue");
+  for (;;) {
+    const item = await liveHistory.next();
+    if (item.done) break;
+    liveFacts.push(item.value);
+    liveHistory.acknowledge(item.value);
+    if (
+      liveFacts.filter((fact) => fact.type === "background.activity").length ===
+        3 &&
+      liveFacts.some(
+        (fact) =>
+          fact.type === "turn.completed" &&
+          fact.turnHandle === spawned.turnHandle,
+      )
+    )
+      break;
+  }
+  liveHistory.close();
+  expect(
+    await owner.wait({ targets: [spawned.turnHandle], completion: "all" }),
+  ).toMatchObject({
+    status: "satisfied",
+    completed: [{ turnHandle: spawned.turnHandle, stopReason: "end_turn" }],
+  });
+  owner.close();
+
+  const observer = await f.sdk();
+  const history = await observer.attach(sessionTarget, { mode: "history" });
+  const facts: AgentFact[] = [];
+  for (;;) {
+    const item = await history.next();
+    if (item.done) break;
+    facts.push(item.value);
+    history.acknowledge(item.value);
+    if (
+      facts.filter((fact) => fact.type === "background.activity").length ===
+        3 &&
+      facts.some(
+        (fact) =>
+          fact.type === "turn.completed" &&
+          fact.turnHandle === spawned.turnHandle,
+      )
+    )
+      break;
+  }
+
+  const agentTool = facts.find(
+    (fact) => fact.type === "tool.requested" && fact.name === "Agent",
+  );
+  if (agentTool?.type !== "tool.requested")
+    throw new Error("Qoder history omitted its Agent tool request");
+  const activities = facts.filter(
+    (fact) => fact.type === "background.activity",
+  );
+  expect(activities).toEqual([
+    expect.objectContaining({
+      type: "background.activity",
+      source: { kind: "qoder_task", id: "qoder-task-1" },
+      status: "active",
+      description: "Read file contents",
+      causedBy: {
+        turnHandle: spawned.turnHandle,
+        toolKey: agentTool.toolKey,
+      },
+    }),
+    expect.objectContaining({
+      type: "background.activity",
+      source: { kind: "qoder_task", id: "qoder-task-1" },
+      status: "active",
+      description: "count-me.txt",
+      causedBy: {
+        turnHandle: spawned.turnHandle,
+        toolKey: agentTool.toolKey,
+      },
+    }),
+    expect.objectContaining({
+      type: "background.activity",
+      source: { kind: "qoder_task", id: "qoder-task-1" },
+      status: "completed",
+      summary: 'Agent "Read file contents" finished',
+      causedBy: {
+        turnHandle: spawned.turnHandle,
+        toolKey: agentTool.toolKey,
+      },
+    }),
+  ]);
+  const terminalIndex = facts.findIndex(
+    (fact) =>
+      fact.type === "turn.completed" && fact.turnHandle === spawned.turnHandle,
+  );
+  const completedActivityIndex = facts.findIndex(
+    (fact) =>
+      fact.type === "background.activity" && fact.status === "completed",
+  );
+  expect(
+    facts.filter(
+      (fact) =>
+        fact.type === "turn.completed" &&
+        fact.turnHandle === spawned.turnHandle,
+    ),
+  ).toHaveLength(1);
+  expect(terminalIndex).toBeGreaterThanOrEqual(0);
+  expect(completedActivityIndex).toBeGreaterThan(terminalIndex);
+}, 30_000);
 
 test("自主回合保留来源、参与前驱并让迟到后台事实进入会话历史", async () => {
   const f = await fixture(autonomousAdapters);

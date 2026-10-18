@@ -879,6 +879,8 @@ export const backgroundActivityEventSchema = v.strictObject({
   sessionId: sessionIdSchema,
   source: backgroundActivitySourceSchema,
   status: backgroundActivityStatusSchema,
+  description: v.optional(v.string()),
+  summary: v.optional(v.string()),
   causedBy: v.optional(backgroundActivityCauseSchema),
 });
 export type BackgroundActivityEvent = v.InferOutput<
