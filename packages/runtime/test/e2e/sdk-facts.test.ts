@@ -144,7 +144,7 @@ test("自主回合保留来源、参与前驱并让迟到后台事实进入会�
   );
   const jobSource: BackgroundActivitySource = {
     kind: "fixture_job",
-    id: "job-1",
+    id: "job-before-status",
   };
   const activeStatus: BackgroundActivityStatus = "active";
   const callerOrigin: TurnOrigin = { kind: "caller" };
@@ -173,6 +173,8 @@ test("自主回合保留来源、参与前驱并让迟到后台事实进入会�
   const sessionFacts = await observer.attach(sessionTarget, {
     mode: "snapshot",
   });
+  if (sessionFacts.initial.mode !== "snapshot")
+    throw new Error("预期获得会话快照");
   expect(sessionFacts.initial).toMatchObject({
     mode: "snapshot",
     baseline: {
@@ -180,37 +182,96 @@ test("自主回合保留来源、参与前驱并让迟到后台事实进入会�
         state: "idle",
         lastCompletedTurn: { origin: callerOrigin },
       },
-      backgroundActivities: [
-        {
-          type: "background.activity",
-          source: jobSource,
-          causedBy: {
-            turnHandle: spawnResult.turnHandle,
-            toolKey: expect.any(String),
-          },
-          status: activeStatus,
-        },
-      ],
     },
   });
+  expect(sessionFacts.initial.baseline.backgroundActivities).toEqual(
+    expect.arrayContaining([
+      expect.objectContaining({
+        type: "background.activity",
+        source: { kind: "fixture_job", id: "job-before-status" },
+        causedBy: {
+          turnHandle: spawnResult.turnHandle,
+          toolKey: expect.any(String),
+        },
+        status: activeStatus,
+      }),
+      expect.objectContaining({
+        type: "background.activity",
+        source: { kind: "fixture_job", id: "job-after-status" },
+        causedBy: {
+          turnHandle: spawnResult.turnHandle,
+          toolKey: expect.any(String),
+        },
+        status: activeStatus,
+      }),
+    ]),
+  );
 
   await writeFile(wakeGate, "wake");
   await vi.waitFor(async () => {
     expect(await readFile(startedFile, "utf8")).toContain("t");
   });
-  const started = await sessionFacts.next();
-  expect(started.done).toBe(false);
-  if (started.done) throw new Error("会话订阅提前结束");
-  expect(started.value).toMatchObject({
+  const outputBeforeStatus = await sessionFacts.next();
+  expect(outputBeforeStatus.done).toBe(false);
+  if (outputBeforeStatus.done) throw new Error("会话订阅提前结束");
+  expect(outputBeforeStatus.value).toMatchObject({
+    type: "tool.completed",
+    name: "finish_background_job",
+    result: {
+      content: [{ type: "text", text: "BACKGROUND_OUTPUT_BEFORE_STATUS" }],
+      bytes: "AAEC",
+    },
+    isError: false,
+  });
+  if (outputBeforeStatus.value.type !== "tool.completed")
+    throw new Error("预期先收到后台工具正文");
+  const beforeStatusToolKey = outputBeforeStatus.value.toolKey;
+  sessionFacts.acknowledge(outputBeforeStatus.value);
+  const beforeStatus = await sessionFacts.next();
+  expect(beforeStatus.done).toBe(false);
+  if (beforeStatus.done) throw new Error("会话订阅提前结束");
+  expect(beforeStatus.value).toMatchObject({
     type: "background.activity",
-    source: jobSource,
+    source: { kind: "fixture_job", id: "job-before-status" },
+    status: "completed",
+    causedBy: {
+      turnHandle: spawnResult.turnHandle,
+      toolKey: beforeStatusToolKey,
+    },
+  });
+  sessionFacts.acknowledge(beforeStatus.value);
+  const afterStatus = await sessionFacts.next();
+  expect(afterStatus.done).toBe(false);
+  if (afterStatus.done) throw new Error("会话订阅提前结束");
+  expect(afterStatus.value).toMatchObject({
+    type: "background.activity",
+    source: { kind: "fixture_job", id: "job-after-status" },
     status: "completed",
     causedBy: {
       turnHandle: spawnResult.turnHandle,
       toolKey: expect.any(String),
     },
   });
-  sessionFacts.acknowledge(started.value);
+  if (afterStatus.value.type !== "background.activity")
+    throw new Error("预期先收到第二项后台状态");
+  const afterStatusToolKey = afterStatus.value.causedBy?.toolKey;
+  sessionFacts.acknowledge(afterStatus.value);
+  const outputAfterStatus = await sessionFacts.next();
+  expect(outputAfterStatus.done).toBe(false);
+  if (outputAfterStatus.done) throw new Error("会话订阅提前结束");
+  expect(outputAfterStatus.value).toMatchObject({
+    type: "tool.completed",
+    toolKey: afterStatusToolKey,
+    name: "finish_background_job",
+    result: {
+      content: [{ type: "text", text: "BACKGROUND_OUTPUT_AFTER_STATUS" }],
+      bytes: "BAUG",
+    },
+    isError: false,
+  });
+  if (outputAfterStatus.value.type !== "tool.completed")
+    throw new Error("预期在后台完成状态后收到工具正文");
+  sessionFacts.acknowledge(outputAfterStatus.value);
   const turnStart = await sessionFacts.next();
   expect(turnStart.done).toBe(false);
   if (turnStart.done) throw new Error("自主回合未发布");
@@ -226,6 +287,15 @@ test("自主回合保留来源、参与前驱并让迟到后台事实进入会�
   if (turnStart.value.type !== "turn.started")
     throw new Error("预期收到自主回合开始事实");
   const autonomousTurn = turnStart.value.turnHandle;
+  expect(
+    await owner.wait({
+      targets: [spawnResult.turnHandle],
+      completion: "all",
+    }),
+  ).toMatchObject({
+    status: "satisfied",
+    completed: [{ turnHandle: spawnResult.turnHandle, stopReason: "end_turn" }],
+  });
 
   const autonomousFacts = await observer.attach(
     { scope: "turn", turnHandle: autonomousTurn },
@@ -272,6 +342,46 @@ test("自主回合保留来源、参与前驱并让迟到后台事实进入会�
   }
   expect(historyFacts.map((fact) => fact.type)).toContain(
     "background.activity",
+  );
+  expect(
+    historyFacts.filter(
+      (fact) =>
+        fact.type === "turn.completed" &&
+        fact.turnHandle === spawnResult.turnHandle,
+    ),
+  ).toHaveLength(1);
+  expect(historyFacts).toContainEqual(
+    expect.objectContaining({
+      type: "tool.completed",
+      toolKey: beforeStatusToolKey,
+      result: {
+        content: [{ type: "text", text: "BACKGROUND_OUTPUT_BEFORE_STATUS" }],
+        bytes: "AAEC",
+      },
+    }),
+  );
+  expect(
+    historyFacts.filter(
+      (fact) =>
+        fact.type === "tool.completed" && fact.toolKey === beforeStatusToolKey,
+    ),
+  ).toHaveLength(1);
+  expect(
+    historyFacts.filter(
+      (fact) =>
+        fact.type === "tool.completed" &&
+        fact.name === "ordinary_tool_without_background_source",
+    ),
+  ).toHaveLength(0);
+  expect(historyFacts).toContainEqual(
+    expect.objectContaining({
+      type: "tool.completed",
+      toolKey: afterStatusToolKey,
+      result: {
+        content: [{ type: "text", text: "BACKGROUND_OUTPUT_AFTER_STATUS" }],
+        bytes: "BAUG",
+      },
+    }),
   );
 
   await owner.interrupt(

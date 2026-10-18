@@ -26,31 +26,44 @@ const driverFactory: AdapterDriverFactory = (context) => {
         turnGate: string;
         startedFile: string;
       };
-      const source = { kind: "fixture_job", id: "job-1" };
-      const toolCallId = v.parse(toolCallIdSchema, "job-creator");
+      const activities = [
+        {
+          source: { kind: "fixture_job", id: "job-before-status" },
+          toolCallId: v.parse(toolCallIdSchema, "job-output-before-status"),
+        },
+        {
+          source: { kind: "fixture_job", id: "job-after-status" },
+          toolCallId: v.parse(toolCallIdSchema, "job-output-after-status"),
+        },
+      ] as const;
+      const ordinaryToolCallId = v.parse(
+        toolCallIdSchema,
+        "untracked-after-status",
+      );
+      for (const { source, toolCallId } of activities) {
+        emit({
+          type: "tool.requested",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          toolCallId,
+          name: "start_background_job",
+          input: { id: source.id },
+        });
+        emit({
+          type: "background.activity",
+          sessionId: spec.sessionId,
+          source,
+          status: "active",
+          causedBy: { turnId: spec.turnId, toolCallId },
+        });
+      }
       emit({
         type: "tool.requested",
         sessionId: spec.sessionId,
         turnId: spec.turnId,
-        toolCallId,
-        name: "start_background_job",
-        input: { id: source.id },
-      });
-      emit({
-        type: "tool.completed",
-        sessionId: spec.sessionId,
-        turnId: spec.turnId,
-        toolCallId,
-        name: "start_background_job",
-        result: { id: source.id },
-        isError: false,
-      });
-      emit({
-        type: "background.activity",
-        sessionId: spec.sessionId,
-        source,
-        status: "active",
-        causedBy: { turnId: spec.turnId, toolCallId },
+        toolCallId: ordinaryToolCallId,
+        name: "ordinary_tool_without_background_source",
+        input: { reason: "negative-case" },
       });
       emit({
         type: "turn.completed",
@@ -76,18 +89,81 @@ const driverFactory: AdapterDriverFactory = (context) => {
           }
         }
         if (!active) return;
+        const [beforeStatus, afterStatus] = activities;
+        if (beforeStatus === undefined || afterStatus === undefined)
+          throw new Error("后台事实 fixture 配置不完整");
+        emit({
+          type: "tool.completed",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          toolCallId: beforeStatus.toolCallId,
+          name: "finish_background_job",
+          result: {
+            content: [
+              { type: "text", text: "BACKGROUND_OUTPUT_BEFORE_STATUS" },
+            ],
+            bytes: "AAEC",
+          },
+          isError: false,
+        });
+        emit({
+          type: "tool.completed",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          toolCallId: beforeStatus.toolCallId,
+          name: "finish_background_job",
+          result: { content: "DUPLICATE_BACKGROUND_OUTPUT" },
+          isError: false,
+        });
+        emit({
+          type: "tool.completed",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          toolCallId: ordinaryToolCallId,
+          name: "ordinary_tool_without_background_source",
+          result: { content: "MUST_NOT_APPEAR_AFTER_TURN" },
+          isError: false,
+        });
         emit({
           type: "background.activity",
           sessionId: spec.sessionId,
-          source,
+          source: beforeStatus.source,
           status: "completed",
-          causedBy: { turnId: spec.turnId, toolCallId },
+          causedBy: {
+            turnId: spec.turnId,
+            toolCallId: beforeStatus.toolCallId,
+          },
+        });
+        emit({
+          type: "background.activity",
+          sessionId: spec.sessionId,
+          source: afterStatus.source,
+          status: "completed",
+          causedBy: {
+            turnId: spec.turnId,
+            toolCallId: afterStatus.toolCallId,
+          },
+        });
+        emit({
+          type: "tool.completed",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          toolCallId: afterStatus.toolCallId,
+          name: "finish_background_job",
+          result: {
+            content: [{ type: "text", text: "BACKGROUND_OUTPUT_AFTER_STATUS" }],
+            bytes: "BAUG",
+          },
+          isError: false,
         });
         if (context.beginAutonomousTurn === undefined)
           throw new Error("自主回合入口未提供");
-        const turnId = context.beginAutonomousTurn({
-          source,
-          causedBy: { turnId: spec.turnId, toolCallId },
+        const turnId = await context.beginAutonomousTurn({
+          source: beforeStatus.source,
+          causedBy: {
+            turnId: spec.turnId,
+            toolCallId: beforeStatus.toolCallId,
+          },
         });
         current = { sessionId: spec.sessionId, turnId };
         await writeFile(input.startedFile, turnId);

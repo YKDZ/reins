@@ -2798,7 +2798,7 @@ export type WorkerDriverFactory = (
 // adapter 构造只在 daemon 路由层发生；上下文只含控制面的领域事件与类型化诊断。
 export type AdapterDriverFactory = (context: {
   emit: (event: DomainEvent) => void;
-  beginAutonomousTurn?: (cause?: AutonomousTurnCause) => TurnId;
+  beginAutonomousTurn?: (cause?: AutonomousTurnCause) => Promise<TurnId>;
   diagnostics: (
     input: DriverDiagnosticFact,
   ) => Promise<DiagnosticId | undefined>;

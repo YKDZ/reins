@@ -379,7 +379,7 @@ function createFakeHarness(options: {
   calls: FakeCalls;
   controls: {
     completeTurn(stopReason?: StopReason, finalReply?: string | null): void;
-    beginAutonomousTurn(cause?: AutonomousTurnCause): TurnId;
+    beginAutonomousTurn(cause?: AutonomousTurnCause): Promise<TurnId>;
     emitWorkerMessage(content: string): void;
     emitText(messageId: MessageId, delta: string): void;
     emitToolRequest(toolCallId: ToolCallId, name: string): void;
@@ -396,8 +396,9 @@ function createFakeHarness(options: {
     terminated: [],
   };
   let emitEvent: ((event: DomainEvent) => void) | null = null;
-  let beginAutonomousTurn: ((cause?: AutonomousTurnCause) => TurnId) | null =
-    null;
+  let beginAutonomousTurn:
+    | ((cause?: AutonomousTurnCause) => Promise<TurnId>)
+    | null = null;
   let current: { sessionId: SessionId; turnId: TurnId } | null = null;
   let permissionSeq = 0;
   let messageSeq = 0;
@@ -458,7 +459,7 @@ function createFakeHarness(options: {
     adapter,
     calls,
     controls: {
-      beginAutonomousTurn(cause) {
+      async beginAutonomousTurn(cause) {
         if (beginAutonomousTurn === null)
           throw new Error("worker 尚未注册自主回合入口");
         return beginAutonomousTurn(cause);
@@ -3355,12 +3356,12 @@ describe("daemon 空闲退出", () => {
       ),
     ).toMatchObject({ initial: { mode: "snapshot" } });
 
-    expect(() =>
+    await expect(
       codex.controls.beginAutonomousTurn({
         source: { kind: "fixture_job", id: "job-uncommitted" },
         causedBy: { turnId: spawned.turnId },
       }),
-    ).toThrow("AUTONOMOUS_TURN_EVENT_IO");
+    ).rejects.toThrow("AUTONOMOUS_TURN_EVENT_IO");
     await waitFor(() => codex.calls.terminated.includes(spawned.sessionId));
     await vi.waitFor(() =>
       expect(observations.ended).toContainEqual({
@@ -3435,7 +3436,7 @@ describe("daemon 空闲退出", () => {
     let autonomousFailure: unknown;
     try {
       await waitFor(() => fake.calls.delivered.length === 1);
-      fake.controls.beginAutonomousTurn({
+      await fake.controls.beginAutonomousTurn({
         source: { kind: "fixture_job", id: "caller-race" },
         causedBy: { turnId: spawned.turnId },
       });
@@ -5343,6 +5344,86 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
   expect(fake.calls.terminated).toEqual([sessionId]);
   a.close();
   b.close();
+});
+
+test("自主回合入口在writer lease丢失后不提交并停止原worker", async () => {
+  let writerHeld = true;
+  let leaseChecks = 0;
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
+  });
+  const server = createInMemoryTransportServer<ProtocolMessage>();
+  const daemon = createDaemonForTest({
+    transport: server,
+    adapters: new Map([["codex", fake.adapter]]),
+    identity: testIdentity,
+    diagnostics: testDiagnostics,
+    runtimeScopeId: testRuntimeScopeId,
+    idleTimeoutMs: 60_000,
+    assertWriterLease: async () => {
+      leaseChecks += 1;
+      if (!writerHeld) throw new Error("writer lease lost");
+    },
+  });
+  const running = daemon.start();
+  void running.catch(() => undefined);
+  const connection = server.connect();
+  const requester = makeRequester(connection);
+  const spawned = resultOf(
+    await requester("spawn", {
+      harness: "codex",
+      sessionLabel: "autonomous-writer-lease-loss",
+      message: "create a session before lease loss",
+      cwd: "/tmp",
+    }),
+  ) as { sessionId: SessionId; turnId: TurnId };
+  fake.controls.completeTurn();
+  const observations = collectNotifications(connection);
+  expect(
+    resultOf(
+      await requester("attach", {
+        scope: "session",
+        sessionId: spawned.sessionId,
+        start: { mode: "snapshot" },
+      }),
+    ),
+  ).toMatchObject({ initial: { mode: "snapshot" } });
+
+  writerHeld = false;
+  const checksBeforeAutonomousStart = leaseChecks;
+  await expect(
+    fake.controls.beginAutonomousTurn({
+      source: { kind: "fixture_job", id: "job-after-lease-loss" },
+      causedBy: { turnId: spawned.turnId },
+    }),
+  ).rejects.toMatchObject({
+    code: "internal_error",
+    cause: { kind: "closed" },
+  });
+  expect(leaseChecks).toBe(checksBeforeAutonomousStart + 1);
+  await waitFor(() => fake.calls.terminated.includes(spawned.sessionId));
+  await vi.waitFor(() =>
+    expect(observations.ended).toContainEqual({
+      sessionId: spawned.sessionId,
+      reason: "control_unavailable",
+    }),
+  );
+  expect(fake.calls.terminated).toEqual([spawned.sessionId]);
+  expect(observations.events).not.toContainEqual(
+    expect.objectContaining({
+      type: "turn.started",
+      sessionId: spawned.sessionId,
+      origin: expect.objectContaining({ kind: "harness" }),
+    }),
+  );
+  expect(
+    resultOf(await requester("list", { sessionId: spawned.sessionId })),
+  ).toMatchObject([{ sessionId: spawned.sessionId, state: "unreachable" }]);
+
+  connection.close();
+  await daemon.stop().catch(() => undefined);
+  await running.catch(() => undefined);
 });
 
 test("writer lease 在模型目录等待期间丢失会阻止 native spawn", async () => {

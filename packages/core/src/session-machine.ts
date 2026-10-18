@@ -70,6 +70,7 @@ type SessionRecord = {
     { turnId: TurnId; options: PermissionOption[] }
   >;
   usedPermissionIds: Set<PermissionId>;
+  backgroundToolCalls: Map<TurnId, Set<ToolCallId>>;
   turns: TurnCompleted[];
 };
 
@@ -89,6 +90,7 @@ type PendingSpawn = {
   readonly lateEvents: DomainEvent[];
   readonly permissionIds: Set<PermissionId>;
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
+  readonly backgroundToolCalls: SessionRecord["backgroundToolCalls"];
   completedTurnId: TurnId | null;
   phase: "accepting" | "committing" | "closing";
 };
@@ -98,6 +100,7 @@ type IngressProjection = {
   currentTurnId: TurnId | null;
   activeTurn: TurnScope | null;
   readonly completedTurnIds: Set<TurnId>;
+  readonly backgroundToolCalls: SessionRecord["backgroundToolCalls"];
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
   readonly usedPermissionIds: Set<PermissionId>;
 };
@@ -171,6 +174,48 @@ function createTurnScope(
     nativeCallerCompletions: new Set(),
     tools: new Map(),
   };
+}
+
+function copyBackgroundToolCalls(
+  source: SessionRecord["backgroundToolCalls"],
+): SessionRecord["backgroundToolCalls"] {
+  return new Map(
+    Array.from(source, ([turnId, toolCallIds]) => [
+      turnId,
+      new Set(toolCallIds),
+    ]),
+  );
+}
+
+function noteBackgroundToolCall(
+  backgroundToolCalls: SessionRecord["backgroundToolCalls"],
+  event: Extract<DomainEvent, { type: "background.activity" }>,
+  activeTurn: TurnScope | null,
+): void {
+  const causedBy = event.causedBy;
+  if (
+    event.status !== "active" ||
+    causedBy?.toolCallId === undefined ||
+    activeTurn?.turnId !== causedBy.turnId ||
+    activeTurn.tools.get(causedBy.toolCallId) !== "requested"
+  )
+    return;
+  let toolCallIds = backgroundToolCalls.get(causedBy.turnId);
+  if (toolCallIds === undefined) {
+    toolCallIds = new Set();
+    backgroundToolCalls.set(causedBy.turnId, toolCallIds);
+  }
+  toolCallIds.add(causedBy.toolCallId);
+}
+
+function consumeBackgroundToolCall(
+  backgroundToolCalls: SessionRecord["backgroundToolCalls"],
+  turnId: TurnId,
+  toolCallId: ToolCallId,
+): void {
+  const toolCallIds = backgroundToolCalls.get(turnId);
+  toolCallIds?.delete(toolCallId);
+  if (toolCallIds?.size === 0) backgroundToolCalls.delete(turnId);
 }
 
 function machineError(error: MachineError): MachineError {
@@ -558,6 +603,7 @@ export function createSessionMachine(options: {
           activeTurn: null,
           pendingPermissions: new Map(),
           usedPermissionIds: new Set(),
+          backgroundToolCalls: new Map(),
           turns: [],
         });
         break;
@@ -585,7 +631,22 @@ export function createSessionMachine(options: {
         session?.activeTurn?.tools.set(event.toolCallId, "requested");
         break;
       case "tool.completed":
-        session?.activeTurn?.tools.set(event.toolCallId, "complete");
+        if (session?.activeTurn?.turnId === event.turnId)
+          session.activeTurn.tools.set(event.toolCallId, "complete");
+        if (session !== undefined)
+          consumeBackgroundToolCall(
+            session.backgroundToolCalls,
+            event.turnId,
+            event.toolCallId,
+          );
+        break;
+      case "background.activity":
+        if (session !== undefined)
+          noteBackgroundToolCall(
+            session.backgroundToolCalls,
+            event,
+            session.activeTurn,
+          );
         break;
       case "turn.completed":
         if (session !== undefined) {
@@ -606,6 +667,7 @@ export function createSessionMachine(options: {
           session.activeTurn = null;
           session.pendingPermissions.clear();
           session.usedPermissionIds.clear();
+          session.backgroundToolCalls.clear();
         }
         pendingSpawns.delete(event.sessionId);
         break;
@@ -671,6 +733,7 @@ export function createSessionMachine(options: {
         inherited === undefined
           ? new Set(session?.turns.map(({ turnId }) => turnId))
           : new Set(inherited.completedTurnIds),
+      backgroundToolCalls: copyBackgroundToolCalls(source.backgroundToolCalls),
       pendingPermissions: new Map(source.pendingPermissions),
       usedPermissionIds: new Set(source.usedPermissionIds),
     };
@@ -734,7 +797,20 @@ export function createSessionMachine(options: {
         projection.activeTurn?.tools.set(event.toolCallId, "requested");
         break;
       case "tool.completed":
-        projection.activeTurn?.tools.set(event.toolCallId, "complete");
+        if (projection.activeTurn?.turnId === event.turnId)
+          projection.activeTurn.tools.set(event.toolCallId, "complete");
+        consumeBackgroundToolCall(
+          projection.backgroundToolCalls,
+          event.turnId,
+          event.toolCallId,
+        );
+        break;
+      case "background.activity":
+        noteBackgroundToolCall(
+          projection.backgroundToolCalls,
+          event,
+          projection.activeTurn,
+        );
         break;
       case "turn.completed":
         projection.state = "idle";
@@ -749,6 +825,7 @@ export function createSessionMachine(options: {
         projection.activeTurn = null;
         projection.pendingPermissions.clear();
         projection.usedPermissionIds.clear();
+        projection.backgroundToolCalls.clear();
         break;
       case "permission.requested":
         projection.usedPermissionIds.add(event.permissionId);
@@ -840,7 +917,13 @@ export function createSessionMachine(options: {
         projected?.completedTurnIds.has(event.turnId) === true ||
         session?.turns.some(({ turnId }) => turnId === event.turnId) === true ||
         spawning?.completedTurnId === event.turnId;
-      if (eventTurnCompleted)
+      const lateBackgroundToolCompletion =
+        event.type === "tool.completed" &&
+        (
+          current?.backgroundToolCalls.get(event.turnId) ??
+          spawning?.backgroundToolCalls.get(event.turnId)
+        )?.has(event.toolCallId) === true;
+      if (eventTurnCompleted && !lateBackgroundToolCompletion)
         return {
           status: "rejected",
           rejection: {
@@ -855,7 +938,11 @@ export function createSessionMachine(options: {
                 }),
           },
         };
-      if (event.type === "permission.resolved" && activeTurnId !== null) {
+      if (
+        !lateBackgroundToolCompletion &&
+        event.type === "permission.resolved" &&
+        activeTurnId !== null
+      ) {
         const pendingPermissions =
           current?.pendingPermissions ?? spawning?.pendingPermissions;
         const pending = pendingPermissions?.get(event.permissionId);
@@ -884,7 +971,7 @@ export function createSessionMachine(options: {
             },
           };
       }
-      if (activeTurnId === null) {
+      if (!lateBackgroundToolCompletion && activeTurnId === null) {
         return {
           status: "rejected",
           rejection: {
@@ -895,7 +982,7 @@ export function createSessionMachine(options: {
           },
         };
       }
-      if (event.turnId !== activeTurnId)
+      if (!lateBackgroundToolCompletion && event.turnId !== activeTurnId)
         return {
           status: "rejected",
           rejection: {
@@ -903,13 +990,17 @@ export function createSessionMachine(options: {
             eventType: event.type,
             sessionState: sessionState as "busy" | "spawning",
             eventTurnId: event.turnId,
-            activeTurnId,
+            activeTurnId: activeTurnId!,
           },
         };
-      turnScope =
-        current?.activeTurn ??
-        (spawning?.completedTurnId === null ? spawning.turn : undefined);
-      if (turnScope === undefined || turnScope.turnId !== event.turnId)
+      turnScope = lateBackgroundToolCompletion
+        ? undefined
+        : (current?.activeTurn ??
+          (spawning?.completedTurnId === null ? spawning.turn : undefined));
+      if (
+        !lateBackgroundToolCompletion &&
+        (turnScope === undefined || turnScope.turnId !== event.turnId)
+      )
         return {
           status: "rejected",
           rejection: {
@@ -917,7 +1008,7 @@ export function createSessionMachine(options: {
             eventType: event.type,
             sessionState: sessionState as "busy" | "spawning",
             eventTurnId: event.turnId,
-            activeTurnId,
+            activeTurnId: activeTurnId!,
           },
         };
     }
@@ -1056,8 +1147,19 @@ export function createSessionMachine(options: {
           spawning.turn.messages.set(event.messageId, "complete");
         else if (event.type === "tool.requested")
           spawning.turn.tools.set(event.toolCallId, "requested");
-        else if (event.type === "tool.completed")
+        else if (event.type === "tool.completed") {
           spawning.turn.tools.set(event.toolCallId, "complete");
+          consumeBackgroundToolCall(
+            spawning.backgroundToolCalls,
+            event.turnId,
+            event.toolCallId,
+          );
+        } else if (event.type === "background.activity")
+          noteBackgroundToolCall(
+            spawning.backgroundToolCalls,
+            event,
+            spawning.turn,
+          );
         else if (event.type === "permission.requested") {
           spawning.permissionIds.add(event.permissionId);
           spawning.pendingPermissions.set(event.permissionId, {
@@ -1199,6 +1301,7 @@ export function createSessionMachine(options: {
         lateEvents: [],
         permissionIds: new Set(),
         pendingPermissions: new Map(),
+        backgroundToolCalls: new Map(),
         completedTurnId: null,
         phase: "accepting",
       };

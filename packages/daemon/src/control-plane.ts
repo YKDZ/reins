@@ -218,7 +218,7 @@ export type ControlPlane = {
     readonly sessionId: SessionId;
     readonly harness: HarnessId;
     readonly cause?: AutonomousTurnCause;
-  }): TurnId;
+  }): Promise<TurnId>;
   settleEvents(): Promise<void>;
   subscribeEvents(listener: (entry: CommittedEvent) => void): () => void;
   subscribeControlUnavailable(listener: () => void): () => void;
@@ -2534,11 +2534,15 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     });
   }
 
-  function recordEventWriteFailure(event: DomainEvent, error: unknown): void {
-    const firstUnavailableEvent = eventWriteFailure === undefined;
+  function markControlUnavailable(error: unknown, sessionId: SessionId): void {
+    const firstControlUnavailable = eventWriteFailure === undefined;
     eventWriteFailure ??= error;
-    if (firstUnavailableEvent) notifyControlUnavailable();
+    if (firstControlUnavailable) notifyControlUnavailable();
     wakeWaiters();
+    stopSessionAfterEventWriteFailure(sessionId);
+  }
+
+  function recordEventWriteFailure(event: DomainEvent, error: unknown): void {
     if (!eventWriteFailures.has(event.sessionId)) {
       eventWriteFailures.set(event.sessionId, event);
       if (
@@ -2553,14 +2557,20 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           });
       }
     }
-    stopSessionAfterEventWriteFailure(event.sessionId);
+    markControlUnavailable(error, event.sessionId);
   }
 
-  function beginAutonomousTurn(input: {
+  async function beginAutonomousTurn(input: {
     readonly sessionId: SessionId;
     readonly harness: HarnessId;
     readonly cause?: AutonomousTurnCause;
-  }): TurnId {
+  }): Promise<TurnId> {
+    try {
+      await assertWriterLease();
+    } catch (error) {
+      markControlUnavailable(error, input.sessionId);
+      throw error;
+    }
     return options.machine.beginAutonomousTurn(input, (event, session) => {
       try {
         if (eventWriteFailure !== undefined) throw eventWriteFailure;

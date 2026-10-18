@@ -25,7 +25,7 @@ export function createRoutingDriverFactory(
     readonly sessionId: SessionId;
     readonly harness: HarnessId;
     readonly cause?: AutonomousTurnCause;
-  }) => TurnId = () => {
+  }) => Promise<TurnId> = async () => {
     throw new Error("Autonomous turn control is unavailable");
   },
 ): WorkerDriverFactory {
