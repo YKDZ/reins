@@ -1,5 +1,4 @@
 import {
-  AlreadyDiagnosedError,
   HarnessSession,
   isAlreadyDiagnosedError,
   type DiagnosticSink,
@@ -13,6 +12,7 @@ import {
   type TurnId,
   type MachineError,
   WorkerStartFailure,
+  makeErrorCause,
 } from "@reins/protocol";
 
 import type { UserInput } from "#/generated/v2/UserInput";
@@ -37,6 +37,7 @@ function textInput(text: string): UserInput {
 }
 
 class TerminateTimeoutError extends Error {}
+class TerminateTransportClosedError extends Error {}
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return `${error.name}: ${error.message}`;
@@ -73,6 +74,8 @@ export function createCodexDriver(deps: {
     let threadDeleted = false;
     let workerInitialized = false;
     let workerClosed = false;
+    let terminationFailure: MachineError | undefined;
+    let terminationPromise: Promise<void> | null = null;
     let workerExitedUnexpectedly = false;
     let activeTurnId: string | null = null;
     let ended = false;
@@ -430,71 +433,109 @@ export function createCodexDriver(deps: {
       },
       async terminate(sessionId) {
         void sessionId;
-        if (workerClosed) return;
-        const closingTransport = transport;
-        const transportAlreadyClosed = closingTransport?.isClosed() ?? true;
-        let deletionFailure: unknown;
-        try {
-          if (
-            closingTransport !== null &&
-            !transportAlreadyClosed &&
-            threadId !== "" &&
-            !threadDeleted
-          ) {
-            await withTerminateTimeout(
-              closingTransport.request("thread/delete", { threadId }),
-              deps.terminateTimeoutMs ?? 5_000,
-            );
-            threadDeleted = true;
+        if (terminationPromise !== null) return await terminationPromise;
+        if (workerClosed) {
+          if (terminationFailure !== undefined) throw terminationFailure;
+          return;
+        }
+        const attempt = (async () => {
+          const closingTransport = transport;
+          const transportAlreadyClosed = closingTransport?.isClosed() ?? true;
+          let deletionFailure: unknown;
+          try {
+            if (
+              closingTransport !== null &&
+              !transportAlreadyClosed &&
+              threadId !== "" &&
+              !threadDeleted
+            ) {
+              await withTerminateTimeout(
+                closingTransport.request("thread/delete", { threadId }),
+                deps.terminateTimeoutMs ?? 5_000,
+              );
+              threadDeleted = true;
+            } else if (threadId !== "" && !threadDeleted) {
+              deletionFailure = new TerminateTransportClosedError(
+                "Codex app-server closed before thread deletion was confirmed",
+              );
+            }
+          } catch (error) {
+            deletionFailure = error;
           }
-        } catch (error) {
-          deletionFailure = error;
-        }
-        ended = true;
-        let closeFailure: unknown;
+          ended = true;
+          let closeFailure: unknown;
+          try {
+            await closingTransport?.close();
+            // 已收到的终态先完成有界证据接受；成功停止不能把它抢成 killed。
+            await runPromise;
+          } catch (error) {
+            closeFailure = error;
+          }
+          workerClosed = closeFailure === undefined;
+          if (workerClosed && workerInitialized && !workerExitedUnexpectedly) {
+            await session?.diagnostic({
+              kind: "lifecycle",
+              operation: "worker",
+              reason: "closed",
+            });
+          }
+          const closeError = deletionFailure ?? closeFailure;
+          if (closeError !== undefined) {
+            const alreadyDiagnosed = isAlreadyDiagnosedError(closeError);
+            const transportClosed =
+              closeError instanceof TerminateTransportClosedError;
+            const diagnosticId = alreadyDiagnosed
+              ? closeError.diagnosticId
+              : await session?.diagnostic({
+                  kind: "request_failure",
+                  operation: "kill",
+                  stage: "terminate",
+                  reason:
+                    closeError instanceof TerminateTimeoutError
+                      ? "timeout"
+                      : transportClosed
+                        ? "closed"
+                        : "upstream_error",
+                  message: makeTextEvidence(errorMessage(closeError)),
+                });
+            const failure: MachineError = {
+              code: "internal_error",
+              cause: makeErrorCause(
+                closeError instanceof TerminateTimeoutError
+                  ? "timeout"
+                  : transportClosed || closeError === closeFailure
+                    ? "closed"
+                    : "upstream",
+                errorMessage(closeError),
+              ),
+              ...(diagnosticId === undefined ? {} : { diagnosticId }),
+              ...(threadDeleted
+                ? {
+                    effect: {
+                      kind: "session_closed",
+                      sessionId,
+                    },
+                  }
+                : {}),
+              ...(deletionFailure === undefined || closeFailure === undefined
+                ? {}
+                : {
+                    cleanupCause: makeErrorCause(
+                      "closed",
+                      errorMessage(closeFailure),
+                    ),
+                  }),
+            };
+            if (workerClosed) terminationFailure = failure;
+            throw failure;
+          }
+          workerClosed = true;
+        })();
+        terminationPromise = attempt;
         try {
-          await closingTransport?.close();
-          // 已收到的终态先完成有界证据接受；成功停止不能把它抢成 killed。
-          await runPromise;
-        } catch (error) {
-          closeFailure = error;
-        }
-        if (closeFailure !== undefined) {
-          if (isAlreadyDiagnosedError(closeFailure)) throw closeFailure;
-          const diagnosticId = await session?.diagnostic({
-            kind: "request_failure",
-            operation: "kill",
-            stage: "terminate",
-            reason: "upstream_error",
-            message: makeTextEvidence(errorMessage(closeFailure)),
-          });
-          throw new AlreadyDiagnosedError(
-            errorMessage(closeFailure),
-            diagnosticId,
-          );
-        }
-        if (
-          deletionFailure !== undefined &&
-          !isAlreadyDiagnosedError(deletionFailure)
-        ) {
-          await session?.diagnostic({
-            kind: "request_failure",
-            operation: "kill",
-            stage: "terminate",
-            reason:
-              deletionFailure instanceof TerminateTimeoutError
-                ? "timeout"
-                : "upstream_error",
-            message: makeTextEvidence(errorMessage(deletionFailure)),
-          });
-        }
-        workerClosed = true;
-        if (workerInitialized && !workerExitedUnexpectedly) {
-          await session?.diagnostic({
-            kind: "lifecycle",
-            operation: "worker",
-            reason: "closed",
-          });
+          await attempt;
+        } finally {
+          if (terminationPromise === attempt) terminationPromise = null;
         }
       },
     };

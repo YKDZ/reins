@@ -1036,12 +1036,15 @@ describe("codex driver", () => {
     ).toEqual(["initialized", "closed"]);
   });
 
-  test("terminate 的 delete 超时仍强制关闭资源树并成功完成 kill", async () => {
+  test("terminate 的 delete 超时强制关闭资源树但不能确认 kill", async () => {
     const { diagnostics, fake, driver } = await setup("interactive", 5);
     await flush();
     fake.controls.setResponse("thread/delete", new Promise(() => {}));
 
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "timeout" },
+    });
 
     expect(fake.controls.closed()).toBe(true);
     expect(
@@ -1057,9 +1060,13 @@ describe("codex driver", () => {
         reason: "timeout",
       }),
     ]);
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "timeout" },
+    });
   });
 
-  test("terminate 的 delete 拒绝仍关闭资源树且只记录一次失败", async () => {
+  test("terminate 的 delete 拒绝关闭资源树但不能确认 kill", async () => {
     const { diagnostics, fake, driver } = await setup();
     await flush();
     fake.controls.setResponse(
@@ -1067,7 +1074,10 @@ describe("codex driver", () => {
       Promise.reject(new Error("delete rejected")),
     );
 
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "upstream" },
+    });
 
     expect(fake.controls.closed()).toBe(true);
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
@@ -1090,7 +1100,11 @@ describe("codex driver", () => {
     await flush();
     fake.controls.setCloseError(new Error("close rejected"));
 
-    await expect(driver.terminate(sessionId)).rejects.toThrow("close rejected");
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { message: expect.stringContaining("close rejected") },
+      effect: { kind: "session_closed", sessionId },
+    });
 
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
@@ -1116,7 +1130,10 @@ describe("codex driver", () => {
       await setupWithMalformedResponse("thread/delete");
     await flush();
 
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "upstream" },
+    });
 
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
       expect.objectContaining({
@@ -1246,7 +1263,10 @@ describe("codex driver", () => {
     ).toHaveLength(completedBeforeEof);
 
     const requestsBeforeTerminate = fake.controls.requests().length;
-    await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "closed" },
+    });
     expect(fake.controls.requests()).toHaveLength(requestsBeforeTerminate);
     expect(
       diagnostics

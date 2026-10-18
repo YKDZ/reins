@@ -159,6 +159,7 @@ export type {
   DiagnosticsResult,
   KillInput,
   KillResult,
+  SessionCloseEffect,
   SendInput,
   SendResult,
   WaitInput,
@@ -1320,6 +1321,14 @@ function projectFailure(
           ...(failure.cleanupCause === undefined
             ? {}
             : { cleanupCause: failure.cleanupCause }),
+          ...(failure.effect === undefined
+            ? {}
+            : {
+                effect: {
+                  kind: "session_closed",
+                  sessionHandle: parseSessionHandle(failure.effect.sessionId),
+                },
+              }),
         },
       };
     case "daemon_start_failed":

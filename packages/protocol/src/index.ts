@@ -655,6 +655,11 @@ export const killResultSchema = v.strictObject({
   status: v.union([v.literal("killed"), v.literal("not_found")]),
 });
 export type KillResult = v.InferOutput<typeof killResultSchema>;
+export const sessionCloseEffectSchema = v.strictObject({
+  kind: v.literal("session_closed"),
+  sessionId: sessionIdSchema,
+});
+export type SessionCloseEffect = v.InferOutput<typeof sessionCloseEffectSchema>;
 
 const completedTurnSummarySchema = v.strictObject({
   turnId: turnIdSchema,
@@ -2424,6 +2429,7 @@ export const machineErrorSchema = v.union([
     cause: v.optional(errorCauseSchema),
     diagnosticId: v.optional(diagnosticIdSchema),
     cleanupCause: v.optional(errorCauseSchema),
+    effect: v.optional(sessionCloseEffectSchema),
   }),
   unexpectedError("diagnostics_store_corrupt"),
 ]);

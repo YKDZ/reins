@@ -105,6 +105,10 @@ export type KillResult = {
   sessionHandle: SessionHandle;
   status: "killed" | "not_found";
 };
+export type SessionCloseEffect = {
+  kind: "session_closed";
+  sessionHandle: SessionHandle;
+};
 export type SendInput =
   | {
       placement: "new_turn";
@@ -854,6 +858,7 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     diagnosticId?: DiagnosticId;
     cleanupCause?: ErrorCause;
+    effect?: SessionCloseEffect;
   };
   diagnostics_store_corrupt: {
     cause?: ErrorCause;
