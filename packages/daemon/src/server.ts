@@ -1,47 +1,27 @@
-import { stat } from "node:fs/promises";
-
-import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
   AttachResult,
+  EventId,
   SubscriptionTarget,
   SubscriptionId,
-  EventId,
-  HarnessId,
-  ModelCatalogResult,
   ConsumerContext,
   DaemonDiagnosticFact,
   DomainEvent,
-  DiagnosticsParams,
-  HarnessModelCatalog,
   InitializeParams,
   InitializeResult,
-  InterruptParams,
-  KillParams,
-  KillResult,
-  ListFilter,
   MachineError,
   ProtocolMessage,
   ProtocolRequest,
   RequestId,
-  ResolvePermissionParams,
-  SendParams,
   SessionId,
-  TurnId,
-  SpawnParams,
   StopReason,
   TransportFailureFact,
-  WaitParams,
 } from "@reins/protocol";
 import {
-  isSideEffectMethod,
-  decodeResumeCursor,
-  eventIdSchema,
   subscriptionIdSchema,
   subscriptionCloseSchema,
   machineErrorSchema,
-  harnessModelCatalogSchema,
   makeErrorCause,
   makeTextEvidence,
   parseTransportFailureFact,
@@ -61,6 +41,12 @@ import * as v from "valibot";
 
 import { createConsumerScope, type ConsumerScope } from "./consumer-scope.ts";
 import {
+  createControlPlane,
+  DEFAULT_EVENT_LOG_LIMIT,
+  type CommittedEvent,
+  type ControlPlane,
+} from "./control-plane.ts";
+import {
   orderDiagnosticsAcceptance,
   type OrderedDiagnosticsRuntime,
 } from "./diagnostics-acceptance.ts";
@@ -68,7 +54,7 @@ import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
-export const DEFAULT_EVENT_LOG_LIMIT = 1000;
+export { DEFAULT_EVENT_LOG_LIMIT };
 
 const listenIoFailure = parseTransportFailureFact({
   kind: "transport_failure",
@@ -95,19 +81,9 @@ type AttachSubscription = {
   readonly subscriptionId: SubscriptionId;
   lastEventId: EventId | null;
   replaying: boolean;
-  pendingEvents: { event: DomainEvent; eventId: EventId }[];
+  pendingEvents: CommittedEvent[];
   active: boolean;
   readonly connection: TransportConnection<ProtocolMessage>;
-};
-
-type Observation = {
-  activeTurnId?: TurnId;
-  lastCompleted?: Extract<DomainEvent, { type: "turn.completed" }>;
-  killed: boolean;
-};
-
-type EventHistory = {
-  readonly events: DomainEvent[];
 };
 
 function unsupportedProtocolMethod(value: ProtocolRequest["method"]): never {
@@ -118,15 +94,21 @@ export type ProtocolServer = {
   start(): Promise<void>;
   quiesce(): void;
   stop(): Promise<void>;
-  forwardEvent(event: DomainEvent): void;
 };
 
 type ProtocolServerOptions = {
   transport: TransportServer<ProtocolMessage>;
-  machine: SessionMachine;
-  adapters: AdapterRegistry;
+  control: ControlPlane;
   diagnostics: OrderedDiagnosticsRuntime;
   consumerScope: ConsumerScope;
+  idleTimeoutMs?: number;
+};
+
+type PublicProtocolServerOptions = {
+  transport: TransportServer<ProtocolMessage>;
+  machine: SessionMachine;
+  adapters: AdapterRegistry;
+  diagnostics: DiagnosticsRuntime;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 };
@@ -137,19 +119,31 @@ type ProtocolServerTestingOptions = {
 };
 
 export function createProtocolServer(
-  options: Omit<ProtocolServerOptions, "diagnostics" | "consumerScope"> & {
-    diagnostics: DiagnosticsRuntime;
-  },
+  options: PublicProtocolServerOptions,
 ): ProtocolServer {
   const consumerScope = createConsumerScope();
+  const diagnostics = orderDiagnosticsAcceptance(
+    options.diagnostics,
+    consumerScope,
+  );
+  const control = createControlPlane({
+    machine: options.machine,
+    adapters: options.adapters,
+    diagnostics,
+    consumerScope,
+    ...(options.eventLogLimit === undefined
+      ? {}
+      : { eventLogLimit: options.eventLogLimit }),
+  });
   return createProtocolServerInternal(
     {
-      ...options,
+      transport: options.transport,
+      control,
       consumerScope,
-      diagnostics: orderDiagnosticsAcceptance(
-        options.diagnostics,
-        consumerScope,
-      ),
+      diagnostics,
+      ...(options.idleTimeoutMs === undefined
+        ? {}
+        : { idleTimeoutMs: options.idleTimeoutMs }),
     },
     {},
   );
@@ -161,7 +155,6 @@ export function createProtocolServerInternal(
   testing: ProtocolServerTestingOptions,
 ): ProtocolServer {
   const idleTimeoutMs = options.idleTimeoutMs ?? DEFAULT_IDLE_TIMEOUT_MS;
-  const eventLogLimit = options.eventLogLimit ?? DEFAULT_EVENT_LOG_LIMIT;
   const connections = new Set<TransportConnection<ProtocolMessage>>();
   const attachSubscriptions = new Set<AttachSubscription>();
   const afterAttachAck = new Map<ProtocolRequest, () => void>();
@@ -169,40 +162,13 @@ export function createProtocolServerInternal(
     TransportConnection<ProtocolMessage>,
     Set<() => void>
   >();
-  const eventLog = new Map<SessionId, EventHistory>();
-  const eventPositions = new WeakMap<DomainEvent, EventId>();
-  const eventHeads = new Map<SessionId, EventId>();
   let subscriptionSequence = 0;
-  const observations = new Map<SessionId, Observation>();
-  const knownSessions = new Set<SessionId>();
   // initialize 握手建立的连接级消费者绑定；连接关闭即释放。
   const consumerBindings = new Map<
     TransportConnection<ProtocolMessage>,
     ConsumerContext
   >();
   const consumerScope = options.consumerScope;
-  // 账本归属于 daemon 世代；断连只移除观察者，不取消原执行。
-  const commands = new Map<
-    string,
-    {
-      consumer: ConsumerContext | undefined;
-      fingerprint: string;
-      outcome: Promise<{ result: unknown } | { error: MachineError }>;
-    }
-  >();
-  function canonical(value: unknown): string {
-    if (Array.isArray(value)) return "[" + value.map(canonical).join(",") + "]";
-    if (value !== null && typeof value === "object")
-      return (
-        "{" +
-        Object.entries(value)
-          .sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0))
-          .map(([key, item]) => JSON.stringify(key) + ":" + canonical(item))
-          .join(",") +
-        "}"
-      );
-    return JSON.stringify(value) ?? "null";
-  }
   async function execute(
     connection: TransportConnection<ProtocolMessage>,
     request: ProtocolRequest,
@@ -233,31 +199,22 @@ export function createProtocolServerInternal(
             },
           };
         }
-        return { result: await dispatch(connection, request) };
+        return { result: await dispatch(connection, request, consumer) };
       } catch (error) {
         return { error: await toMachineError(error) };
       }
     };
-    if (!isSideEffectMethod(request.method)) return perform();
-    if (request.commandId === undefined)
-      return { error: { code: "protocol_error" } };
-    if (request.commandId.split(":")[0] !== options.diagnostics.generation)
-      return { error: { code: "stale_command_id" } };
-    const fingerprint = canonical({
-      method: request.method,
-      params: request.params,
-    });
-    const key = request.commandId;
-    const existing = commands.get(key);
-    if (existing !== undefined)
-      return existing.consumer === consumer &&
-        existing.fingerprint === fingerprint
-        ? existing.outcome
-        : { error: { code: "command_id_conflict" } };
-    // 先登记再调用业务，确保同步发起的重入也只能加入原 Promise。
-    const outcome = Promise.resolve().then(perform);
-    commands.set(key, { consumer, fingerprint, outcome });
-    return outcome;
+    return options.control.execute(
+      {
+        method: request.method,
+        params: request.params,
+        ...(request.commandId === undefined
+          ? {}
+          : { commandId: request.commandId }),
+      },
+      consumer,
+      perform,
+    );
   }
   const transportFailureConnections = new WeakMap<
     TransportConnection<ProtocolMessage>,
@@ -410,7 +367,7 @@ export function createProtocolServerInternal(
   }
 
   function hasLiveSessions(): boolean {
-    return options.machine.list().some((session) => session.state !== "killed");
+    return options.control.liveSessionIds().length > 0;
   }
 
   function isIdle(): boolean {
@@ -450,6 +407,7 @@ export function createProtocolServerInternal(
       attachSubscriptions.clear();
       pendingMessages.length = 0;
       try {
+        await options.control.settleEvents();
         if (daemonStarted && daemonStopReason === undefined) {
           await recordDiagnostic({
             kind: "lifecycle",
@@ -463,6 +421,8 @@ export function createProtocolServerInternal(
         shutdownFailure = error;
         throw error;
       } finally {
+        unsubscribeControlEvents();
+        options.control.close();
         startedResolve?.();
         startedResolve = null;
       }
@@ -472,16 +432,6 @@ export function createProtocolServerInternal(
       if (shutdownPromise === attempt) shutdownPromise = undefined;
     });
     return attempt;
-  }
-
-  function appendLog(event: DomainEvent): void {
-    const history = eventLog.get(event.sessionId) ?? {
-      events: [],
-    };
-    history.events.push(event);
-    if (history.events.length > eventLogLimit)
-      history.events.splice(0, history.events.length - eventLogLimit);
-    eventLog.set(event.sessionId, history);
   }
 
   function endAttach(
@@ -504,33 +454,11 @@ export function createProtocolServerInternal(
     });
   }
 
-  function forwardEvent(event: DomainEvent): void {
-    if (event.type === "session.created") {
-      knownSessions.add(event.sessionId);
-      // 归属在会话身份产生的那一刻确立，早于任何成功返回。
-      const consumer = consumerScope.current();
-      if (consumer !== undefined)
-        consumerScope.claim(event.sessionId, consumer);
-    }
-    const eventId = v.parse(
-      eventIdSchema,
-      (eventHeads.get(event.sessionId) ?? 0) + 1,
-    );
-    eventHeads.set(event.sessionId, eventId);
-    eventPositions.set(event, eventId);
-    appendLog(event);
-    const observation = observations.get(event.sessionId) ?? { killed: false };
-    if (event.type === "turn.started") observation.activeTurnId = event.turnId;
-    if (event.type === "turn.completed") {
-      delete observation.activeTurnId;
-      observation.lastCompleted = event;
-    }
-    if (event.type === "session.killed") observation.killed = true;
-    observations.set(event.sessionId, observation);
+  function forwardCommittedEvent(entry: CommittedEvent): void {
+    const { event, eventId } = entry;
     for (const subscription of Array.from(attachSubscriptions)) {
       if (subscription.sessionId !== event.sessionId) continue;
-      if (subscription.replaying)
-        subscription.pendingEvents.push({ event, eventId });
+      if (subscription.replaying) subscription.pendingEvents.push(entry);
       else forwardToSubscription(subscription, event, eventId);
     }
     scheduleIdleExit();
@@ -563,6 +491,10 @@ export function createProtocolServerInternal(
       endAttach(subscription, event.stopReason);
     }
   }
+
+  const unsubscribeControlEvents = options.control.subscribeEvents(
+    forwardCommittedEvent,
+  );
 
   function requestIdOf(raw: unknown): RequestId | null {
     if (typeof raw !== "object" || raw === null) return null;
@@ -627,169 +559,14 @@ export function createProtocolServerInternal(
     });
   }
 
-  async function aggregateModelCatalog(): Promise<ModelCatalogResult> {
-    async function verifiedModelCatalogDiagnostic(
-      error: unknown,
-      harness: HarnessId,
-    ) {
-      if (!isAlreadyDiagnosedError(error) || error.diagnosticId === undefined) {
-        return undefined;
-      }
-      try {
-        const result = await options.diagnostics.query({
-          diagnosticId: error.diagnosticId,
-        });
-        if (!("record" in result)) return undefined;
-        const record = result.record;
-        return record.diagnosticId === error.diagnosticId &&
-          record.source === "adapter" &&
-          record.harness === harness &&
-          record.kind === "request_failure" &&
-          record.operation === "model_catalog" &&
-          record.stage === "query"
-          ? error.diagnosticId
-          : undefined;
-      } catch {
-        return undefined;
-      }
-    }
-
-    const entries = Array.from(options.adapters.entries());
-    const results = await Promise.allSettled(
-      entries.map(async ([harness, adapter]) =>
-        adapter.modelCatalog(async (input) => {
-          const unsafe = input as unknown as Record<string, unknown>;
-          if ("source" in unsafe || "harness" in unsafe) {
-            return undefined;
-          }
-          return await options.diagnostics.record({
-            ...input,
-            source: "adapter",
-            harness,
-          });
-        }),
-      ),
-    );
-    const catalogs: HarnessModelCatalog[] = [];
-    const failures: ModelCatalogResult["failures"] = [];
-    for (const [index, result] of results.entries()) {
-      const harness = entries[index]?.[0];
-      if (harness === undefined) continue;
-      if (result.status === "fulfilled") {
-        const parsed = v.safeParse(harnessModelCatalogSchema, result.value);
-        if (parsed.success && parsed.output.harness === harness) {
-          catalogs.push(parsed.output);
-          continue;
-        }
-        const reason = new Error("Model catalog did not match its harness");
-        const diagnosticId = await recordDiagnostic({
-          harness,
-          kind: "request_failure",
-          operation: "model_catalog",
-          stage: "query",
-          reason: "upstream_error",
-          message: makeTextEvidence(String(reason)),
-        });
-        failures.push({
-          harness,
-          code: "model_catalog_query_failed",
-          failure: {
-            failureCategory: "unclassified",
-            retryDisposition: "unknown",
-          },
-          ...(diagnosticId === undefined ? {} : { diagnosticId }),
-        });
-      } else {
-        const suppliedDiagnosticId = await verifiedModelCatalogDiagnostic(
-          result.reason,
-          harness,
-        );
-        const diagnosticId =
-          suppliedDiagnosticId ??
-          (await recordDiagnostic({
-            kind: "request_failure",
-            operation: "model_catalog",
-            stage: "query",
-            reason: "upstream_error",
-            harness,
-            message: makeTextEvidence(String(result.reason)),
-          }));
-        failures.push({
-          harness,
-          code: "model_catalog_query_failed",
-          failure: {
-            failureCategory: "unclassified",
-            retryDisposition: "unknown",
-          },
-          ...(diagnosticId === undefined ? {} : { diagnosticId }),
-        });
-      }
-    }
-    return { catalogs, failures };
-  }
-
   async function attach(
     connection: TransportConnection<ProtocolMessage>,
     params: AttachParams,
     request: ProtocolRequest,
+    consumer: ConsumerContext | undefined,
   ): Promise<AttachResult> {
-    assertSessionScope(params.sessionId);
-    if (!knownSessions.has(params.sessionId))
-      throw {
-        code: "session_not_found",
-        sessionId: params.sessionId,
-      } satisfies MachineError;
-    if (params.scope === "turn")
-      options.machine.assertTurnTarget({
-        sessionId: params.sessionId,
-        turnId: params.turnId,
-      });
-    const target: SubscriptionTarget =
-      params.scope === "turn"
-        ? { scope: "turn", sessionId: params.sessionId, turnId: params.turnId }
-        : { scope: "session", sessionId: params.sessionId };
-    const history = eventLog.get(params.sessionId);
-    const head = eventHeads.get(params.sessionId) ?? null;
-    const first = history?.events[0];
-    const oldest = first === undefined ? null : eventPositions.get(first)!;
-    let after: number | undefined;
-    if (params.replay.mode === "after") {
-      const cursor = decodeResumeCursor(params.replay.cursor);
-      if (
-        cursor.daemonGeneration !== options.diagnostics.generation ||
-        cursor.target.scope !== target.scope ||
-        cursor.target.sessionId !== target.sessionId ||
-        (target.scope === "turn" &&
-          (cursor.target.scope !== "turn" ||
-            cursor.target.turnId !== target.turnId)) ||
-        cursor.eventId > (head ?? 0)
-      ) {
-        throw {
-          code: "invalid_params",
-          issues: [{ issue: "invalid_value", path: "replay.cursor" }],
-        } satisfies MachineError;
-      }
-      if (
-        head !== null &&
-        (oldest === null || oldest > 1) &&
-        cursor.eventId < (oldest ?? head + 1)
-      )
-        throw {
-          code: "event_cursor_expired",
-          oldest,
-          head,
-        } satisfies MachineError;
-      after = cursor.eventId;
-    }
-    const replayEvents =
-      params.replay.mode === "none"
-        ? []
-        : (history?.events ?? []).filter(
-            (event) =>
-              (after === undefined || eventPositions.get(event)! > after) &&
-              (target.scope === "session" ||
-                ("turnId" in event && event.turnId === target.turnId)),
-          );
+    const replay = options.control.attachReplay(params, consumer);
+    const { target } = replay;
     const subscription: AttachSubscription = {
       sessionId: params.sessionId,
       target,
@@ -797,12 +574,7 @@ export function createProtocolServerInternal(
         subscriptionIdSchema,
         "subscription-" + ++subscriptionSequence,
       ),
-      lastEventId:
-        after === undefined
-          ? head
-          : after === 0
-            ? null
-            : v.parse(eventIdSchema, after),
+      lastEventId: replay.lastEventId,
       connection,
       replaying: true,
       pendingEvents: [],
@@ -814,10 +586,9 @@ export function createProtocolServerInternal(
     try {
       testing.beforeAttachReplay?.(params.sessionId);
       if (target.scope === "turn") {
-        const snapshot = await options.machine.wait({
-          targets: [{ sessionId: target.sessionId, turnId: target.turnId }],
-          completion: "all",
-          timeoutMs: 0,
+        const snapshot = await options.control.waitForAttachTurn({
+          sessionId: target.sessionId,
+          turnId: target.turnId,
         });
         terminal = snapshot.completed[0]?.stopReason;
       }
@@ -828,14 +599,14 @@ export function createProtocolServerInternal(
     }
     afterAttachAck.set(request, () => {
       if (!subscription.active) return;
-      for (const event of replayEvents)
-        forwardToSubscription(subscription, event, eventPositions.get(event)!);
+      for (const entry of replay.entries)
+        forwardToSubscription(subscription, entry.event, entry.eventId);
       subscription.replaying = false;
-      for (const { event, eventId } of subscription.pendingEvents.splice(0))
-        forwardToSubscription(subscription, event, eventId);
+      for (const entry of subscription.pendingEvents.splice(0))
+        forwardToSubscription(subscription, entry.event, entry.eventId);
       if (!subscription.active) return;
       if (terminal !== undefined) endAttach(subscription, terminal);
-      else if (observations.get(params.sessionId)?.killed)
+      else if (options.control.isSessionKilled(params.sessionId))
         endAttach(subscription, "session_killed");
     });
     return {
@@ -843,33 +614,18 @@ export function createProtocolServerInternal(
       subscriptionId: subscription.subscriptionId,
       target,
       window: {
-        truncated:
-          head !== null &&
-          (first === undefined || eventPositions.get(first)! > 1),
-        oldest: first === undefined ? null : eventPositions.get(first)!,
-        head,
+        truncated: replay.truncated,
+        oldest: replay.oldest,
+        head: replay.head,
       },
-      replayed: replayEvents.length,
+      replayed: replay.entries.length,
     };
-  }
-
-  // 会话归属之外的消费者把该会话按不存在呈现，投影与"未知 id"完全一致。
-  function isForeignSession(sessionId: SessionId): boolean {
-    const consumer = consumerScope.current();
-    return (
-      consumer !== undefined && !consumerScope.inScope(consumer, sessionId)
-    );
-  }
-
-  function assertSessionScope(sessionId: SessionId): void {
-    if (isForeignSession(sessionId)) {
-      throw { code: "session_not_found", sessionId } satisfies MachineError;
-    }
   }
 
   async function dispatch(
     connection: TransportConnection<ProtocolMessage>,
     request: ProtocolRequest,
+    consumer: ConsumerContext | undefined,
   ): Promise<unknown> {
     // execute 已在接纳时核验并捕获绑定；连接随后关闭不能取消已接纳命令。
     switch (request.method) {
@@ -893,141 +649,32 @@ export function createProtocolServerInternal(
         } satisfies InitializeResult;
       }
       case "modelCatalog":
-        return await aggregateModelCatalog();
       case "spawn":
-        const spawnParams = request.params as SpawnParams;
-        try {
-          const directory = await stat(spawnParams.cwd, { bigint: true });
-          if (
-            !directory.isDirectory() ||
-            (spawnParams.cwdIdentity !== undefined &&
-              (spawnParams.cwdIdentity.device !== String(directory.dev) ||
-                spawnParams.cwdIdentity.inode !== String(directory.ino)))
-          ) {
-            throw new Error("Not a directory");
-          }
-        } catch {
-          throw {
-            code: "invalid_params",
-            issues: [{ issue: "invalid_value", path: "cwd" }],
-          } satisfies MachineError;
-        }
-        if (
-          spawnParams.captureHarnessStderr === true &&
-          options.adapters.has(spawnParams.harness) &&
-          options.adapters.get(spawnParams.harness)?.canCaptureHarnessStderr !==
-            true
-        ) {
-          throw {
-            code: "unsupported_feature",
-            feature: "capture_harness_stderr",
-          } satisfies MachineError;
-        }
-        const knownHarnesses = new Set(options.adapters.keys());
-        if (!knownHarnesses.has(spawnParams.harness)) {
-          throw {
-            code: "unknown_harness",
-            harness: spawnParams.harness,
-            availableHarnesses: [...knownHarnesses],
-          } satisfies MachineError;
-        }
-        if (spawnParams.model !== undefined) {
-          const currentModelCatalog = await aggregateModelCatalog();
-          const catalog = currentModelCatalog.catalogs.find(
-            ({ harness }) => harness === spawnParams.harness,
-          );
-          const model = catalog?.models.find(
-            ({ id }) => id === spawnParams.model,
-          );
-          if (catalog !== undefined && model === undefined) {
-            throw {
-              code: "invalid_params",
-              issues: [{ issue: "invalid_value", path: "model" }],
-            } satisfies MachineError;
-          }
-          if (
-            model !== undefined &&
-            spawnParams.reasoning !== undefined &&
-            !model.reasoningEfforts.includes(spawnParams.reasoning)
-          ) {
-            throw {
-              code: "invalid_params",
-              issues: [{ issue: "invalid_value", path: "reasoning" }],
-            } satisfies MachineError;
-          }
-        }
-        return await options.machine.spawn(spawnParams);
-      case "send": {
-        const params = request.params as SendParams;
-        assertSessionScope(params.sessionId);
-        return await options.machine.send(params);
-      }
-      case "wait": {
-        const params = request.params as WaitParams;
-        for (const target of params.targets)
-          assertSessionScope(target.sessionId);
-        return await options.machine.wait(params);
-      }
-      case "interrupt": {
-        const params = request.params as InterruptParams;
-        assertSessionScope(params.sessionId);
-        return await options.machine.interrupt(params);
-      }
-      case "kill": {
-        const params = request.params as KillParams;
-        return isForeignSession(params.sessionId)
-          ? ({
-              sessionId: params.sessionId,
-              status: "not_found",
-            } satisfies KillResult)
-          : await options.machine.kill(params);
-      }
-      case "list": {
-        const listed = options.machine.list(
-          request.params as ListFilter | undefined,
+      case "send":
+      case "wait":
+      case "interrupt":
+      case "kill":
+      case "list":
+      case "resolvePermission":
+        return await options.control.dispatch(
+          request.method,
+          request.params,
+          consumer,
         );
-        const consumer = consumerScope.current();
-        return consumer === undefined
-          ? listed
-          : listed.filter((session) =>
-              consumerScope.inScope(consumer, session.sessionId),
-            );
-      }
-      case "attach":
-        return attach(connection, request.params as AttachParams, request);
-      case "resolvePermission": {
-        const params = request.params as ResolvePermissionParams;
-        assertSessionScope(params.sessionId);
-        await options.machine.resolvePermission(params);
-        return {
-          sessionId: params.sessionId,
-          permissionId: params.permissionId,
-          turnId: params.turnId,
-        };
-      }
       case "diagnostics":
         testing.onDiagnosticsQueryAccepted?.();
-        if (options.diagnostics.health().status === "degraded") {
-          throw { code: "diagnostics_unavailable" } satisfies MachineError;
-        }
-        const diagnosticsParams = request.params as DiagnosticsParams;
-        try {
-          return await options.diagnostics.query(diagnosticsParams);
-        } catch (error) {
-          if (
-            error instanceof Error &&
-            "code" in error &&
-            error.code === "diagnostic_not_found"
-          ) {
-            if ("diagnosticId" in diagnosticsParams) {
-              throw {
-                code: "diagnostic_not_found",
-                diagnosticId: diagnosticsParams.diagnosticId,
-              } satisfies MachineError;
-            }
-          }
-          throw { code: "diagnostics_unavailable" } satisfies MachineError;
-        }
+        return await options.control.dispatch(
+          request.method,
+          request.params,
+          consumer,
+        );
+      case "attach":
+        return attach(
+          connection,
+          request.params as AttachParams,
+          request,
+          consumer,
+        );
       default:
         return unsupportedProtocolMethod(request.method);
     }
@@ -1161,6 +808,5 @@ export function createProtocolServerInternal(
     async stop() {
       await shutdown("stopped");
     },
-    forwardEvent,
   };
 }

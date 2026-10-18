@@ -309,7 +309,7 @@ export function createSessionMachine(options: {
     }
   }
 
-  // 事件折叠：只改状态，不做任何订阅通知；通知由总线在折叠前发出。
+  // 事件折叠：只改状态，不做任何订阅通知；总线在折叠后发布已提交事件。
   const apply = (event: DomainEvent): void => {
     const session = sessions.get(event.sessionId);
     if (session !== undefined && session.state === "killed") return;

@@ -10,7 +10,7 @@ import type {
 } from "@reins/protocol";
 
 const simulatedModelCatalog: HarnessModelCatalog = {
-  harness: "codex",
+  harness: "qoder",
   models: [
     {
       id: "simulated-model",
@@ -95,7 +95,7 @@ const simulatedDriverFactory: HarnessAdapter["driverFactory"] = ({ emit }) => {
 };
 
 const simulatedRegistryModule = {
-  simulated: {
+  qoder: {
     driverFactory: simulatedDriverFactory,
     async modelCatalog(): Promise<HarnessModelCatalog> {
       return simulatedModelCatalog;

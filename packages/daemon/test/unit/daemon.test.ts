@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 
 import { AlreadyDiagnosedError } from "@reins/adapter-kit";
-import type { SessionMachine } from "@reins/core";
+import { createSessionMachine } from "@reins/core";
 import type {
   DomainEvent,
   ModelCatalogResult,
@@ -31,7 +31,6 @@ import {
   makeDiagnosticId,
   REINS_PROTOCOL_MAJOR_VERSION,
   sessionIdSchema,
-  sessionNameSchema,
 } from "@reins/protocol";
 import {
   createInMemoryTransportServer,
@@ -44,7 +43,11 @@ import { createDaemonForTest } from "../../src/daemon.testing.ts";
 import type { Daemon } from "../../src/daemon.ts";
 import type { DiagnosticsRuntime } from "../../src/diagnostics-recorder.ts";
 import { daemonGenerationSchema } from "../../src/generation.ts";
-import { createDaemon, createProtocolServer } from "../../src/index.ts";
+import {
+  createDaemon,
+  createProtocolServer,
+  createRoutingDriverFactory,
+} from "../../src/index.ts";
 import type { AdapterRegistry, HarnessAdapter } from "../../src/registry.ts";
 
 type PublicProtocolServerOptions = Parameters<typeof createProtocolServer>[0];
@@ -423,25 +426,27 @@ describe("daemon 公共接口", () => {
   test("公开 protocol server 不接受或执行 attach replay 测试 hook", async () => {
     expect(publicProtocolServerHasAttachReplayHook).toBe(false);
     const transport = createInMemoryTransportServer<ProtocolMessage>();
-    const unsupported = async (): Promise<never> => {
-      throw new Error("unsupported test operation");
-    };
-    const machine: SessionMachine = {
-      spawn: unsupported,
-      send: unsupported,
-      wait: unsupported,
-      interrupt: unsupported,
-      resolvePermission: unsupported,
-      kill: unsupported,
-      list: () => [],
-      assertTurnTarget() {},
-      subscribe: () => () => undefined,
-    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const adapters = new Map<HarnessId, HarnessAdapter>([
+      ["codex", fake.adapter],
+    ]);
+    const machine = createSessionMachine({
+      driverFactory: createRoutingDriverFactory(adapters, testDiagnostics),
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          return await testDiagnostics.record({ ...input, source: "core" });
+        },
+      },
+    });
     let replayHookCalls = 0;
     const runtimeOptions = {
       transport,
       machine,
-      adapters: new Map(),
+      adapters,
       diagnostics: testDiagnostics,
       idleTimeoutMs: 60_000,
       beforeAttachReplay: () => {
@@ -451,29 +456,31 @@ describe("daemon 公共接口", () => {
     const protocolServer = createProtocolServer(runtimeOptions);
     const running = protocolServer.start();
     await flush();
-    const sessionId = v.parse(sessionIdSchema, "public-interface@gdaemontest");
-    protocolServer.forwardEvent({
-      type: "session.created",
-      sessionId,
-      sessionName: v.parse(sessionNameSchema, "public-interface"),
-      harness: "codex",
-      model: null,
-      reasoning: null,
-      cwd: "/tmp",
-      spawnedAt: "2026-08-20T00:00:00.000Z",
-    });
     const client = transport.connect();
     await flush();
+    const requester = makeRequester(client);
+    let sessionId: SessionId | undefined;
     try {
+      sessionId = (
+        resultOf(
+          await requester.request("spawn", {
+            sessionName: "public-interface",
+            harness: "codex",
+            message: "hello",
+          }),
+        ) as { sessionId: SessionId }
+      ).sessionId;
       await expect(
-        makeRequester(client).request("attach", {
+        requester.request("attach", {
           scope: "session",
           sessionId,
           replay: { mode: "none" },
         }),
       ).resolves.toMatchObject({ result: { sessionId, replayed: 0 } });
+      expect(machine.list({ sessionId })).toHaveLength(1);
       expect(replayHookCalls).toBe(0);
     } finally {
+      if (sessionId !== undefined) await machine.kill({ sessionId });
       await protocolServer.stop();
       await running;
     }

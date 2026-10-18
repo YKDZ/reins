@@ -1174,7 +1174,7 @@ async function replayWindow(): Promise<void> {
   try {
     const input: SpawnInput = {
       sessionName: "packed-history-window",
-      harness: "codex",
+      harness: "qoder",
       message: JSON.stringify({
         gate: required("REINS_HISTORY_GATE"),
         messages: 1005,

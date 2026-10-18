@@ -22,7 +22,7 @@ function deltas(events: DomainEvent[]): string[] {
 }
 
 describe("event-bus", () => {
-  test("publish 同步分发：先通知订阅者，再折叠状态", () => {
+  test("publish 同步分发：先折叠状态，再通知订阅者", () => {
     const order: Array<["notify" | "apply", number]> = [];
     const bus = createEventBus({
       apply: (event) =>
@@ -35,8 +35,8 @@ describe("event-bus", () => {
     bus.publish(makeEvent(1));
 
     expect(order).toEqual([
-      ["notify", 1],
       ["apply", 1],
+      ["notify", 1],
     ]);
   });
 

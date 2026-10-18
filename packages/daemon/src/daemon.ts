@@ -10,6 +10,7 @@ import {
 import type { TransportServer } from "@reins/transport";
 
 import { createConsumerScope } from "./consumer-scope.ts";
+import { createControlPlane } from "./control-plane.ts";
 import { orderDiagnosticsAcceptance } from "./diagnostics-acceptance.ts";
 import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
@@ -91,19 +92,24 @@ export function createDaemonInternal(
     identity: options.identity,
     diagnostics: coreDiagnostics,
   });
+  const control = createControlPlane({
+    machine,
+    adapters: options.adapters,
+    diagnostics,
+    consumerScope,
+    ...(options.eventLogLimit === undefined
+      ? {}
+      : { eventLogLimit: options.eventLogLimit }),
+  });
   const server = createProtocolServerInternal(
     {
       transport: options.transport,
-      adapters: options.adapters,
-      machine,
+      control,
       diagnostics,
       consumerScope,
       ...(options.idleTimeoutMs === undefined
         ? {}
         : { idleTimeoutMs: options.idleTimeoutMs }),
-      ...(options.eventLogLimit === undefined
-        ? {}
-        : { eventLogLimit: options.eventLogLimit }),
     },
     {
       ...(testing.beforeAttachReplay === undefined
@@ -116,9 +122,6 @@ export function createDaemonInternal(
           }),
     },
   );
-  machine.subscribe((event) => {
-    server.forwardEvent(event);
-  });
   if (testing.onEvent !== undefined) {
     machine.subscribe(testing.onEvent);
   }
@@ -127,24 +130,7 @@ export function createDaemonInternal(
     if (stopPromise !== undefined) return stopPromise;
     server.quiesce();
     const attempt = (async () => {
-      const liveSessionIds = machine
-        .list()
-        .filter((session) => session.state !== "killed")
-        .map((session) => session.sessionId);
-      const results = await Promise.allSettled(
-        liveSessionIds.map(async (sessionId) => {
-          await machine.kill({ sessionId: sessionId });
-        }),
-      );
-      const failures = results
-        .filter(
-          (result): result is PromiseRejectedResult =>
-            result.status === "rejected",
-        )
-        .map((result) => result.reason);
-      if (failures.length > 0) {
-        throw new AggregateError(failures, "Worker cleanup failed");
-      }
+      await control.terminateLiveSessions();
       await server.stop();
     })();
     stopPromise = attempt;
