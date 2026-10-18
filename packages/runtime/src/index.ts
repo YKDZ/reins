@@ -7,17 +7,17 @@ import {
 } from "@ykdz/reins-sdk";
 import * as v from "valibot";
 
-import type { ConnectReinsOptions } from "./application-contracts.js";
+import type { OpenLocalOptions } from "./application-contracts.js";
 import {
   connectWithStartup,
   isReinsStartupTransportFailure,
 } from "./application-runtime.ts";
 
-export type { ConnectReinsOptions } from "./application-contracts.js";
+export type { OpenLocalOptions } from "./application-contracts.js";
 
 // 本机 daemon 的启动归运行包应用层；连接、握手和查询统一使用公开 SDK。
-export async function connectReins(
-  options: ConnectReinsOptions,
+export async function openLocal(
+  options: OpenLocalOptions,
 ): Promise<ReinsConnection> {
   try {
     return await connectWithStartup(

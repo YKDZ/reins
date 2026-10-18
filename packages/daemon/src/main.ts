@@ -2,7 +2,7 @@
 
 import { closeSync, writeFileSync } from "node:fs";
 import { mkdir } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
@@ -23,10 +23,12 @@ import {
   transportErrorCodeOf,
 } from "@reins/transport";
 
-import { createDaemon, runDaemonLifecycle } from "./daemon.ts";
+import { createDaemonInternal, runDaemonLifecycle } from "./daemon.ts";
 import { openDiagnosticsRuntime } from "./diagnostics-recorder.ts";
+import { acquireAdvisoryFileLease } from "./diagnostics-store-lock.ts";
 import type { HarnessAdapter } from "./registry.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS } from "./server.ts";
+import { resolveDaemonState } from "./state.ts";
 
 // 发布阶段的拼接点（ADR-0011）：默认注册两个真实 adapter；
 // --adapters <module> 可用外部模块整体替换注册表（测试与扩展入口）。
@@ -111,45 +113,75 @@ function installCrashHandlers(): void {
 
 async function main(): Promise<void> {
   installCrashHandlers();
-  const flags = parseFlags(process.argv.slice(2));
-  const adaptersModule =
-    flags.adaptersModule ?? process.env.REINS_ADAPTERS_MODULE;
-  const socketPath = resolveReinsSocketPath({ env: process.env });
-  await mkdir(dirname(socketPath), { recursive: true });
-  const adapters = await loadAdapters(adaptersModule);
-  const transport = createUnixSocketServer<ProtocolMessage>({
-    path: socketPath,
-  });
-  const diagnosticsRuntime = await openDiagnosticsRuntime();
-  const daemon = createDaemon({
-    transport,
-    adapters,
-    identity: {
-      session: (sessionName) => diagnosticsRuntime.sessionId(sessionName),
-    },
-    diagnostics: diagnosticsRuntime,
-    idleTimeoutMs: idleTimeoutFromEnv(process.env),
-  });
-  let shutdownPromise: Promise<void> | undefined;
-  const shutdown = (): Promise<void> => {
-    if (shutdownPromise !== undefined) return shutdownPromise;
-    const attempt = daemon.stop();
-    shutdownPromise = attempt;
-    void attempt.catch(() => {
-      if (shutdownPromise === attempt) shutdownPromise = undefined;
-    });
-    return attempt;
-  };
-  process.on("SIGINT", () => {
-    void shutdown().catch(() => undefined);
-  });
-  process.on("SIGTERM", () => {
-    void shutdown().catch(() => undefined);
-  });
-  await runDaemonLifecycle(
-    { start: () => daemon.start(), stop: shutdown },
-    diagnosticsRuntime,
+  const state = await resolveDaemonState();
+  const writerLease = await acquireAdvisoryFileLease(
+    join(state.directory, "control-writer"),
+    { timeoutMs: 0 },
   );
+  let diagnosticsRuntime:
+    | Awaited<ReturnType<typeof openDiagnosticsRuntime>>
+    | undefined;
+  let lifecycleOwnsRuntime = false;
+  try {
+    const flags = parseFlags(process.argv.slice(2));
+    const adaptersModule =
+      flags.adaptersModule ?? process.env.REINS_ADAPTERS_MODULE;
+    const socketPath = resolveReinsSocketPath({ env: process.env });
+    await mkdir(dirname(socketPath), { recursive: true });
+    const adapters = await loadAdapters(adaptersModule);
+    const transport = createUnixSocketServer<ProtocolMessage>({
+      path: socketPath,
+    });
+    diagnosticsRuntime = await openDiagnosticsRuntime(state);
+    const openedDiagnosticsRuntime = diagnosticsRuntime;
+    const daemon = createDaemonInternal(
+      {
+        transport,
+        adapters,
+        identity: {
+          session: (sessionName) =>
+            openedDiagnosticsRuntime.sessionId(sessionName),
+        },
+        diagnostics: openedDiagnosticsRuntime,
+        idleTimeoutMs: idleTimeoutFromEnv(process.env),
+      },
+      {},
+      () => writerLease.assertHeld(),
+    );
+    let shutdownPromise: Promise<void> | undefined;
+    const shutdown = (): Promise<void> => {
+      if (shutdownPromise !== undefined) return shutdownPromise;
+      const attempt = daemon.stop();
+      shutdownPromise = attempt;
+      void attempt.catch(() => {
+        if (shutdownPromise === attempt) shutdownPromise = undefined;
+      });
+      return attempt;
+    };
+    process.on("SIGINT", () => {
+      void shutdown().catch(() => undefined);
+    });
+    process.on("SIGTERM", () => {
+      void shutdown().catch(() => undefined);
+    });
+    lifecycleOwnsRuntime = true;
+    await runDaemonLifecycle(
+      { start: () => daemon.start(), stop: shutdown },
+      {
+        record: (input) => openedDiagnosticsRuntime.record(input),
+        async close() {
+          await openedDiagnosticsRuntime.close();
+          await writerLease.close();
+        },
+      },
+    );
+  } catch (error) {
+    if (!lifecycleOwnsRuntime) {
+      await diagnosticsRuntime?.close().catch(() => undefined);
+      await writerLease.close().catch(() => undefined);
+    }
+    throw error;
+  }
 }
 
 void main().catch((error: unknown) => {

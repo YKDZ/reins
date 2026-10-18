@@ -366,9 +366,9 @@ export function createReleaseStagingManifest(
   }
   manifest.dependencies = dependencies;
   manifest.exports = {
-    "./application": {
-      types: "./dist/application.d.ts",
-      default: "./dist/application.js",
+    ".": {
+      types: "./dist/index.d.ts",
+      default: "./dist/index.js",
     },
   };
   return manifest;

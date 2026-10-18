@@ -1,5 +1,4 @@
-import { chmod, mkdir, mkdtemp, stat } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { chmod, mkdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 
 export const defaultDiagnosticsRetention = {
@@ -89,7 +88,6 @@ async function ensurePrivateDirectory(directory: string): Promise<void> {
 
 export async function resolveDaemonState(options?: {
   env?: StateEnvironment;
-  temporaryParent?: string;
 }): Promise<DaemonState> {
   const env = options?.env ?? process.env;
   const retention = resolveDiagnosticsRetention(env);
@@ -97,16 +95,17 @@ export async function resolveDaemonState(options?: {
   if (explicit === "") throw new StateConfigurationError("REINS_STATE_DIR");
   const xdg = env.XDG_STATE_HOME === "" ? undefined : env.XDG_STATE_HOME;
   const home = env.HOME === "" ? undefined : env.HOME;
-  const durable =
-    explicit !== undefined || xdg !== undefined || home !== undefined;
   const directory =
     explicit ??
     (xdg === undefined ? undefined : join(xdg, "reins")) ??
-    (home === undefined ? undefined : join(home, ".local", "state", "reins")) ??
-    (await mkdtemp(join(options?.temporaryParent ?? tmpdir(), "reins-state-")));
+    (home === undefined ? undefined : join(home, ".local", "state", "reins"));
+
+  if (directory === undefined) {
+    throw new StateConfigurationError("REINS_STATE_DIR");
+  }
 
   await ensurePrivateDirectory(directory);
   const diagnosticsDirectory = join(directory, "diagnostics");
   await ensurePrivateDirectory(diagnosticsDirectory);
-  return { directory, diagnosticsDirectory, durable, retention };
+  return { directory, diagnosticsDirectory, durable: true, retention };
 }

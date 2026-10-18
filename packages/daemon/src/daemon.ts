@@ -71,6 +71,7 @@ export function createDaemonInternal(
     onDiagnosticsQueryAccepted?: () => void;
     onEvent?: (event: DomainEvent) => void;
   },
+  assertWriterLease?: () => Promise<void>,
 ): Daemon {
   const consumerScope = createConsumerScope();
   const diagnostics = orderDiagnosticsAcceptance(
@@ -107,6 +108,7 @@ export function createDaemonInternal(
       control,
       diagnostics,
       consumerScope,
+      ...(assertWriterLease === undefined ? {} : { assertWriterLease }),
       ...(options.idleTimeoutMs === undefined
         ? {}
         : { idleTimeoutMs: options.idleTimeoutMs }),

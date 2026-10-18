@@ -1,4 +1,6 @@
-import { rm } from "node:fs/promises";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import type { ProtocolMessage } from "@reins/protocol";
 import {
@@ -68,7 +70,10 @@ async function waitUntilReady(
 export async function openEphemeralDaemonForTest(options: {
   adapters: AdapterRegistry;
 }): Promise<EphemeralDaemon> {
-  const state = await resolveDaemonState({ env: {} });
+  const stateRoot = await mkdtemp(join(tmpdir(), "reins-test-runtime-"));
+  const state = await resolveDaemonState({
+    env: { REINS_STATE_DIR: stateRoot },
+  });
   let runtime:
     | Awaited<ReturnType<typeof openDiagnosticsRuntimeForTest>>
     | undefined;

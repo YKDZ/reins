@@ -219,7 +219,7 @@ const runtimeBundle = await rolldown({
   cwd: repository,
   input: {
     "reins-daemon": "packages/daemon/src/main.ts",
-    application: "packages/runtime/src/application.ts",
+    index: "packages/runtime/src/index.ts",
   },
   platform: "node",
   external: (specifier) =>
@@ -244,7 +244,7 @@ const runtimeChunks = runtimeOutput.output.filter(
 verifyBundle(
   runtimeChunks,
   Object.keys(runtimeDependencies),
-  ["reins-daemon.js", "application.js"],
+  ["reins-daemon.js", "index.js"],
   true,
 );
 for (const name of ["reins-daemon.js"] as const) {
@@ -256,10 +256,7 @@ for (const name of ["reins-daemon.js"] as const) {
   if ((statSync(path).mode & 0o777) !== 0o755)
     throw new Error(`Executable mode is not 0755: ${path}`);
 }
-for (const name of [
-  "application.d.ts",
-  "application-contracts.d.ts",
-] as const) {
+for (const name of ["index.d.ts", "application-contracts.d.ts"] as const) {
   const declaration = join(repository, "packages", "runtime", "dist", name);
   if (!readFileSync(declaration, "utf8")) {
     throw new Error(`Application declaration is empty: ${declaration}`);

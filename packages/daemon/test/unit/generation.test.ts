@@ -100,10 +100,12 @@ describe("daemon generation", () => {
     expect(reissuedHandle).not.toBe(heldHandle);
   });
 
-  test("ephemeral allocation uses injected random boot material and makes no durability promise", async () => {
+  test("a test temporary directory is an explicit durable state root", async () => {
     const root = await mkdtemp(join(tmpdir(), "reins-ephemeral-test-"));
     directories.push(root);
-    const state = await resolveDaemonState({ env: {}, temporaryParent: root });
+    const state = await resolveDaemonState({
+      env: { REINS_STATE_DIR: root },
+    });
     const allocator = await acquireGenerationAllocator(state, {
       randomBytes: () => Buffer.from([0xff, 0xff, 0xff, 0xff, 0xff, 0xff]),
     });

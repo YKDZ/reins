@@ -25,7 +25,7 @@ import {
   type DaemonGeneration,
   type GenerationAllocatorLease,
 } from "./generation.ts";
-import { resolveDaemonState, type DaemonState } from "./state.ts";
+import type { DaemonState } from "./state.ts";
 
 export type DiagnosticsRuntime = {
   readonly generation: DaemonGeneration;
@@ -50,9 +50,9 @@ type RuntimeDependencies = {
   stderr(message: string): void;
 };
 
-function productionDependencies(): RuntimeDependencies {
+function productionDependencies(state: DaemonState): RuntimeDependencies {
   return {
-    resolveState: () => resolveDaemonState(),
+    resolveState: async () => state,
     openStore: (state) =>
       openDiagnosticsStore({
         directory: state.diagnosticsDirectory,
@@ -65,8 +65,10 @@ function productionDependencies(): RuntimeDependencies {
   };
 }
 
-export async function openDiagnosticsRuntime(): Promise<DiagnosticsRuntime> {
-  return await openDiagnosticsRuntimeInternal(productionDependencies());
+export async function openDiagnosticsRuntime(
+  state: DaemonState,
+): Promise<DiagnosticsRuntime> {
+  return await openDiagnosticsRuntimeInternal(productionDependencies(state));
 }
 
 export async function openDiagnosticsRuntimeInternal(

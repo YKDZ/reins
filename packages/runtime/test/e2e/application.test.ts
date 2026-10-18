@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { consumerContextSchema } from "@reins/protocol";
+import { openLocal } from "@ykdz/reins";
 import {
   connect,
   type DiagnosticId,
@@ -23,7 +24,6 @@ import {
   type TurnHandle,
 } from "@ykdz/reins-sdk";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
-import { connectReins } from "@ykdz/reins/application";
 import * as v from "valibot";
 import { afterEach, expect, test } from "vitest";
 
@@ -120,7 +120,7 @@ test("runtime rejects an empty consumer binding before starting the daemon", asy
   const socketPath = join(directory, "reins.sock");
 
   await expect(
-    connectReins({
+    openLocal({
       consumerContext: "",
       env: {
         ...process.env,
@@ -137,6 +137,154 @@ test("runtime rejects an empty consumer binding before starting the daemon", asy
   await expect(access(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
   await expect(access(daemonPids)).rejects.toMatchObject({ code: "ENOENT" });
 });
+
+test("openLocal fails without a stable state root before any harness dispatch", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "reins-application-no-state-"),
+  );
+  const daemonPids = join(directory, "daemon-pids.txt");
+  const requestsFile = join(directory, "requests.jsonl");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const socketPath = join(directory, "reins.sock");
+
+  await expect(
+    openLocal({
+      consumerContext: "no-state-consumer",
+      timeoutMs: 1_000,
+      env: {
+        ...process.env,
+        REINS_SOCKET: socketPath,
+        REINS_STATE_DIR: "",
+        XDG_STATE_HOME: "",
+        HOME: "",
+        REINS_DAEMON_BIN: daemonLauncher,
+        REINS_ADAPTERS_MODULE: adaptersModule,
+        REINS_FIXTURE_REQUESTS_FILE: requestsFile,
+      },
+    }),
+  ).rejects.toMatchObject({
+    stage: "connect",
+    failure: { code: "daemon_start_failed" },
+  });
+  await expect(access(requestsFile)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(access(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+});
+
+test("different endpoints cannot start writers for the same state root", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-application-writer-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  const requestsFile = join(directory, "requests.jsonl");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const stateDirectory = join(directory, "state");
+  const baseEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_STATE_DIR: stateDirectory,
+    REINS_DAEMON_BIN: daemonLauncher,
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_FIXTURE_REQUESTS_FILE: requestsFile,
+    REINS_IDLE_TIMEOUT_MS: "120000",
+  };
+  const first = await openLocal({
+    consumerContext: "writer-lease-consumer",
+    env: { ...baseEnv, REINS_SOCKET: join(directory, "first.sock") },
+  });
+  clients.push(first);
+  const spawned = await first.spawn(
+    {
+      harness: "fake",
+      message: "first writer",
+      sessionName: "writer-session",
+      cwd: process.cwd(),
+    },
+    first.prepareOperation("spawn"),
+  );
+
+  await expect(
+    openLocal({
+      consumerContext: "writer-lease-consumer",
+      timeoutMs: 1_000,
+      env: { ...baseEnv, REINS_SOCKET: join(directory, "second.sock") },
+    }),
+  ).rejects.toMatchObject({
+    stage: "connect",
+    failure: { code: "daemon_start_failed" },
+  });
+  await expect(
+    first.list({ sessionHandle: spawned.sessionHandle }),
+  ).resolves.toMatchObject([{ sessionHandle: spawned.sessionHandle }]);
+  const dispatches = (await readFile(requestsFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { type: string });
+  expect(
+    dispatches.filter(({ type }) => type === "worker_started"),
+  ).toHaveLength(1);
+});
+
+test("an in-flight spawn keeps the shared daemon alive after its client closes", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "reins-application-in-flight-"),
+  );
+  const daemonPids = join(directory, "daemon-pids.txt");
+  const requestsFile = join(directory, "requests.jsonl");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const options = {
+    consumerContext: "in-flight-consumer",
+    env: {
+      ...process.env,
+      REINS_SOCKET: join(directory, "reins.sock"),
+      REINS_STATE_DIR: join(directory, "state"),
+      REINS_DAEMON_BIN: daemonLauncher,
+      REINS_ADAPTERS_MODULE: adaptersModule,
+      REINS_FIXTURE_REQUESTS_FILE: requestsFile,
+      REINS_FIXTURE_CAPABILITIES_DELAY_MS: "3000",
+      REINS_IDLE_TIMEOUT_MS: "2000",
+    },
+  };
+  const connection = await openLocal(options);
+  clients.push(connection);
+  const spawning = connection.spawn(
+    {
+      harness: "fake",
+      message: "still in flight",
+      sessionName: "pending-session",
+      cwd: process.cwd(),
+    },
+    connection.prepareOperation("spawn"),
+  );
+  void spawning.catch(() => undefined);
+  connection.close();
+  clients.splice(clients.indexOf(connection), 1);
+
+  await new Promise((resolve) => setTimeout(resolve, 2_100));
+  const originalPid = Number((await readFile(daemonPids, "utf8")).trim());
+  expect(() => process.kill(originalPid, 0)).not.toThrow();
+  await expect(access(requestsFile)).rejects.toMatchObject({ code: "ENOENT" });
+
+  const reconnected = await openLocal({ ...options, timeoutMs: 1_000 });
+  clients.push(reconnected);
+  expect((await readFile(daemonPids, "utf8")).trim().split("\n")).toHaveLength(
+    1,
+  );
+}, 15_000);
 
 test("programmatic callers share one real daemon and reconnect to the same session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "reins-application-"));
@@ -163,8 +311,8 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
   };
 
   const [first, second] = await Promise.all([
-    connectReins(options),
-    connectReins(options),
+    openLocal(options),
+    openLocal(options),
   ]);
   clients.push(first, second);
 
@@ -194,7 +342,7 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
   second.close();
   clients.splice(0, 2);
 
-  const reconnected = await connectReins(options);
+  const reconnected = await openLocal(options);
   clients.push(reconnected);
   const observedAfterReconnect = await reconnected.list({
     sessionHandle: sessionHandle as unknown as SessionHandle,
@@ -241,7 +389,7 @@ test("application startup failure keeps the raw transport code", async () => {
 
   let failure: unknown;
   try {
-    await connectReins({
+    await openLocal({
       consumerContext: v.parse(consumerContextSchema, "application-e2e"),
       env,
       timeoutMs: 1_000,
@@ -262,7 +410,7 @@ test("application startup failure keeps the raw transport code", async () => {
   env.REINS_DAEMON_BIN = daemonLauncher;
   env.REINS_ADAPTERS_MODULE = adaptersModule;
   env.REINS_IDLE_TIMEOUT_MS = "120000";
-  const retried = await connectReins({
+  const retried = await openLocal({
     consumerContext: v.parse(consumerContextSchema, "application-e2e"),
     env,
   });
@@ -302,7 +450,7 @@ test("application reports local startup IO failures and can retry", async () => 
 
   let failure: unknown;
   try {
-    await connectReins(options);
+    await openLocal(options);
   } catch (error) {
     failure = error;
   }
@@ -320,7 +468,7 @@ test("application reports local startup IO failures and can retry", async () => 
 
   await rm(blockedParent);
   await mkdir(blockedParent);
-  const retried = await connectReins(options);
+  const retried = await openLocal(options);
   clients.push(retried);
   expect(await retried.capabilities()).toHaveProperty("capabilities");
   expect((await readFile(daemonPids, "utf8")).trim().split("\n")).toHaveLength(
@@ -360,7 +508,7 @@ test("a connected daemon handshake failure does not launch a replacement", async
   );
   let failure: unknown;
   try {
-    await connectReins({
+    await openLocal({
       consumerContext: v.parse(consumerContextSchema, "application-e2e"),
       env: {
         ...process.env,
@@ -402,7 +550,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     REINS_ADAPTERS_MODULE: adaptersModule,
     REINS_IDLE_TIMEOUT_MS: "120000",
   };
-  const connection = await connectReins({
+  const connection = await openLocal({
     consumerContext: "application-stderr-e2e",
     env,
   });
@@ -571,7 +719,7 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
     REINS_ADAPTERS_MODULE: adaptersModule,
     REINS_IDLE_TIMEOUT_MS: "120000",
   };
-  const owner = await connectReins({ consumerContext: "scope-owner", env });
+  const owner = await openLocal({ consumerContext: "scope-owner", env });
   clients.push(owner);
   const spawned = await owner.spawn(
     {
@@ -641,7 +789,7 @@ test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
     REINS_ADAPTERS_MODULE: adaptersModule,
     REINS_IDLE_TIMEOUT_MS: "120000",
   };
-  const connection = await connectReins({
+  const connection = await openLocal({
     consumerContext: "application-name-e2e",
     env,
   });
@@ -720,7 +868,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     REINS_FIXTURE_REQUESTS_FILE: observations,
     REINS_IDLE_TIMEOUT_MS: "120000",
   };
-  const connection = await connectReins({
+  const connection = await openLocal({
     consumerContext: "sdk-control-actions",
     env,
   });

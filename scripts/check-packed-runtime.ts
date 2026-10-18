@@ -1816,7 +1816,7 @@ async function runInstalledApplicationAcceptance(options: {
         value.closeReason === "killed" &&
         typeof value.sessionHandle === "string" &&
         typeof value.turnHandle === "string",
-      "已安装运行包未通过公开 application API 完成正式操作",
+      "已安装运行包未通过公开 openLocal API 完成正式操作",
     );
   } finally {
     await stopInstalledDaemon(pidPath);
@@ -1922,12 +1922,11 @@ async function main(): Promise<void> {
     const runtimeBins = installedRuntime.bin;
     assert(
       isRecord(runtimeExports) &&
-        JSON.stringify(Object.keys(runtimeExports)) ===
-          JSON.stringify(["./application"]) &&
+        JSON.stringify(Object.keys(runtimeExports)) === JSON.stringify(["."]) &&
         isRecord(runtimeBins) &&
         JSON.stringify(Object.keys(runtimeBins)) ===
           JSON.stringify(["reins-daemon"]),
-      "运行包没有公开唯一 application 与 daemon 入口",
+      "运行包没有公开 openLocal 与 daemon 入口",
     );
     const daemonPath = join(
       runtimeConsumer,

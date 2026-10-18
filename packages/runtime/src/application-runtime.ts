@@ -21,7 +21,7 @@ import { ReinsSdkError } from "@ykdz/reins-sdk";
 import lockfile from "proper-lockfile";
 import * as v from "valibot";
 
-import type { ConnectReinsOptions } from "./application-contracts.js";
+import type { OpenLocalOptions } from "./application-contracts.js";
 
 const sleep = (ms: number): Promise<void> =>
   new Promise((resolve) => setTimeout(resolve, ms));
@@ -60,7 +60,7 @@ function resolveDaemonCommand(
   } satisfies MachineError;
 }
 
-export type { ConnectReinsOptions } from "./application-contracts.js";
+export type { OpenLocalOptions } from "./application-contracts.js";
 
 export type ReinsStartupTransportFailure = {
   readonly kind: "reins_startup_transport_failure";
@@ -87,7 +87,7 @@ type ConnectionFactory<T> = (
 ) => Promise<T>;
 
 export async function connectWithStartup<T>(
-  options: ConnectReinsOptions,
+  options: OpenLocalOptions,
   connect: ConnectionFactory<T>,
 ): Promise<T> {
   const parsedConsumerContext = v.safeParse(

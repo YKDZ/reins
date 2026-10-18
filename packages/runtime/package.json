@@ -32,10 +32,10 @@
   ],
   "type": "module",
   "exports": {
-    "./application": {
-      "source": "./src/application.ts",
-      "types": "./dist/application.d.ts",
-      "default": "./dist/application.js"
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
     }
   },
   "publishConfig": {

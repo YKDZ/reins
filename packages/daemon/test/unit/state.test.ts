@@ -61,21 +61,22 @@ describe("daemon state", () => {
     expect(homeState.directory).toBe(join(home, ".local", "state", "reins"));
   });
 
-  test("uses an isolated ephemeral directory without a persistent home", async () => {
-    const root = await temporaryDirectory();
-    const state = await resolveDaemonState({ env: {}, temporaryParent: root });
-
-    expect(state.durable).toBe(false);
-    expect(state.directory.startsWith(root)).toBe(true);
-    expect((await stat(state.directory)).mode & 0o777).toBe(0o700);
+  test("fails when no stable state root is available", async () => {
+    await expect(
+      resolveDaemonState({
+        env: { XDG_STATE_HOME: "", HOME: "" },
+      }),
+    ).rejects.toMatchObject({
+      code: "invalid_configuration",
+      field: "REINS_STATE_DIR",
+    });
   });
 
-  test("rejects an empty explicit state path and ignores empty fallback roots", async () => {
+  test("rejects an empty explicit state path and unavailable fallback roots", async () => {
     const root = await temporaryDirectory();
     await expect(
       resolveDaemonState({
         env: { REINS_STATE_DIR: "", HOME: root },
-        temporaryParent: root,
       }),
     ).rejects.toMatchObject({
       code: "invalid_configuration",
@@ -84,17 +85,15 @@ describe("daemon state", () => {
 
     const homeFallback = await resolveDaemonState({
       env: { XDG_STATE_HOME: "", HOME: root },
-      temporaryParent: root,
     });
     expect(homeFallback.durable).toBe(true);
     expect(homeFallback.directory).toBe(join(root, ".local", "state", "reins"));
 
-    const temporaryFallback = await resolveDaemonState({
-      env: { XDG_STATE_HOME: "", HOME: "" },
-      temporaryParent: root,
-    });
-    expect(temporaryFallback.durable).toBe(false);
-    expect(temporaryFallback.directory.startsWith(root)).toBe(true);
+    await expect(
+      resolveDaemonState({
+        env: { XDG_STATE_HOME: "", HOME: "" },
+      }),
+    ).rejects.toMatchObject({ code: "invalid_configuration" });
   });
 
   test("uses bounded diagnostics retention defaults and rejects invalid overrides", async () => {

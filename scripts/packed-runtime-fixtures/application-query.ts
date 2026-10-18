@@ -1,9 +1,9 @@
+import { openLocal } from "@ykdz/reins";
 import {
   ReinsSdkError,
   type ReinsConnection,
   type SessionHandle,
 } from "@ykdz/reins-sdk";
-import { connectReins } from "@ykdz/reins/application";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -23,7 +23,7 @@ async function main(): Promise<void> {
     throw new Error("The installed application query needs its runtime env");
   }
 
-  const connection: ReinsConnection = await connectReins({
+  const connection: ReinsConnection = await openLocal({
     consumerContext,
     env: process.env,
   });

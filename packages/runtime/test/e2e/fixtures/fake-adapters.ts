@@ -167,7 +167,13 @@ function fakeAdapter(options: {
   };
   return {
     driverFactory: factory,
-    capabilities: async () => capability(harness, modelId),
+    async capabilities() {
+      const delayMs = Number(process.env.REINS_FIXTURE_CAPABILITIES_DELAY_MS);
+      if (Number.isFinite(delayMs) && delayMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+      }
+      return capability(harness, modelId);
+    },
     ...(options.canCaptureHarnessStderr === true
       ? { canCaptureHarnessStderr: true }
       : {}),

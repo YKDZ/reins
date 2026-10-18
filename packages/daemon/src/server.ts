@@ -102,6 +102,7 @@ type ProtocolServerOptions = {
   diagnostics: OrderedDiagnosticsRuntime;
   consumerScope: ConsumerScope;
   idleTimeoutMs?: number;
+  assertWriterLease?: () => Promise<void>;
 };
 
 type PublicProtocolServerOptions = {
@@ -173,6 +174,11 @@ export function createProtocolServerInternal(
     connection: TransportConnection<ProtocolMessage>,
     request: ProtocolRequest,
   ): Promise<{ result: unknown } | { error: MachineError }> {
+    try {
+      await options.assertWriterLease?.();
+    } catch {
+      return { error: writerLeaseFailure() };
+    }
     const consumer = consumerBindings.get(connection);
     if (request.method !== "initialize" && consumer === undefined)
       return { error: { code: "protocol_error" } };
@@ -198,6 +204,11 @@ export function createProtocolServerInternal(
               ],
             },
           };
+        }
+        try {
+          await options.assertWriterLease?.();
+        } catch {
+          return { error: writerLeaseFailure() };
         }
         return { result: await dispatch(connection, request, consumer) };
       } catch (error) {
@@ -227,6 +238,7 @@ export function createProtocolServerInternal(
   let daemonStarted = false;
   let daemonStopReason: "stopped" | "idle_exit" | undefined;
   let acceptingRequests = false;
+  let inFlightRequests = 0;
   let startSetup: Promise<void> | undefined;
   let shutdownPromise: Promise<void> | undefined;
   let shutdownFailure: unknown;
@@ -260,6 +272,13 @@ export function createProtocolServerInternal(
       code: "internal_error",
       cause,
       ...(diagnosticId === undefined ? {} : { diagnosticId }),
+    };
+  }
+
+  function writerLeaseFailure(): MachineError {
+    return {
+      code: "internal_error",
+      cause: makeErrorCause("closed", "Control writer lease is unavailable"),
     };
   }
 
@@ -371,7 +390,9 @@ export function createProtocolServerInternal(
   }
 
   function isIdle(): boolean {
-    return connections.size === 0 && !hasLiveSessions();
+    return (
+      connections.size === 0 && inFlightRequests === 0 && !hasLiveSessions()
+    );
   }
 
   function scheduleIdleExit(): void {
@@ -547,16 +568,29 @@ export function createProtocolServerInternal(
       return;
     }
     const request = parsed.output;
-    void execute(connection, request).then((outcome) => {
-      sendSafe(connection, {
-        kind: "response",
-        requestId: request.requestId,
-        ...outcome,
+    inFlightRequests += 1;
+    void execute(connection, request)
+      .then((outcome) => {
+        sendSafe(connection, {
+          kind: "response",
+          requestId: request.requestId,
+          ...outcome,
+        });
+        const release = afterAttachAck.get(request);
+        afterAttachAck.delete(request);
+        if ("result" in outcome) release?.();
+      })
+      .catch(async (error: unknown) => {
+        sendSafe(connection, {
+          kind: "response",
+          requestId: request.requestId,
+          error: await toMachineError(error),
+        });
+      })
+      .finally(() => {
+        inFlightRequests -= 1;
+        scheduleIdleExit();
       });
-      const release = afterAttachAck.get(request);
-      afterAttachAck.delete(request);
-      if ("result" in outcome) release?.();
-    });
   }
 
   async function attach(
