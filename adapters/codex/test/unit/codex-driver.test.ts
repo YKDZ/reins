@@ -1219,6 +1219,8 @@ describe("codex driver", () => {
       kind: "request",
       id: 7,
       method: "item/commandExecution/requestApproval",
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn1",
       itemId: "e1",
       input: { command: "ls" },
       availableDecisions: ["accept", "acceptForSession", "decline"],
@@ -1258,6 +1260,80 @@ describe("codex driver", () => {
     expect(fake.controls.responded()).toEqual([
       { id: 7, result: { decision: "accept" } },
     ]);
+  });
+
+  test("turn/start 确认前到达的当前回合工具与授权按原生归属接续", async () => {
+    const { events, fake, driver } = await setup();
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { id: "turn1", status: "completed", error: null } },
+    });
+    await flush();
+
+    let acceptStart!: (result: { turn: { id: string } }) => void;
+    fake.controls.setResponse(
+      "turn/start",
+      new Promise<{ turn: { id: string } }>((resolve) => {
+        acceptStart = resolve;
+      }),
+    );
+    const delivery = driver.deliver(
+      sessionId,
+      secondTurnId,
+      "caller task",
+      "new_turn",
+    );
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        item: {
+          type: "commandExecution",
+          id: "e2",
+          command: "ls",
+          status: "inProgress",
+          output: null,
+        },
+        turnId: "turn2",
+      },
+    });
+    fake.controls.pushInbound({
+      kind: "request",
+      id: 12,
+      method: "item/commandExecution/requestApproval",
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn2",
+      itemId: "e2",
+      input: { command: "ls" },
+      availableDecisions: ["accept"],
+      requestedPermissions: {},
+    });
+    await flush();
+    expect(events.some((event) => event.type === "permission.requested")).toBe(
+      false,
+    );
+
+    acceptStart({ turn: { id: "turn2" } });
+    await delivery;
+    await flush();
+    const tool = events.find((event) => event.type === "tool.requested");
+    const permission = events.find(
+      (event) => event.type === "permission.requested",
+    );
+    expect(tool).toMatchObject({
+      type: "tool.requested",
+      turnId: secondTurnId,
+      toolCallId: "c1",
+    });
+    expect(permission).toMatchObject({
+      type: "permission.requested",
+      turnId: secondTurnId,
+      toolCallId: "c1",
+      input: { command: "ls" },
+    });
   });
 
   test("不支持的入站请求归一化为 compatibility_gap，不泄漏请求对象", async () => {
@@ -1340,11 +1416,10 @@ describe("codex driver", () => {
       kind: "request",
       id: 9,
       method: "item/commandExecution/requestApproval",
-      input: {
-        threadId: "thr1",
-        turnId: "turn1",
-        itemId: "e2",
-      },
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn1",
+      itemId: "e2",
+      input: {},
       availableDecisions: ["accept"],
       requestedPermissions: {},
     });
@@ -1366,7 +1441,10 @@ describe("codex driver", () => {
       kind: "request",
       id: 8,
       method: "item/fileChange/requestApproval",
-      input: { threadId: "thr1", turnId: "turn1", itemId: "f1" },
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn1",
+      itemId: "f1",
+      input: {},
       availableDecisions: ["accept", "acceptForSession", "decline"],
       requestedPermissions: {},
     });
@@ -1784,6 +1862,8 @@ test("adapter rejects an out-of-menu answer without consuming the original nativ
     kind: "request",
     id: 70,
     method: "item/commandExecution/requestApproval",
+    nativeThreadId: "thr1",
+    nativeTurnId: "turn1",
     input: {},
     availableDecisions: ["accept"],
     requestedPermissions: {},

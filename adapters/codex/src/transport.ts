@@ -308,6 +308,8 @@ export type CodexApprovalRequest = {
     | "item/commandExecution/requestApproval"
     | "item/fileChange/requestApproval"
     | "item/permissions/requestApproval";
+  nativeThreadId?: string;
+  nativeTurnId?: string;
   itemId?: string;
   input: unknown;
   availableDecisions: readonly ApprovalDecision[];
@@ -1362,6 +1364,15 @@ export function createCodexTransport(options: {
     if (permissions !== undefined && !isRecord(permissions)) return null;
     const requestedPermissions = parseRequestedPermissions(permissions);
     if (requestedPermissions === null) return null;
+    const threadId = params.threadId;
+    const turnId = params.turnId;
+    if (
+      (threadId !== undefined &&
+        (typeof threadId !== "string" || threadId.length === 0)) ||
+      (turnId !== undefined &&
+        (typeof turnId !== "string" || turnId.length === 0))
+    )
+      return null;
     const itemId = params.itemId;
     const input = Object.fromEntries(
       Object.entries(params).filter(
@@ -1372,6 +1383,8 @@ export function createCodexTransport(options: {
       kind: "request",
       id,
       method,
+      ...(typeof threadId === "string" ? { nativeThreadId: threadId } : {}),
+      ...(typeof turnId === "string" ? { nativeTurnId: turnId } : {}),
       ...(typeof itemId === "string" ? { itemId } : {}),
       input,
       availableDecisions,

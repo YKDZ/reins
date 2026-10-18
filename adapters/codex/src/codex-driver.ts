@@ -102,6 +102,8 @@ export function createCodexDriver(deps: {
       message: Extract<InboundMessage, { kind: "notification" }>;
       callerContent?: Promise<MessageContent>;
     }> = [];
+    const pendingTurnRequests: CodexApprovalRequest[] = [];
+    const nativeToolTurnOwners = new Set<string>();
     const pendingByRequest = new Map<number, PermissionId>();
     const pendingCallerMessages: Array<{
       readonly messageId: MessageId;
@@ -144,6 +146,17 @@ export function createCodexDriver(deps: {
         (candidate) => candidate.messageId === messageId,
       );
       if (index >= 0) pendingCallerMessages.splice(index, 1);
+    }
+
+    function nativeToolOwnerKey(nativeTurnId: string, itemId: string): string {
+      return `${nativeTurnId}\u0000${itemId}`;
+    }
+
+    function rejectApprovalRequest(
+      message: CodexApprovalRequest,
+      reason: string,
+    ): void {
+      transport?.respondError(message.id, -32602, reason);
     }
 
     function nativeTurnIdOf(
@@ -198,6 +211,14 @@ export function createCodexDriver(deps: {
         }
         emit(event);
       }
+      if (
+        message.method === "item/started" &&
+        message.params.turnId !== undefined &&
+        session.toolNames.has(message.params.item.id)
+      )
+        nativeToolTurnOwners.add(
+          nativeToolOwnerKey(message.params.turnId, message.params.item.id),
+        );
     }
 
     async function flushPendingTurnNotifications(
@@ -216,6 +237,25 @@ export function createCodexDriver(deps: {
         await processNotification(pending.message, pending.callerContent);
       if (pendingNativeStartTurnIds.size === 0)
         pendingTurnNotifications.length = 0;
+    }
+
+    async function flushPendingTurnRequests(
+      nativeTurnId: string,
+    ): Promise<void> {
+      const matching = pendingTurnRequests.filter(
+        (message) => message.nativeTurnId === nativeTurnId,
+      );
+      for (let index = pendingTurnRequests.length - 1; index >= 0; index -= 1)
+        if (pendingTurnRequests[index]?.nativeTurnId === nativeTurnId)
+          pendingTurnRequests.splice(index, 1);
+      for (const message of matching) handleRequest(message);
+      if (pendingNativeStartTurnIds.size === 0) {
+        for (const message of pendingTurnRequests.splice(0))
+          rejectApprovalRequest(
+            message,
+            "Approval request does not target an active Codex turn",
+          );
+      }
     }
 
     async function startTurn(
@@ -242,8 +282,14 @@ export function createCodexDriver(deps: {
         turn = await pendingTurn;
       } catch (error) {
         pendingNativeStartTurnIds.delete(reinsTurnId);
-        if (pendingNativeStartTurnIds.size === 0)
+        if (pendingNativeStartTurnIds.size === 0) {
           pendingTurnNotifications.length = 0;
+          for (const message of pendingTurnRequests.splice(0))
+            rejectApprovalRequest(
+              message,
+              "Approval request does not target an active Codex turn",
+            );
+        }
         if (messageId !== undefined) removePendingCallerMessage(messageId);
         throw error;
       }
@@ -256,6 +302,7 @@ export function createCodexDriver(deps: {
         pendingCaller.nativeTurnId = turn.turn.id;
       pendingNativeStartTurnIds.delete(reinsTurnId);
       await flushPendingTurnNotifications(turn.turn.id);
+      await flushPendingTurnRequests(turn.turn.id);
       return turn.turn.id;
     }
 
@@ -274,6 +321,31 @@ export function createCodexDriver(deps: {
           message.id,
           -32601,
           `Unhandled server request: ${message.nativeMethod}`,
+        );
+        return;
+      }
+      if (
+        message.nativeThreadId !== threadId ||
+        message.nativeTurnId === undefined ||
+        activeTurnId !== message.nativeTurnId ||
+        nativeTurnToReins.get(message.nativeTurnId) !== session.turnId
+      ) {
+        rejectApprovalRequest(
+          message,
+          "Approval request does not match the active Codex turn",
+        );
+        return;
+      }
+      if (
+        message.itemId !== undefined &&
+        session.toolNames.has(message.itemId) &&
+        !nativeToolTurnOwners.has(
+          nativeToolOwnerKey(message.nativeTurnId, message.itemId),
+        )
+      ) {
+        rejectApprovalRequest(
+          message,
+          "Approval request does not match the active Codex tool",
         );
         return;
       }
@@ -301,7 +373,11 @@ export function createCodexDriver(deps: {
         message.input,
         options,
         message,
-        message.itemId !== undefined && session.toolNames.has(message.itemId)
+        message.itemId !== undefined &&
+          session.toolNames.has(message.itemId) &&
+          nativeToolTurnOwners.has(
+            nativeToolOwnerKey(message.nativeTurnId, message.itemId),
+          )
           ? session.toolCallId(message.itemId)
           : undefined,
       );
@@ -336,6 +412,15 @@ export function createCodexDriver(deps: {
             }
             await processNotification(message);
           } else {
+            if (
+              message.method !== "unsupported" &&
+              message.nativeTurnId !== undefined &&
+              !nativeTurnToReins.has(message.nativeTurnId) &&
+              pendingNativeStartTurnIds.size > 0
+            ) {
+              pendingTurnRequests.push(message);
+              continue;
+            }
             handleRequest(message);
           }
         }

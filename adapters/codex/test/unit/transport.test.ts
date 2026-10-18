@@ -1120,6 +1120,8 @@ describe("codex transport", () => {
         kind: "request",
         id: 42,
         method: "item/commandExecution/requestApproval",
+        nativeThreadId: "native-thread",
+        nativeTurnId: "native-turn",
         availableDecisions: ["accept", "cancel"],
         itemId: "native-tool-call",
         input: {

@@ -136,7 +136,7 @@ async function mapItemCompleted(
   if (turnId === null) return [];
   if (item.type === "userMessage") return [];
   if (item.type === "agentMessage") {
-    session.setFinalText(item.text);
+    if (session.turnId === turnId) session.setFinalText(item.text);
     return [
       {
         type: "message",
