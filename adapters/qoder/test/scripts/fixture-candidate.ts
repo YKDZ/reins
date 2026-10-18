@@ -185,9 +185,6 @@ export async function prepareFixtureCandidate(options: {
     timedOut: false,
     minimumNativeToolCount: options.minimumNativeToolCount,
   });
-  await assertQoderProjectionSemanticEquivalence(
-    toQoderSdkMessages(source as RecordedQoderMessage[]),
-  );
   const init = projected[0];
   if (init?.type !== "system") {
     throw new Error("Recorded Qoder fixture has no init message");
@@ -234,5 +231,8 @@ export async function prepareFixtureCandidate(options: {
   } catch {
     throw new FixtureCandidateAcceptanceError();
   }
+  await assertQoderProjectionSemanticEquivalence(
+    toQoderSdkMessages(source as RecordedQoderMessage[]),
+  );
   return { jsonl, metadata, facts };
 }

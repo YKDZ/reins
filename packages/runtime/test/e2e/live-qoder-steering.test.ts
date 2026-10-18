@@ -691,6 +691,8 @@ test("Qoder 交互授权在重连后按同一操作幂等决议", async () => {
       fact.type === "tool.completed" && fact.toolKey === toolRequest.toolKey,
     "Qoder Bash result was not committed",
   );
+  if (toolCompleted.type !== "tool.completed")
+    throw new Error("Qoder Bash result was not a tool.completed fact");
   expect(toolCompleted).toMatchObject({
     type: "tool.completed",
     toolKey: toolRequest.toolKey,

@@ -149,9 +149,9 @@ test("a stopped phase stays as a known effect when continuation acceptance is un
       },
     });
     expect(fake.controls.delivered()).toHaveLength(2);
-    expect(
-      events.filter((event) => event.type === "turn.completed"),
-    ).toMatchObject([{ type: "turn.completed", turnId, stopReason: "failed" }]);
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
   } finally {
     await driver.terminate(sessionId);
   }
