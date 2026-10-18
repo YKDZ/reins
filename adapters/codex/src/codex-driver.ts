@@ -182,6 +182,11 @@ export function createCodexDriver(deps: {
         if (permissionId !== undefined) {
           session.takePending(permissionId);
           pendingByRequest.delete(requestId);
+        } else {
+          const queuedRequest = pendingTurnRequests.findIndex(
+            (request) => request.id === requestId,
+          );
+          if (queuedRequest >= 0) pendingTurnRequests.splice(queuedRequest, 1);
         }
         return;
       }

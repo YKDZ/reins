@@ -29,7 +29,9 @@ import { expect, test, vi } from "vitest";
 
 type NativeFrame = Record<string, unknown> & { id?: number };
 
-async function startFixture(): Promise<{
+async function startFixture(options?: {
+  readonly preAckApproval?: "pending" | "resolved";
+}): Promise<{
   readonly directory: string;
   readonly client: ReinsConnection;
   readonly outbound: NativeFrame[];
@@ -82,9 +84,53 @@ async function startFixture(): Promise<{
             : frame.method === "turn/steer"
               ? { turnId: `native-${nativeTurnSequence}` }
               : {};
-      queueMicrotask(() =>
-        stdout.write(`${JSON.stringify({ id: frame.id, result })}\n`),
-      );
+      if (
+        frame.method === "turn/start" &&
+        nativeTurnSequence === 2 &&
+        options?.preAckApproval !== undefined
+      ) {
+        const nativeTurnId = `native-${nativeTurnSequence}`;
+        queueMicrotask(() => {
+          stdout.write(
+            `${JSON.stringify({
+              method: "item/started",
+              params: {
+                threadId: "native-thread",
+                turnId: nativeTurnId,
+                item: commandItem("pre-ack-tool", "inProgress", null),
+              },
+            })}\n`,
+          );
+          stdout.write(
+            `${JSON.stringify({
+              id: 9010,
+              method: "item/commandExecution/requestApproval",
+              params: {
+                threadId: "native-thread",
+                turnId: nativeTurnId,
+                itemId: "pre-ack-tool",
+                command: "echo before ack",
+                availableDecisions: ["accept", "decline"],
+              },
+            })}\n`,
+          );
+          if (options.preAckApproval === "resolved")
+            stdout.write(
+              `${JSON.stringify({
+                method: "serverRequest/resolved",
+                params: { requestId: 9010 },
+              })}\n`,
+            );
+          setTimeout(
+            () => stdout.write(`${JSON.stringify({ id: frame.id, result })}\n`),
+            20,
+          );
+        });
+      } else {
+        queueMicrotask(() =>
+          stdout.write(`${JSON.stringify({ id: frame.id, result })}\n`),
+        );
+      }
     }
   });
 
@@ -440,6 +486,135 @@ test("Codex 授权只关联当前原生回合及其已知工具", async () => {
       toolKey: currentPermission.toolKey,
       result: "CURRENT_TOOL_OUTPUT",
     });
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("turn/start 应答前已解决的 Codex 授权不会重新成为待决权限", async () => {
+  const fixture = await startFixture({ preAckApproval: "resolved" });
+  try {
+    const first = await fixture.client.spawn(
+      { harness: "codex", cwd: fixture.directory, message: "first" },
+      { operationKey: fixture.client.prepareOperation("spawn") },
+    );
+    fixture.notify("turn/completed", {
+      threadId: "native-thread",
+      turn: { id: "native-1", status: "completed", error: null },
+    });
+    await fixture.client.wait({
+      targets: [first.turnHandle],
+      completion: "all",
+    });
+
+    const second = await fixture.client.send(
+      {
+        placement: "new_turn",
+        sessionHandle: first.sessionHandle,
+        ifLastCompletedTurn: first.turnHandle,
+        message: "second",
+      },
+      { operationKey: fixture.client.prepareOperation("send") },
+    );
+    const snapshot = await fixture.client.attach(
+      { scope: "turn", turnHandle: second.turnHandle },
+      { mode: "snapshot" },
+    );
+    expect(snapshot.initial.mode).toBe("snapshot");
+    if (snapshot.initial.mode !== "snapshot")
+      throw new Error("Codex 回合快照未返回基线");
+    expect(snapshot.initial.baseline.pendingPermissions).toEqual([]);
+    snapshot.close();
+
+    const history = await readHistory(fixture.client, first.sessionHandle);
+    expect(
+      history.some(
+        (fact) =>
+          fact.type === "tool.requested" &&
+          fact.turnHandle === second.turnHandle &&
+          fact.name === "commandExecution",
+      ),
+    ).toBe(true);
+    expect(
+      history.some(
+        (fact) =>
+          fact.type === "permission.requested" &&
+          fact.turnHandle === second.turnHandle,
+      ),
+    ).toBe(false);
+    expect(fixture.outbound.some((frame) => frame.id === 9010)).toBe(false);
+  } finally {
+    await fixture.close();
+  }
+});
+
+test("turn/start 应答前未解决的 Codex 授权仍可关联并决议", async () => {
+  const fixture = await startFixture({ preAckApproval: "pending" });
+  try {
+    const first = await fixture.client.spawn(
+      { harness: "codex", cwd: fixture.directory, message: "first" },
+      { operationKey: fixture.client.prepareOperation("spawn") },
+    );
+    fixture.notify("turn/completed", {
+      threadId: "native-thread",
+      turn: { id: "native-1", status: "completed", error: null },
+    });
+    await fixture.client.wait({
+      targets: [first.turnHandle],
+      completion: "all",
+    });
+
+    const second = await fixture.client.send(
+      {
+        placement: "new_turn",
+        sessionHandle: first.sessionHandle,
+        ifLastCompletedTurn: first.turnHandle,
+        message: "second",
+      },
+      { operationKey: fixture.client.prepareOperation("send") },
+    );
+    const snapshot = await fixture.client.attach(
+      { scope: "turn", turnHandle: second.turnHandle },
+      { mode: "snapshot" },
+    );
+    expect(snapshot.initial.mode).toBe("snapshot");
+    if (snapshot.initial.mode !== "snapshot")
+      throw new Error("Codex 回合快照未返回基线");
+    const pending = snapshot.initial.baseline.pendingPermissions;
+    expect(pending).toHaveLength(1);
+
+    const history = await readHistory(fixture.client, first.sessionHandle);
+    const requestedTool = history.find(
+      (fact) =>
+        fact.type === "tool.requested" && fact.turnHandle === second.turnHandle,
+    );
+    const requestedPermission = history.find(
+      (fact) =>
+        fact.type === "permission.requested" &&
+        fact.turnHandle === second.turnHandle,
+    );
+    expect(requestedTool?.type).toBe("tool.requested");
+    expect(requestedPermission?.type).toBe("permission.requested");
+    if (
+      requestedTool?.type !== "tool.requested" ||
+      requestedPermission?.type !== "permission.requested"
+    )
+      throw new Error("turn/start 应答前未解决授权未完整提交");
+    expect(requestedPermission.toolKey).toBe(requestedTool.toolKey);
+    expect(pending[0]?.toolKey).toBe(requestedTool.toolKey);
+
+    await fixture.client.resolvePermission(
+      requestedPermission.permissionHandle,
+      { outcome: "allow", scope: "once" },
+      {
+        operationKey: fixture.client.prepareOperation("resolvePermission"),
+      },
+    );
+    expect(await waitForNativeFrame(fixture.outbound, 9010)).toMatchObject({
+      id: 9010,
+      result: { decision: "accept" },
+    });
+    snapshot.close();
   } finally {
     await fixture.close();
   }
