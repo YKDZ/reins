@@ -21,6 +21,7 @@ import type {
   AttachParams,
   AttachInitial,
   ConsumerContext,
+  AutonomousTurnCause,
   DaemonDiagnosticFact,
   DiagnosticsParams,
   DomainEvent,
@@ -45,6 +46,7 @@ import type {
   SpawnParams,
   SubscriptionTarget,
   TurnTarget,
+  TurnId,
   WaitParams,
   WaitResult,
 } from "@reins/protocol";
@@ -183,6 +185,11 @@ export type ControlPlane = {
     operationKey?: OperationKey,
   ): Promise<unknown>;
   acceptEvent(event: DomainEvent): Promise<void>;
+  beginAutonomousTurn(input: {
+    readonly sessionId: SessionId;
+    readonly harness: HarnessId;
+    readonly cause?: AutonomousTurnCause;
+  }): TurnId;
   settleEvents(): Promise<void>;
   subscribeEvents(listener: (entry: CommittedEvent) => void): () => void;
   subscribeControlUnavailable(listener: () => void): () => void;
@@ -503,6 +510,12 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     const created = events[0];
     if (created?.type !== "session.created")
       throw new Error("Initial spawn event is missing session.created");
+    const started = events.find(
+      (event) =>
+        event.type === "turn.started" && event.turnId === result.turnId,
+    );
+    if (started?.type !== "turn.started")
+      throw new Error("Initial spawn event is missing turn.started");
     let info: SessionInfo = {
       sessionId: result.sessionId,
       ...(created.sessionLabel === undefined
@@ -516,6 +529,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       turns: 0,
       state: "busy",
       activeTurnId: result.turnId,
+      ...(started.origin === undefined
+        ? {}
+        : { activeTurnOrigin: started.origin }),
     };
     for (const event of events.slice(2)) {
       if (event.type === "turn.completed") {
@@ -536,6 +552,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           state: "idle",
           lastCompletedTurn: {
             turnId: event.turnId,
+            ...((event.origin ?? started.origin) === undefined
+              ? {}
+              : { origin: event.origin ?? started.origin }),
             stopReason: event.stopReason,
           },
         };
@@ -583,6 +602,12 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     }
     if (previous.state !== "idle")
       throw new Error("New turn target was not idle before commit");
+    const started = events.find(
+      (event) =>
+        event.type === "turn.started" && event.turnId === result.turnId,
+    );
+    if (started?.type !== "turn.started")
+      throw new Error("New turn event is missing turn.started");
     const common: SessionProjectionBase = {
       sessionId: previous.sessionId,
       ...(previous.sessionLabel === undefined
@@ -608,6 +633,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         state: "idle",
         lastCompletedTurn: {
           turnId: terminal.turnId,
+          ...((terminal.origin ?? started.origin) === undefined
+            ? {}
+            : { origin: terminal.origin ?? started.origin }),
           stopReason: terminal.stopReason,
         },
       };
@@ -616,6 +644,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       ...common,
       state: "busy",
       activeTurnId: result.turnId,
+      ...(started.origin === undefined
+        ? {}
+        : { activeTurnOrigin: started.origin }),
     };
   }
 
@@ -1958,6 +1989,45 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     });
   }
 
+  function recordEventWriteFailure(event: DomainEvent, error: unknown): void {
+    const firstUnavailableEvent = eventWriteFailure === undefined;
+    eventWriteFailure ??= error;
+    if (firstUnavailableEvent) notifyControlUnavailable();
+    wakeWaiters();
+    if (!eventWriteFailures.has(event.sessionId)) {
+      eventWriteFailures.set(event.sessionId, event);
+      if (
+        event.type === "session.killed" ||
+        (event.type === "turn.completed" && event.stopReason === "killed")
+      ) {
+        const operationKeys = activeKillOperationKeys.get(event.sessionId);
+        if (operationKeys?.size === 1)
+          eventOperationFailures.set(event.sessionId, {
+            operationKey: operationKeys.values().next().value!,
+            event,
+          });
+      }
+    }
+    stopSessionAfterEventWriteFailure(event.sessionId);
+  }
+
+  function beginAutonomousTurn(input: {
+    readonly sessionId: SessionId;
+    readonly harness: HarnessId;
+    readonly cause?: AutonomousTurnCause;
+  }): TurnId {
+    return options.machine.beginAutonomousTurn(input, (event, session) => {
+      try {
+        if (eventWriteFailure !== undefined) throw eventWriteFailure;
+        const entry = options.controlStore.recordEvent(event, session);
+        queueCommittedEvents(event.sessionId, [entry]);
+      } catch (error) {
+        recordEventWriteFailure(event, error);
+        throw error;
+      }
+    });
+  }
+
   function acceptEvent(event: DomainEvent): Promise<void> {
     try {
       if (eventWriteFailure !== undefined) throw eventWriteFailure;
@@ -1980,25 +2050,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       wakeWaiters(entry);
       return Promise.resolve();
     } catch (error) {
-      const firstUnavailableEvent = eventWriteFailure === undefined;
-      eventWriteFailure ??= error;
-      if (firstUnavailableEvent) notifyControlUnavailable();
-      wakeWaiters();
-      if (!eventWriteFailures.has(event.sessionId)) {
-        eventWriteFailures.set(event.sessionId, event);
-        if (
-          event.type === "session.killed" ||
-          (event.type === "turn.completed" && event.stopReason === "killed")
-        ) {
-          const operationKeys = activeKillOperationKeys.get(event.sessionId);
-          if (operationKeys?.size === 1)
-            eventOperationFailures.set(event.sessionId, {
-              operationKey: operationKeys.values().next().value!,
-              event,
-            });
-        }
-      }
-      stopSessionAfterEventWriteFailure(event.sessionId);
+      recordEventWriteFailure(event, error);
       return Promise.reject(error);
     }
   }
@@ -2468,6 +2520,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     head: EventId | null,
   ): {
     session: SessionInfo;
+    activeTurnCause?: AutonomousTurnCause;
     confirmedTerminals: {
       eventId: EventId;
       event: Extract<
@@ -2478,6 +2531,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     pendingPermissions: {
       eventId: EventId;
       event: Extract<DomainEvent, { type: "permission.requested" }>;
+    }[];
+    backgroundActivities: {
+      eventId: EventId;
+      event: Extract<DomainEvent, { type: "background.activity" }>;
     }[];
   } {
     const confirmedTerminals: {
@@ -2494,6 +2551,20 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         event: Extract<DomainEvent, { type: "permission.requested" }>;
       }
     >();
+    const backgroundActivities = new Map<
+      string,
+      {
+        eventId: EventId;
+        event: Extract<DomainEvent, { type: "background.activity" }>;
+      }
+    >();
+    const turnStarts = new Map<
+      TurnId,
+      {
+        eventId: EventId;
+        event: Extract<DomainEvent, { type: "turn.started" }>;
+      }
+    >();
     const input = {
       sessionId: target.sessionId,
       afterEventId: 0,
@@ -2508,6 +2579,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           throw new Error("Session event history contains a gap");
         expectedEventId += 1;
         const event = entry.event;
+        if (event.type === "turn.started")
+          turnStarts.set(event.turnId, {
+            eventId: entry.eventId,
+            event,
+          });
         if (
           event.type === "turn.completed" &&
           (target.scope === "session" || event.turnId === target.turnId)
@@ -2543,6 +2619,16 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           event.type === "session.killed"
         )
           pendingPermissions.clear();
+
+        if (event.type === "background.activity") {
+          const key = JSON.stringify([event.source.kind, event.source.id]);
+          if (event.status === "active")
+            backgroundActivities.set(key, {
+              eventId: entry.eventId,
+              event,
+            });
+          else backgroundActivities.delete(key);
+        }
       }
       if (!page.hasMore) break;
       page = options.controlStore.sessionEventsPage({
@@ -2557,6 +2643,16 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       storedSession.generation === options.diagnostics.generation;
     const activeTurnId =
       sessionInfo.state === "busy" ? sessionInfo.activeTurnId : undefined;
+    const knownTurnId =
+      activeTurnId ??
+      (sessionInfo.state === "unreachable" &&
+      sessionInfo.lastKnownState === "busy"
+        ? sessionInfo.lastKnownActiveTurn
+        : undefined);
+    const activeTurnCause =
+      knownTurnId === undefined
+        ? undefined
+        : turnStarts.get(knownTurnId)?.event.cause;
     const effectivePermissions =
       currentGeneration && activeTurnId !== undefined
         ? Array.from(pendingPermissions.values()).filter(
@@ -2568,8 +2664,12 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         : [];
     return {
       session: sessionInfo,
+      ...(activeTurnCause === undefined ? {} : { activeTurnCause }),
       confirmedTerminals,
       pendingPermissions: effectivePermissions,
+      backgroundActivities: Array.from(backgroundActivities.values()).toSorted(
+        (left, right) => left.eventId - right.eventId,
+      ),
     };
   }
 
@@ -3430,6 +3530,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     execute,
     dispatch,
     acceptEvent,
+    beginAutonomousTurn,
     settleEvents,
     subscribeEvents(listener) {
       eventListeners.add(listener);

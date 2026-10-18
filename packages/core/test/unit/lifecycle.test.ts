@@ -117,6 +117,7 @@ describe("回合生命周期", () => {
         {
           sessionId: id,
           turnId: ids.turn("t1"),
+          origin: { kind: "caller" },
           stopReason: "end_turn",
           finalReply: "完成",
           usage: { durationMs: 1200 },

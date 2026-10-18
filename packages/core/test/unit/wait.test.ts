@@ -85,6 +85,7 @@ describe("wait", () => {
         {
           sessionId: b,
           turnId: ids.turn("t2"),
+          origin: { kind: "caller" },
           stopReason: "end_turn",
           finalReply: "乙完成",
           usage: {},
@@ -123,6 +124,7 @@ describe("wait", () => {
         {
           sessionId: id,
           turnId: ids.turn("t1"),
+          origin: { kind: "caller" },
           stopReason: "killed",
           finalReply: null,
         },

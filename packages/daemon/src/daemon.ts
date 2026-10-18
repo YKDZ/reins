@@ -98,8 +98,17 @@ export function createDaemonInternal(
       });
     },
   };
+  let controlPlane: ReturnType<typeof createControlPlane> | undefined;
   const machine = createSessionMachine({
-    driverFactory: createRoutingDriverFactory(options.adapters, diagnostics),
+    driverFactory: createRoutingDriverFactory(
+      options.adapters,
+      diagnostics,
+      (input) => {
+        if (controlPlane === undefined)
+          throw new Error("Control plane is not ready for autonomous turns");
+        return controlPlane.beginAutonomousTurn(input);
+      },
+    ),
     identity: options.identity,
     diagnostics: coreDiagnostics,
   });
@@ -112,6 +121,7 @@ export function createDaemonInternal(
     runtimeScopeId: options.runtimeScopeId,
     ...(assertWriterLease === undefined ? {} : { assertWriterLease }),
   });
+  controlPlane = control;
   const server = createProtocolServerInternal(
     {
       transport: options.transport,

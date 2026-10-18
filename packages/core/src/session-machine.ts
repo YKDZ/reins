@@ -1,5 +1,8 @@
 import {
   spawnParamsSchema,
+  autonomousTurnCauseSchema,
+  harnessIdSchema,
+  type AutonomousTurnCause,
   type DomainEvent,
   type DiagnosticId,
   type CoreDiagnosticFact,
@@ -27,7 +30,9 @@ import {
   type SessionId,
   type ToolCallId,
   type TurnId,
+  type TurnOrigin,
   turnIdSchema,
+  sessionIdSchema,
   type SessionInfo,
   type SpawnParams,
   type SpawnAck,
@@ -70,6 +75,8 @@ type SessionRecord = {
 
 type TurnScope = {
   readonly turnId: TurnId;
+  readonly origin?: TurnOrigin;
+  readonly cause?: AutonomousTurnCause;
   readonly messages: Map<MessageId, "streaming" | "complete">;
   readonly nativeCallerCompletions: Set<MessageId>;
   readonly tools: Map<ToolCallId, "requested" | "complete">;
@@ -135,9 +142,21 @@ type WorkerEventIngressDecision =
   | { status: "accepted" }
   | { status: "rejected"; rejection: WorkerEventRejection };
 
-function createTurnScope(turnId: TurnId): TurnScope {
+const autonomousTurnParamsSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  harness: harnessIdSchema,
+  cause: v.optional(autonomousTurnCauseSchema),
+});
+
+function createTurnScope(
+  turnId: TurnId,
+  origin?: TurnOrigin,
+  cause?: AutonomousTurnCause,
+): TurnScope {
   return {
     turnId,
+    ...(origin === undefined ? {} : { origin }),
+    ...(cause === undefined ? {} : { cause }),
     messages: new Map(),
     nativeCallerCompletions: new Set(),
     tools: new Map(),
@@ -261,18 +280,29 @@ function toInfo(session: SessionRecord): SessionInfo {
       : {
           lastCompletedTurn: {
             turnId: lastTurn.turnId,
+            ...(lastTurn.origin === undefined
+              ? {}
+              : { origin: lastTurn.origin }),
             stopReason: lastTurn.stopReason,
           },
         }),
   };
   if (session.state === "busy")
-    return { ...common, state: "busy", activeTurnId: session.currentTurnId! };
+    return {
+      ...common,
+      state: "busy",
+      activeTurnId: session.currentTurnId!,
+      ...(session.activeTurn?.origin === undefined
+        ? {}
+        : { activeTurnOrigin: session.activeTurn.origin }),
+    };
   if (session.state === "idle")
     return {
       ...common,
       state: "idle",
       lastCompletedTurn: {
         turnId: lastTurn!.turnId,
+        ...(lastTurn!.origin === undefined ? {} : { origin: lastTurn!.origin }),
         stopReason: lastTurn!.stopReason,
       },
     };
@@ -297,6 +327,14 @@ export type SessionMachine = {
       ) => void | Promise<void>;
     },
   ): Promise<SendAck>;
+  beginAutonomousTurn(
+    params: {
+      readonly sessionId: SessionId;
+      readonly harness: SpawnParams["harness"];
+      readonly cause?: AutonomousTurnCause;
+    },
+    commit: (event: DomainEvent, session: SessionInfo) => void,
+  ): TurnId;
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(
     params: InterruptParams,
@@ -511,7 +549,11 @@ export function createSessionMachine(options: {
           session.state = "busy";
           session.currentTurnId = event.turnId;
           if (session.activeTurn?.turnId !== event.turnId) {
-            session.activeTurn = createTurnScope(event.turnId);
+            session.activeTurn = createTurnScope(
+              event.turnId,
+              event.origin,
+              event.cause,
+            );
           }
         }
         break;
@@ -595,6 +637,12 @@ export function createSessionMachine(options: {
           ? null
           : {
               turnId: activeTurn.turnId,
+              ...(activeTurn.origin === undefined
+                ? {}
+                : { origin: activeTurn.origin }),
+              ...(activeTurn.cause === undefined
+                ? {}
+                : { cause: activeTurn.cause }),
               messages: new Map(activeTurn.messages),
               nativeCallerCompletions: new Set(
                 activeTurn.nativeCallerCompletions,
@@ -652,7 +700,11 @@ export function createSessionMachine(options: {
       case "turn.started":
         projection.state = "busy";
         projection.currentTurnId = event.turnId;
-        projection.activeTurn = createTurnScope(event.turnId);
+        projection.activeTurn = createTurnScope(
+          event.turnId,
+          event.origin,
+          event.cause,
+        );
         break;
       case "text.delta":
         projection.activeTurn?.messages.set(event.messageId, "streaming");
@@ -956,6 +1008,17 @@ export function createSessionMachine(options: {
     }
     const projection = activeProjection(event.sessionId);
     const spawning = pendingSpawns.get(event.sessionId);
+    const activeTurn =
+      projection?.activeTurn ??
+      (spawning !== undefined && spawning.phase !== "closing"
+        ? spawning.turn
+        : sessions.get(event.sessionId)?.activeTurn);
+    if (
+      event.type === "turn.completed" &&
+      activeTurn?.turnId === event.turnId &&
+      activeTurn.origin !== undefined
+    )
+      event = { ...event, origin: activeTurn.origin };
     if (event.type === "message" && event.role === "caller") {
       const turnScope =
         projection !== undefined
@@ -1113,7 +1176,7 @@ export function createSessionMachine(options: {
       const cwd = spec.cwd;
       const spawnScope: PendingSpawn = {
         token: Symbol(sessionId),
-        turn: createTurnScope(turnId),
+        turn: createTurnScope(turnId, { kind: "caller" }),
         events: [],
         lateEvents: [],
         permissionIds: new Set(),
@@ -1204,7 +1267,12 @@ export function createSessionMachine(options: {
             : { sessionLabel: spec.sessionLabel }),
           spawnedAt: new Date().toISOString(),
         },
-        { type: "turn.started", sessionId, turnId },
+        {
+          type: "turn.started",
+          sessionId,
+          turnId,
+          origin: { kind: "caller" },
+        },
         nativeCallerMessage ?? callerMessage,
         ...spawnScope.events.filter(
           (event) =>
@@ -1317,6 +1385,7 @@ export function createSessionMachine(options: {
           type: "turn.started",
           sessionId,
           turnId,
+          origin: { kind: "caller" },
         };
         const projection = projectSession(sessionId);
         projectEvent(projection, started);
@@ -1583,6 +1652,67 @@ export function createSessionMachine(options: {
         deliveryPoint: "active_turn",
       };
     },
+    beginAutonomousTurn(params, commit) {
+      const parsed = v.safeParse(autonomousTurnParamsSchema, params);
+      if (!parsed.success) throw invalidParamsError(parsed.issues);
+      const { sessionId, harness, cause } = parsed.output;
+      if (pendingSpawns.has(sessionId))
+        throw machineError({ code: "session_busy", sessionId });
+      const session = sessions.get(sessionId);
+      if (session === undefined)
+        throw machineError({ code: "session_not_found", sessionId });
+      if (session.state === "killed")
+        throw machineError({ code: "session_killed", sessionId });
+      assertNotTerminating(sessionId);
+      if (
+        session.state !== "idle" ||
+        pendingDeliveries.has(sessionId) ||
+        uncertainDeliveries.has(sessionId)
+      )
+        throw machineError({ code: "session_busy", sessionId });
+      if (session.harness !== harness)
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "harness" }],
+        });
+      if (
+        cause?.causedBy !== undefined &&
+        cause.causedBy.turnId !== session.currentTurnId &&
+        !session.turns.some((turn) => turn.turnId === cause.causedBy!.turnId)
+      )
+        throw machineError({
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "cause.causedBy.turnId" }],
+        });
+
+      const turnId = nextTurnId(sessionId);
+      const origin: TurnOrigin = {
+        kind: "harness",
+        harness,
+        ...(cause?.source === undefined
+          ? {}
+          : { cause: { source: cause.source } }),
+      };
+      const event: DomainEvent = {
+        type: "turn.started",
+        sessionId,
+        turnId,
+        origin,
+        ...(cause === undefined ? {} : { cause }),
+      };
+      const currentInfo = toInfo(session);
+      if (currentInfo.state !== "idle")
+        throw machineError({ code: "session_busy", sessionId });
+      const projectedInfo: SessionInfo = {
+        ...currentInfo,
+        state: "busy",
+        activeTurnId: turnId,
+        activeTurnOrigin: origin,
+      };
+      commit(event, projectedInfo);
+      bus.publish(event);
+      return turnId;
+    },
     async wait(params) {
       const parsed = v.safeParse(waitParamsSchema, params);
       if (!parsed.success) {
@@ -1807,6 +1937,9 @@ export function createSessionMachine(options: {
                 type: "turn.completed",
                 sessionId: id,
                 turnId: session.currentTurnId,
+                ...(session.activeTurn?.origin === undefined
+                  ? {}
+                  : { origin: session.activeTurn.origin }),
                 stopReason: "killed",
                 finalReply: null,
               });

@@ -109,6 +109,54 @@ export const messageIdSchema = opaqueIdentity("MessageId");
 export type MessageId = v.InferOutput<typeof messageIdSchema>;
 export const toolCallIdSchema = opaqueIdentity("ToolCallId");
 export type ToolCallId = v.InferOutput<typeof toolCallIdSchema>;
+
+export const backgroundActivitySourceSchema = v.strictObject({
+  kind: v.pipe(v.string(), v.minLength(1)),
+  id: v.pipe(v.string(), v.minLength(1)),
+});
+export type BackgroundActivitySource = v.InferOutput<
+  typeof backgroundActivitySourceSchema
+>;
+export const backgroundActivityStatusSchema = v.picklist([
+  "active",
+  "completed",
+  "failed",
+  "cancelled",
+]);
+export type BackgroundActivityStatus = v.InferOutput<
+  typeof backgroundActivityStatusSchema
+>;
+export const backgroundActivityCauseSchema = v.strictObject({
+  turnId: turnIdSchema,
+  toolCallId: v.optional(toolCallIdSchema),
+});
+export type BackgroundActivityCause = v.InferOutput<
+  typeof backgroundActivityCauseSchema
+>;
+export const autonomousTurnCauseSchema = v.union([
+  v.strictObject({
+    source: backgroundActivitySourceSchema,
+    causedBy: v.optional(backgroundActivityCauseSchema),
+  }),
+  v.strictObject({
+    source: v.optional(v.undefined()),
+    causedBy: backgroundActivityCauseSchema,
+  }),
+]);
+export type AutonomousTurnCause = v.InferOutput<
+  typeof autonomousTurnCauseSchema
+>;
+export const turnOriginSchema = v.union([
+  v.strictObject({ kind: v.literal("caller") }),
+  v.strictObject({
+    kind: v.literal("harness"),
+    harness: harnessIdSchema,
+    cause: v.optional(
+      v.strictObject({ source: backgroundActivitySourceSchema }),
+    ),
+  }),
+]);
+export type TurnOrigin = v.InferOutput<typeof turnOriginSchema>;
 export const sideEffectMethodSchema = v.picklist([
   "spawn",
   "send",
@@ -499,6 +547,7 @@ export const UNKNOWN_HARNESS_FAILURE: HarnessFailure = {
 const turnCompletedFields = {
   sessionId: sessionIdSchema,
   turnId: turnIdSchema,
+  origin: v.optional(turnOriginSchema),
   finalReply: v.nullable(v.string()),
   usage: v.optional(v.record(v.string(), v.unknown())),
   diagnosticId: v.optional(diagnosticIdSchema),
@@ -752,6 +801,7 @@ export type KillResult = v.InferOutput<typeof killResultSchema>;
 
 const completedTurnSummarySchema = v.strictObject({
   turnId: turnIdSchema,
+  origin: v.optional(turnOriginSchema),
   stopReason: stopReasonSchema,
 });
 const sessionInfoFields = {
@@ -770,6 +820,7 @@ export const sessionInfoSchema = v.union([
     ...sessionInfoFields,
     state: v.literal("busy"),
     activeTurnId: turnIdSchema,
+    activeTurnOrigin: v.optional(turnOriginSchema),
   }),
   v.strictObject({
     ...sessionInfoFields,
@@ -782,6 +833,7 @@ export const sessionInfoSchema = v.union([
     state: v.literal("unreachable"),
     lastKnownState: v.literal("busy"),
     lastKnownActiveTurn: turnIdSchema,
+    activeTurnOrigin: v.optional(turnOriginSchema),
     unreachableReason: v.picklist([
       "previous_generation",
       "control_lost",
@@ -804,6 +856,17 @@ export type SessionInfo = v.InferOutput<typeof sessionInfoSchema>;
 
 // —— 领域事件 ——
 
+export const backgroundActivityEventSchema = v.strictObject({
+  type: v.literal("background.activity"),
+  sessionId: sessionIdSchema,
+  source: backgroundActivitySourceSchema,
+  status: backgroundActivityStatusSchema,
+  causedBy: v.optional(backgroundActivityCauseSchema),
+});
+export type BackgroundActivityEvent = v.InferOutput<
+  typeof backgroundActivityEventSchema
+>;
+
 export const domainEventSchema = v.union([
   v.strictObject({
     type: v.literal("session.created"),
@@ -819,7 +882,10 @@ export const domainEventSchema = v.union([
     type: v.literal("turn.started"),
     sessionId: sessionIdSchema,
     turnId: turnIdSchema,
+    origin: v.optional(turnOriginSchema),
+    cause: v.optional(autonomousTurnCauseSchema),
   }),
+  backgroundActivityEventSchema,
   v.strictObject({
     type: v.literal("text.delta"),
     sessionId: sessionIdSchema,
@@ -889,6 +955,7 @@ export type DomainEvent = v.InferOutput<typeof domainEventSchema>;
 const workerEventTypeSchema = v.picklist([
   "session.created",
   "turn.started",
+  "background.activity",
   "text.delta",
   "message",
   "tool.requested",
@@ -998,6 +1065,7 @@ const workerEventRejectionDefinitions = [
     eventType: v.picklist([
       "session.created",
       "turn.started",
+      "background.activity",
       "session.killed",
     ]),
     sessionState: v.picklist(["spawning", "busy", "idle"]),
@@ -2477,6 +2545,7 @@ export const machineErrorSchema = v.union([
     eventType: v.picklist([
       "session.created",
       "turn.started",
+      "background.activity",
       "text.delta",
       "message",
       "tool.requested",
@@ -2503,6 +2572,7 @@ export const machineErrorSchema = v.union([
     eventType: v.picklist([
       "session.created",
       "turn.started",
+      "background.activity",
       "text.delta",
       "message",
       "tool.requested",
@@ -2718,6 +2788,7 @@ export type WorkerDriverFactory = (
 // adapter 构造只在 daemon 路由层发生；上下文只含控制面的领域事件与类型化诊断。
 export type AdapterDriverFactory = (context: {
   emit: (event: DomainEvent) => void;
+  beginAutonomousTurn?: (cause?: AutonomousTurnCause) => TurnId;
   diagnostics: (
     input: DriverDiagnosticFact,
   ) => Promise<DiagnosticId | undefined>;
@@ -2900,10 +2971,16 @@ const attachPermissionEntrySchema = v.strictObject({
   eventId: eventIdSchema,
   event: attachPermissionEventSchema,
 });
+const attachBackgroundActivityEntrySchema = v.strictObject({
+  eventId: eventIdSchema,
+  event: backgroundActivityEventSchema,
+});
 const attachBaselineSchema = v.strictObject({
   session: sessionInfoSchema,
+  activeTurnCause: v.optional(autonomousTurnCauseSchema),
   confirmedTerminals: v.array(attachTerminalEntrySchema),
   pendingPermissions: v.array(attachPermissionEntrySchema),
+  backgroundActivities: v.array(attachBackgroundActivityEntrySchema),
 });
 export type AttachBaseline = v.InferOutput<typeof attachBaselineSchema>;
 export const attachInitialSchema = v.variant("mode", [

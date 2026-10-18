@@ -67,6 +67,8 @@ import {
   type RuntimeScopeId,
   type AgentFact,
   type AgentFactId,
+  type AutonomousTurnCause,
+  type BackgroundActivityCause,
   type AgentSubscriptionEnd,
   type AgentSubscriptionBaseline,
   type AgentSubscriptionInitial,
@@ -90,6 +92,10 @@ import {
 } from "./contracts.ts";
 import { createControlByteTransport } from "./control-channel.ts";
 import { ReinsSdkError } from "./errors.ts";
+
+type ClientAutonomousTurnCause = NonNullable<
+  Extract<ClientAgentFact, { type: "turn.started" }>["cause"]
+>;
 
 export function parseRuntimeScopeId(value: string): RuntimeScopeId {
   return v.parse(runtimeScopeIdSchema, value) as unknown as RuntimeScopeId;
@@ -181,6 +187,10 @@ export type {
   OperationOptions,
   OperationEffect,
   OperationRecord,
+  AutonomousTurnCause,
+  BackgroundActivityCause,
+  BackgroundActivitySource,
+  BackgroundActivityStatus,
   HarnessModelCatalog,
   HarnessFailure,
   LastCompletedTurn,
@@ -197,6 +207,7 @@ export type {
   SpawnResult,
   StopReason,
   TurnHandle,
+  TurnOrigin,
   AgentFact,
   AgentFactId,
   MessageContent,
@@ -338,9 +349,40 @@ function projectAgentFact(fact: ClientAgentFact): AgentFact {
   if ("toolKey" in fact) projected.toolKey = parseToolKey(fact.toolKey);
   if ("permissionHandle" in fact)
     projected.permissionHandle = parsePermissionHandle(fact.permissionHandle);
+  if (fact.type === "turn.started" && fact.cause !== undefined)
+    projected.cause = projectAutonomousTurnCause(fact.cause);
+  if (fact.type === "background.activity" && fact.causedBy !== undefined)
+    projected.causedBy = projectBackgroundActivityCause(fact.causedBy);
   if ("diagnosticId" in fact && fact.diagnosticId !== undefined)
     projected.diagnosticId = parseDiagnosticId(fact.diagnosticId);
   return projected as AgentFact;
+}
+
+function projectBackgroundActivityCause(cause: {
+  turnHandle: string;
+  toolKey?: string | undefined;
+}): BackgroundActivityCause {
+  return {
+    turnHandle: parseTurnHandle(cause.turnHandle),
+    ...(cause.toolKey === undefined
+      ? {}
+      : { toolKey: parseToolKey(cause.toolKey) }),
+  };
+}
+
+function projectAutonomousTurnCause(
+  cause: ClientAutonomousTurnCause,
+): AutonomousTurnCause {
+  if (cause.source !== undefined)
+    return {
+      source: cause.source,
+      ...(cause.causedBy === undefined
+        ? {}
+        : { causedBy: projectBackgroundActivityCause(cause.causedBy) }),
+    };
+  if (cause.causedBy !== undefined)
+    return { causedBy: projectBackgroundActivityCause(cause.causedBy) };
+  throw new Error("Autonomous turn cause is empty");
 }
 
 export function connect(options: ConnectOptions): Promise<ReinsConnection> {
@@ -951,12 +993,22 @@ function projectAgentSubscriptionInitial(
     cursor: parseResumeCursor(initial.cursor),
     baseline: {
       session: mapSessionInfo(initial.baseline.session),
+      ...(initial.baseline.activeTurnCause === undefined
+        ? {}
+        : {
+            activeTurnCause: projectAutonomousTurnCause(
+              initial.baseline.activeTurnCause,
+            ),
+          }),
       confirmedTerminals: initial.baseline.confirmedTerminals.map(
         projectAgentFact,
       ) as AgentSubscriptionBaseline["confirmedTerminals"],
       pendingPermissions: initial.baseline.pendingPermissions.map(
         projectAgentFact,
       ) as AgentSubscriptionBaseline["pendingPermissions"],
+      backgroundActivities: initial.baseline.backgroundActivities.map(
+        projectAgentFact,
+      ) as AgentSubscriptionBaseline["backgroundActivities"],
     },
   };
 }
@@ -1647,6 +1699,9 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
               turnId: session.lastCompletedTurn.turnId,
             }),
           ),
+          ...(session.lastCompletedTurn.origin === undefined
+            ? {}
+            : { origin: session.lastCompletedTurn.origin }),
           stopReason: session.lastCompletedTurn.stopReason,
         };
 
@@ -1660,6 +1715,9 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
           turnId: session.activeTurnId,
         }),
       ),
+      ...(session.activeTurnOrigin === undefined
+        ? {}
+        : { activeTurnOrigin: session.activeTurnOrigin }),
       ...(lastCompletedTurn === undefined ? {} : { lastCompletedTurn }),
     };
   }
@@ -1681,6 +1739,9 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
             turnId: session.lastKnownActiveTurn,
           }),
         ),
+        ...(session.activeTurnOrigin === undefined
+          ? {}
+          : { activeTurnOrigin: session.activeTurnOrigin }),
         ...(lastCompletedTurn === undefined ? {} : { lastCompletedTurn }),
         unreachableReason: session.unreachableReason,
       };
