@@ -36,7 +36,7 @@ afterEach(async () => {
         );
       }
     } catch {
-      // The daemon may already be shutting down after a failed native fixture.
+      // 原生夹具失败后，daemon 可能已经开始关闭。
     }
     client.close();
   }

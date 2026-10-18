@@ -53,3 +53,12 @@ jobs:
         with:
           path: .turbo/cache
           key: ${{ steps.turbo-cache.outputs.cache-primary-key }}
+      - name: 上传制品验收失败日志
+        if: always()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: packed-runtime-verification-logs
+          path: .artifacts/packed-runtime-verification/**
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

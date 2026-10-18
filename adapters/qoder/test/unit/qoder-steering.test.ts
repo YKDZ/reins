@@ -399,7 +399,7 @@ test("a permission callback can arrive before its assistant tool-use message", a
     await expect(latePermission).rejects.toThrow(
       "Qoder permission callback belongs to a closed input root",
     );
-    // The SDK aborts a callback when its native control request is cancelled.
+    // 原生控制请求取消时，SDK 会中止对应回调。
     lateSignal.abort();
     fake.controls.pushRaw(assistantToolUse("late-tool-use-from-closed-phase"));
     await flush();

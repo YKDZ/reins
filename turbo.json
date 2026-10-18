@@ -151,11 +151,6 @@
       "cache": false,
       "dependsOn": ["build"]
     },
-    "@ykdz/reins#test:live:codex-contract": {
-      "cache": false,
-      "dependsOn": ["build"],
-      "tags": ["quality:conditional"]
-    },
     "typecheck": {
       "dependsOn": ["^typecheck"],
       "outputs": []

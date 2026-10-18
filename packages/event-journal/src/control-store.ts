@@ -568,8 +568,8 @@ function createControlStore(database: DatabaseSync): ControlStore {
       try {
         database.exec("ROLLBACK");
       } catch {
-        // A failed write is not a durable rejection signal. Keep the store
-        // closed to new effects until its owner can recover the control log.
+        // 写入失败不能证明拒绝结果已经持久化。在控制日志恢复前，
+        // 存储对新的副作用保持关闭。
       }
       writeUnavailable = true;
       throw error;

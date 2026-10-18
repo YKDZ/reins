@@ -22,6 +22,11 @@
     },
     "typecheck": {
       "tags": ["quality:light"]
+    },
+    "test:live:codex-contract": {
+      "cache": false,
+      "dependsOn": ["build"],
+      "tags": ["quality:conditional"]
     }
   }
 }

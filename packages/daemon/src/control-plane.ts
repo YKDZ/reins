@@ -596,7 +596,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     try {
       void acceptEvent(event).catch(() => undefined);
     } catch {
-      // EventBus routes synchronous persistence failures to its listener error sink.
+      // EventBus 会将同步持久化失败交给监听器错误接收端。
     }
   });
   const unsubscribeMachineControlUnavailable =
@@ -2332,7 +2332,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           if (result.status === "deleted") return finishDeletion(result);
         }
       } catch {
-        // Verification failure keeps the original deletion failure as primary cause.
+        // 复核失败时，仍以原始删除失败作为主要原因。
       }
       throw {
         code: "control_store_unavailable",

@@ -101,7 +101,7 @@ async function inspectKillOperation(): Promise<SessionHandle | undefined> {
 void inspectKillOperation;
 const wrongKillOperation: OperationRecord<"kill"> = {
   status: "succeeded",
-  // @ts-expect-error Kill results remain accurately associated with kill keys.
+  // @ts-expect-error kill 结果必须与 kill 操作键准确关联。
   operationKey: sendOperationKey,
   result: { sessionHandle, status: "killed" },
 };

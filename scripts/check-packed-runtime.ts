@@ -11,7 +11,7 @@ import {
 } from "node:fs";
 import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
-import { dirname, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
@@ -171,12 +171,51 @@ async function installConsumer(
 ): Promise<void> {
   await runCommand({
     command: "pnpm",
-    args: ["install", "--prefer-offline", "--reporter=append-only"],
+    args: [
+      "install",
+      "--lockfile-only",
+      "--prefer-offline",
+      "--reporter=append-only",
+    ],
     cwd: directory,
-    label,
+    label: `${label} 锁文件生成`,
+    logPath: join(logsDirectory, `${label}-lockfile-only.log`),
+    timeoutMs: 300_000,
+  });
+  await runCommand({
+    command: "pnpm",
+    args: [
+      "install",
+      "--frozen-lockfile",
+      "--prefer-offline",
+      "--reporter=append-only",
+    ],
+    cwd: directory,
+    label: `${label} 冻结安装`,
     logPath: join(logsDirectory, `${label}.log`),
     timeoutMs: 300_000,
   });
+}
+
+function retainFailureLogs(
+  temporaryRoot: string,
+  logsDirectory: string,
+): string {
+  const destination = join(
+    repository,
+    ".artifacts",
+    "packed-runtime-verification",
+    basename(temporaryRoot),
+  );
+  mkdirSync(destination, { recursive: true });
+  for (const entry of readdirSync(logsDirectory, { withFileTypes: true })) {
+    if (!entry.isFile()) continue;
+    copyFileSync(
+      join(logsDirectory, entry.name),
+      join(destination, entry.name),
+    );
+  }
+  return destination;
 }
 
 async function typecheckConsumer(
@@ -2866,6 +2905,25 @@ async function main(): Promise<void> {
       await stopAllDaemons(handles);
     } catch (error) {
       cleanupFailure = error;
+    }
+    if (primaryFailure !== undefined || cleanupFailure !== undefined) {
+      try {
+        const failureLogsDirectory = retainFailureLogs(
+          temporaryRoot,
+          logsDirectory,
+        );
+        process.stderr.write(
+          `制品验收或资源清理失败日志：${failureLogsDirectory}\n`,
+        );
+      } catch (error) {
+        cleanupFailure =
+          cleanupFailure === undefined
+            ? error
+            : new AggregateError(
+                [cleanupFailure, error],
+                "清理 daemon 并保留失败日志都失败",
+              );
+      }
     }
     rmSync(temporaryRoot, { recursive: true, force: true });
   }

@@ -152,9 +152,8 @@ function makeNativePhase(
     accept = resolve;
     rejectAcceptance = reject;
   });
-  // The initial root is observed through start() and may not have a consumer
-  // awaiting this promise. Keep a rejection observed while retaining it for a
-  // later delivery waiter.
+  // start() 会观察初始根调用，但此处可能没有消费者等待此 Promise。
+  // 先为拒绝附加处理器，同时保留 Promise 供后续投递等待者读取。
   void acceptedPromise.catch(() => undefined);
   const outcome = new Promise<NativePhaseOutcome>((resolve) => {
     settleOutcome = resolve;
@@ -710,9 +709,8 @@ export function createQoderDriver(deps: {
       if (disposition !== undefined) return disposition;
       if (removed) return "accepted";
 
-      // false means the exact queued UUID was not removed. If its lifecycle
-      // now proves the root started, interrupt that active root and check the
-      // queue once more before treating the stop request as accepted.
+      // false 表示队列中未移除该 UUID。若生命周期证据表明根调用已启动，
+      // 就中断该活动根调用并再次检查队列，再决定是否接受停止请求。
       if (phase.state !== "started" || phase.result !== undefined)
         return "unknown";
       const retry = interruptedReply(await query!.interrupt());
