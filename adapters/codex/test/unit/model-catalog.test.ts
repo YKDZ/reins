@@ -54,10 +54,11 @@ describe("Codex 模型目录", () => {
       emit: () => undefined,
       diagnostics: async () => undefined,
     });
+    let workerStart: Promise<void> | undefined;
     let modelCatalogPromise: Promise<unknown> | undefined;
 
     try {
-      worker.start({
+      workerStart = worker.start({
         sessionId,
         turnId: "t1" as TurnId,
         harness: "codex",
@@ -75,6 +76,7 @@ describe("Codex 模型目录", () => {
       expect(modelCatalogFake.controls.requests()).toEqual([]);
 
       workerInitialize.resolve({});
+      await workerStart;
       await flush();
       expect(modelCatalogStarts).toBe(1);
       await expect(modelCatalogPromise).resolves.toEqual({
@@ -85,6 +87,7 @@ describe("Codex 模型目录", () => {
       workerInitialize.resolve({});
       if (modelCatalogPromise !== undefined)
         await modelCatalogPromise.catch(() => {});
+      if (workerStart !== undefined) await workerStart.catch(() => {});
       await worker.terminate(sessionId);
       if (previousHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousHome;

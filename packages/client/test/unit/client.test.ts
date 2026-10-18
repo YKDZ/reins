@@ -1,8 +1,11 @@
-import { REINS_PROTOCOL_MAJOR_VERSION } from "@reins/protocol";
+import {
+  REINS_PROTOCOL_MAJOR_VERSION,
+  parseOperationKey,
+} from "@reins/protocol";
 import { createInMemoryTransportPair } from "@reins/transport";
 import { expect, test, vi } from "vitest";
 
-import { createReinsClient } from "../../src/index.ts";
+import { createReinsClient } from "../../src/control.ts";
 
 const binding = {
   consumerContext: "alpha" as const,
@@ -228,7 +231,7 @@ test("a request made after close rejects without installing a timer", async () =
   }
 });
 
-test("副作用超时保留命令身份、不泄露原参，也不自动重发", async () => {
+test("副作用超时返回同一 OperationKey 的未知结果且不泄露原参", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
   const sent: unknown[] = [];
@@ -262,12 +265,8 @@ test("副作用超时保留命令身份、不泄露原参，也不自动重发",
     error = JSON.parse((caught as Error).message);
   }
   expect(error).toMatchObject({
-    code: "command_outcome_unknown",
-    cause: "timeout",
-    method: "spawn",
-    daemonGeneration: "ab12cd",
-    commandId: expect.stringMatching(/^ab12cd:/),
-    retryToken: expect.any(String),
+    code: "operation_outcome_unknown",
+    operationKey: expect.stringMatching(/^operation1_/),
   });
   expect(JSON.stringify(error)).not.toContain("sensitive original");
   expect(sent).toHaveLength(2);
@@ -303,7 +302,7 @@ test.each([
     },
   ],
 ] as const)(
-  "%s 自动取得命令身份，断连为未知且不复制原参数",
+  "%s 自动生成 OperationKey，断连为未知且不复制原参数",
   async (method, params) => {
     const pair = createInMemoryTransportPair();
     const client = createReinsClient(pair.client as never, binding);
@@ -333,17 +332,15 @@ test.each([
       error = JSON.parse((caught as Error).message);
     }
     expect(error).toMatchObject({
-      code: "command_outcome_unknown",
-      cause: "disconnected",
-      method,
-      targets: ["session:00000000-0000-4000-8000-000000000000:worker:12"],
+      code: "operation_outcome_unknown",
+      operationKey: expect.stringMatching(/^operation1_/),
     });
     expect(JSON.stringify(error)).not.toContain("private-message");
     expect(JSON.stringify(error)).not.toContain("private-feedback");
     expect(sent[1]).toMatchObject({
       method,
       params,
-      commandId: expect.stringMatching(/^ab12cd:/),
+      operationKey: expect.stringMatching(/^operation1_/),
     });
     expect(sent).toHaveLength(2);
     client.close();
@@ -370,7 +367,7 @@ test("已关闭客户端确定未发送；安全查询断连保持普通错误",
   client.close();
 });
 
-test("显式恢复保留原目录事实，不要求调用方重填目录对象身份", async () => {
+test("显式 OperationKey 重发保留原始完整请求且 key 不包含请求正文", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
   const sent: Array<Record<string, unknown>> = [];
@@ -399,23 +396,34 @@ test("显式恢复保留原目录事实，不要求调用方重填目录对象�
     cwd: "/original/absolute/path",
     cwdIdentity: { device: "43", inode: "9876" },
   };
-  let token: string | undefined;
+  const operationKey = client.prepareOperation("spawn");
+  expect(parseOperationKey(operationKey, "spawn")).toMatchObject({
+    runtimeScopeId: binding.runtimeScopeId,
+    consumer: binding.consumerContext,
+    generation: "ab12cd",
+    kind: "spawn",
+  });
+  let unknown: unknown;
   try {
-    await client.request("spawn", original as never, 5);
+    await client.executeOperation("spawn", original as never, operationKey, 5);
   } catch (error) {
-    token = (JSON.parse((error as Error).message) as { retryToken: string })
-      .retryToken;
+    unknown = JSON.parse((error as Error).message);
   }
-  expect(token).toEqual(expect.any(String));
-  expect(
-    Buffer.from(token!.slice(7), "base64url").toString("utf8"),
-  ).not.toContain("private initial task");
-  const recovered = client.retry(token!, caller);
+  expect(unknown).toMatchObject({
+    code: "operation_outcome_unknown",
+    operationKey,
+  });
+  expect(JSON.stringify(operationKey)).not.toContain("private initial task");
+  const recovered = client.executeOperation(
+    "spawn",
+    original as never,
+    operationKey,
+  );
   await Promise.resolve();
   expect(sent[2]).toMatchObject({
     method: "spawn",
     params: original,
-    commandId: sent[1]?.commandId,
+    operationKey: sent[1]?.operationKey,
   });
   pair.server.send({
     kind: "response",
@@ -465,18 +473,12 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
   });
   expect(failures).toMatchObject([
     {
-      code: "command_outcome_unknown",
-      cause: "invalid_daemon_response",
-      method: "spawn",
-      commandId: expect.stringMatching(/^ab12cd:/),
-      retryToken: expect.any(String),
+      code: "operation_outcome_unknown",
+      operationKey: expect.stringMatching(/^operation1_/),
     },
     {
-      code: "command_outcome_unknown",
-      cause: "invalid_daemon_response",
-      method: "kill",
-      commandId: expect.stringMatching(/^ab12cd:/),
-      retryToken: expect.any(String),
+      code: "operation_outcome_unknown",
+      operationKey: expect.stringMatching(/^operation1_/),
     },
     { code: "invalid_daemon_response" },
   ]);

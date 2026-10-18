@@ -9,38 +9,32 @@ import type { ConsumerContext, SessionId } from "@reins/protocol";
 export type ConsumerScope = {
   within<T>(consumer: ConsumerContext, run: () => T): T;
   current(): ConsumerContext | undefined;
-  claim(sessionId: SessionId, consumer: ConsumerContext): void;
   ownerOf(sessionId: SessionId): ConsumerContext | undefined;
   inScope(consumer: ConsumerContext, sessionId: SessionId): boolean;
   ownerForFact(fact: unknown): ConsumerContext | undefined;
 };
 
-export function createConsumerScope(): ConsumerScope {
+export function createConsumerScope(
+  ownerOf: (sessionId: SessionId) => ConsumerContext | undefined = () =>
+    undefined,
+): ConsumerScope {
   const storage = new AsyncLocalStorage<ConsumerContext>();
-  const sessionOwners = new Map<SessionId, ConsumerContext>();
 
   return {
     within: (consumer, run) => storage.run(consumer, run),
     current: () => storage.getStore(),
-    claim(sessionId, consumer) {
-      // 归属由创建该会话的请求确立，后来者不能改写。
-      if (!sessionOwners.has(sessionId)) {
-        sessionOwners.set(sessionId, consumer);
-      }
-    },
-    ownerOf: (sessionId) => sessionOwners.get(sessionId),
+    ownerOf,
     inScope(consumer, sessionId) {
-      const owner = sessionOwners.get(sessionId);
-      return owner === undefined || owner === consumer;
+      return ownerOf(sessionId) === consumer;
     },
     ownerForFact(fact: unknown) {
-      const causedByRequest = storage.getStore();
-      if (causedByRequest !== undefined) return causedByRequest;
       if (typeof fact !== "object" || fact === null) return undefined;
       const sessionId = (fact as { sessionId?: unknown }).sessionId;
-      return typeof sessionId === "string"
-        ? sessionOwners.get(sessionId as SessionId)
-        : undefined;
+      if (typeof sessionId === "string") {
+        const owner = ownerOf(sessionId as SessionId);
+        if (owner !== undefined) return owner;
+      }
+      return storage.getStore();
     },
   };
 }

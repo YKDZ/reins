@@ -16,7 +16,7 @@ import {
   connect,
   parseAgentFactId,
   parseMessageKey,
-  parseOperationCredential,
+  parseOperationKey,
   parsePermissionHandle,
   parseResumeCursor,
   parseRuntimeScopeId,
@@ -26,7 +26,7 @@ import {
   ReinsSdkError,
   serializeAgentFactId,
   serializeMessageKey,
-  serializeOperationCredential,
+  serializeOperationKey,
   serializePermissionHandle,
   serializeResumeCursor,
   serializeSessionHandle,
@@ -117,7 +117,7 @@ async function fixture() {
         message,
         cwd: directory,
       },
-      connection.prepareOperation("spawn"),
+      { operationKey: connection.prepareOperation("spawn") },
     );
   }
 
@@ -154,7 +154,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
         await observer.resolvePermission(
           fact.permissionHandle,
           { outcome: "deny", feedback: "caller feedback" },
-          observer.prepareOperation("resolvePermission"),
+          { operationKey: observer.prepareOperation("resolvePermission") },
         );
       }
     }
@@ -259,18 +259,12 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
       "eventId",
     ])
       expect(fact).not.toHaveProperty(key);
-  const credential = control.prepareOperation("spawn");
-  expect(
-    parseOperationCredential(
-      "spawn",
-      serializeOperationCredential("spawn", credential),
-    ),
-  ).toBe(credential);
+  const operationKey = control.prepareOperation("spawn");
+  expect(parseOperationKey(serializeOperationKey(operationKey), "spawn")).toBe(
+    operationKey,
+  );
   expect(() =>
-    parseOperationCredential(
-      "send",
-      serializeOperationCredential("spawn", credential),
-    ),
+    parseOperationKey(serializeOperationKey(operationKey), "send"),
   ).toThrow();
   expect(parseAgentFactId(serializeAgentFactId(callerMessage.factId))).toBe(
     callerMessage.factId,
@@ -422,7 +416,7 @@ test("turn observation ends at its target while session history crosses and resu
       sessionHandle: spawned.sessionHandle,
       message: JSON.stringify({ gate: secondGate, reply: "second" }),
     },
-    control.prepareOperation("send"),
+    { operationKey: control.prepareOperation("send") },
   );
 
   await writeFile(secondGate, "release second");
@@ -619,7 +613,7 @@ test("active replay remains bounded before a permission-blocked turn completes",
   await observer.resolvePermission(
     requested.permissionHandle,
     { outcome: "deny", feedback: "finish active replay test" },
-    observer.prepareOperation("resolvePermission"),
+    { operationKey: observer.prepareOperation("resolvePermission") },
   );
   const terminal: AgentFact[] = [];
   for (;;) {

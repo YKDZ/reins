@@ -23,7 +23,8 @@ import type {
 import {
   WORKER_EVENT_REJECTION_REASONS,
   isSideEffectMethod,
-  commandIdSchema,
+  operationKeyClaimsSchema,
+  serializeOperationKey,
   initializeResultSchema,
   diagnosticsResultSchema,
   makeDiagnosticId,
@@ -33,6 +34,7 @@ import {
   turnIdSchema,
   REINS_PROTOCOL_MAJOR_VERSION,
   runtimeScopeIdSchema,
+  WorkerStartFailure,
   type WorkerEventRejection,
 } from "@reins/protocol";
 import {
@@ -133,12 +135,17 @@ async function bindConsumer(
           }
         : message.kind === "request" &&
             isSideEffectMethod(message.method) &&
-            message.commandId === undefined
+            message.operationKey === undefined
           ? {
               ...message,
-              commandId: v.parse(
-                commandIdSchema,
-                generation + ":" + randomUUID(),
+              operationKey: serializeOperationKey(
+                v.parse(operationKeyClaimsSchema, {
+                  runtimeScopeId: testRuntimeScopeId,
+                  consumer: consumerContext,
+                  kind: message.method,
+                  generation,
+                  nonce: randomUUID(),
+                }),
               ),
             }
           : message,
@@ -411,7 +418,7 @@ describe("daemon diagnostic error dispatch", () => {
       driverFactory: (ingress) => {
         emit = ingress;
         return {
-          start() {},
+          async start() {},
           async deliver() {},
           async interrupt() {},
           resolvePermission() {},
@@ -473,7 +480,7 @@ describe("daemon diagnostic error dispatch", () => {
     const driverFactory: WorkerDriverFactory = (ingress) => {
       emit = ingress;
       return {
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -543,7 +550,7 @@ describe("daemon diagnostic error dispatch", () => {
     const driverFactory: AdapterDriverFactory = (context) => {
       emit = context.emit;
       return {
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -986,8 +993,8 @@ describe("daemon diagnostic error dispatch", () => {
         v.parse(daemonGenerationSchema, "dispatch"),
     });
     const driverFactory: AdapterDriverFactory = () => ({
-      start() {
-        throw new Error("worker start failed");
+      async start() {
+        throw new WorkerStartFailure("worker start failed", "not_accepted");
       },
       async deliver() {},
       async interrupt() {},
@@ -1083,8 +1090,8 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
-        start() {
-          throw new Error("worker start failed");
+        async start() {
+          throw new WorkerStartFailure("worker start failed", "not_accepted");
         },
         async deliver() {},
         async interrupt() {},
@@ -1218,7 +1225,7 @@ describe("daemon diagnostic error dispatch", () => {
       allocateGeneration: async () => v.parse(daemonGenerationSchema, "caps"),
     });
     const driverFactory: AdapterDriverFactory = () => ({
-      start() {},
+      async start() {},
       async deliver() {},
       async interrupt() {},
       resolvePermission() {},
@@ -1349,7 +1356,7 @@ describe("daemon diagnostic error dispatch", () => {
       }
     });
     const driverFactory: AdapterDriverFactory = () => ({
-      start() {},
+      async start() {},
       async deliver() {},
       async interrupt() {},
       resolvePermission() {},
@@ -2199,7 +2206,7 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -2656,7 +2663,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
     const driverFactory: AdapterDriverFactory = (context) => {
       emit = context.emit;
       return {
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -2734,7 +2741,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
     const root = await mkdtemp(join(tmpdir(), "reins-daemon-spawn-owner-"));
     directories.push(root);
     const driverFactory: AdapterDriverFactory = ({ diagnostics }) => ({
-      start(spec) {
+      async start(spec) {
         void diagnostics({
           kind: "harness_stderr",
           operation: "worker_process",
@@ -2742,7 +2749,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
           sessionId: spec.sessionId,
           text: { text: "boom", truncated: false, originalBytes: 4 },
         });
-        throw new Error("start failed");
+        throw new WorkerStartFailure("start failed", "not_accepted");
       },
       async deliver() {},
       async interrupt() {},

@@ -1,5 +1,9 @@
 import { createSessionMachine, type SessionIdentity } from "@reins/core";
 import {
+  createInMemoryControlStore,
+  type ControlStore,
+} from "@reins/event-journal";
+import {
   type DiagnosticId,
   type DiagnosticInput,
   type CoreDiagnosticFact,
@@ -53,6 +57,7 @@ export function createDaemon(options: {
   identity: SessionIdentity;
   diagnostics: DiagnosticsRuntime;
   runtimeScopeId: RuntimeScopeId;
+  controlStore?: ControlStore;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 }): Daemon {
@@ -66,6 +71,7 @@ export function createDaemonInternal(
     identity: SessionIdentity;
     diagnostics: DiagnosticsRuntime;
     runtimeScopeId: RuntimeScopeId;
+    controlStore?: ControlStore;
     idleTimeoutMs?: number;
     eventLogLimit?: number;
   },
@@ -76,7 +82,10 @@ export function createDaemonInternal(
   },
   assertWriterLease?: () => Promise<void>,
 ): Daemon {
-  const consumerScope = createConsumerScope();
+  const controlStore = options.controlStore ?? createInMemoryControlStore();
+  const consumerScope = createConsumerScope(
+    (sessionId) => controlStore.getSession(sessionId)?.consumer,
+  );
   const diagnostics = orderDiagnosticsAcceptance(
     options.diagnostics,
     consumerScope,
@@ -101,6 +110,8 @@ export function createDaemonInternal(
     adapters: options.adapters,
     diagnostics,
     consumerScope,
+    controlStore,
+    runtimeScopeId: options.runtimeScopeId,
     ...(assertWriterLease === undefined ? {} : { assertWriterLease }),
     ...(options.eventLogLimit === undefined
       ? {}
@@ -136,7 +147,20 @@ export function createDaemonInternal(
     if (stopPromise !== undefined) return stopPromise;
     server.quiesce();
     const attempt = (async () => {
-      await control.terminateLiveSessions();
+      try {
+        await control.terminateLiveSessions();
+      } catch (error) {
+        if (control.liveSessionIds().length > 0) throw error;
+        try {
+          await server.stop();
+        } catch (shutdownError) {
+          throw new AggregateError(
+            [error, shutdownError],
+            "Daemon stop did not fully succeed",
+          );
+        }
+        throw error;
+      }
       await server.stop();
     })();
     stopPromise = attempt;

@@ -150,7 +150,7 @@ async function fixture() {
   ) {
     return connection.spawn(
       { sessionLabel, harness: "codex", message, cwd },
-      connection.prepareOperation("spawn"),
+      { operationKey: connection.prepareOperation("spawn") },
     );
   }
   async function killSession(
@@ -159,7 +159,7 @@ async function fixture() {
   ) {
     return connection.kill(
       { sessionHandle },
-      connection.prepareOperation("kill"),
+      { operationKey: connection.prepareOperation("kill") },
     );
   }
   return {

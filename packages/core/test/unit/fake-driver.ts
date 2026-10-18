@@ -27,7 +27,7 @@ export type FakeDriverControls = {
 };
 
 export function createFakeDriver(options?: {
-  start?: (spec: WorkerSpec) => void;
+  start?: (spec: WorkerSpec) => Promise<void> | void;
   deliver?: (
     sessionId: SessionId,
     turnId: TurnId,
@@ -65,11 +65,11 @@ export function createFakeDriver(options?: {
   const factory: WorkerDriverFactory = (emit) => {
     emitRef = emit;
     const driver: WorkerDriver = {
-      start(spec) {
+      async start(spec) {
         if (options?.start === undefined) {
           started.push(spec);
         } else {
-          options.start(spec);
+          await options.start(spec);
         }
       },
       async deliver(sessionId, turnId, message) {

@@ -29,7 +29,7 @@ async function closeIfLive(
   try {
     await connection.kill(
       { sessionHandle },
-      connection.prepareOperation("kill"),
+      { operationKey: connection.prepareOperation("kill") },
     );
   } catch {
     // 主断言失败时尽力清理；正式 daemon 停止仍由调用方负责。
@@ -51,7 +51,7 @@ try {
       message: "first wait target",
       cwd,
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   firstSession = first.sessionHandle;
   const second = await connection.spawn(
@@ -61,7 +61,7 @@ try {
       message: "second wait target",
       cwd,
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   secondSession = second.sessionHandle;
 
@@ -91,7 +91,7 @@ try {
 
   const closedSecond = await connection.kill(
     { sessionHandle: second.sessionHandle },
-    connection.prepareOperation("kill"),
+    { operationKey: connection.prepareOperation("kill") },
   );
   const anyResult = await anyWaiting;
   assert(
@@ -114,7 +114,7 @@ try {
 
   await connection.kill(
     { sessionHandle: first.sessionHandle },
-    connection.prepareOperation("kill"),
+    { operationKey: connection.prepareOperation("kill") },
   );
   const allResult = await allWaiting;
   assert(

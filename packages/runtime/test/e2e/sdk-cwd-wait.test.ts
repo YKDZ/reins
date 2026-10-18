@@ -109,7 +109,7 @@ test("SDK validates worker cwd and preserves exact busy, idle, and killed snapsh
           message: "read-marker",
           cwd,
         },
-        f.connection.prepareOperation("spawn"),
+        { operationKey: f.connection.prepareOperation("spawn") },
       ),
     ).rejects.toMatchObject({
       failure: {
@@ -129,7 +129,7 @@ test("SDK validates worker cwd and preserves exact busy, idle, and killed snapsh
       message: "hold",
       cwd: f.firstCwd,
     },
-    f.connection.prepareOperation("spawn"),
+    { operationKey: f.connection.prepareOperation("spawn") },
   );
   expect(
     await f.connection.list({ sessionHandle: spawned.sessionHandle }),
@@ -183,7 +183,7 @@ test("SDK validates worker cwd and preserves exact busy, idle, and killed snapsh
   expect(
     await f.connection.kill(
       { sessionHandle: spawned.sessionHandle },
-      f.connection.prepareOperation("kill"),
+      { operationKey: f.connection.prepareOperation("kill") },
     ),
   ).toEqual({ sessionHandle: spawned.sessionHandle, status: "killed" });
   const [killed] = await f.connection.list({
@@ -224,7 +224,7 @@ test("SDK any and all waits report the exact target set across out-of-order comp
       message: "hold",
       cwd: f.firstCwd,
     },
-    f.connection.prepareOperation("spawn"),
+    { operationKey: f.connection.prepareOperation("spawn") },
   );
   const second = await f.connection.spawn(
     {
@@ -233,7 +233,7 @@ test("SDK any and all waits report the exact target set across out-of-order comp
       message: "hold",
       cwd: f.secondCwd,
     },
-    f.connection.prepareOperation("spawn"),
+    { operationKey: f.connection.prepareOperation("spawn") },
   );
 
   await writeFile(join(f.secondCwd, "release"), "finish second first");
@@ -328,7 +328,7 @@ test("SDK any and all preserve every partial result, pending target, and request
   const spawn = async (sessionLabel: string, message: string) =>
     f.connection.spawn(
       { sessionLabel, harness: "codex", message, cwd: f.firstCwd },
-      f.connection.prepareOperation("spawn"),
+      { operationKey: f.connection.prepareOperation("spawn") },
     );
   const a = await spawn(
     "any-all-a",
@@ -430,7 +430,7 @@ test("an old exact SDK target remains completed while its session runs a later t
       message: "first",
       cwd: f.firstCwd,
     },
-    f.connection.prepareOperation("spawn"),
+    { operationKey: f.connection.prepareOperation("spawn") },
   );
   await f.connection.wait({
     targets: [first.turnHandle],
@@ -446,7 +446,7 @@ test("an old exact SDK target remains completed while its session runs a later t
         reply: "second",
       }),
     },
-    f.connection.prepareOperation("send"),
+    { operationKey: f.connection.prepareOperation("send") },
   );
   expect(second.turnHandle).not.toBe(first.turnHandle);
   expect(
@@ -486,7 +486,7 @@ test("a long finite SDK wait deadline is not clamped to an immediate timeout", a
       message: JSON.stringify({ gate, reply: "long result" }),
       cwd: f.firstCwd,
     },
-    f.connection.prepareOperation("spawn"),
+    { operationKey: f.connection.prepareOperation("spawn") },
   );
   let observed: unknown;
   const waiting = f.connection
@@ -526,7 +526,7 @@ test("SDK preserves typed harness failure facts on the exact completed target", 
       }),
       cwd: f.firstCwd,
     },
-    f.connection.prepareOperation("spawn"),
+    { operationKey: f.connection.prepareOperation("spawn") },
   );
   expect(
     await f.connection.wait({

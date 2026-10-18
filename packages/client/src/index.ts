@@ -4,7 +4,6 @@ import type { TransportConnection } from "@reins/transport";
 import {
   createReinsClient as createControlClient,
   type ClientResult,
-  type CommandOutcomeUnknown,
   type NotificationListener,
   type ReinsClient as ControlReinsClient,
   type ProtocolResponseFor,
@@ -18,14 +17,8 @@ import type {
   FactSubscriptionEnd,
 } from "./subscription.ts";
 
-export {
-  commandOutcomeUnknownSchema,
-  isCommandOutcomeUnknown,
-  parseRetryToken,
-} from "./control.ts";
 export type {
   ClientResult,
-  CommandOutcomeUnknown,
   NotificationListener,
   ProtocolResponseFor,
   ReinsClientOptions,

@@ -97,7 +97,7 @@ export async function qoderPublicEventFingerprint(
     },
     diagnostics: async () => undefined,
   });
-  driver.start({
+  await driver.start({
     sessionId:
       "session:00000000-0000-4000-8000-000000000000:fixture:1" as SessionId,
     turnId: "t1" as TurnId,

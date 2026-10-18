@@ -50,7 +50,7 @@ try {
       }),
       cwd: required("REINS_WORKER_CWD"),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
   const live = await connection.attach(target, { mode: "none" });
@@ -63,7 +63,7 @@ try {
         await connection.resolvePermission(
           fact.permissionHandle,
           { outcome: "deny", feedback: "caller feedback" },
-          connection.prepareOperation("resolvePermission"),
+          { operationKey: connection.prepareOperation("resolvePermission") },
         );
       }
     }
@@ -175,7 +175,7 @@ try {
       sessionHandle: spawned.sessionHandle,
       message: JSON.stringify({ gate, reply: "second turn" }),
     },
-    connection.prepareOperation("send"),
+    { operationKey: connection.prepareOperation("send") },
   );
   assert(
     newTurn.sessionHandle === spawned.sessionHandle &&

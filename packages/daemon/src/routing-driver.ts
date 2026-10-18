@@ -87,7 +87,7 @@ export function createRoutingDriverFactory(
     }
 
     const routingDriver: WorkerDriver = {
-      start(spec: WorkerSpec) {
+      async start(spec: WorkerSpec) {
         const adapter = adapters.get(spec.harness);
         if (adapter === undefined) {
           throw {
@@ -100,17 +100,12 @@ export function createRoutingDriverFactory(
           emit,
           diagnostics: (input) => recordAdapterFact(spec.harness, input),
         });
-        try {
-          driver.start(spec);
-          drivers.set(spec.sessionId, driver);
-          sessionHarness.set(spec.sessionId, spec.harness);
-          sessionTurn.set(spec.sessionId, spec.turnId);
-        } catch (error) {
-          drivers.delete(spec.sessionId);
-          sessionHarness.delete(spec.sessionId);
-          sessionTurn.delete(spec.sessionId);
-          throw error;
-        }
+        // 先登记清理路由，再等待原生接受。若接受未知或启动后续失败，
+        // SessionMachine 仍能沿正式 terminate 路径收束该 driver。
+        drivers.set(spec.sessionId, driver);
+        sessionHarness.set(spec.sessionId, spec.harness);
+        sessionTurn.set(spec.sessionId, spec.turnId);
+        await driver.start(spec);
       },
       async deliver(sessionId, turnId, message, placement) {
         const driver = driverFor(sessionId);
