@@ -466,8 +466,37 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
 
   const active = await original.spawn({
     harness: "codex",
-    message: "hold across daemon restart",
+    message: "hold with pending permission across daemon restart",
     cwd: process.cwd(),
+  });
+  const activeTarget = {
+    scope: "session" as const,
+    sessionHandle: active.sessionHandle,
+  };
+  const activeHistory = await original.attach(activeTarget, {
+    mode: "history",
+  });
+  const activeCursor = activeHistory.initial.cursor;
+  let observedPendingPermission = false;
+  for await (const fact of activeHistory) {
+    activeHistory.acknowledge(fact);
+    if (fact.type === "permission.requested") {
+      observedPendingPermission = true;
+      break;
+    }
+  }
+  activeHistory.close();
+  await expect(activeHistory.done).resolves.toMatchObject({ reason: "closed" });
+  expect(observedPendingPermission).toBe(true);
+  const liveAuthorization = await original.attach(activeTarget, {
+    mode: "snapshot",
+  });
+  if (liveAuthorization.initial.mode !== "snapshot")
+    throw new Error("Expected a snapshot initial state");
+  expect(liveAuthorization.initial.baseline.pendingPermissions).toHaveLength(1);
+  liveAuthorization.close();
+  await expect(liveAuthorization.done).resolves.toMatchObject({
+    reason: "closed",
   });
   const killed = await original.spawn({
     harness: "codex",
@@ -495,6 +524,32 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   }
   expect(resumedFactTypes).toContain("turn.completed");
   await expect(resumedHistory.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
+  const oldAuthorization = await reconnected.attach(activeTarget, {
+    mode: "snapshot",
+  });
+  if (oldAuthorization.initial.mode !== "snapshot")
+    throw new Error("Expected a snapshot initial state");
+  expect(oldAuthorization.initial.baseline.session).toMatchObject({
+    state: "unreachable",
+    unreachableReason: "previous_generation",
+  });
+  expect(oldAuthorization.initial.baseline.pendingPermissions).toEqual([]);
+  await expect(oldAuthorization.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
+  const oldAuthorizationHistory = await reconnected.attach(activeTarget, {
+    mode: "after",
+    cursor: activeCursor,
+  });
+  let replayedOldPermission = false;
+  for await (const fact of oldAuthorizationHistory) {
+    if (fact.type === "permission.requested") replayedOldPermission = true;
+    oldAuthorizationHistory.acknowledge(fact);
+  }
+  expect(replayedOldPermission).toBe(true);
+  await expect(oldAuthorizationHistory.done).resolves.toMatchObject({
     reason: "control_unavailable",
   });
   expect(await reconnected.list()).toEqual([]);
