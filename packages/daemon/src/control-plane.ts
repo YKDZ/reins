@@ -281,8 +281,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       }
     | { readonly status: "outcome_unknown"; readonly error: MachineError }
   >();
-  const killResults = new Map<
-    string,
+  type KillOperationResult =
     | { readonly status: "failed"; readonly error: MachineError }
     | {
         readonly status:
@@ -305,8 +304,31 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         readonly error: KillEffectError;
         readonly cause: ReturnType<typeof makeErrorCause>;
       }
-    | { readonly status: "outcome_unknown"; readonly error: MachineError }
+    | { readonly status: "outcome_unknown"; readonly error: MachineError };
+  const killResults = new Map<
+    string,
+    KillOperationResult & { readonly fingerprint: string }
   >();
+  function rememberKillResult(
+    operationKey: OperationKey,
+    result: KillOperationResult,
+  ): void {
+    const active = transientOperations.get(operationKey);
+    if (active?.method === "kill") {
+      killResults.set(operationKey, {
+        ...result,
+        fingerprint: active.fingerprint,
+      });
+      return;
+    }
+    const operation = options.controlStore.getOperation(operationKey);
+    if (operation?.kind !== "kill")
+      throw new Error("Kill request fingerprint is unavailable");
+    killResults.set(operationKey, {
+      ...result,
+      fingerprint: canonical({ method: "kill", params: operation.request }),
+    });
+  }
   let eventWriteFailure: unknown;
   const eventWriteFailures = new Map<SessionId, DomainEvent>();
   const eventOperationFailures = new Map<
@@ -1925,7 +1947,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           });
         } catch (error) {
           if (!(error instanceof KillCommitVerificationError)) throw error;
-          killResults.set(operationKey, {
+          rememberKillResult(operationKey, {
             status:
               error.durableState === "not_committed"
                 ? "accepted_uncommitted"
@@ -3207,6 +3229,54 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       const parsed = v.safeParse(killParamsSchema, request.params);
       if (!parsed.success) return performSafely(perform);
       const key = operationKey as OperationKey<"kill">;
+      const cached = killResults.get(key);
+      if (cached !== undefined && cached.fingerprint !== fingerprint)
+        return { error: { code: "operation_key_conflict" } };
+
+      const cachedOutcome = (
+        known: NonNullable<typeof cached>,
+      ): { error: MachineError } => {
+        switch (known.status) {
+          case "failed":
+          case "outcome_unknown":
+            return { error: known.error };
+          case "not_accepted_uncommitted":
+          case "not_accepted_unconfirmed":
+            return {
+              error: storeUnavailable(
+                key,
+                "failure",
+                "not_dispatched",
+                new Error(
+                  `${failureCause(known.error).message}; failure record failed: ${errorMessage(known.failureWriteError)}`,
+                ),
+              ),
+            };
+          case "accepted_uncommitted":
+          case "accepted_unconfirmed":
+            return {
+              error: storeUnavailable(
+                key,
+                "commit",
+                "accepted",
+                known.error,
+                known.result,
+              ),
+            };
+          case "partial_effect_uncommitted":
+          case "partial_effect_unconfirmed":
+            return {
+              error: {
+                ...known.error,
+                ...(known.error.cleanupCause === undefined
+                  ? {
+                      cleanupCause: makeErrorCause("io", known.cause.message),
+                    }
+                  : {}),
+              },
+            };
+        }
+      };
       let registration: ReturnType<ControlStore["registerKill"]> | undefined;
       try {
         registration = options.controlStore.registerKill({
@@ -3225,6 +3295,42 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           known.code === "stale_operation_key"
         )
           return { error: known };
+
+        let stored: ControlOperation | undefined;
+        try {
+          stored = options.controlStore.getOperation(key);
+        } catch (verificationError) {
+          const cachedAfterFailure = killResults.get(key);
+          if (cachedAfterFailure !== undefined)
+            return cachedOutcome(cachedAfterFailure);
+          return {
+            error: storeUnavailable(
+              key,
+              "register",
+              "unknown",
+              new Error(
+                `${errorMessage(error)}; operation lookup failed: ${errorMessage(verificationError)}`,
+              ),
+            ),
+          };
+        }
+        if (stored === undefined) {
+          const cachedAfterFailure = killResults.get(key);
+          if (cachedAfterFailure !== undefined)
+            return cachedOutcome(cachedAfterFailure);
+        } else {
+          if (stored.kind !== "kill")
+            return { error: { code: "operation_key_conflict" } };
+          if (
+            stored.runtimeScopeId !== options.runtimeScopeId ||
+            stored.consumer !== consumer ||
+            stored.generation !== options.diagnostics.generation
+          )
+            return { error: { code: "operation_key_scope_mismatch" } };
+          if (canonical(stored.request) !== canonical(parsed.output))
+            return { error: { code: "operation_key_conflict" } };
+          registration = { created: false, operation: stored };
+        }
       }
 
       if (registration !== undefined && !registration.created) {
@@ -3377,7 +3483,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             const effectFailure = failure as KillEffectError;
             try {
               options.controlStore.failKill(key, effectFailure);
-              killResults.set(key, { status: "failed", error: effectFailure });
+              rememberKillResult(key, {
+                status: "failed",
+                error: effectFailure,
+              });
               return eventFailureResponse ?? { error: effectFailure };
             } catch (storeError) {
               wakeWaitersIfStoreUnavailable();
@@ -3392,7 +3501,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 stored?.status === "failed" &&
                 canonical(stored.error) === canonical(effectFailure)
               ) {
-                killResults.set(key, {
+                rememberKillResult(key, {
                   status: "failed",
                   error: stored.error,
                 });
@@ -3408,7 +3517,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               const status = stateIsUncommitted
                 ? "partial_effect_uncommitted"
                 : "partial_effect_unconfirmed";
-              killResults.set(key, {
+              rememberKillResult(key, {
                 status,
                 error: effectFailure,
                 cause: makeErrorCause("io", errorMessage(storeError)),
@@ -3449,7 +3558,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 ? { diagnosticId: failure.diagnosticId }
                 : {}),
             };
-            killResults.set(key, { status: "outcome_unknown", error: unknown });
+            rememberKillResult(key, {
+              status: "outcome_unknown",
+              error: unknown,
+            });
             try {
               options.controlStore.recordKillOutcomeUnknown(
                 key,
@@ -3471,7 +3583,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 // 未能核实持久状态时，仍保留关闭结果未知这一事实。
               }
               if (registration === undefined)
-                killResults.set(key, {
+                rememberKillResult(key, {
                   status: "outcome_unknown",
                   error: unknown,
                 });
@@ -3482,7 +3594,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
 
           try {
             options.controlStore.failKill(key, failure);
-            killResults.set(key, { status: "failed", error: failure });
+            rememberKillResult(key, { status: "failed", error: failure });
             return eventFailureResponse ?? { error: failure };
           } catch (storeError) {
             wakeWaitersIfStoreUnavailable();
@@ -3497,7 +3609,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               stored?.status === "failed" &&
               canonical(stored.error) === canonical(failure)
             ) {
-              killResults.set(key, { status: "failed", error: stored.error });
+              rememberKillResult(key, {
+                status: "failed",
+                error: stored.error,
+              });
               return eventFailureResponse ?? { error: stored.error };
             }
             if (stored?.status === "outcome_unknown")
@@ -3510,7 +3625,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             const status = stateIsUncommitted
               ? "not_accepted_uncommitted"
               : "not_accepted_unconfirmed";
-            killResults.set(key, {
+            rememberKillResult(key, {
               status,
               error: failure,
               failureWriteError: storeError,

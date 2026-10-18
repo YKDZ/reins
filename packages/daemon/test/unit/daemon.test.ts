@@ -2824,6 +2824,13 @@ describe("daemon 空闲退出", () => {
         message: "启动后注入停止登记失败",
       }),
     ) as { sessionId: SessionId };
+    const other = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "kill-registration-failure-other",
+        message: "验证已接受结果的参数绑定",
+      }),
+    ) as { sessionId: SessionId };
     const operationKey = testOperationKey(connection, "kill");
 
     const stopped = await sendRaw(connection, {
@@ -2848,6 +2855,19 @@ describe("daemon 空闲退出", () => {
       await requester("getOperation", { operationKey }),
     ) as { status: string };
     expect(queried.status).toBe("accepted_uncommitted");
+    await expect(
+      sendRaw(connection, {
+        kind: "request",
+        requestId: "kill-registration-failure-reused",
+        method: "kill",
+        params: { sessionId: other.sessionId },
+        operationKey,
+      }),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(terminationAttempts).toBe(1);
+    expect(backingStore.getSession(other.sessionId)?.info.state).toBe("busy");
     expect(backingStore.getSession(spawned.sessionId)?.info.state).toBe("busy");
     expect(
       backingStore
@@ -2855,6 +2875,236 @@ describe("daemon 空闲退出", () => {
         .some(({ event }) => event.type === "session.killed"),
     ).toBe(false);
 
+    connection.close();
+    await daemon.stop();
+    await running;
+  });
+
+  test("kill 注册故障时核实既有操作后才可派发", async () => {
+    const backingStore = createInMemoryControlStore();
+    let registerUnavailable = false;
+    let readUnavailable = false;
+    let failKillUnavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      registerKill(input) {
+        if (registerUnavailable)
+          throw new Error("kill registration read failed");
+        return backingStore.registerKill(input);
+      },
+      markKillDispatched(operationKey) {
+        if (registerUnavailable)
+          throw new Error("kill dispatch marker unavailable");
+        return backingStore.markKillDispatched(operationKey);
+      },
+      failKill(operationKey, error) {
+        if (failKillUnavailable) throw new Error("kill failure write failed");
+        return backingStore.failKill(operationKey, error);
+      },
+      getOperation(operationKey) {
+        if (readUnavailable) throw new Error("operation read failed");
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    const attempts = new Map<SessionId, number>();
+    let unknownSessionId: SessionId | undefined;
+    let partialSessionId: SessionId | undefined;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async (sessionId) => {
+        const count = (attempts.get(sessionId) ?? 0) + 1;
+        attempts.set(sessionId, count);
+        if (sessionId === unknownSessionId && count === 1)
+          throw {
+            code: "internal_error",
+            cause: {
+              kind: "timeout",
+              message: "official deletion confirmation absent",
+            },
+          };
+        if (sessionId === partialSessionId && count === 1)
+          throw {
+            code: "internal_error",
+            cause: { kind: "closed", message: "owned resource release failed" },
+            effect: { kind: "session_closed", sessionId },
+          };
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const sessions = new Map<string, SessionId>();
+    for (const label of [
+      "A",
+      "B",
+      "unknown",
+      "dispatched",
+      "unreadable",
+      "partial",
+    ]) {
+      const spawned = resultOf(
+        await requester("spawn", {
+          harness: "codex",
+          sessionLabel: `kill-register-${label}`,
+          message: `创建 ${label} 的关闭测试会话`,
+        }),
+      ) as { sessionId: SessionId };
+      sessions.set(label, spawned.sessionId);
+    }
+    const sendKill = (
+      requestId: string,
+      operationKey: string,
+      sessionId: SessionId,
+    ) =>
+      sendRaw(connection, {
+        kind: "request",
+        requestId,
+        method: "kill",
+        params: { sessionId },
+        operationKey,
+      });
+    const seedDispatched = (operationKey: string, sessionId: SessionId) => {
+      const claims = parseOperationKey(operationKey);
+      backingStore.registerKill({
+        operationKey: operationKey as never,
+        runtimeScopeId: claims.runtimeScopeId,
+        consumer: claims.consumer,
+        generation: claims.generation,
+        request: { sessionId },
+      });
+      backingStore.markKillDispatched(operationKey as never);
+    };
+
+    const boundKey = testOperationKey(connection, "kill");
+    await expect(
+      sendKill("kill-register-a", boundKey, sessions.get("A")!),
+    ).resolves.toMatchObject({
+      result: { sessionId: sessions.get("A"), status: "killed" },
+    });
+    registerUnavailable = true;
+    await expect(
+      sendKill("kill-register-reused-on-b", boundKey, sessions.get("B")!),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(attempts.get(sessions.get("A")!)).toBe(1);
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+    expect(backingStore.getSession(sessions.get("B")!)?.info.state).toBe(
+      "busy",
+    );
+    expect(backingStore.getOperation(boundKey as never)).toMatchObject({
+      kind: "kill",
+      request: { sessionId: sessions.get("A") },
+      status: "succeeded",
+      result: { sessionId: sessions.get("A"), status: "killed" },
+    });
+
+    registerUnavailable = false;
+    unknownSessionId = sessions.get("unknown");
+    const unknownKey = testOperationKey(connection, "kill");
+    await expect(
+      sendKill("kill-register-unknown-first", unknownKey, unknownSessionId!),
+    ).resolves.toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        cause: {
+          kind: "timeout",
+          message: "official deletion confirmation absent",
+        },
+      },
+    });
+    expect(backingStore.getOperation(unknownKey as never)).toMatchObject({
+      status: "outcome_unknown",
+    });
+    registerUnavailable = true;
+    await expect(
+      sendKill("kill-register-unknown-retry", unknownKey, unknownSessionId!),
+    ).resolves.toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        operationKey: unknownKey,
+        cause: {
+          kind: "timeout",
+          message: "official deletion confirmation absent",
+        },
+      },
+    });
+    expect(attempts.get(unknownSessionId!)).toBe(1);
+    await expect(
+      sendKill("kill-register-unknown-reused", unknownKey, sessions.get("B")!),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+
+    const dispatchedKey = testOperationKey(connection, "kill");
+    seedDispatched(dispatchedKey, sessions.get("dispatched")!);
+    await expect(
+      sendKill(
+        "kill-register-dispatched-retry",
+        dispatchedKey,
+        sessions.get("dispatched")!,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        operationKey: dispatchedKey,
+      },
+    });
+    expect(attempts.get(sessions.get("dispatched")!)).toBeUndefined();
+
+    const unreadableKey = testOperationKey(connection, "kill");
+    seedDispatched(unreadableKey, sessions.get("unreadable")!);
+    readUnavailable = true;
+    await expect(
+      sendKill(
+        "kill-register-unreadable-retry",
+        unreadableKey,
+        sessions.get("B")!,
+      ),
+    ).resolves.toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        operationKey: unreadableKey,
+        stage: "register",
+        acceptance: "unknown",
+      },
+    });
+    expect(attempts.get(sessions.get("unreadable")!)).toBeUndefined();
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+
+    readUnavailable = false;
+    partialSessionId = sessions.get("partial");
+    failKillUnavailable = true;
+    const partialKey = testOperationKey(connection, "kill");
+    await expect(
+      sendKill("kill-register-partial-first", partialKey, partialSessionId!),
+    ).resolves.toMatchObject({
+      error: {
+        code: "internal_error",
+        effect: { kind: "session_closed", sessionId: partialSessionId },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+      },
+    });
+    await expect(
+      sendKill("kill-register-partial-reused", partialKey, sessions.get("B")!),
+    ).resolves.toMatchObject({
+      error: { code: "operation_key_conflict" },
+    });
+    expect(attempts.get(partialSessionId!)!).toBe(1);
+    expect(attempts.get(sessions.get("B")!)).toBeUndefined();
+    failKillUnavailable = false;
     connection.close();
     await daemon.stop();
     await running;
