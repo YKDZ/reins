@@ -2,7 +2,7 @@ import * as v from "valibot";
 import { describe, expect, expectTypeOf, test } from "vitest";
 
 import {
-  capabilityFailureSchema,
+  modelCatalogFailureSchema,
   diagnosticInputSchema,
   diagnosticRecordSchema,
   diagnosticsParamsSchema,
@@ -540,7 +540,7 @@ describe("strict diagnostic protocol", () => {
     const invalidPair = {
       source: "core",
       kind: "request_failure",
-      operation: "capabilities",
+      operation: "model_catalog",
       stage: "start_session",
       reason: "upstream_error",
       message: { text: "failed", truncated: false, originalBytes: 6 },
@@ -1022,8 +1022,8 @@ describe("strict diagnostic protocol", () => {
       ["diagnostics", "dispatch"],
       ["resolve_permission", "resolve"],
       ["resolve_permission", "dispatch"],
-      ["capabilities", "query"],
-      ["capabilities", "dispatch"],
+      ["model_catalog", "query"],
+      ["model_catalog", "dispatch"],
     ] as const;
     for (const [operation, stage] of requestPairs) {
       for (const reason of [
@@ -1328,11 +1328,11 @@ describe("machine errors", () => {
         sessionId,
         permissionId: "p1",
       },
-      { code: "unknown_harness", harness: "missing", availableHarnesses: [] },
+      { code: "unknown_harness", harness: "qoder", availableHarnesses: [] },
       { code: "method_not_found", method: "missing" },
       { code: "protocol_error" },
       {
-        code: "capability_query_failed",
+        code: "model_catalog_query_failed",
         cause: { kind: "upstream", message: "failed" },
         diagnosticId,
       },
@@ -1403,20 +1403,20 @@ describe("machine errors", () => {
     ];
   });
 
-  test("capability failures carry typed harness failure and optional accepted evidence", () => {
-    ok(capabilityFailureSchema, {
+  test("modelCatalog failures carry typed harness failure and optional accepted evidence", () => {
+    ok(modelCatalogFailureSchema, {
       harness: "codex",
-      code: "capability_query_failed",
+      code: "model_catalog_query_failed",
       failure: { failureCategory: "unclassified", retryDisposition: "unknown" },
       diagnosticId,
     });
-    bad(capabilityFailureSchema, {
+    bad(modelCatalogFailureSchema, {
       harness: "codex",
       code: "session_not_found",
     });
-    bad(capabilityFailureSchema, {
+    bad(modelCatalogFailureSchema, {
       harness: "codex",
-      code: "capability_query_failed",
+      code: "model_catalog_query_failed",
       message: "legacy free text",
     });
   });

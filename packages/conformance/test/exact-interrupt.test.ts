@@ -26,7 +26,7 @@ async function fixture(interrupt: () => Promise<void>) {
   };
   let publish!: (event: DomainEvent) => void;
   const adapter: HarnessAdapter = {
-    capabilities: async () => ({ harness: "fake", models: [] }),
+    modelCatalog: async () => ({ harness: "codex", models: [] }),
     driverFactory: ({ emit }) => {
       publish = emit;
       return {
@@ -48,7 +48,7 @@ async function fixture(interrupt: () => Promise<void>) {
     },
   };
   const daemon = await openEphemeralDaemonForTest({
-    adapters: new Map([["fake", adapter]]),
+    adapters: new Map([["codex", adapter]]),
   });
   daemons.push(daemon);
   const client = createReinsClient(daemon.connect(), {
@@ -70,7 +70,7 @@ test("精确 interrupt 等原生接受才 ACK，取消独立观察且保留会�
   });
   const { client, calls, publish } = await fixture(() => accepted);
   const spawned = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "exact-interrupt" as SessionName,
     message: "initial caller task",
@@ -131,7 +131,7 @@ test("interrupt 结束先赢的拒绝保留原目标，不停止显式后继回�
   });
   const { client, calls, publish } = await fixture(() => decision);
   const spawned = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "interrupt-race" as SessionName,
     message: "initial task",
@@ -175,7 +175,7 @@ test("interrupt 错误父级在原生调用前拒绝，停止失败不伪造取�
   });
   const spawn = async (name: string) => {
     const response = await client.request("spawn", {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: name as SessionName,
       message: "caller task",

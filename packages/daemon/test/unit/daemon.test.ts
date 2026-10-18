@@ -4,8 +4,9 @@ import { AlreadyDiagnosedError } from "@reins/adapter-kit";
 import { createSessionMachine } from "@reins/core";
 import type {
   DomainEvent,
-  CapabilitiesResult,
-  HarnessCapability,
+  ModelCatalogResult,
+  HarnessId,
+  HarnessModelCatalog,
   PermissionOption,
   PermissionId,
   RequestId,
@@ -47,7 +48,7 @@ import {
   createProtocolServer,
   createRoutingDriverFactory,
 } from "../../src/index.ts";
-import type { HarnessAdapter } from "../../src/registry.ts";
+import type { AdapterRegistry, HarnessAdapter } from "../../src/registry.ts";
 
 type PublicProtocolServerOptions = Parameters<typeof createProtocolServer>[0];
 type PublicProtocolServerHasAttachReplayHook =
@@ -104,12 +105,13 @@ afterEach(async () => {
 });
 
 function startDaemon(
-  adapters: Map<string, HarnessAdapter>,
+  adapters: AdapterRegistry,
   options?: {
     idleTimeoutMs?: number;
     eventLogLimit?: number;
     beforeAttachReplay?: (sessionId: SessionId) => void;
     onEvent?: (event: DomainEvent) => void;
+    assertWriterLease?: () => Promise<void>;
   },
 ): {
   server: ReturnType<typeof createInMemoryTransportServer<ProtocolMessage>>;
@@ -129,6 +131,9 @@ function startDaemon(
       ? {}
       : { beforeAttachReplay: options.beforeAttachReplay }),
     ...(options?.onEvent === undefined ? {} : { onEvent: options.onEvent }),
+    ...(options?.assertWriterLease === undefined
+      ? {}
+      : { assertWriterLease: options.assertWriterLease }),
   });
   daemons.push(daemon);
   void daemon.start();
@@ -265,8 +270,8 @@ type FakeCalls = {
 };
 
 function createFakeHarness(options: {
-  harness: string;
-  capability: HarnessCapability;
+  harness: HarnessId;
+  modelCatalog: HarnessModelCatalog;
   autoPermission?: { options: PermissionOption[] };
   canCaptureHarnessStderr?: boolean;
   terminate?: (sessionId: SessionId) => Promise<void>;
@@ -337,8 +342,8 @@ function createFakeHarness(options: {
       emitEvent = emit;
       return driver;
     }) satisfies AdapterDriverFactory,
-    async capabilities() {
-      return options.capability;
+    async modelCatalog() {
+      return options.modelCatalog;
     },
     ...(options.canCaptureHarnessStderr === undefined
       ? {}
@@ -417,7 +422,7 @@ function createFakeHarness(options: {
   };
 }
 
-function emptyCapability(harness: string): HarnessCapability {
+function emptyModelCatalog(harness: HarnessId): HarnessModelCatalog {
   return { harness, models: [] };
 }
 
@@ -426,10 +431,12 @@ describe("daemon 公共接口", () => {
     expect(publicProtocolServerHasAttachReplayHook).toBe(false);
     const transport = createInMemoryTransportServer<ProtocolMessage>();
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const adapters = new Map([["fake", fake.adapter]]);
+    const adapters = new Map<HarnessId, HarnessAdapter>([
+      ["codex", fake.adapter],
+    ]);
     const machine = createSessionMachine({
       driverFactory: createRoutingDriverFactory(adapters, testDiagnostics),
       identity: testIdentity,
@@ -462,7 +469,7 @@ describe("daemon 公共接口", () => {
         resultOf(
           await requester.request("spawn", {
             sessionName: "public-interface",
-            harness: "fake",
+            harness: "codex",
             message: "hello",
           }),
         ) as { sessionId: SessionId }
@@ -485,21 +492,21 @@ describe("daemon 公共接口", () => {
 });
 
 describe("daemon 协议面（缝 C）", () => {
-  test("capabilities 诊断接受挂起仍返回部分结果，后续有限查询不被堵住", async () => {
+  test("模型目录诊断接受挂起仍返回部分结果，后续有限查询不被堵住", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     const server = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemon({
       transport: server,
       adapters: new Map([
-        ["fake", fake.adapter],
+        ["codex", fake.adapter],
         [
-          "bad",
+          "qoder",
           {
             ...fake.adapter,
-            async capabilities() {
+            async modelCatalog() {
               throw new Error("private native quota text");
             },
           },
@@ -510,7 +517,7 @@ describe("daemon 协议面（缝 C）", () => {
         ...testDiagnostics,
         record(input) {
           return input.kind === "request_failure" &&
-            input.operation === "capabilities"
+            input.operation === "model_catalog"
             ? new Promise(() => {})
             : testDiagnostics.record(input);
         },
@@ -520,12 +527,12 @@ describe("daemon 协议面（缝 C）", () => {
     void daemon.start();
     const client = server.connect();
     const requester = makeRequester(client);
-    const response = await requester.request("capabilities", {});
+    const response = await requester.request("modelCatalog", {});
     expect(resultOf(response)).toMatchObject({
-      capabilities: [{ harness: "fake" }],
+      catalogs: [{ harness: "codex" }],
       failures: [
         {
-          harness: "bad",
+          harness: "qoder",
           failure: {
             failureCategory: "unclassified",
             retryDisposition: "unknown",
@@ -534,7 +541,7 @@ describe("daemon 协议面（缝 C）", () => {
       ],
     });
     expect(
-      (resultOf(response) as CapabilitiesResult).failures[0],
+      (resultOf(response) as ModelCatalogResult).failures[0],
     ).not.toHaveProperty("diagnosticId");
     expect(
       resultOf(await requester.request("diagnostics", { limit: 1 })),
@@ -545,13 +552,16 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("initialize", {
-      protocolMajorVersion: 1,
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext: "alpha",
     });
     expect(response).toEqual({
       kind: "response",
       requestId: "r1",
-      result: { protocolMajorVersion: 1, daemonGeneration: "test" },
+      result: {
+        protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+        daemonGeneration: "test",
+      },
     });
   });
 
@@ -560,7 +570,7 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("initialize", {
-      protocolMajorVersion: 2,
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION - 1,
       consumerContext: "alpha",
     });
     expect(response).toMatchObject({
@@ -568,8 +578,8 @@ describe("daemon 协议面（缝 C）", () => {
       requestId: "r1",
       error: {
         code: "protocol_version_mismatch",
-        requestedProtocolMajorVersion: 2,
-        supportedProtocolMajorVersion: 1,
+        requestedProtocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION - 1,
+        supportedProtocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       },
     });
   });
@@ -579,7 +589,7 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("initialize", {
-      protocolMajorVersion: 1,
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -589,10 +599,10 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("未绑定消费者的连接在领域动作触达领域前被拒绝", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const response = await sendRaw(client, {
@@ -601,7 +611,7 @@ describe("daemon 协议面（缝 C）", () => {
       method: "spawn",
       params: {
         sessionName: "reviewer",
-        harness: "fake",
+        harness: "codex",
         message: "hello",
         cwd: "/tmp",
       },
@@ -641,11 +651,11 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     await requester.request("initialize", {
-      protocolMajorVersion: 1,
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext: "alpha",
     });
     const conflicting = await requester.request("initialize", {
-      protocolMajorVersion: 1,
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext: "beta",
     });
     expect(conflicting).toMatchObject({
@@ -653,28 +663,31 @@ describe("daemon 协议面（缝 C）", () => {
       error: { code: "protocol_error" },
     });
     const idempotent = await requester.request("initialize", {
-      protocolMajorVersion: 1,
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext: "alpha",
     });
     expect(idempotent).toMatchObject({
       kind: "response",
-      result: { protocolMajorVersion: 1, daemonGeneration: "test" },
+      result: {
+        protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+        daemonGeneration: "test",
+      },
     });
   });
 
   test("spawn 返回 sessionId，attach 回放历史事件并在 exitOn 命中时结束", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
 
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     expect(spawned).toMatchObject({
@@ -705,15 +718,15 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("未知 harness 返回 unknown_harness 并附合法 harness 列表", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("spawn", {
       sessionName: "reviewer",
-      harness: "nope",
+      harness: "qoder",
       message: "x",
       captureHarnessStderr: true,
     });
@@ -721,8 +734,8 @@ describe("daemon 协议面（缝 C）", () => {
       kind: "response",
       error: {
         code: "unknown_harness",
-        harness: "nope",
-        availableHarnesses: ["fake"],
+        harness: "qoder",
+        availableHarnesses: ["codex"],
       },
     });
     expect(fake.calls.factoryCalls).toBe(0);
@@ -730,17 +743,17 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("unsupported stderr capture is rejected before session creation", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const collector = collectNotifications(client);
 
     const response = await makeRequester(client).request("spawn", {
       sessionName: "capture-test",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
       captureHarnessStderr: true,
     });
@@ -754,17 +767,17 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("stderr capture starts only when the registry explicitly supports it", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
       canCaptureHarnessStderr: true,
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
 
     const response = await makeRequester(client).request("spawn", {
       sessionName: "capture-supported",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
       captureHarnessStderr: true,
     });
@@ -778,14 +791,14 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("spawn 参数不合法返回 invalid_params", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("spawn", {
-      harness: "fake",
+      harness: "codex",
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -809,16 +822,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("wait 等待回合完成并返回终态", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -845,16 +858,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("busy 中显式 active_turn 直接等待原生接受", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -874,16 +887,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("idle 中 send 触发新回合", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -903,10 +916,10 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("跨连接 attach + send 后会话保持存活，连接断开不杀会话", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const clientA = server.connect();
     const clientB = server.connect();
     await flush();
@@ -915,7 +928,7 @@ describe("daemon 协议面（缝 C）", () => {
 
     const spawned = await requesterA("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -965,16 +978,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("interrupt 返回带 turnId 的 ack，随后合成 cancelled", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -1000,16 +1013,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("kill 清理会话，wait 保留自然终态，未知 id 报 session_not_found", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -1045,8 +1058,8 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach 实时转发事件，权限决议走双工通道", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
       autoPermission: {
         options: [
           { outcome: "allow", scope: "once" },
@@ -1054,14 +1067,14 @@ describe("daemon 协议面（缝 C）", () => {
         ],
       },
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const collector = collectNotifications(client);
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -1104,16 +1117,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("explicit turn scope excludes older turn history", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-target",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1146,11 +1159,11 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach queues a live event injected during replay behind history and before response", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     let injectLive: (() => void) | undefined;
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
       beforeAttachReplay: () => injectLive?.(),
     });
     const client = server.connect();
@@ -1158,7 +1171,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-gap",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1200,16 +1213,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("available replay preserves complete message history", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "coherent-slice",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1256,16 +1269,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach expands terminal replay for a completed message without a snapshot", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "coherent-terminal",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1291,16 +1304,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("explicit none does not replay an active or completed message", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "coherent-zero",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1333,10 +1346,10 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("available reports strict truncation during an unfinished stream and retains the bounded tail", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
       eventLogLimit: 2,
     });
     const client = server.connect();
@@ -1344,7 +1357,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "coherent-limit",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1383,12 +1396,12 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach freezes its coherent replay selection before pending live injection", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     const messageId = "m-boundary" as MessageId;
     let injectLive: (() => void) | undefined;
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
       beforeAttachReplay: () => injectLive?.(),
     });
     const client = server.connect();
@@ -1396,7 +1409,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "coherent-boundary",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1426,11 +1439,11 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach ends once when its target completes reentrantly during replay", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     let completeTarget: (() => void) | undefined;
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
       beforeAttachReplay: () => completeTarget?.(),
     });
     const client = server.connect();
@@ -1438,7 +1451,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-reentrant",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1462,11 +1475,11 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach replay hook failure leaves no subscription behind", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     let fail = true;
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
       beforeAttachReplay: () => {
         if (fail) throw new Error("replay hook failed");
       },
@@ -1476,7 +1489,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-hook",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1507,16 +1520,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach replay zero still ends for its already completed idle target", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-idle",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1538,16 +1551,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("turn subscription ends at every terminal and never follows a successor", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-reason",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1573,16 +1586,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("empty attach exitOn remains subscribed across turns until the session is killed", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-session",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1610,10 +1623,10 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("observation keeps the active attach target when the event ring truncates", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
       eventLogLimit: 1,
     });
     const client = server.connect();
@@ -1621,7 +1634,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "attach-ring",
-      harness: "fake",
+      harness: "codex",
       message: "first",
     });
     const sessionId = (resultOf(spawned) as { sessionId: SessionId }).sessionId;
@@ -1663,16 +1676,16 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("attach 已 kill 的会话回放历史并以 session_killed 结束", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -1698,11 +1711,11 @@ describe("daemon 协议面（缝 C）", () => {
     expect(collector.ended).toEqual([{ sessionId, reason: "session_killed" }]);
   });
 
-  test("capabilities 聚合，单点失败不拖垮整体", async () => {
+  test("模型目录聚合，单点失败不拖垮整体", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: {
-        harness: "fake",
+      harness: "codex",
+      modelCatalog: {
+        harness: "codex",
         models: [{ id: "m1", displayName: "M1", reasoningEfforts: ["low"] }],
       },
     });
@@ -1715,30 +1728,30 @@ describe("daemon 协议面（缝 C）", () => {
     };
     const badAdapter: HarnessAdapter = {
       driverFactory: () => dummyDriver,
-      async capabilities() {
+      async modelCatalog() {
         throw new Error("boom");
       },
     };
     const { server } = startDaemon(
       new Map([
-        ["fake", fake.adapter],
-        ["bad", badAdapter],
+        ["codex", fake.adapter],
+        ["qoder", badAdapter],
       ]),
     );
     const client = server.connect();
     await flush();
-    const response = await makeRequester(client).request("capabilities", {});
+    const response = await makeRequester(client).request("modelCatalog", {});
     expect(resultOf(response)).toEqual({
-      capabilities: [
+      catalogs: [
         {
-          harness: "fake",
+          harness: "codex",
           models: [{ id: "m1", displayName: "M1", reasoningEfforts: ["low"] }],
         },
       ],
       failures: [
         {
-          harness: "bad",
-          code: "capability_query_failed",
+          harness: "qoder",
+          code: "model_catalog_query_failed",
           failure: {
             failureCategory: "unclassified",
             retryDisposition: "unknown",
@@ -1748,7 +1761,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
   });
 
-  test("伪造 AlreadyDiagnosed 结构不会污染 capability response", async () => {
+  test("伪造 AlreadyDiagnosed 结构不会污染 modelCatalog response", async () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
@@ -1757,31 +1770,31 @@ describe("daemon 协议面（缝 C）", () => {
         resolvePermission() {},
         async terminate() {},
       }),
-      async capabilities() {
+      async modelCatalog() {
         throw { alreadyDiagnosed: true, diagnosticId: "not-a-diagnostic-id" };
       },
     };
-    const { server } = startDaemon(new Map([["forged", adapter]]));
+    const { server } = startDaemon(new Map([["qoder", adapter]]));
     const client = server.connect();
     await flush();
 
-    const response = await makeRequester(client).request("capabilities", {});
+    const response = await makeRequester(client).request("modelCatalog", {});
     expect(response).toMatchObject({
       kind: "response",
       result: {
         failures: [
           {
-            harness: "forged",
-            code: "capability_query_failed",
+            harness: "qoder",
+            code: "model_catalog_query_failed",
           },
         ],
       },
     });
-    const result = resultOf(response) as CapabilitiesResult;
+    const result = resultOf(response) as ModelCatalogResult;
     expect(result.failures[0]).not.toHaveProperty("diagnosticId");
   });
 
-  test("公开 AlreadyDiagnosed constructor 的悬空 ID 不成为 capability authority", async () => {
+  test("公开 AlreadyDiagnosed constructor 的悬空 ID 不成为 modelCatalog authority", async () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
         start() {},
@@ -1790,38 +1803,38 @@ describe("daemon 协议面（缝 C）", () => {
         resolvePermission() {},
         async terminate() {},
       }),
-      async capabilities() {
+      async modelCatalog() {
         throw new AlreadyDiagnosedError(
           "supplied",
           makeDiagnosticId("test", "1"),
         );
       },
     };
-    const { server } = startDaemon(new Map([["supplied", adapter]]));
+    const { server } = startDaemon(new Map([["qoder", adapter]]));
     const client = server.connect();
     await flush();
 
-    const response = await makeRequester(client).request("capabilities", {});
-    const result = resultOf(response) as CapabilitiesResult;
+    const response = await makeRequester(client).request("modelCatalog", {});
+    const result = resultOf(response) as ModelCatalogResult;
     expect(result.failures[0]).toMatchObject({
-      harness: "supplied",
-      code: "capability_query_failed",
+      harness: "qoder",
+      code: "model_catalog_query_failed",
     });
     expect(result.failures[0]).not.toHaveProperty("diagnosticId");
   });
 
-  test("capabilities rejects an existing unrelated diagnostic id and records one fallback", async () => {
+  test("模型目录忽略不相关诊断并记录一次 fallback", async () => {
     const suppliedId = makeDiagnosticId("test", "2");
     const fallbackId = makeDiagnosticId("test", "3");
-    const capabilityRecords: unknown[] = [];
+    const modelCatalogRecords: unknown[] = [];
     const diagnostics: DiagnosticsRuntime = {
       ...testDiagnostics,
       async record(input) {
         if (
           input.kind === "request_failure" &&
-          input.operation === "capabilities"
+          input.operation === "model_catalog"
         ) {
-          capabilityRecords.push(input);
+          modelCatalogRecords.push(input);
           return fallbackId;
         }
         return makeDiagnosticId("test", "1");
@@ -1835,7 +1848,7 @@ describe("daemon 协议面（缝 C）", () => {
               recordedAt: "2026-08-20T00:00:00.000Z",
               severity: "warning",
               source: "adapter",
-              harness: "unrelated-capability",
+              harness: "qoder",
               kind: "mapping_gap",
               operation: "spawn",
               reason: "unsupported_input",
@@ -1854,14 +1867,14 @@ describe("daemon 协议面（缝 C）", () => {
         resolvePermission() {},
         async terminate() {},
       }),
-      async capabilities() {
+      async modelCatalog() {
         throw new AlreadyDiagnosedError("unrelated", suppliedId);
       },
     };
     const server = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemonForTest({
       transport: server,
-      adapters: new Map([["unrelated-capability", adapter]]),
+      adapters: new Map([["qoder", adapter]]),
       identity: testIdentity,
       diagnostics,
       idleTimeoutMs: 60_000,
@@ -1871,13 +1884,13 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
 
-    const response = await makeRequester(client).request("capabilities", {});
-    const result = resultOf(response) as CapabilitiesResult;
+    const response = await makeRequester(client).request("modelCatalog", {});
+    const result = resultOf(response) as ModelCatalogResult;
     expect(result.failures[0]).toMatchObject({
-      harness: "unrelated-capability",
+      harness: "qoder",
       diagnosticId: fallbackId,
     });
-    expect(capabilityRecords).toHaveLength(1);
+    expect(modelCatalogRecords).toHaveLength(1);
   });
 
   test("unexpected dispatch errors are schema-valid UTF-8 bounded causes", async () => {
@@ -1892,17 +1905,17 @@ describe("daemon 协议面（缝 C）", () => {
     };
     const adapter: HarnessAdapter = {
       driverFactory: () => failingDriver,
-      async capabilities() {
-        return emptyCapability("failing");
+      async modelCatalog() {
+        return emptyModelCatalog("codex");
       },
     };
-    const { server } = startDaemon(new Map([["failing", adapter]]));
+    const { server } = startDaemon(new Map([["codex", adapter]]));
     const client = server.connect();
     await flush();
 
     const response = await makeRequester(client).request("spawn", {
       sessionName: "failing",
-      harness: "failing",
+      harness: "codex",
       message: "hello",
     });
     if (!("error" in response)) throw new Error("expected machine error");
@@ -1946,17 +1959,17 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("路由 driver 按会话实例化所选 harness", async () => {
     const fakeA = createFakeHarness({
-      harness: "a",
-      capability: emptyCapability("a"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     const fakeB = createFakeHarness({
-      harness: "b",
-      capability: emptyCapability("b"),
+      harness: "qoder",
+      modelCatalog: emptyModelCatalog("qoder"),
     });
     const { server } = startDaemon(
       new Map([
-        ["a", fakeA.adapter],
-        ["b", fakeB.adapter],
+        ["codex", fakeA.adapter],
+        ["qoder", fakeB.adapter],
       ]),
     );
     const client = server.connect();
@@ -1964,17 +1977,17 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     await requester("spawn", {
       sessionName: "a-one",
-      harness: "a",
+      harness: "codex",
       message: "1",
     });
     await requester("spawn", {
       sessionName: "a-two",
-      harness: "a",
+      harness: "codex",
       message: "2",
     });
     await requester("spawn", {
       sessionName: "b-one",
-      harness: "b",
+      harness: "qoder",
       message: "3",
     });
     expect(fakeA.calls.factoryCalls).toBe(2);
@@ -2010,13 +2023,13 @@ describe("daemon 空闲退出", () => {
   test("有会话时保持存活，全部清理后退出", async () => {
     vi.useFakeTimers();
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     const server = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemon({
       transport: server,
-      adapters: new Map([["fake", fake.adapter]]),
+      adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics: testDiagnostics,
       idleTimeoutMs: 100,
@@ -2026,7 +2039,7 @@ describe("daemon 空闲退出", () => {
     await flush();
     const spawned = await makeRequester(client).request("spawn", {
       sessionName: "reviewer",
-      harness: "fake",
+      harness: "codex",
       message: "hi",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -2069,15 +2082,15 @@ describe("daemon 空闲退出", () => {
       releaseTermination = resolve;
     });
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
       terminate: async () => await termination,
     });
     const server = createInMemoryTransportServer<ProtocolMessage>();
     const events: DomainEvent[] = [];
     const daemon = createDaemonForTest({
       transport: server,
-      adapters: new Map([["fake", fake.adapter]]),
+      adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics: testDiagnostics,
       idleTimeoutMs: 60_000,
@@ -2088,7 +2101,7 @@ describe("daemon 空闲退出", () => {
     await flush();
     await makeRequester(client).request("spawn", {
       sessionName: "shutdown-owner",
-      harness: "fake",
+      harness: "codex",
       message: "hi",
     });
 
@@ -2102,7 +2115,7 @@ describe("daemon 空闲退出", () => {
 
     const rejected = await makeRequester(client).request("spawn", {
       sessionName: "must-not-start",
-      harness: "fake",
+      harness: "codex",
       message: "late",
     });
     expect(rejected).toMatchObject({
@@ -2170,8 +2183,8 @@ describe("daemon 空闲退出", () => {
 
   test("started 未被接受则启动失败，queued spawn 不会创建 worker", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
     const diagnostics: DiagnosticsRuntime = {
       ...testDiagnostics,
@@ -2189,7 +2202,7 @@ describe("daemon 空闲退出", () => {
     const server = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemon({
       transport: server,
-      adapters: new Map([["fake", fake.adapter]]),
+      adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics,
       idleTimeoutMs: 60_000,
@@ -2203,7 +2216,7 @@ describe("daemon 空闲退出", () => {
       method: "spawn",
       params: {
         sessionName: "queued-start",
-        harness: "fake",
+        harness: "codex",
         message: "must not start",
       },
     });
@@ -2315,8 +2328,8 @@ describe("daemon 空闲退出", () => {
   test("worker 清理失败不关闭 daemon，下一次 stop 可精确重试", async () => {
     let attempts = 0;
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
       terminate: async () => {
         attempts += 1;
         if (attempts === 1) throw new Error("cleanup rejected");
@@ -2326,7 +2339,7 @@ describe("daemon 空闲退出", () => {
     const events: DomainEvent[] = [];
     const daemon = createDaemonForTest({
       transport: server,
-      adapters: new Map([["fake", fake.adapter]]),
+      adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics: testDiagnostics,
       idleTimeoutMs: 60_000,
@@ -2337,7 +2350,7 @@ describe("daemon 空闲退出", () => {
     await flush();
     await makeRequester(client).request("spawn", {
       sessionName: "retry-shutdown",
-      harness: "fake",
+      harness: "codex",
       message: "hi",
     });
 
@@ -2360,10 +2373,10 @@ describe("daemon 空闲退出", () => {
 describe("daemon 消费者范围（01 票第 2 项）", () => {
   test("异消费者的句柄动作与查询把他人会话按不存在呈现", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const alphaClient = server.connect();
     const betaClient = server.connect();
     await flush();
@@ -2372,7 +2385,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
 
     const spawned = await alpha("spawn", {
       sessionName: "owned-by-alpha",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -2418,17 +2431,17 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
 
   test("同一消费者绑定跨短连接保持范围", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const firstAlpha = server.connect();
     await flush();
     const sessionId = (
       resultOf(
         await makeRequester(firstAlpha, "alpha")("spawn", {
           sessionName: "short-lived",
-          harness: "fake",
+          harness: "codex",
           message: "hello",
         }),
       ) as { sessionId: string }
@@ -2466,8 +2479,8 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
 
   test("挂起权限只能由会话归属消费者决议", async () => {
     const fake = createFakeHarness({
-      harness: "fake",
-      capability: emptyCapability("fake"),
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
       autoPermission: {
         options: [
           { outcome: "allow", scope: "once" },
@@ -2475,14 +2488,14 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
         ],
       },
     });
-    const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const alphaClient = server.connect();
     await flush();
     const alpha = makeRequester(alphaClient, "alpha");
     const collector = collectNotifications(alphaClient);
     const spawned = await alpha("spawn", {
       sessionName: "guarded",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
@@ -2524,10 +2537,10 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
 
 test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建一次", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: { harness: "fake", models: [] },
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
   });
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const a = server.connect();
   const b = server.connect();
   await makeRequester(a)("initialize", {
@@ -2543,7 +2556,7 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
     method: "spawn",
     commandId: "test:01234567-0123-4123-8123-0123456789ab",
     params: {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: "recoverable",
       message: "caller original",
@@ -2560,12 +2573,223 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
   b.close();
 });
 
+test("writer lease 丢失时保留读取、缓存结果和必要停止", async () => {
+  let writerHeld = true;
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
+    autoPermission: { options: [{ outcome: "allow", scope: "once" }] },
+  });
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
+    assertWriterLease: async () => {
+      if (!writerHeld) throw new Error("writer lease lost");
+    },
+  });
+  const a = server.connect();
+  const b = server.connect();
+  const consumerContext = "lease-owner";
+  await makeRequester(a)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext,
+  });
+  await makeRequester(b)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext,
+  });
+  const original = {
+    kind: "request",
+    method: "spawn",
+    commandId: "test:00000001-0123-4123-8123-0123456789ab",
+    params: {
+      harness: "codex",
+      cwd: "/tmp",
+      sessionName: "lease-keeps-facts",
+      message: "start before lease loss",
+    },
+  };
+  const spawned = await sendRaw(a, { ...original, requestId: "original" });
+  expect(spawned).toHaveProperty("result.sessionId");
+  writerHeld = false;
+
+  expect(await sendRaw(b, { ...original, requestId: "cached" })).toEqual({
+    ...spawned,
+    requestId: "cached",
+  });
+  const requester = makeRequester(a);
+  const sessionId = (spawned as { result: { sessionId: SessionId } }).result
+    .sessionId;
+  expect(resultOf(await requester("list", {}))).toMatchObject([{ sessionId }]);
+  expect(
+    await requester("attach", {
+      scope: "session",
+      sessionId,
+      replay: { mode: "available" },
+    }),
+  ).toMatchObject({ result: { sessionId } });
+  expect(resultOf(await requester("diagnostics", { limit: 1 }))).toEqual({
+    records: [],
+    truncated: false,
+  });
+
+  expect(
+    await sendRaw(a, {
+      kind: "request",
+      requestId: "new-execution",
+      method: "spawn",
+      commandId: "test:00000002-0123-4123-8123-0123456789ab",
+      params: {
+        harness: "codex",
+        cwd: "/tmp",
+        sessionName: "lease-refuses-new-execution",
+        message: "must not start",
+      },
+    }),
+  ).toMatchObject({
+    error: {
+      code: "internal_error",
+      cause: { kind: "closed" },
+    },
+  });
+  expect(
+    await sendRaw(a, {
+      kind: "request",
+      requestId: "new-turn",
+      method: "send",
+      commandId: "test:00000005-0123-4123-8123-0123456789ab",
+      params: {
+        placement: "new_turn",
+        sessionId,
+        message: "must not send after lease loss",
+      },
+    }),
+  ).toMatchObject({
+    error: {
+      code: "internal_error",
+      cause: { kind: "closed" },
+    },
+  });
+  expect(
+    await sendRaw(a, {
+      kind: "request",
+      requestId: "continue-permission",
+      method: "resolvePermission",
+      commandId: "test:00000006-0123-4123-8123-0123456789ab",
+      params: {
+        sessionId,
+        turnId: "t1",
+        permissionId: "p1",
+        resolution: { outcome: "allow", scope: "once" },
+      },
+    }),
+  ).toMatchObject({
+    error: {
+      code: "internal_error",
+      cause: { kind: "closed" },
+    },
+  });
+  expect(fake.calls.starts).toBe(1);
+  expect(fake.calls.delivered).toEqual([]);
+  expect(fake.calls.resolved).toEqual([]);
+
+  expect(
+    await sendRaw(a, {
+      kind: "request",
+      requestId: "interrupt-existing",
+      method: "interrupt",
+      commandId: "test:00000007-0123-4123-8123-0123456789ab",
+      params: { sessionId, turnId: "t1" },
+    }),
+  ).toMatchObject({ result: { sessionId } });
+  expect(fake.calls.interrupted).toEqual([sessionId]);
+
+  expect(
+    await sendRaw(a, {
+      kind: "request",
+      requestId: "stop-existing",
+      method: "kill",
+      commandId: "test:00000008-0123-4123-8123-0123456789ab",
+      params: { sessionId },
+    }),
+  ).toMatchObject({ result: { sessionId, status: "killed" } });
+  expect(fake.calls.terminated).toEqual([sessionId]);
+  a.close();
+  b.close();
+});
+
+test("writer lease 在模型目录等待期间丢失会阻止 native spawn", async () => {
+  let writerHeld = true;
+  let announceCatalogStarted!: () => void;
+  let releaseCatalog!: () => void;
+  const catalogStarted = new Promise<void>((resolve) => {
+    announceCatalogStarted = resolve;
+  });
+  const catalogWait = new Promise<void>((resolve) => {
+    releaseCatalog = resolve;
+  });
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: {
+      harness: "codex",
+      models: [
+        { id: "available", displayName: "Available", reasoningEfforts: [] },
+      ],
+    },
+  });
+  fake.adapter.modelCatalog = async () => {
+    announceCatalogStarted();
+    await catalogWait;
+    return {
+      harness: "codex",
+      models: [
+        { id: "available", displayName: "Available", reasoningEfforts: [] },
+      ],
+    };
+  };
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
+    assertWriterLease: async () => {
+      if (!writerHeld) throw new Error("writer lease lost");
+    },
+  });
+  const connection = server.connect();
+  const requester = makeRequester(connection);
+  await requester("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "lease-waiter",
+  });
+  const command = {
+    kind: "request",
+    requestId: "waiting-spawn",
+    method: "spawn",
+    commandId: "test:00000004-0123-4123-8123-0123456789ab",
+    params: {
+      harness: "codex",
+      model: "available",
+      cwd: "/tmp",
+      sessionName: "lease-lost-during-catalog",
+      message: "must not dispatch after catalog wait",
+    },
+  };
+  const resultPromise = sendRaw(connection, command);
+  await catalogStarted;
+  writerHeld = false;
+  releaseCatalog();
+  await expect(resultPromise).resolves.toMatchObject({
+    error: {
+      code: "internal_error",
+      cause: { kind: "closed" },
+    },
+  });
+  expect(fake.calls.starts).toBe(0);
+  expect(resultOf(await requester("list", {}))).toEqual([]);
+  connection.close();
+});
+
 test("命令结果恢复：其他消费者不能用原身份取结果或另起副作用", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: { harness: "fake", models: [] },
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
   });
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const a = server.connect(),
     b = server.connect();
   await makeRequester(a, "alpha")("initialize", {
@@ -2581,7 +2805,7 @@ test("命令结果恢复：其他消费者不能用原身份取结果或另起�
     method: "spawn",
     commandId: "test:01234567-0123-4123-8123-0123456789ab",
     params: {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: "private-command",
       message: "private",
@@ -2600,11 +2824,11 @@ test("命令结果恢复：其他消费者不能用原身份取结果或另起�
 
 test("命令结果恢复：成功、机器错误和冲突均不再次执行业务", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: { harness: "fake", models: [] },
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
     autoPermission: { options: [{ outcome: "allow", scope: "once" }] },
   });
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const a = server.connect(),
     b = server.connect();
   await makeRequester(a)("initialize", {
@@ -2648,7 +2872,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
   await command(
     "spawn",
     {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: "commands",
       message: "initial",
@@ -2719,29 +2943,29 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
   b.close();
 });
 
-test("操作账本只在首次 spawn 时校验动态能力", async () => {
-  let capability: HarnessCapability = {
-    harness: "fake",
+test("操作账本只在首次 spawn 时校验模型目录", async () => {
+  let modelCatalog: HarnessModelCatalog = {
+    harness: "codex",
     models: [
       { id: "available", displayName: "Available", reasoningEfforts: ["high"] },
     ],
   };
-  let capabilityQueries = 0;
-  const fake = createFakeHarness({ harness: "fake", capability });
-  fake.adapter.capabilities = async () => {
-    capabilityQueries += 1;
-    return capability;
+  let modelCatalogQueries = 0;
+  const fake = createFakeHarness({ harness: "codex", modelCatalog });
+  fake.adapter.modelCatalog = async () => {
+    modelCatalogQueries += 1;
+    return modelCatalog;
   };
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const connection = server.connect();
   await makeRequester(connection)("initialize", {
     protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
     consumerContext: "test-consumer",
   });
   const params = {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
-    sessionName: "capability-ledger",
+    sessionName: "model-catalog-ledger",
     message: "original intent",
     model: "not-yet-available",
   };
@@ -2763,8 +2987,8 @@ test("操作账本只在首次 spawn 时校验动态能力", async () => {
   });
   expect(fake.calls.starts).toBe(0);
 
-  capability = {
-    harness: "fake",
+  modelCatalog = {
+    harness: "codex",
     models: [
       {
         id: "not-yet-available",
@@ -2779,7 +3003,28 @@ test("操作账本只在首次 spawn 时校验动态能力", async () => {
       requestId: "invalid-recovered",
     }),
   ).toEqual({ ...first, requestId: "invalid-recovered" });
-  expect(capabilityQueries).toBe(1);
+  expect(modelCatalogQueries).toBe(1);
+  expect(fake.calls.starts).toBe(0);
+
+  const unsupportedReasoning = await sendRaw(connection, {
+    kind: "request",
+    method: "spawn",
+    commandId: "test:00000003-0123-4123-8123-0123456789ab",
+    requestId: "invalid-reasoning",
+    params: {
+      ...params,
+      sessionName: "model-catalog-reasoning",
+      model: "not-yet-available",
+      reasoning: "vendor-future-tier",
+    },
+  });
+  expect(unsupportedReasoning).toMatchObject({
+    error: {
+      code: "invalid_params",
+      issues: [{ issue: "invalid_value", path: "reasoning" }],
+    },
+  });
+  expect(modelCatalogQueries).toBe(2);
   expect(fake.calls.starts).toBe(0);
 
   const accepted = {
@@ -2789,37 +3034,37 @@ test("操作账本只在首次 spawn 时校验动态能力", async () => {
   };
   const created = await sendRaw(connection, accepted);
   expect(created).toMatchObject({
-    result: { sessionId: "capability-ledger@gdaemontest" },
+    result: { sessionId: "model-catalog-ledger@gdaemontest" },
   });
   expect(fake.calls.starts).toBe(1);
 
-  capability = { harness: "fake", models: [] };
+  modelCatalog = { harness: "codex", models: [] };
   expect(
     await sendRaw(connection, { ...accepted, requestId: "accepted-recovered" }),
   ).toEqual({ ...created, requestId: "accepted-recovered" });
-  expect(capabilityQueries).toBe(2);
+  expect(modelCatalogQueries).toBe(3);
   expect(fake.calls.starts).toBe(1);
   connection.close();
 });
 
-test("能力查询失败时不把 harness 误判为未知或拒绝模型", async () => {
+test("模型目录查询失败时不把 harness 误判为未知或拒绝模型", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: emptyCapability("fake"),
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
   });
-  fake.adapter.capabilities = async () => {
-    throw new Error("capabilities unavailable");
+  fake.adapter.modelCatalog = async () => {
+    throw new Error("model catalog unavailable");
   };
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const connection = server.connect();
   const response = await makeRequester(connection)("spawn", {
-    sessionName: "capability-query-failed",
-    harness: "fake",
+    sessionName: "model-catalog-query-failed",
+    harness: "codex",
     model: "live-model",
     message: "continue with explicitly supplied model",
   });
   expect(resultOf(response)).toMatchObject({
-    sessionId: "capability-query-failed@gdaemontest",
+    sessionId: "model-catalog-query-failed@gdaemontest",
   });
   expect(fake.calls.starts).toBe(1);
   expect(fake.calls.specs[0]).toMatchObject({ model: "live-model" });
@@ -2829,15 +3074,15 @@ test("能力查询失败时不把 harness 误判为未知或拒绝模型", async
 test("kill 恢复返回原清理失败，新身份才会重试", async () => {
   let attempts = 0;
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: emptyCapability("fake"),
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
     terminate: async () => {
       attempts += 1;
       if (attempts === 1) throw new Error("cleanup rejected");
     },
   });
   const events: DomainEvent[] = [];
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
     onEvent: (event) => events.push(event),
   });
   const connection = server.connect();
@@ -2845,7 +3090,7 @@ test("kill 恢复返回原清理失败，新身份才会重试", async () => {
   const spawned = resultOf(
     await request("spawn", {
       sessionName: "kill-recovery",
-      harness: "fake",
+      harness: "codex",
       message: "keep the worker until cleanup succeeds",
     }),
   ) as { sessionId: string };
@@ -2889,10 +3134,10 @@ test("kill 恢复返回原清理失败，新身份才会重试", async () => {
 
 test("命令结果恢复：参数拒绝也是已知结果，不能用修改后的参数复用身份", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: { harness: "fake", models: [] },
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
   });
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]));
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const connection = server.connect();
   await makeRequester(connection)("initialize", {
     protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
@@ -2907,7 +3152,7 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
     await sendRaw(connection, {
       ...base,
       requestId: "invalid",
-      params: { harness: "fake", sessionName: "params" },
+      params: { harness: "codex", sessionName: "params" },
     }),
   ).toMatchObject({ error: { code: "invalid_params" } });
   expect(
@@ -2915,7 +3160,7 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
       ...base,
       requestId: "changed",
       params: {
-        harness: "fake",
+        harness: "codex",
         cwd: "/tmp",
         sessionName: "params",
         message: "now valid",
@@ -2928,8 +3173,8 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
 
 test("命令结果恢复：接纳请求后立即断连不撤销原消费者下的执行", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: { harness: "fake", models: [] },
+    harness: "codex",
+    modelCatalog: { harness: "codex", models: [] },
   });
   const server = createInMemoryTransportServer<ProtocolMessage>();
   let disconnect = true;
@@ -2960,7 +3205,7 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
         );
       },
     },
-    adapters: new Map([["fake", fake.adapter]]),
+    adapters: new Map([["codex", fake.adapter]]),
     identity: testIdentity,
     diagnostics: testDiagnostics,
     idleTimeoutMs: 60_000,
@@ -2977,7 +3222,7 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
     method: "spawn",
     commandId: "test:01234567-0123-4123-8123-0123456789ab",
     params: {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: "accepted",
       message: "original",
@@ -3009,10 +3254,10 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
 
 test("none turn scope ends from authoritative terminal history after event retention discards that turn", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: emptyCapability("fake"),
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
   });
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
     eventLogLimit: 1,
   });
   const client = server.connect();
@@ -3020,7 +3265,7 @@ test("none turn scope ends from authoritative terminal history after event reten
   const request = makeRequester(client);
   const spawned = await request("spawn", {
     sessionName: "retained-terminal",
-    harness: "fake",
+    harness: "codex",
     message: "first",
   });
   const { sessionId, turnId } = resultOf(spawned) as {
@@ -3052,11 +3297,11 @@ test("none turn scope ends from authoritative terminal history after event reten
 
 test("after freezes its replay prefix and buffers live events before the establishment ACK", async () => {
   const fake = createFakeHarness({
-    harness: "fake",
-    capability: emptyCapability("fake"),
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
   });
   let inject: (() => void) | undefined;
-  const { server } = startDaemon(new Map([["fake", fake.adapter]]), {
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
     beforeAttachReplay: () => inject?.(),
   });
   const client = server.connect();
@@ -3064,7 +3309,7 @@ test("after freezes its replay prefix and buffers live events before the establi
   const requester = makeRequester(client);
   const spawned = await requester("spawn", {
     sessionName: "after-boundary",
-    harness: "fake",
+    harness: "codex",
     message: "first",
   });
   const { sessionId } = resultOf(spawned) as { sessionId: SessionId };

@@ -3,10 +3,10 @@ import { describe, expect, test } from "vitest";
 
 import {
   attachEndedSchema,
-  capabilitiesResultSchema,
-  capabilityModelSchema,
+  modelCatalogResultSchema,
+  modelCatalogEntrySchema,
   domainEventSchema,
-  harnessCapabilitySchema,
+  harnessModelCatalogSchema,
   machineErrorSchema,
   protocolMessageSchema,
   protocolNotificationSchema,
@@ -79,7 +79,7 @@ describe("协议 envelope", () => {
     ok(protocolRequestSchema, {
       kind: "request",
       requestId: "r1",
-      method: "capabilities",
+      method: "modelCatalog",
       params: {},
     });
     bad(protocolRequestSchema, {
@@ -216,6 +216,12 @@ describe("per-method 参数与结果 schema", () => {
       message: "hello",
       sessionName: "reviewer",
     });
+    bad(protocolParamsSchemaFor("spawn"), {
+      cwd: "/tmp",
+      harness: "dsh",
+      message: "hello",
+      sessionName: "reviewer",
+    });
     bad(protocolParamsSchemaFor("spawn"), { harness: "qoder" });
     ok(protocolParamsSchemaFor("send"), {
       placement: "new_turn",
@@ -253,7 +259,7 @@ describe("per-method 参数与结果 schema", () => {
       permissionId: "p1",
       resolution: { outcome: "allow", scope: "once" },
     });
-    ok(protocolParamsSchemaFor("capabilities"), {});
+    ok(protocolParamsSchemaFor("modelCatalog"), {});
   });
 
   test("每个方法都有对应的结果 schema 且按契约拒绝非法结果", () => {
@@ -354,14 +360,14 @@ describe("per-method 参数与结果 schema", () => {
       permissionId: "p1",
     });
     bad(protocolResultSchemaFor("resolvePermission"), {});
-    ok(protocolResultSchemaFor("capabilities"), {
-      capabilities: [],
+    ok(protocolResultSchemaFor("modelCatalog"), {
+      catalogs: [],
       failures: [],
     });
   });
 });
 
-describe("capabilities 矩阵", () => {
+describe("模型目录矩阵", () => {
   const model = {
     id: "gpt-5.3-codex-spark",
     displayName: "GPT-5.3 Codex Spark",
@@ -369,29 +375,29 @@ describe("capabilities 矩阵", () => {
   };
 
   test("模型条目携带 id/displayName/推理强度列表", () => {
-    ok(capabilityModelSchema, model);
-    bad(capabilityModelSchema, { displayName: "x", reasoningEfforts: [] });
-    bad(capabilityModelSchema, { id: "x", displayName: "x" });
-    bad(capabilityModelSchema, { ...model, reasoningEfforts: "high" });
+    ok(modelCatalogEntrySchema, model);
+    bad(modelCatalogEntrySchema, { displayName: "x", reasoningEfforts: [] });
+    bad(modelCatalogEntrySchema, { id: "x", displayName: "x" });
+    bad(modelCatalogEntrySchema, { ...model, reasoningEfforts: "high" });
   });
 
   test("默认模型 / 默认推理强度不进矩阵（最小干扰原则）", () => {
-    bad(capabilityModelSchema, { ...model, isDefault: true });
-    bad(capabilityModelSchema, {
+    bad(modelCatalogEntrySchema, { ...model, isDefault: true });
+    bad(modelCatalogEntrySchema, {
       ...model,
       defaultReasoningEffort: "high",
     });
   });
 
   test("harness 条目与整体结果支持失败面，单点失败不拖垮整体", () => {
-    ok(harnessCapabilitySchema, { harness: "codex", models: [model] });
-    bad(harnessCapabilitySchema, { models: [model] });
-    ok(capabilitiesResultSchema, {
-      capabilities: [{ harness: "qoder", models: [] }],
+    ok(harnessModelCatalogSchema, { harness: "codex", models: [model] });
+    bad(harnessModelCatalogSchema, { models: [model] });
+    ok(modelCatalogResultSchema, {
+      catalogs: [{ harness: "qoder", models: [] }],
       failures: [
         {
           harness: "codex",
-          code: "capability_query_failed",
+          code: "model_catalog_query_failed",
           failure: {
             failureCategory: "unclassified",
             retryDisposition: "unknown",
@@ -399,8 +405,8 @@ describe("capabilities 矩阵", () => {
         },
       ],
     });
-    bad(capabilitiesResultSchema, {
-      capabilities: [],
+    bad(modelCatalogResultSchema, {
+      catalogs: [],
       failures: [{ harness: "codex", code: "session_not_found" }],
     });
   });
@@ -426,7 +432,7 @@ describe("错误码扩展", () => {
       code: "consumer_context_required",
       consumerContext: "alpha",
     });
-    ok(machineErrorSchema, { code: "capability_query_failed" });
+    ok(machineErrorSchema, { code: "model_catalog_query_failed" });
     ok(machineErrorSchema, { code: "internal_error" });
   });
 });

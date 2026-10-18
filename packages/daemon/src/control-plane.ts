@@ -4,13 +4,14 @@ import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import type { SessionMachine } from "@reins/core";
 import type {
   AttachParams,
-  CapabilitiesResult,
   ConsumerContext,
   DaemonDiagnosticFact,
   DiagnosticsParams,
   DomainEvent,
   EventId,
-  HarnessCapability,
+  HarnessId,
+  HarnessModelCatalog,
+  ModelCatalogResult,
   MachineError,
   ProtocolMethod,
   SessionId,
@@ -24,7 +25,7 @@ import type {
 import {
   decodeResumeCursor,
   eventIdSchema,
-  harnessCapabilitySchema,
+  harnessModelCatalogSchema,
   isSideEffectMethod,
   makeErrorCause,
   makeTextEvidence,
@@ -92,6 +93,7 @@ type ControlPlaneOptions = {
   adapters: AdapterRegistry;
   diagnostics: OrderedDiagnosticsRuntime;
   consumerScope: ConsumerScope;
+  assertWriterLease?: () => Promise<void>;
   eventLogLimit?: number;
 };
 
@@ -135,7 +137,21 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       .catch(() => undefined);
   }
 
-  async function verifiedCapabilityDiagnostic(error: unknown, harness: string) {
+  async function assertWriterLease(): Promise<void> {
+    try {
+      await options.assertWriterLease?.();
+    } catch {
+      throw {
+        code: "internal_error",
+        cause: makeErrorCause("closed", "Control writer lease is unavailable"),
+      } satisfies MachineError;
+    }
+  }
+
+  async function verifiedModelCatalogDiagnostic(
+    error: unknown,
+    harness: HarnessId,
+  ) {
     if (!isAlreadyDiagnosedError(error) || error.diagnosticId === undefined)
       return undefined;
     try {
@@ -148,7 +164,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         record.source === "adapter" &&
         record.harness === harness &&
         record.kind === "request_failure" &&
-        record.operation === "capabilities" &&
+        record.operation === "model_catalog" &&
         record.stage === "query"
         ? error.diagnosticId
         : undefined;
@@ -157,11 +173,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     }
   }
 
-  async function aggregateCapabilities(): Promise<CapabilitiesResult> {
+  async function aggregateModelCatalog(): Promise<ModelCatalogResult> {
     const entries = Array.from(options.adapters.entries());
     const results = await Promise.allSettled(
       entries.map(async ([harness, adapter]) =>
-        adapter.capabilities(async (input) => {
+        adapter.modelCatalog(async (input) => {
           const unsafe = input as unknown as Record<string, unknown>;
           if ("source" in unsafe || "harness" in unsafe) return undefined;
           return await options.diagnostics.record({
@@ -172,29 +188,29 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         }),
       ),
     );
-    const capabilities: HarnessCapability[] = [];
-    const failures: CapabilitiesResult["failures"] = [];
+    const catalogs: HarnessModelCatalog[] = [];
+    const failures: ModelCatalogResult["failures"] = [];
     for (const [index, result] of results.entries()) {
       const harness = entries[index]?.[0];
       if (harness === undefined) continue;
       if (result.status === "fulfilled") {
-        const parsed = v.safeParse(harnessCapabilitySchema, result.value);
+        const parsed = v.safeParse(harnessModelCatalogSchema, result.value);
         if (parsed.success && parsed.output.harness === harness) {
-          capabilities.push(parsed.output);
+          catalogs.push(parsed.output);
           continue;
         }
-        const reason = new Error("Capability result did not match its harness");
+        const reason = new Error("Model catalog did not match its harness");
         const diagnosticId = await recordDiagnostic({
           harness,
           kind: "request_failure",
-          operation: "capabilities",
+          operation: "model_catalog",
           stage: "query",
           reason: "upstream_error",
           message: makeTextEvidence(String(reason)),
         });
         failures.push({
           harness,
-          code: "capability_query_failed",
+          code: "model_catalog_query_failed",
           failure: {
             failureCategory: "unclassified",
             retryDisposition: "unknown",
@@ -202,7 +218,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           ...(diagnosticId === undefined ? {} : { diagnosticId }),
         });
       } else {
-        const suppliedDiagnosticId = await verifiedCapabilityDiagnostic(
+        const suppliedDiagnosticId = await verifiedModelCatalogDiagnostic(
           result.reason,
           harness,
         );
@@ -210,7 +226,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           suppliedDiagnosticId ??
           (await recordDiagnostic({
             kind: "request_failure",
-            operation: "capabilities",
+            operation: "model_catalog",
             stage: "query",
             reason: "upstream_error",
             harness,
@@ -218,7 +234,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           }));
         failures.push({
           harness,
-          code: "capability_query_failed",
+          code: "model_catalog_query_failed",
           failure: {
             failureCategory: "unclassified",
             retryDisposition: "unknown",
@@ -227,7 +243,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         });
       }
     }
-    return { capabilities, failures };
+    return { catalogs, failures };
   }
 
   function assertSessionScope(
@@ -247,8 +263,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     consumer: ConsumerContext | undefined,
   ): Promise<unknown> {
     switch (method) {
-      case "capabilities":
-        return await aggregateCapabilities();
+      case "modelCatalog":
+        return await aggregateModelCatalog();
       case "spawn": {
         const spawnParams = rawParams as SpawnParams;
         try {
@@ -276,30 +292,28 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             code: "unsupported_feature",
             feature: "capture_harness_stderr",
           } satisfies MachineError;
-        const currentCapabilities = await aggregateCapabilities();
-        const knownHarnesses = new Set([
-          ...currentCapabilities.capabilities.map(({ harness }) => harness),
-          ...currentCapabilities.failures.map(({ harness }) => harness),
-        ]);
+        const knownHarnesses = new Set(options.adapters.keys());
         if (!knownHarnesses.has(spawnParams.harness))
           throw {
             code: "unknown_harness",
             harness: spawnParams.harness,
             availableHarnesses: [...knownHarnesses],
           } satisfies MachineError;
-        const capability = currentCapabilities.capabilities.find(
-          ({ harness }) => harness === spawnParams.harness,
-        );
-        if (capability !== undefined && spawnParams.model !== undefined) {
-          const model = capability.models.find(
+        if (spawnParams.model !== undefined) {
+          const currentModelCatalog = await aggregateModelCatalog();
+          const catalog = currentModelCatalog.catalogs.find(
+            ({ harness }) => harness === spawnParams.harness,
+          );
+          const model = catalog?.models.find(
             ({ id }) => id === spawnParams.model,
           );
-          if (model === undefined)
+          if (catalog !== undefined && model === undefined)
             throw {
               code: "invalid_params",
               issues: [{ issue: "invalid_value", path: "model" }],
             } satisfies MachineError;
           if (
+            model !== undefined &&
             spawnParams.reasoning !== undefined &&
             !model.reasoningEfforts.includes(spawnParams.reasoning)
           )
@@ -308,6 +322,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               issues: [{ issue: "invalid_value", path: "reasoning" }],
             } satisfies MachineError;
         }
+        await assertWriterLease();
         const result = await options.machine.spawn(spawnParams);
         if (consumer !== undefined)
           options.consumerScope.claim(result.sessionId, consumer);
@@ -316,6 +331,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       case "send": {
         const params = rawParams as Parameters<SessionMachine["send"]>[0];
         assertSessionScope(params.sessionId, consumer);
+        await assertWriterLease();
         return await options.machine.send(params);
       }
       case "wait": {
@@ -348,6 +364,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           SessionMachine["resolvePermission"]
         >[0];
         assertSessionScope(params.sessionId, consumer);
+        await assertWriterLease();
         await options.machine.resolvePermission(params);
         return {
           sessionId: params.sessionId,

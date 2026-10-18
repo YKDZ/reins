@@ -21,6 +21,7 @@ import {
   type ReinsConnection,
   type SendInput,
   type SessionHandle,
+  type SpawnInput,
   type TurnHandle,
 } from "@ykdz/reins-sdk";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
@@ -203,7 +204,7 @@ test("different endpoints cannot start writers for the same state root", async (
   clients.push(first);
   const spawned = await first.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "first writer",
       sessionName: "writer-session",
       cwd: process.cwd(),
@@ -255,7 +256,7 @@ test("an in-flight spawn keeps the shared daemon alive after its client closes",
       REINS_DAEMON_BIN: daemonLauncher,
       REINS_ADAPTERS_MODULE: adaptersModule,
       REINS_FIXTURE_REQUESTS_FILE: requestsFile,
-      REINS_FIXTURE_CAPABILITIES_DELAY_MS: "3000",
+      REINS_FIXTURE_MODEL_CATALOG_DELAY_MS: "3000",
       REINS_IDLE_TIMEOUT_MS: "2000",
     },
   };
@@ -263,7 +264,8 @@ test("an in-flight spawn keeps the shared daemon alive after its client closes",
   clients.push(connection);
   const spawning = connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
+      model: "fake-model",
       message: "still in flight",
       sessionName: "pending-session",
       cwd: process.cwd(),
@@ -271,13 +273,41 @@ test("an in-flight spawn keeps the shared daemon alive after its client closes",
     connection.prepareOperation("spawn"),
   );
   void spawning.catch(() => undefined);
+  const dispatchDeadline = Date.now() + 2_000;
+  let catalogQueryStarted = false;
+  while (!catalogQueryStarted && Date.now() < dispatchDeadline) {
+    try {
+      catalogQueryStarted = (await readFile(requestsFile, "utf8"))
+        .trim()
+        .split("\n")
+        .some((line) => {
+          const request = JSON.parse(line) as {
+            type: string;
+            harness?: string;
+          };
+          return (
+            request.type === "model_catalog_started" &&
+            request.harness === "codex"
+          );
+        });
+    } catch {
+      // SDK 写入请求后 daemon 才会执行延迟中的目录查询。
+    }
+    if (!catalogQueryStarted)
+      await new Promise((resolve) => setTimeout(resolve, 25));
+  }
+  expect(catalogQueryStarted).toBe(true);
   connection.close();
   clients.splice(clients.indexOf(connection), 1);
 
   await new Promise((resolve) => setTimeout(resolve, 2_100));
   const originalPid = Number((await readFile(daemonPids, "utf8")).trim());
   expect(() => process.kill(originalPid, 0)).not.toThrow();
-  await expect(access(requestsFile)).rejects.toMatchObject({ code: "ENOENT" });
+  const requests = (await readFile(requestsFile, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as { type: string });
+  expect(requests.some(({ type }) => type === "worker_started")).toBe(false);
 
   const reconnected = await openLocal({ ...options, timeoutMs: 1_000 });
   clients.push(reconnected);
@@ -317,11 +347,11 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
   clients.push(first, second);
 
   const spawnInput = {
-    harness: "fake",
+    harness: "codex",
     message: "keep this session after disconnect",
     sessionName: "application-session",
     cwd: process.cwd(),
-  };
+  } satisfies SpawnInput;
   const spawnCredential = first.prepareOperation("spawn");
   const spawned = await first.spawn(spawnInput, spawnCredential);
   const sessionHandle = spawned.sessionHandle;
@@ -415,8 +445,8 @@ test("application startup failure keeps the raw transport code", async () => {
     env,
   });
   clients.push(retried);
-  const capabilities = await retried.capabilities();
-  expect(capabilities).toHaveProperty("capabilities");
+  const modelCatalog = await retried.modelCatalog();
+  expect(modelCatalog).toHaveProperty("catalogs");
   expect((await readFile(daemonSockets, "utf8")).trim().split("\n")).toEqual([
     env.REINS_SOCKET,
   ]);
@@ -470,7 +500,7 @@ test("application reports local startup IO failures and can retry", async () => 
   await mkdir(blockedParent);
   const retried = await openLocal(options);
   clients.push(retried);
-  expect(await retried.capabilities()).toHaveProperty("capabilities");
+  expect(await retried.modelCatalog()).toHaveProperty("catalogs");
   expect((await readFile(daemonPids, "utf8")).trim().split("\n")).toHaveLength(
     1,
   );
@@ -558,7 +588,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
 
   const captured = await connection.spawn(
     {
-      harness: "capture",
+      harness: "codex",
       message: "capture diagnostic evidence",
       sessionName: "capture-stderr",
       cwd: process.cwd(),
@@ -640,7 +670,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
       turnHandle: first.turnHandle as TurnHandle,
     },
     {
-      harness: "capture",
+      harness: "codex",
       sources: ["harness"],
     },
     { kinds: ["harness_stderr"] },
@@ -656,7 +686,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   expect(
     await connection.diagnostics({
       sessionHandle: captured.sessionHandle,
-      harness: "fake",
+      harness: "qoder",
     }),
   ).toEqual({ records: [], truncated: false });
   expect(
@@ -668,7 +698,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     records: [{ diagnosticId: result.records.at(-1)?.diagnosticId }],
     truncated: true,
   });
-  expect(await connection.diagnostics({ harness: "none" })).toEqual({
+  expect(await connection.diagnostics({ harness: "qoder" })).toEqual({
     records: [],
     truncated: false,
   });
@@ -682,7 +712,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   await expect(
     connection.spawn(
       {
-        harness: "fake",
+        harness: "qoder",
         message: "capture is unavailable",
         sessionName: unsupportedSessionName,
         cwd: process.cwd(),
@@ -723,7 +753,7 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
   clients.push(owner);
   const spawned = await owner.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "owned session",
       sessionName: "owned-session",
       cwd: process.cwd(),
@@ -797,7 +827,7 @@ test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
 
   const first = await connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "first",
       sessionName: "reused-name",
       cwd: process.cwd(),
@@ -807,7 +837,7 @@ test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
   await expect(
     connection.spawn(
       {
-        harness: "fake",
+        harness: "codex",
         message: "second",
         sessionName: "reused-name",
         cwd: process.cwd(),
@@ -830,7 +860,7 @@ test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
   await expect(
     connection.spawn(
       {
-        harness: "fake",
+        harness: "codex",
         message: "third",
         sessionName: "reused-name",
         cwd: process.cwd(),
@@ -876,7 +906,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
 
   const active = await connection.spawn(
     {
-      harness: "hang",
+      harness: "codex",
       message: "hold the active turn",
       sessionName: "active-send",
       cwd: process.cwd(),
@@ -963,7 +993,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
 
   const held = await connection.spawn(
     {
-      harness: "hang",
+      harness: "codex",
       message: "hold for interrupt",
       sessionName: "interrupt-target",
       cwd: process.cwd(),

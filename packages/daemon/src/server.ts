@@ -102,7 +102,6 @@ type ProtocolServerOptions = {
   diagnostics: OrderedDiagnosticsRuntime;
   consumerScope: ConsumerScope;
   idleTimeoutMs?: number;
-  assertWriterLease?: () => Promise<void>;
 };
 
 type PublicProtocolServerOptions = {
@@ -174,11 +173,6 @@ export function createProtocolServerInternal(
     connection: TransportConnection<ProtocolMessage>,
     request: ProtocolRequest,
   ): Promise<{ result: unknown } | { error: MachineError }> {
-    try {
-      await options.assertWriterLease?.();
-    } catch {
-      return { error: writerLeaseFailure() };
-    }
     const consumer = consumerBindings.get(connection);
     if (request.method !== "initialize" && consumer === undefined)
       return { error: { code: "protocol_error" } };
@@ -204,11 +198,6 @@ export function createProtocolServerInternal(
               ],
             },
           };
-        }
-        try {
-          await options.assertWriterLease?.();
-        } catch {
-          return { error: writerLeaseFailure() };
         }
         return { result: await dispatch(connection, request, consumer) };
       } catch (error) {
@@ -272,13 +261,6 @@ export function createProtocolServerInternal(
       code: "internal_error",
       cause,
       ...(diagnosticId === undefined ? {} : { diagnosticId }),
-    };
-  }
-
-  function writerLeaseFailure(): MachineError {
-    return {
-      code: "internal_error",
-      cause: makeErrorCause("closed", "Control writer lease is unavailable"),
     };
   }
 
@@ -661,7 +643,7 @@ export function createProtocolServerInternal(
     request: ProtocolRequest,
     consumer: ConsumerContext | undefined,
   ): Promise<unknown> {
-    // execute 已在接纳时核验并捕获绑定；连接随后关闭不能取消已接纳命令。
+    // 请求因果贯穿整条处理链：诊断归属、会话声明与范围检查共用这一份绑定。
     switch (request.method) {
       case "initialize": {
         const params = request.params as InitializeParams;
@@ -682,7 +664,7 @@ export function createProtocolServerInternal(
           daemonGeneration: options.diagnostics.generation,
         } satisfies InitializeResult;
       }
-      case "capabilities":
+      case "modelCatalog":
       case "spawn":
       case "send":
       case "wait":

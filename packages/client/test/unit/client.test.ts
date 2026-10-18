@@ -105,7 +105,7 @@ test("版本不匹配的握手响应原样交出且不再发出领域请求", as
 test("malformed inbound envelope rejects an outstanding request as invalid daemon response", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
-  const pending = client.request("capabilities", {});
+  const pending = client.request("modelCatalog", {});
   pair.server.send({ kind: "notification", method: "event", params: {} });
   await expect(pending).rejects.toThrow("invalid_daemon_response");
   client.close();
@@ -114,7 +114,7 @@ test("malformed inbound envelope rejects an outstanding request as invalid daemo
 test("a schema-invalid response result rejects as invalid daemon response", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
-  const pending = client.request("capabilities", {});
+  const pending = client.request("modelCatalog", {});
   pair.server.send({ kind: "response", requestId: "req1", result: {} });
   await expect(pending).rejects.toThrow("invalid_daemon_response");
   client.close();
@@ -133,7 +133,7 @@ test("an invalid result terminates the client with invalid_daemon_response", asy
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
   const reason = new Promise((resolve) => client.onClosed(resolve));
-  const pending = client.request("capabilities", {});
+  const pending = client.request("modelCatalog", {});
   pair.server.send({ kind: "response", requestId: "req1", result: {} });
   await expect(pending).rejects.toThrow("invalid_daemon_response");
   await expect(reason).resolves.toEqual({ code: "invalid_daemon_response" });
@@ -169,7 +169,7 @@ test("a malformed notification after a valid response preserves invalid_daemon_r
 test("client close rejects a pending request without waiting for its timeout", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
-  const pending = client.request("capabilities", {}, 30_000);
+  const pending = client.request("modelCatalog", {}, 30_000);
   client.close();
   await expect(pending).rejects.toThrow("daemon_disconnected");
 });
@@ -177,7 +177,7 @@ test("client close rejects a pending request without waiting for its timeout", a
 test("request timeout rejects with the distinct daemon_timeout machine error", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
-  await expect(client.request("capabilities", {}, 1)).rejects.toMatchObject({
+  await expect(client.request("modelCatalog", {}, 1)).rejects.toMatchObject({
     failure: { code: "daemon_timeout" },
   });
   client.close();
@@ -188,12 +188,12 @@ test("a settled response removes its request timer", async () => {
   try {
     const pair = createInMemoryTransportPair();
     const client = createReinsClient(pair.client as never, binding);
-    const pending = client.request("capabilities", {}, 30_000);
+    const pending = client.request("modelCatalog", {}, 30_000);
     expect(vi.getTimerCount()).toBe(1);
     pair.server.send({
       kind: "response",
       requestId: "req1",
-      result: { capabilities: [], failures: [] },
+      result: { catalogs: [], failures: [] },
     });
     await expect(pending).resolves.toMatchObject({ kind: "response" });
     expect(vi.getTimerCount()).toBe(0);
@@ -209,7 +209,7 @@ test("a request made after close rejects without installing a timer", async () =
     const pair = createInMemoryTransportPair();
     const client = createReinsClient(pair.client as never, binding);
     client.close();
-    await expect(client.request("capabilities", {})).rejects.toThrow(
+    await expect(client.request("modelCatalog", {})).rejects.toThrow(
       "daemon_disconnected",
     );
     expect(vi.getTimerCount()).toBe(0);
@@ -240,7 +240,7 @@ test("副作用超时保留命令身份、不泄露原参，也不自动重发",
     await client.request(
       "spawn",
       {
-        harness: "fake",
+        harness: "codex",
         cwd: "/tmp",
         sessionName: "worker" as never,
         message: "sensitive original",
@@ -339,7 +339,7 @@ test("已关闭客户端确定未发送；安全查询断连保持普通错误",
 
   await expect(
     client.request("spawn", {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: "unused" as never,
       message: "never-sent",
@@ -368,7 +368,7 @@ test("显式恢复保留原目录事实，不要求调用方重填目录对象�
   });
   await initialized;
   const caller = {
-    harness: "fake",
+    harness: "codex",
     sessionName: "original-dir",
     message: "private initial task",
   };
@@ -423,13 +423,13 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
   await initialized;
   const pending = Promise.allSettled([
     client.request("spawn", {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: "invalid" as never,
       message: "private task",
     }),
     client.request("kill", { sessionId: "worker@gab12cd" as never }),
-    client.request("capabilities", {}),
+    client.request("modelCatalog", {}),
   ]);
   pair.server.send({ kind: "response", requestId: "req2", result: {} });
   const failures = (await pending).map((result) => {

@@ -2,9 +2,9 @@ import adapters from "./wait-adapters.ts";
 
 export default {
   ...adapters,
-  unavailable: {
+  qoder: {
     driverFactory: adapters.codex.driverFactory,
-    async capabilities() {
+    async modelCatalog() {
       throw new Error("private credential quota rate limit text");
     },
   },

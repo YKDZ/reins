@@ -16,18 +16,24 @@ export function createDaemonForTest(options: {
   beforeAttachReplay?: (sessionId: SessionId) => void;
   onDiagnosticsQueryAccepted?: () => void;
   onEvent?: (event: DomainEvent) => void;
+  assertWriterLease?: () => Promise<void>;
 }): Daemon {
   const {
     beforeAttachReplay,
     onDiagnosticsQueryAccepted,
     onEvent,
+    assertWriterLease,
     ...productionOptions
   } = options;
-  return createDaemonInternal(productionOptions, {
-    ...(beforeAttachReplay === undefined ? {} : { beforeAttachReplay }),
-    ...(onDiagnosticsQueryAccepted === undefined
-      ? {}
-      : { onDiagnosticsQueryAccepted }),
-    ...(onEvent === undefined ? {} : { onEvent }),
-  });
+  return createDaemonInternal(
+    productionOptions,
+    {
+      ...(beforeAttachReplay === undefined ? {} : { beforeAttachReplay }),
+      ...(onDiagnosticsQueryAccepted === undefined
+        ? {}
+        : { onDiagnosticsQueryAccepted }),
+      ...(onEvent === undefined ? {} : { onEvent }),
+    },
+    assertWriterLease,
+  );
 }

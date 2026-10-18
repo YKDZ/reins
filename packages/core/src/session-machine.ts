@@ -49,7 +49,7 @@ import { createEventBus, type EventBus } from "#/event-bus";
 
 type SessionRecord = {
   readonly id: SessionId;
-  readonly harness: string;
+  readonly harness: SpawnParams["harness"];
   readonly model: string | null;
   readonly reasoning: string | null;
   readonly cwd: string;

@@ -4,6 +4,7 @@ import {
   type MachineError,
   type DiagnosticInput,
   type DriverDiagnosticFact,
+  type HarnessId,
   type SessionId,
   type TurnId,
   type WorkerDriver,
@@ -22,11 +23,11 @@ export function createRoutingDriverFactory(
 ): WorkerDriverFactory {
   return (emit) => {
     const drivers = new Map<SessionId, WorkerDriver>();
-    const sessionHarness = new Map<SessionId, string>();
+    const sessionHarness = new Map<SessionId, HarnessId>();
     const sessionTurn = new Map<SessionId, TurnId>();
 
     async function recordAdapterFact(
-      harness: string,
+      harness: HarnessId,
       fact: DriverDiagnosticFact,
     ) {
       const unsafe = fact as unknown as Record<string, unknown>;
@@ -50,7 +51,7 @@ export function createRoutingDriverFactory(
 
     async function verifiedDriverFailure(
       error: unknown,
-      harness: string,
+      harness: HarnessId,
       sessionId: SessionId,
     ): Promise<MachineError | undefined> {
       if (!isDriverFailure(error) || error.diagnosticId === undefined) {

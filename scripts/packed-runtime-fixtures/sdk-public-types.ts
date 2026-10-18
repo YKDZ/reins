@@ -1,6 +1,9 @@
 import {
   connect,
   type AgentTarget,
+  type HarnessId,
+  type ModelCatalogFailure,
+  type ModelCatalogResult,
   type ReinsConnection,
   type ResumeCursor,
   type SendInput,
@@ -14,13 +17,16 @@ declare const connection: ReinsConnection;
 declare const sessionHandle: SessionHandle;
 declare const turnHandle: TurnHandle;
 declare const resumeCursor: ResumeCursor;
+const dynamicModelId: string = "vendor:model-2031-05-preview";
+const dynamicReasoningEffort: string = "vendor-calibration-mode";
 
 const spawnInput: SpawnInput = {
-  harness: "a-runtime-defined-harness",
+  harness: "codex",
   sessionName: "repeated labels remain valid consumer data",
   message: "dynamic task input",
   cwd: "/consumer/workspace",
-  model: "dynamic-model-id",
+  model: dynamicModelId,
+  reasoning: dynamicReasoningEffort,
 };
 const spawnCredential = connection.prepareOperation("spawn");
 const started = connection.spawn(spawnInput, spawnCredential);
@@ -45,7 +51,37 @@ const resumed = connection.attach(target, {
   cursor: resumeCursor,
 });
 
+const supportedHarness: HarnessId = "qoder";
+function spawnWithHarness<Harness extends SpawnInput["harness"]>(
+  harness: Harness,
+) {
+  return connection.spawn(
+    { ...spawnInput, harness },
+    connection.prepareOperation("spawn"),
+  );
+}
+const arbitraryHarness: string = "third-party-harness";
+// @ts-expect-error 内置 harness 标识保持闭集。
+const invalidHarness: SpawnInput["harness"] = arbitraryHarness;
+// @ts-expect-error 泛型推断不能扩大内置 harness 标识集合。
+const invalidSpawn = spawnWithHarness(arbitraryHarness);
+
+async function inspectModelCatalog(): Promise<
+  [
+    ModelCatalogResult["catalogs"][number] | undefined,
+    ModelCatalogFailure | undefined,
+  ]
+> {
+  const result = await connection.modelCatalog();
+  const failure: ModelCatalogFailure | undefined = result.failures[0];
+  return [result.catalogs[0], failure];
+}
+
 void connect;
+void supportedHarness;
+void invalidHarness;
+void invalidSpawn;
+void inspectModelCatalog;
 void started;
 void activeTurnSend;
 void newTurnSend;

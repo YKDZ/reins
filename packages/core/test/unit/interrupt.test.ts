@@ -130,7 +130,7 @@ describe("interrupt", () => {
     });
     const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-6"),
-      harness: "dsh",
+      harness: "codex",
       message: "临时",
       cwd: "/tmp/demo",
     });

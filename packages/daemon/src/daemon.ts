@@ -98,6 +98,7 @@ export function createDaemonInternal(
     adapters: options.adapters,
     diagnostics,
     consumerScope,
+    ...(assertWriterLease === undefined ? {} : { assertWriterLease }),
     ...(options.eventLogLimit === undefined
       ? {}
       : { eventLogLimit: options.eventLogLimit }),
@@ -108,7 +109,6 @@ export function createDaemonInternal(
       control,
       diagnostics,
       consumerScope,
-      ...(assertWriterLease === undefined ? {} : { assertWriterLease }),
       ...(options.idleTimeoutMs === undefined
         ? {}
         : { idleTimeoutMs: options.idleTimeoutMs }),

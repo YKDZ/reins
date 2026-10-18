@@ -34,6 +34,6 @@ export default {
         },
       };
     }) satisfies typeof codexFactory,
-    capabilities: async () => ({ harness: "codex", models: [] }),
+    modelCatalog: async () => ({ harness: "codex", models: [] }),
   },
 };
