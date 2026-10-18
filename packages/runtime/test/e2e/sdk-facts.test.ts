@@ -414,7 +414,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   });
 });
 
-test("SDK resumes after a disconnected observer from its last delivered fact", async () => {
+test("SDK resumes after a disconnected observer from its last acknowledged fact", async () => {
   const f = await fixture();
   const control = await f.sdk();
   const gate = join(f.directory, "release");

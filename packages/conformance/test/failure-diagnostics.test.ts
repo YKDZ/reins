@@ -280,7 +280,10 @@ test("结构化限流优先于含额度字样的正文，诊断引用在返回�
       start: { mode: "history" },
     });
     const facts: AgentFact[] = [];
-    for await (const fact of subscription) facts.push(fact);
+    for await (const fact of subscription) {
+      facts.push(fact);
+      subscription.acknowledge(fact);
+    }
     expect(await subscription.done).toMatchObject({ reason: "failed" });
     const completed = facts.filter((fact) => fact.type === "turn.completed");
     expect(completed).toHaveLength(1);

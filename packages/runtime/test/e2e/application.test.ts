@@ -1268,12 +1268,12 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   );
   const callerFactPromise = (async () => {
     for await (const fact of subscription) {
-      if (
+      const isCallerFact =
         fact.type === "message" &&
         fact.role === "caller" &&
-        fact.content === activeMessage
-      )
-        return fact;
+        fact.content === activeMessage;
+      subscription.acknowledge(fact);
+      if (isCallerFact) return fact;
     }
     throw new Error("The active caller message was not published as a fact");
   })();

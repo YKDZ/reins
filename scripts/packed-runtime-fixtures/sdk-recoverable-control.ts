@@ -810,7 +810,10 @@ async function observePermission(): Promise<void> {
   );
   try {
     for await (const fact of subscription) {
-      if (fact.type !== "permission.requested") continue;
+      if (fact.type !== "permission.requested") {
+        subscription.acknowledge(fact);
+        continue;
+      }
       process.stdout.write(
         `${JSON.stringify({
           sessionHandle: fact.sessionHandle,
@@ -1115,12 +1118,14 @@ async function replayFacts(): Promise<void> {
   } finally {
     connection.close();
   }
-  const deliveredFactCount = Number(process.env.REINS_RESUME_FACT_COUNT ?? "1");
-  const checkpoint = checkpoints[deliveredFactCount - 1];
+  const acknowledgedFactCount = Number(
+    process.env.REINS_RESUME_ACKNOWLEDGED_FACT_COUNT ?? "1",
+  );
+  const checkpoint = checkpoints[acknowledgedFactCount - 1];
   if (
     facts.length < 2 ||
-    !Number.isInteger(deliveredFactCount) ||
-    deliveredFactCount < 1 ||
+    !Number.isInteger(acknowledgedFactCount) ||
+    acknowledgedFactCount < 1 ||
     checkpoint === undefined
   )
     throw new Error("The installed SDK did not receive replayable facts");
@@ -1130,7 +1135,7 @@ async function replayFacts(): Promise<void> {
     disconnectedCheckpoint !== checkpoint
   )
     throw new Error(
-      "The disconnect checkpoint did not identify the last acknowledged fact",
+      "The disconnect checkpoint did not identify the acknowledged fact prefix",
     );
 
   const resumedConnection = await connectSdk();
@@ -1156,9 +1161,9 @@ async function replayFacts(): Promise<void> {
   } finally {
     resumedConnection.close();
   }
-  if (deliveredFactCount > facts.length)
-    throw new Error("The resume cursor did not identify a delivered fact");
-  const expectedSuffix = facts.slice(deliveredFactCount);
+  if (acknowledgedFactCount > facts.length)
+    throw new Error("The resume cursor did not identify an acknowledged fact");
+  const expectedSuffix = facts.slice(acknowledgedFactCount);
   if (JSON.stringify(resumedFacts) !== JSON.stringify(expectedSuffix))
     throw new Error(
       "The installed SDK replay skipped or changed delivered facts",
@@ -1169,7 +1174,7 @@ async function replayFacts(): Promise<void> {
       resumedFacts,
       replayed,
       endReason,
-      checkpointWasDelivered: true,
+      checkpointWasAcknowledged: true,
       resumedAfterDisconnect: disconnectedCheckpoint !== undefined,
     })}\n`,
   );
@@ -1185,7 +1190,9 @@ async function disconnectAfterFirstFact(): Promise<void> {
   const first = await subscription.next();
   if (first.done) throw new Error("The installed SDK received no first fact");
   const deliveredFacts = [first.value];
+  let acknowledgedFactCount = 0;
   subscription.acknowledge(first.value);
+  acknowledgedFactCount += 1;
   connection.close();
   let disconnected: ReinsSdkError | undefined;
   try {
@@ -1206,7 +1213,7 @@ async function disconnectAfterFirstFact(): Promise<void> {
     deliveredFacts.length < 2
   )
     throw new Error(
-      "The installed SDK did not return its last queued-and-delivered fact checkpoint on disconnect",
+      "The installed SDK did not preserve the acknowledged fact checkpoint on disconnect",
     );
   process.stdout.write(
     `${JSON.stringify({
@@ -1215,9 +1222,10 @@ async function disconnectAfterFirstFact(): Promise<void> {
       deliveredFactIds: deliveredFacts.map((fact) => fact.factId),
       queuedFactCount: deliveredFacts.length - 1,
       deliveredFactCount: deliveredFacts.length,
+      acknowledgedFactCount,
       checkpoint,
       code: disconnected.failure.code,
-      cursorMatchesDeliveredFact: true,
+      cursorMatchesAcknowledgedFact: true,
     })}\n`,
   );
 }
