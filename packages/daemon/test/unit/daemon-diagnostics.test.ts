@@ -2391,7 +2391,13 @@ describe("daemon diagnostic error dispatch", () => {
         },
       });
       await expect(
-        request({ diagnosticId: makeDiagnosticId("filters", "missing") }),
+        request({
+          diagnosticId: makeDiagnosticId(
+            testRuntimeScopeId,
+            "filters",
+            "missing",
+          ),
+        }),
       ).resolves.toMatchObject({
         error: { code: "diagnostic_not_found" },
       });

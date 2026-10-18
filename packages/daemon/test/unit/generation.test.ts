@@ -207,6 +207,23 @@ describe("daemon generation", () => {
     );
     expect(ids.diagnostic()).not.toBe(ids.diagnostic());
   });
+
+  test("diagnostic identity includes its runtime scope even for equal generation and counter", () => {
+    const generation = v.parse(daemonGenerationSchema, "same");
+    const scopeB = v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000001",
+    );
+    const diagnosticA = createDaemonIdFactory(
+      generation,
+      runtimeScopeId,
+    ).diagnostic();
+    const diagnosticB = createDaemonIdFactory(generation, scopeB).diagnostic();
+
+    expect(diagnosticA).not.toBe(diagnosticB);
+    expect(v.safeParse(diagnosticIdSchema, diagnosticA).success).toBe(true);
+    expect(v.safeParse(diagnosticIdSchema, diagnosticB).success).toBe(true);
+  });
 });
 
 function runAllocatorProcess(

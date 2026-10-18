@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-import type { DriverDiagnosticFact, SessionId, TurnId } from "@reins/protocol";
+import type {
+  DriverDiagnosticFact,
+  RuntimeScopeId,
+  SessionId,
+  TurnId,
+} from "@reins/protocol";
 import { makeDiagnosticId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
@@ -182,7 +187,11 @@ describe("Codex 模型目录", () => {
       }
     });
     const diagnostics: DriverDiagnosticFact[] = [];
-    const diagnosticId = makeDiagnosticId("modelcatalog", "98");
+    const diagnosticId = makeDiagnosticId(
+      "00000000-0000-4000-8000-000000000000" as RuntimeScopeId,
+      "modelcatalog",
+      "98",
+    );
     const query = createCodexModelCatalog({
       transportFactory: (options) =>
         createCodexTransport({ ...options, spawnChild: () => child }),

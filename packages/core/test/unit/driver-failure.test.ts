@@ -2,6 +2,7 @@ import {
   makeDiagnosticId,
   type CoreDiagnosticFact,
   type DomainEvent,
+  type RuntimeScopeId,
 } from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
 
@@ -10,6 +11,9 @@ import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testIdentity } from "./ids.ts";
+
+const diagnosticRuntimeScopeId =
+  "00000000-0000-4000-8000-000000000000" as RuntimeScopeId;
 
 describe("driver 抛错时动作整体回滚", () => {
   test("rejects a microtask orphan after failed start before awaiting diagnostics", async () => {
@@ -70,7 +74,11 @@ describe("driver 抛错时动作整体回滚", () => {
   });
 
   test("failure waits for an accepted diagnostic before exposing its id", async () => {
-    const diagnosticId = makeDiagnosticId("test", "accepted");
+    const diagnosticId = makeDiagnosticId(
+      diagnosticRuntimeScopeId,
+      "test",
+      "accepted",
+    );
     let accept!: (id: typeof diagnosticId) => void;
     const accepted = new Promise<typeof diagnosticId>((resolve) => {
       accept = resolve;
@@ -138,7 +146,11 @@ describe("driver 抛错时动作整体回滚", () => {
   });
 
   test("already-recorded MachineError is propagated without a duplicate diagnostic", async () => {
-    const diagnosticId = makeDiagnosticId("test", "recorded");
+    const diagnosticId = makeDiagnosticId(
+      diagnosticRuntimeScopeId,
+      "test",
+      "recorded",
+    );
     const fake = createFakeDriver({
       start: () => {
         throw {
@@ -172,7 +184,11 @@ describe("driver 抛错时动作整体回滚", () => {
         throw new Error("启动失败");
       },
     });
-    const diagnosticId = makeDiagnosticId("test", "1");
+    const diagnosticId = makeDiagnosticId(
+      diagnosticRuntimeScopeId,
+      "test",
+      "1",
+    );
     const expectedSessionId = ids.session(
       "session:00000000-0000-4000-8000-000000000000:failedstart:1",
     );
@@ -401,7 +417,11 @@ describe("driver 抛错时动作整体回滚", () => {
   });
 
   test("routing 已验证的 diagnosticId 由 core 复用且不重复记录", async () => {
-    const diagnosticId = makeDiagnosticId("core", "1");
+    const diagnosticId = makeDiagnosticId(
+      diagnosticRuntimeScopeId,
+      "core",
+      "1",
+    );
     const fake = createFakeDriver({
       terminate: async () => {
         throw {

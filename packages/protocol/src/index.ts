@@ -223,14 +223,21 @@ export const consumerContextSchema = v.pipe(
 export type ConsumerContext = v.InferOutput<typeof consumerContextSchema>;
 
 export function makeDiagnosticId(
+  runtimeScopeId: RuntimeScopeId,
   generation: string,
   counter: string,
 ): DiagnosticId {
-  return v.parse(diagnosticIdSchema, `diagnostic:${generation}:${counter}`);
+  return v.parse(
+    diagnosticIdSchema,
+    `diagnostic:${runtimeScopeId}:${generation}:${counter}`,
+  );
 }
 export const diagnosticIdSchema = identifier(
   "DiagnosticId",
-  /^diagnostic:[a-z0-9]+:[1-9a-z][0-9a-z]*$/u,
+  new RegExp(
+    `^diagnostic:${runtimeScopeIdSource}:[a-z0-9]+:[1-9a-z][0-9a-z]*$`,
+    "u",
+  ),
 );
 export type DiagnosticId = v.InferOutput<typeof diagnosticIdSchema>;
 

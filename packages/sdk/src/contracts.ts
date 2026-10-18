@@ -219,22 +219,322 @@ export type DiagnosticsQuery =
       sessionHandle?: SessionHandle;
       turnHandle: TurnHandle;
     });
-export type DiagnosticRecord = {
+type DiagnosticRecordEnvelope = {
   v: 1;
   diagnosticId: DiagnosticId;
   recordedAt: string;
-  severity: DiagnosticSeverity;
-  source: DiagnosticSource;
-  harness?: HarnessId;
-  sessionHandle?: SessionHandle;
-  turnHandle?: TurnHandle;
-  kind: DiagnosticKind;
-  operation?: string;
-  stage?: string;
-  reason?: string;
-  message?: DiagnosticTextEvidence;
-  [field: string]: unknown;
 };
+type DiagnosticRecordSession = {
+  sessionHandle: SessionHandle;
+  turnHandle?: TurnHandle;
+};
+type DiagnosticRecordNoSession = {
+  sessionHandle?: never;
+  turnHandle?: never;
+};
+type DiagnosticControlAssociation =
+  | ({
+      source: "daemon" | "core";
+      harness?: HarnessId;
+    } & (DiagnosticRecordNoSession | DiagnosticRecordSession))
+  | ({ source: "adapter"; harness: HarnessId } & (
+      | DiagnosticRecordNoSession
+      | DiagnosticRecordSession
+    ));
+type DiagnosticAdapterAssociation = {
+  source: "adapter";
+  harness: HarnessId;
+} & (DiagnosticRecordNoSession | DiagnosticRecordSession);
+type DiagnosticSessionAssociation =
+  | ({
+      source: "daemon" | "core";
+      harness?: HarnessId;
+    } & DiagnosticRecordSession)
+  | ({ source: "adapter"; harness: HarnessId } & DiagnosticRecordSession);
+type DiagnosticDaemonAssociation = { source: "daemon"; harness?: HarnessId } & (
+  | DiagnosticRecordNoSession
+  | DiagnosticRecordSession
+);
+type DiagnosticFieldName = "agent" | "reasoning" | "sandbox";
+type DiagnosticPermissionFieldName = "feedback" | "resolution";
+type DiagnosticRequestLocation =
+  | { operation: "spawn"; stage: "start_session" | "start_turn" | "dispatch" }
+  | { operation: "send"; stage: "deliver" | "steer" | "dispatch" }
+  | { operation: "wait"; stage: "dispatch" }
+  | { operation: "interrupt"; stage: "interrupt" | "dispatch" }
+  | { operation: "kill"; stage: "terminate" | "dispatch" }
+  | { operation: "list" | "attach" | "diagnostics"; stage: "dispatch" }
+  | {
+      operation: "resolve_permission";
+      stage: "resolve" | "dispatch";
+    }
+  | { operation: "model_catalog"; stage: "query" | "dispatch" };
+type DiagnosticTransportLocation =
+  | { operation: "listen"; reason: "io_error" }
+  | { operation: "connect"; reason: "io_error" | "timeout" }
+  | { operation: "connection"; reason: "io_error" }
+  | {
+      operation: "read";
+      reason: "invalid_frame" | "io_error" | "timeout" | "disconnected";
+      inputBytes?: number;
+    }
+  | {
+      operation: "write" | "close";
+      reason: "io_error" | "timeout" | "disconnected";
+    };
+type DiagnosticStorageLocation =
+  | {
+      operation: "initialize";
+      reason: "unavailable" | "io_error" | "corrupt" | "invalid_configuration";
+    }
+  | {
+      operation: "append" | "rotate";
+      reason: "unavailable" | "io_error";
+    }
+  | { operation: "query"; reason: "unavailable" | "io_error" | "corrupt" }
+  | { operation: "recover"; reason: "io_error" | "corrupt" }
+  | { operation: "lock"; reason: "io_error" | "lock_unavailable" }
+  | { operation: "close"; reason: "io_error" }
+  | { operation: "allocate_generation"; reason: "io_error" | "corrupt" };
+type DiagnosticWorkerEventType =
+  | "session.created"
+  | "turn.started"
+  | "text.delta"
+  | "message"
+  | "tool.requested"
+  | "tool.completed"
+  | "permission.requested"
+  | "permission.resolved"
+  | "turn.completed"
+  | "session.killed";
+type DiagnosticWorkerEventReason =
+  | "unknown_session"
+  | "session_killed"
+  | "driver_event_forbidden"
+  | "turn_not_active"
+  | "turn_mismatch"
+  | "event_after_turn_completed"
+  | "message_already_completed"
+  | "tool_already_requested"
+  | "tool_already_completed"
+  | "permission_id_reused"
+  | "permission_not_pending"
+  | "permission_turn_mismatch";
+
+export type DiagnosticRecord =
+  | (DiagnosticRecordEnvelope & {
+      source: "daemon";
+      kind: "lifecycle";
+      operation: "daemon";
+      reason: "started" | "stopped" | "idle_exit";
+      severity: "info";
+    })
+  | (DiagnosticRecordEnvelope & {
+      source: "daemon";
+      kind: "lifecycle";
+      operation: "daemon";
+      reason: "crashed";
+      severity: "error";
+      message?: DiagnosticTextEvidence;
+      stack?: DiagnosticTextEvidence;
+    })
+  | (DiagnosticRecordEnvelope & {
+      source: "adapter";
+      harness: HarnessId;
+      sessionHandle: SessionHandle;
+      turnHandle?: TurnHandle;
+      kind: "lifecycle";
+      operation: "worker";
+      reason: "initialized" | "closed";
+      severity: "info";
+    })
+  | (DiagnosticRecordEnvelope & {
+      source: "adapter";
+      harness: HarnessId;
+      sessionHandle: SessionHandle;
+      turnHandle?: TurnHandle;
+      kind: "lifecycle";
+      operation: "worker";
+      reason: "exited_unexpectedly";
+      severity: "error";
+      message?: DiagnosticTextEvidence;
+      stack?: DiagnosticTextEvidence;
+    })
+  | (DiagnosticRecordEnvelope & {
+      source: "core";
+      sessionHandle: SessionHandle;
+      turnHandle?: TurnHandle;
+      kind: "lifecycle";
+      operation: "event_delivery";
+      reason: "listener_failed";
+      severity: "error";
+      message?: DiagnosticTextEvidence;
+      stack?: DiagnosticTextEvidence;
+    })
+  | (DiagnosticRecordEnvelope & {
+      source: "daemon";
+      kind: "lifecycle";
+      operation: "diagnostics_store";
+      reason: "initialized" | "closed";
+      severity: "info";
+    })
+  | (DiagnosticRecordEnvelope & {
+      source: "daemon";
+      kind: "lifecycle";
+      operation: "diagnostics_store";
+      reason: "invariant_failed";
+      severity: "error";
+      message?: DiagnosticTextEvidence;
+      stack?: DiagnosticTextEvidence;
+    })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticAdapterAssociation & {
+        kind: "mapping_gap";
+        operation: "spawn";
+        reason: "unsupported_input";
+        fields: [DiagnosticFieldName, ...DiagnosticFieldName[]];
+        severity: "warning";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticAdapterAssociation & {
+        kind: "mapping_gap";
+        operation: "resolve_permission";
+        reason: "unsupported_input";
+        fields: [
+          DiagnosticPermissionFieldName,
+          ...DiagnosticPermissionFieldName[],
+        ];
+        severity: "warning";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticAdapterAssociation & {
+        kind: "compatibility_gap";
+        operation: "receive_worker_request";
+        reason: "unsupported_request";
+        message?: DiagnosticTextEvidence;
+        severity: "warning";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticControlAssociation & {
+        kind: "request_failure";
+        reason: "upstream_error" | "timeout" | "closed" | "rejected";
+        message: DiagnosticTextEvidence;
+        stack?: DiagnosticTextEvidence;
+        severity: "error";
+      } & DiagnosticRequestLocation)
+  | (DiagnosticRecordEnvelope &
+      DiagnosticSessionAssociation & {
+        kind: "stream_failure";
+        operation: "receive_worker_stream";
+        reason: "read_error" | "closed_unexpectedly";
+        message: DiagnosticTextEvidence;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticSessionAssociation & {
+        kind: "turn_failure";
+        operation: "run_turn";
+        reason: "worker_reported_failure";
+        message: DiagnosticTextEvidence;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticSessionAssociation & {
+        kind: "authorization_failure";
+        operation: "resolve_permission";
+        stage: "lookup";
+        reason: "target_lost";
+        permissionId: string;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticSessionAssociation & {
+        kind: "authorization_failure";
+        operation: "resolve_permission";
+        stage: "deliver";
+        reason: "upstream_rejected";
+        permissionId: string;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticControlAssociation & {
+        kind: "protocol_violation";
+        operation: "decode_worker_message";
+        reason: "invalid_json" | "invalid_shape" | "unexpected_message";
+        message?: DiagnosticTextEvidence;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticAdapterAssociation & {
+        kind: "protocol_violation";
+        operation: "validate_worker_response" | "validate_worker_event";
+        reason: "invalid_shape" | "unexpected_message";
+        message?: DiagnosticTextEvidence;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope & {
+      source: "core";
+      sessionHandle: SessionHandle;
+      kind: "protocol_violation";
+      operation: "validate_worker_event";
+      reason: DiagnosticWorkerEventReason;
+      eventType: DiagnosticWorkerEventType;
+      sessionState: "unknown" | "killed" | "spawning" | "busy" | "idle";
+      eventTurnId?: string;
+      activeTurnId?: string;
+      messageId?: string;
+      toolCallId?: string;
+      permissionId?: string;
+      severity: "error";
+    })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticControlAssociation & {
+        kind: "protocol_violation";
+        operation: "validate_daemon_result" | "emit_domain_event";
+        reason: "invalid_shape";
+        message?: DiagnosticTextEvidence;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope & {
+      source: "daemon";
+      kind: "protocol_violation";
+      operation: "validate_daemon_request";
+      stage: "envelope";
+      reason: "invalid_shape";
+      severity: "error";
+    })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticDaemonAssociation &
+      DiagnosticTransportLocation & {
+        kind: "transport_failure";
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticDaemonAssociation &
+      DiagnosticStorageLocation & {
+        kind: "storage_failure";
+        message: DiagnosticTextEvidence;
+        severity: "error";
+      })
+  | (DiagnosticRecordEnvelope &
+      DiagnosticDaemonAssociation & {
+        kind: "storage_failure";
+        operation: "recover";
+        reason: "tail_repaired";
+        affectedBytes: number;
+        severity: "warning";
+      })
+  | (DiagnosticRecordEnvelope & {
+      source: "harness";
+      harness: HarnessId;
+      sessionHandle: SessionHandle;
+      turnHandle?: TurnHandle;
+      kind: "harness_stderr";
+      operation: "worker_process";
+      reason: "stderr_output";
+      text: DiagnosticTextEvidence;
+      severity: "info";
+    });
 export type DiagnosticsResult =
   | { record: DiagnosticRecord }
   | { records: DiagnosticRecord[]; truncated: boolean };

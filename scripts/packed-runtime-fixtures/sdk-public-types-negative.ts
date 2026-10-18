@@ -1,6 +1,7 @@
 import {
   type AgentTarget,
   type CompletedTurn,
+  type DiagnosticRecord,
   type DiagnosticId,
   type MessageKey,
   type OperationCredential,
@@ -32,6 +33,43 @@ declare const diagnosticId: DiagnosticId;
 declare const messageKey: MessageKey;
 declare const permissionHandle: PermissionHandle;
 declare const toolKey: ToolKey;
+
+const diagnosticWithUnknownField: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "info",
+  source: "daemon",
+  kind: "lifecycle",
+  operation: "daemon",
+  reason: "started",
+  // @ts-expect-error 公开诊断记录不能夹带未定义字段。
+  privatePayload: "secret",
+};
+const diagnosticWithUnknownReason: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "info",
+  source: "daemon",
+  kind: "lifecycle",
+  operation: "daemon",
+  // @ts-expect-error 来源、阶段、原因必须匹配具体诊断类型。
+  reason: "unlisted_reason",
+};
+const diagnosticWithMismatchedStage: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "error",
+  source: "daemon",
+  kind: "request_failure",
+  operation: "send",
+  // @ts-expect-error 请求阶段必须与操作匹配。
+  stage: "start_session",
+  reason: "upstream_error",
+  message: { text: "failed", truncated: false, originalBytes: 6 },
+};
 
 // @ts-expect-error 会话句柄与回合句柄具有不同的公开身份。
 const wrongTurn: TurnHandle = sessionHandle;
@@ -85,3 +123,6 @@ void invalidReplay;
 void sessionTarget;
 void mismatchedTarget;
 void resumeCursor;
+void diagnosticWithUnknownField;
+void diagnosticWithUnknownReason;
+void diagnosticWithMismatchedStage;

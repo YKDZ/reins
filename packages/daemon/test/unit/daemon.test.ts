@@ -105,7 +105,7 @@ const testDiagnostics: DiagnosticsRuntime = {
   sessionId: testIdentity.session,
   async record(input) {
     return input.kind === "lifecycle" && input.operation === "daemon"
-      ? makeDiagnosticId("test", "1")
+      ? makeDiagnosticId(testRuntimeScopeId, "test", "1")
       : undefined;
   },
   async query() {
@@ -1939,7 +1939,7 @@ describe("daemon 协议面（缝 C）", () => {
       async modelCatalog() {
         throw new AlreadyDiagnosedError(
           "supplied",
-          makeDiagnosticId("test", "1"),
+          makeDiagnosticId(testRuntimeScopeId, "test", "1"),
         );
       },
     };
@@ -1957,8 +1957,8 @@ describe("daemon 协议面（缝 C）", () => {
   });
 
   test("模型目录忽略不相关诊断并记录一次 fallback", async () => {
-    const suppliedId = makeDiagnosticId("test", "2");
-    const fallbackId = makeDiagnosticId("test", "3");
+    const suppliedId = makeDiagnosticId(testRuntimeScopeId, "test", "2");
+    const fallbackId = makeDiagnosticId(testRuntimeScopeId, "test", "3");
     const modelCatalogRecords: unknown[] = [];
     const diagnostics: DiagnosticsRuntime = {
       ...testDiagnostics,
@@ -1970,7 +1970,7 @@ describe("daemon 协议面（缝 C）", () => {
           modelCatalogRecords.push(input);
           return fallbackId;
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
       async query(params) {
         if ("diagnosticId" in params && params.diagnosticId === suppliedId) {
@@ -2289,7 +2289,7 @@ describe("daemon 空闲退出", () => {
         if (input.kind === "lifecycle" && input.operation === "daemon") {
           lifecycle.push(input.reason);
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     const server = createInMemoryTransportServer<ProtocolMessage>();
@@ -2333,7 +2333,7 @@ describe("daemon 空闲退出", () => {
         ) {
           return undefined;
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     const server = createInMemoryTransportServer<ProtocolMessage>();
@@ -2432,7 +2432,7 @@ describe("daemon 空闲退出", () => {
         if (input.kind === "lifecycle" && input.operation === "daemon") {
           lifecycle.push(input.reason);
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     let rejectClose = true;
