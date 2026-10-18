@@ -61,9 +61,9 @@ function spawnWithHarness<Harness extends SpawnInput["harness"]>(
   );
 }
 const arbitraryHarness: string = "third-party-harness";
-// @ts-expect-error Built-in harness identifiers are a closed set.
+// @ts-expect-error 内置 harness 标识保持闭集。
 const invalidHarness: SpawnInput["harness"] = arbitraryHarness;
-// @ts-expect-error Generic inference must not widen the built-in harness set.
+// @ts-expect-error 泛型推断不能扩大内置 harness 标识集合。
 const invalidSpawn = spawnWithHarness(arbitraryHarness);
 
 async function inspectModelCatalog(): Promise<

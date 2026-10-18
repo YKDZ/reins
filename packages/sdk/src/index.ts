@@ -88,6 +88,7 @@ export type {
   CompletedTurn,
   InterruptInput,
   InterruptResult,
+  HarnessId,
   OperationCredential,
   OperationKind,
   HarnessModelCatalog,
@@ -119,7 +120,6 @@ export type {
   ResumeCursor,
   ToolKey,
 } from "./contracts.ts";
-export type { HarnessId } from "@reins/protocol";
 
 export async function connect(
   options: ConnectOptions,

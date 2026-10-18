@@ -1,5 +1,3 @@
-import type { HarnessId } from "@reins/protocol";
-
 declare const sessionHandleBrand: unique symbol;
 declare const turnHandleBrand: unique symbol;
 declare const agentFactIdBrand: unique symbol;
@@ -39,6 +37,8 @@ export type OperationKind =
 export type OperationCredential<Kind extends OperationKind> = string & {
   readonly [operationCredentialBrand]: Kind;
 };
+
+export type HarnessId = "codex" | "qoder";
 
 export type SpawnInput = {
   sessionName: string;
