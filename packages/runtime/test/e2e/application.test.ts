@@ -25,6 +25,7 @@ import {
   serializeDiagnosticId,
   serializeMessageKey,
   serializeResumeCursor,
+  serializeRuntimeScopeId,
   serializeSessionHandle,
   serializeTurnHandle,
   type DiagnosticId,
@@ -49,6 +50,15 @@ const fixtureDaemonBin = fileURLToPath(
 );
 const fixtures: Array<{ directory: string; daemonPids: string }> = [];
 const clients: ReinsConnection[] = [];
+
+test("RuntimeScopeId parser rejects identities with another role", () => {
+  const scope = parseRuntimeScopeId("00000000-0000-4000-8000-000000000000");
+  expect(serializeRuntimeScopeId(scope)).toBe(
+    "00000000-0000-4000-8000-000000000000",
+  );
+  expect(() => parseRuntimeScopeId("session:daemon:1")).toThrow();
+  expect(() => parseRuntimeScopeId("diagnostic:daemon:1")).toThrow();
+});
 
 async function waitForProcessExit(
   pid: number,
