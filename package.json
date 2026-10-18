@@ -11,7 +11,6 @@
     "format:write": "oxfmt --write --no-error-on-unmatched-pattern package.json pnpm-workspace.yaml pnpm-lock.yaml turbo.json tsconfig.json tsconfig.config.json *.config.ts .pnpmfile.mjs .gitignore .dockerignore Dockerfile TODO.md rust-toolchain.toml .vscode .github .devcontainer scripts",
     "lint": "oxlint --quiet --format=unix --no-error-on-unmatched-pattern *.config.ts .pnpmfile.mjs scripts",
     "lint:fix": "oxlint --format=unix --no-error-on-unmatched-pattern *.config.ts .pnpmfile.mjs scripts --fix",
-    "reins": "node --conditions=source scripts/run-development-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "release:build": "node --conditions=source scripts/build-distribution.ts",
     "release:verify": "node --conditions=source scripts/check-packed-runtime.ts",
