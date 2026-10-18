@@ -12,9 +12,9 @@ import {
   killParamsSchema,
   type ListFilter,
   type MachineError,
+  type MessageId,
   machineErrorSchema,
   makeErrorCause,
-  type MessageId,
   messageIdSchema,
   type PermissionId,
   type PermissionOption,
@@ -69,6 +69,7 @@ type SessionRecord = {
 type TurnScope = {
   readonly turnId: TurnId;
   readonly messages: Map<MessageId, "streaming" | "complete">;
+  readonly nativeCallerCompletions: Set<MessageId>;
   readonly tools: Map<ToolCallId, "requested" | "complete">;
 };
 
@@ -122,7 +123,12 @@ type WorkerEventIngressDecision =
   | { status: "rejected"; rejection: WorkerEventRejection };
 
 function createTurnScope(turnId: TurnId): TurnScope {
-  return { turnId, messages: new Map(), tools: new Map() };
+  return {
+    turnId,
+    messages: new Map(),
+    nativeCallerCompletions: new Set(),
+    tools: new Map(),
+  };
 }
 
 function machineError(error: MachineError): MachineError {
@@ -473,6 +479,9 @@ export function createSessionMachine(options: {
           : {
               turnId: activeTurn.turnId,
               messages: new Map(activeTurn.messages),
+              nativeCallerCompletions: new Set(
+                activeTurn.nativeCallerCompletions,
+              ),
               tools: new Map(activeTurn.tools),
             },
       completedTurnIds:
@@ -740,7 +749,13 @@ export function createSessionMachine(options: {
         };
     }
     if (event.type === "message") {
-      if (turnScope?.messages.get(event.messageId) === "complete")
+      const isNativeCallerCompletion =
+        event.role === "caller" &&
+        turnScope?.nativeCallerCompletions.has(event.messageId) === true;
+      if (
+        turnScope?.messages.get(event.messageId) === "complete" &&
+        !isNativeCallerCompletion
+      )
         return {
           status: "rejected",
           rejection: {
@@ -824,6 +839,16 @@ export function createSessionMachine(options: {
     }
     const projection = activeProjection(event.sessionId);
     const spawning = pendingSpawns.get(event.sessionId);
+    if (event.type === "message" && event.role === "caller") {
+      const turnScope =
+        projection !== undefined
+          ? projection.activeTurn
+          : spawning !== undefined && spawning.phase !== "closing"
+            ? spawning.turn
+            : sessions.get(event.sessionId)?.activeTurn;
+      if (turnScope?.turnId === event.turnId)
+        turnScope.nativeCallerCompletions.delete(event.messageId);
+    }
     if (projection !== undefined) projectEvent(projection, event);
     else {
       if (spawning !== undefined && spawning.phase !== "closing") {
@@ -926,6 +951,37 @@ export function createSessionMachine(options: {
     return v.parse(turnIdSchema, `t${turnSeq}`);
   }
 
+  function nextMessageId(): MessageId {
+    messageSeq += 1;
+    return v.parse(messageIdSchema, `m${messageSeq}`);
+  }
+
+  function selectCallerMessage(
+    events: readonly DomainEvent[],
+    fallback: Extract<DomainEvent, { type: "message" }>,
+  ): {
+    caller: Extract<DomainEvent, { type: "message" }>;
+    remainder: DomainEvent[];
+  } {
+    const caller = events.find(
+      (event) =>
+        event.type === "message" &&
+        event.role === "caller" &&
+        event.messageId === fallback.messageId,
+    );
+    return {
+      caller: caller?.type === "message" ? caller : fallback,
+      remainder: events.filter(
+        (event) =>
+          !(
+            event.type === "message" &&
+            event.role === "caller" &&
+            event.messageId === fallback.messageId
+          ),
+      ),
+    };
+  }
+
   return {
     async spawn(params, commit) {
       const parsed = v.safeParse(spawnParamsSchema, params);
@@ -935,6 +991,7 @@ export function createSessionMachine(options: {
       const spec = parsed.output;
       const sessionId = options.identity.session();
       const turnId = nextTurnId(sessionId);
+      const messageId = nextMessageId();
       const cwd = spec.cwd;
       const spawnScope: PendingSpawn = {
         token: Symbol(sessionId),
@@ -951,6 +1008,7 @@ export function createSessionMachine(options: {
         await driver.start({
           sessionId,
           turnId,
+          messageId,
           harness: spec.harness,
           message: spec.message,
           cwd,
@@ -998,6 +1056,23 @@ export function createSessionMachine(options: {
         );
       }
       const result = { sessionId, turnId, cwd };
+      const callerMessage: DomainEvent = {
+        type: "message",
+        sessionId,
+        turnId,
+        messageId,
+        role: "caller",
+        content: spec.message,
+      };
+      spawnScope.turn.messages.set(messageId, "complete");
+      const nativeCallerMessage = spawnScope.events.find(
+        (event) =>
+          event.type === "message" &&
+          event.role === "caller" &&
+          event.messageId === messageId,
+      );
+      if (nativeCallerMessage === undefined)
+        spawnScope.turn.nativeCallerCompletions.add(messageId);
       const events: DomainEvent[] = [
         {
           type: "session.created",
@@ -1012,7 +1087,15 @@ export function createSessionMachine(options: {
           spawnedAt: new Date().toISOString(),
         },
         { type: "turn.started", sessionId, turnId },
-        ...spawnScope.events,
+        nativeCallerMessage ?? callerMessage,
+        ...spawnScope.events.filter(
+          (event) =>
+            !(
+              event.type === "message" &&
+              event.role === "caller" &&
+              event.messageId === messageId
+            ),
+        ),
       ];
       // 固定创建提交的截点。原生在异步提交期间产生的事件只进入 lateEvents，
       // 会在创建事实提交并发布后逐批走普通记录路径。
@@ -1036,6 +1119,11 @@ export function createSessionMachine(options: {
         throw new SpawnCommitFailure(sessionId, result, error, stopError);
       }
       bus.publish(initialBatch);
+      const activeTurn = sessions.get(sessionId)?.activeTurn;
+      if (activeTurn?.turnId === turnId) {
+        for (const nativeMessageId of spawnScope.turn.nativeCallerCompletions)
+          activeTurn.nativeCallerCompletions.add(nativeMessageId);
+      }
       while (spawnScope.lateEvents.length > 0) {
         const batch = spawnScope.lateEvents.splice(0);
         bus.publish(batch);
@@ -1065,10 +1153,20 @@ export function createSessionMachine(options: {
       ) {
         throw machineError({ code: "session_busy", sessionId });
       }
-      messageSeq += 1;
-      const messageId = v.parse(messageIdSchema, `m${messageSeq}`);
+      const messageId = nextMessageId();
+      const callerMessage: Extract<DomainEvent, { type: "message" }> = {
+        type: "message",
+        sessionId,
+        turnId:
+          parsed.output.placement === "new_turn"
+            ? nextTurnId(sessionId)
+            : parsed.output.turnId,
+        messageId,
+        role: "caller",
+        content: message,
+      };
       if (parsed.output.placement === "new_turn") {
-        const turnId = nextTurnId(sessionId);
+        const turnId = callerMessage.turnId;
         const started: DomainEvent = {
           type: "turn.started",
           sessionId,
@@ -1079,19 +1177,19 @@ export function createSessionMachine(options: {
         const delivery = createPendingDelivery(projection, true);
         pendingDeliveries.set(sessionId, delivery);
         try {
-          await driver.deliver(sessionId, turnId, message, "new_turn");
-          bus.publish([
-            started,
-            {
-              type: "message",
-              sessionId,
-              turnId,
-              messageId,
-              role: "caller",
-              content: message,
-            },
-            ...delivery.events,
-          ]);
+          await driver.deliver(
+            sessionId,
+            turnId,
+            message,
+            "new_turn",
+            messageId,
+          );
+          const selected = selectCallerMessage(delivery.events, callerMessage);
+          bus.publish([started, selected.caller, ...selected.remainder]);
+          if (selected.caller === callerMessage)
+            sessions
+              .get(sessionId)
+              ?.activeTurn?.nativeCallerCompletions.add(messageId);
         } catch (error) {
           throw await unexpectedFailure(options.diagnostics, error, {
             sessionId,
@@ -1129,15 +1227,24 @@ export function createSessionMachine(options: {
       delivery.count += 1;
       pendingDeliveries.set(sessionId, delivery);
       try {
-        await driver.deliver(sessionId, turnId, message, "active_turn");
-        bus.publish({
-          type: "message",
+        await driver.deliver(
           sessionId,
           turnId,
+          message,
+          "active_turn",
           messageId,
-          role: "caller",
-          content: message,
-        });
+        );
+        const selected = selectCallerMessage(delivery.events, callerMessage);
+        delivery.events.splice(
+          0,
+          delivery.events.length,
+          ...selected.remainder,
+        );
+        bus.publish(selected.caller);
+        if (selected.caller === callerMessage)
+          sessions
+            .get(sessionId)
+            ?.activeTurn?.nativeCallerCompletions.add(messageId);
       } catch (error) {
         throw await unexpectedFailure(options.diagnostics, error, {
           sessionId,
@@ -1159,7 +1266,12 @@ export function createSessionMachine(options: {
           }
         }
       }
-      return { sessionId, turnId, messageId, deliveryPoint: "active_turn" };
+      return {
+        sessionId,
+        turnId: callerMessage.turnId,
+        messageId,
+        deliveryPoint: "active_turn",
+      };
     },
     async wait(params) {
       const parsed = v.safeParse(waitParamsSchema, params);

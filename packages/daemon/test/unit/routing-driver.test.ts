@@ -14,6 +14,7 @@ import {
   turnIdSchema,
   runtimeScopeIdSchema,
   type DomainEvent,
+  type MessageId,
   type WorkerSpec,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -145,7 +146,7 @@ function codexRoutingFixture() {
 
 describe("routing driver invariants", () => {
   test("same-harness session actions reach only their own native worker", async () => {
-    const { driver, workers, alpha, beta } = codexRoutingFixture();
+    const { driver, workers, events, alpha, beta } = codexRoutingFixture();
     try {
       await driver.start(alpha);
       await vi.waitFor(() => {
@@ -165,11 +166,46 @@ describe("routing driver invariants", () => {
       }
       const initialA = workerA.controls.requests().length;
       const initialB = workerB.controls.requests().length;
+      const alphaMessageId = "m-routed-alpha" as MessageId;
       await driver.deliver(
         alpha.sessionId,
         alpha.turnId,
         "caller message for alpha",
         "active_turn",
+        alphaMessageId,
+      );
+      const callerItem = {
+        type: "userMessage",
+        id: "native-user-alpha",
+        clientId: null,
+        content: [
+          {
+            type: "text",
+            text: "caller message for alpha",
+            text_elements: [],
+          },
+        ],
+      } as const;
+      workerA.controls.pushInbound({
+        method: "item/started",
+        params: { item: callerItem },
+      });
+      workerA.controls.pushInbound({
+        method: "item/completed",
+        params: { turnId: "turn1", item: callerItem },
+      });
+      await vi.waitFor(() => {
+        expect(events).toContainEqual({
+          type: "message",
+          sessionId: alpha.sessionId,
+          turnId: alpha.turnId,
+          messageId: alphaMessageId,
+          role: "caller",
+          content: [{ type: "text", text: "caller message for alpha" }],
+        });
+      });
+      expect(events.some((event) => event.type === "tool.requested")).toBe(
+        false,
       );
       await driver.interrupt(alpha.sessionId, alpha.turnId);
       await driver.terminate(alpha.sessionId);

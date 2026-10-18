@@ -650,6 +650,91 @@ export const eventWindowSchema = v.strictObject({
   head: v.nullable(eventIdSchema),
 });
 
+const messageByteRangeSchema = v.pipe(
+  v.strictObject({
+    start: v.pipe(v.number(), v.integer(), v.minValue(0)),
+    end: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  }),
+  v.check((range) => range.end >= range.start),
+);
+export const messageTextElementSchema = v.strictObject({
+  byteRange: messageByteRangeSchema,
+  placeholder: v.nullable(v.string()),
+});
+export const messageContentPartSchema = v.union([
+  v.strictObject({
+    type: v.literal("text"),
+    text: v.string(),
+    textElements: v.optional(v.array(messageTextElementSchema)),
+    annotations: v.optional(v.unknown()),
+  }),
+  v.strictObject({
+    type: v.literal("thinking"),
+    text: v.string(),
+    signature: v.optional(v.string()),
+  }),
+  v.strictObject({ type: v.literal("redacted_thinking"), data: v.string() }),
+  v.strictObject({
+    type: v.literal("image"),
+    source: v.literal("url"),
+    url: v.string(),
+    detail: v.optional(v.picklist(["auto", "low", "high", "original"])),
+  }),
+  v.strictObject({
+    type: v.literal("image"),
+    source: v.literal("bytes"),
+    data: v.string(),
+    mediaType: v.optional(v.string()),
+    detail: v.optional(v.picklist(["auto", "low", "high", "original"])),
+  }),
+  v.strictObject({
+    type: v.literal("audio"),
+    source: v.literal("url"),
+    url: v.string(),
+  }),
+  v.strictObject({
+    type: v.literal("audio"),
+    source: v.literal("bytes"),
+    data: v.string(),
+    mediaType: v.optional(v.string()),
+  }),
+  v.strictObject({
+    type: v.literal("image"),
+    source: v.literal("unavailable"),
+    reason: v.literal("read_failed"),
+  }),
+  v.strictObject({
+    type: v.literal("audio"),
+    source: v.literal("unavailable"),
+    reason: v.literal("read_failed"),
+  }),
+  v.strictObject({
+    type: v.literal("reference"),
+    referenceType: v.picklist(["skill", "mention"]),
+    name: v.string(),
+  }),
+  v.strictObject({
+    type: v.literal("tool_call"),
+    toolCallId: toolCallIdSchema,
+  }),
+  v.strictObject({
+    type: v.literal("tool_result"),
+    toolCallId: toolCallIdSchema,
+  }),
+  v.strictObject({
+    type: v.literal("opaque"),
+    harness: harnessIdSchema,
+    nativeType: v.string(),
+    value: v.unknown(),
+  }),
+]);
+export type MessageContentPart = v.InferOutput<typeof messageContentPartSchema>;
+export const messageContentSchema = v.union([
+  v.string(),
+  v.array(messageContentPartSchema),
+]);
+export type MessageContent = v.InferOutput<typeof messageContentSchema>;
+
 export const killResultSchema = v.strictObject({
   sessionId: sessionIdSchema,
   status: v.union([v.literal("killed"), v.literal("not_found")]),
@@ -739,7 +824,9 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     messageId: messageIdSchema,
     role: v.union([v.literal("caller"), v.literal("worker")]),
-    content: v.string(),
+    content: messageContentSchema,
+    // 仅上游明确报告截断时标记；缺省不表示 Reins 历史存在缺口。
+    nativeTruncated: v.optional(v.literal(true)),
   }),
   v.strictObject({
     type: v.literal("tool.requested"),
@@ -747,6 +834,7 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     toolCallId: toolCallIdSchema,
     name: v.string(),
+    input: v.optional(v.unknown()),
   }),
   v.strictObject({
     type: v.literal("tool.completed"),
@@ -754,7 +842,8 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     toolCallId: toolCallIdSchema,
     name: v.string(),
-    result: v.nullable(v.string()),
+    result: v.unknown(),
+    error: v.optional(v.unknown()),
     isError: v.boolean(),
   }),
   v.strictObject({
@@ -2346,6 +2435,53 @@ export const machineErrorSchema = v.union([
     cleanupCause: v.optional(errorCauseSchema),
   }),
   v.strictObject({
+    code: v.literal("control_store_unavailable"),
+    stage: v.literal("event"),
+    sessionId: sessionIdSchema,
+    eventType: v.picklist([
+      "session.created",
+      "turn.started",
+      "text.delta",
+      "message",
+      "tool.requested",
+      "tool.completed",
+      "permission.requested",
+      "permission.resolved",
+      "turn.completed",
+      "session.killed",
+    ]),
+    turnId: v.optional(turnIdSchema),
+    cause: errorCauseSchema,
+    cleanupCause: v.optional(errorCauseSchema),
+    cleanupSessionId: v.optional(sessionIdSchema),
+  }),
+  v.strictObject({
+    code: v.literal("control_store_unavailable"),
+    stage: v.literal("event_commit"),
+    operationKey: v.pipe(
+      operationKeySchema,
+      v.check((value) => parseOperationKey(value).kind === "kill"),
+    ),
+    acceptance: v.literal("accepted"),
+    sessionId: sessionIdSchema,
+    eventType: v.picklist([
+      "session.created",
+      "turn.started",
+      "text.delta",
+      "message",
+      "tool.requested",
+      "tool.completed",
+      "permission.requested",
+      "permission.resolved",
+      "turn.completed",
+      "session.killed",
+    ]),
+    turnId: v.optional(turnIdSchema),
+    cause: errorCauseSchema,
+    cleanupCause: v.optional(errorCauseSchema),
+    cleanupSessionId: v.optional(sessionIdSchema),
+  }),
+  v.strictObject({
     code: v.literal("session_not_found"),
     sessionId: sessionIdSchema,
   }),
@@ -2465,6 +2601,7 @@ export function isDriverFailure(error: unknown): error is DriverFailure {
 export type WorkerSpec = {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
+  readonly messageId?: MessageId;
   readonly harness: HarnessId;
   readonly message: string;
   readonly agent?: string;
@@ -2485,6 +2622,7 @@ export interface WorkerDriver {
     turnId: TurnId,
     message: string,
     placement: SendParams["placement"],
+    messageId?: MessageId,
   ): Promise<void>;
   // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
   interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;

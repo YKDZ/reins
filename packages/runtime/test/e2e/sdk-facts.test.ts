@@ -129,19 +129,17 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   const control = await f.sdk();
   const gate = join(f.directory, "release");
   const resolutionFile = join(f.directory, "resolution.json");
-  const spawned = await f.spawnSession(
-    control,
-    JSON.stringify({
-      gate,
-      reply: "done",
-      callerMessage: "next",
-      permission: true,
-      resolutionFile,
-    }),
-  );
+  const spawnMessage = JSON.stringify({
+    gate,
+    reply: "done",
+    permission: true,
+    nativeCallerSnapshot: true,
+    resolutionFile,
+  });
+  const spawned = await f.spawnSession(control, spawnMessage);
   const observer = await f.sdk();
   const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
-  const live = await observer.attach(target, { mode: "none" });
+  const live = await observer.attach(target, { mode: "available" });
   const initialCursor = live.checkpoint;
   expect(parseResumeCursor(serializeResumeCursor(initialCursor))).toBe(
     initialCursor,
@@ -164,6 +162,8 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   await consuming;
   expect(await live.done).toMatchObject({ reason: "end_turn" });
   expect(facts.map((fact) => fact.type)).toEqual([
+    "turn.started",
+    "message",
     "message",
     "text.delta",
     "text.delta",
@@ -175,16 +175,30 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
     "turn.completed",
   ]);
 
-  const callerMessage = facts.find(
+  const callerMessages = facts.filter(
     (fact): fact is Extract<AgentFact, { type: "message" }> =>
       fact.type === "message" && fact.role === "caller",
   );
+  const callerMessage = callerMessages.at(-1);
+  const callerFallback = callerMessages[0];
+  expect(callerMessages).toHaveLength(2);
+  expect(callerFallback?.messageKey).toBe(callerMessage?.messageKey);
+  expect(callerFallback?.content).toBe(spawnMessage);
+  expect(callerMessage?.content).toEqual([
+    { type: "text", text: spawnMessage },
+    { type: "image", source: "bytes", data: "AAEC" },
+  ]);
   const textFacts = facts.filter((fact) => fact.type === "text.delta");
   const workerMessage = facts.find(
     (fact): fact is Extract<AgentFact, { type: "message" }> =>
       fact.type === "message" && fact.role === "worker",
   );
-  expect(callerMessage).toMatchObject({ content: "next" });
+  expect(callerMessage).toMatchObject({
+    content: [
+      { type: "text", text: spawnMessage },
+      { type: "image", source: "bytes", data: "AAEC" },
+    ],
+  });
   if (callerMessage === undefined)
     throw new Error("missing caller message fact");
   expect(parseMessageKey(serializeMessageKey(callerMessage.messageKey))).toBe(
@@ -192,11 +206,17 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   );
   expect(textFacts.map((fact) => fact.delta)).toEqual(["hello ", "world"]);
   expect(textFacts[0]?.messageKey).toBe(workerMessage?.messageKey);
-  expect(workerMessage).toMatchObject({ content: "hello world" });
+  expect(workerMessage).toMatchObject({
+    content: "hello world",
+    nativeTruncated: true,
+  });
 
   const toolRequested = facts.find((fact) => fact.type === "tool.requested");
   const toolCompleted = facts.find((fact) => fact.type === "tool.completed");
-  expect(toolRequested).toMatchObject({ name: "read-file" });
+  expect(toolRequested).toMatchObject({
+    name: "read-file",
+    input: { path: "report.json", options: { raw: true } },
+  });
   if (toolRequested?.type !== "tool.requested")
     throw new Error("missing tool request fact");
   expect(parseToolKey(serializeToolKey(toolRequested.toolKey))).toBe(
@@ -211,7 +231,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   expect(toolRequested?.toolKey).toBe(toolCompleted?.toolKey);
   expect(toolCompleted).toMatchObject({
     name: "native-result-name",
-    result: "file contents",
+    result: { content: "file contents", metadata: { bytes: 13 } },
     isError: false,
   });
 
@@ -565,7 +585,7 @@ test.each(["failed", "cancelled"] as const)(
   },
 );
 
-test("active replay remains bounded before a permission-blocked turn completes", async () => {
+test("active replay preserves complete history before a permission-blocked turn completes", async () => {
   const f = await fixture();
   const control = await f.sdk();
   const gate = join(f.directory, "release-large-active-history");
@@ -589,20 +609,20 @@ test("active replay remains bounded before a permission-blocked turn completes",
   await writeFile(gate, "release");
   const requested = await permission;
   const available = await observer.attach(target, { mode: "available" });
-  expect(available.establishment.window).toMatchObject({ truncated: true });
-  expect(available.establishment.replayed).toBeLessThanOrEqual(1_000);
-  const retained: AgentFact[] = [];
+  expect(available.establishment.window).toMatchObject({ truncated: false });
+  expect(available.establishment.replayed).toBeGreaterThan(1_000);
+  const replayed: AgentFact[] = [];
   for (let index = 0; index < available.establishment.replayed; index += 1) {
     const item = await available.next();
     expect(item.done).toBe(false);
-    if (!item.done) retained.push(item.value);
+    if (!item.done) replayed.push(item.value);
   }
   available.close();
   expect(await available.done).toMatchObject({ reason: "closed" });
-  expect(retained.some((fact) => fact.type === "permission.requested")).toBe(
+  expect(replayed.some((fact) => fact.type === "permission.requested")).toBe(
     true,
   );
-  expect(retained.some((fact) => fact.type === "turn.completed")).toBe(false);
+  expect(replayed.some((fact) => fact.type === "turn.completed")).toBe(false);
 
   await observer.resolvePermission(
     requested.permissionHandle,
@@ -670,7 +690,7 @@ test("SDK cursors remain bound to their exact scope and session", async () => {
   ).rejects.toMatchObject({ failure: { code: "invalid_params" } });
 });
 
-test("SDK exposes its retained replay window and reports an expired cursor", async () => {
+test("SDK replays complete history and keeps an earlier cursor valid", async () => {
   const f = await fixture();
   const control = await f.sdk();
   const gate = join(f.directory, "release-history");
@@ -697,22 +717,22 @@ test("SDK exposes its retained replay window and reports an expired cursor", asy
   const available = await observer.attach(target, { mode: "available" });
   const window = available.establishment.window;
   expect(window).toMatchObject({
-    truncated: true,
+    truncated: false,
     oldest: expect.any(Number),
     head: expect.any(Number),
   });
-  expect(window.oldest).toBeGreaterThan(1);
+  expect(window.oldest).toBe(1);
   const facts: AgentFact[] = [];
   for await (const fact of available) facts.push(fact);
   expect(await available.done).toMatchObject({ reason: "end_turn" });
-  expect(facts.length).toBeLessThanOrEqual(1_000);
+  expect(facts.length).toBeGreaterThan(1_000);
 
-  await expect(
-    observer.attach(target, { mode: "after", cursor: staleCursor }),
-  ).rejects.toMatchObject({
-    failure: {
-      code: "event_cursor_expired",
-      facts: { oldest: window.oldest, head: window.head },
-    },
+  const after = await observer.attach(target, {
+    mode: "after",
+    cursor: staleCursor,
   });
+  const afterFacts: AgentFact[] = [];
+  for await (const fact of after) afterFacts.push(fact);
+  expect(await after.done).toMatchObject({ reason: "end_turn" });
+  expect(afterFacts.length).toBeGreaterThan(1_000);
 });

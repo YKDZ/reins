@@ -190,14 +190,51 @@ function assertPublicLifecycle(
   const deltas = events.filter((event) => event.type === "text.delta");
   const snapshots = events.filter((event) => event.type === "message");
   expect(deltas).toHaveLength(facts.textDeltaCount);
-  const expectedMessageIds = facts.messages.map(
-    (_message, index) => `m${index + 1}`,
+  expect(snapshots.map((event) => [event.messageId, event.role])).toEqual([
+    ["m1", "caller"],
+    ["w1", "worker"],
+    ["w2", "worker"],
+    ["w3", "worker"],
+  ]);
+  expect(snapshots[0]).toMatchObject({
+    content: "fixture replay",
+    messageId: "m1",
+    role: "caller",
+  });
+  const workerSnapshots = snapshots.filter((event) => event.role === "worker");
+  const parts = workerSnapshots.map((snapshot) =>
+    typeof snapshot.content === "string"
+      ? [{ type: "text" as const, text: snapshot.content }]
+      : snapshot.content,
   );
-  expect(snapshots.map((event) => event.messageId)).toEqual(expectedMessageIds);
+  expect(parts.map((content) => content.map((part) => part.type))).toEqual([
+    ["thinking", "text", "tool_call"],
+    ["thinking", "tool_call"],
+    ["thinking", "text"],
+  ]);
+  const thinkingHashes = parts.flatMap((content) =>
+    content
+      .filter((part) => part.type === "thinking")
+      .map((part) => sha256(part.text)),
+  );
+  expect(thinkingHashes).toEqual(facts.thinkingHashes);
+  const toolCallIds = parts.flatMap((content) =>
+    content
+      .filter((part) => part.type === "tool_call")
+      .map((part) => part.toolCallId),
+  );
+  expect(toolCallIds).toEqual(
+    facts.tools.map((_tool, index) => `c${index + 1}`),
+  );
+  const textSnapshots = workerSnapshots.filter(
+    (snapshot) =>
+      typeof snapshot.content !== "string" &&
+      snapshot.content.some((part) => part.type === "text"),
+  );
   expect(new Set(deltas.map((event) => event.messageId))).toEqual(
-    new Set(expectedMessageIds),
+    new Set(textSnapshots.map((event) => event.messageId)),
   );
-  const deltaHashes = snapshots.map((snapshot) =>
+  const deltaHashes = textSnapshots.map((snapshot) =>
     sha256(
       deltas
         .filter((delta) => delta.messageId === snapshot.messageId)
@@ -206,9 +243,18 @@ function assertPublicLifecycle(
     ),
   );
   expect(deltaHashes).toEqual(facts.messages.map((fact) => fact.deltaHash));
-  expect(snapshots.map((snapshot) => sha256(snapshot.content))).toEqual(
-    facts.messages.map((fact) => fact.snapshotHash),
-  );
+  expect(
+    textSnapshots.map((snapshot) =>
+      sha256(
+        typeof snapshot.content === "string"
+          ? snapshot.content
+          : snapshot.content
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join(""),
+      ),
+    ),
+  ).toEqual(facts.messages.map((fact) => fact.snapshotHash));
   const toolEvents = events.filter(
     (event) =>
       event.type === "tool.requested" || event.type === "tool.completed",
@@ -222,6 +268,7 @@ function assertPublicLifecycle(
       turnId: "t1",
       toolCallId,
       name: fact.name,
+      input: fact.input,
     });
     const completed = toolEvents[index * 2 + 1];
     expect(
@@ -232,7 +279,11 @@ function assertPublicLifecycle(
             turnId: completed.turnId,
             toolCallId: completed.toolCallId,
             name: completed.name,
-            resultHash: sha256(completed.result ?? ""),
+            resultHash: sha256(
+              typeof completed.result === "string"
+                ? completed.result
+                : (JSON.stringify(completed.result) ?? ""),
+            ),
             isError: completed.isError,
           }
         : completed,
@@ -265,11 +316,11 @@ describe("Qoder ingress conformance", () => {
       sdkVersion: "1.0.23",
       qoderCliVersion: "1.1.23",
       protocolVersion: "1.2.0",
-      projectionVersion: 2,
+      projectionVersion: 4,
       lineCount: 34,
       uniqueNativeToolCount: 2,
       artifactSha256:
-        "fd22bd2353a3b9651e88a52e057c3dd31ca7de04d811ce8d803826a022096491",
+        "61bff04768ebaaa8b590ea050427faa43653fb9901f91c6df28e3cc71bc326a3",
       sourceSha256:
         "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
       scenario:
@@ -306,7 +357,17 @@ describe("Qoder ingress conformance", () => {
       turnId: "t1",
       stopReason: fixture.facts.terminal.stopReason,
     });
-    expect(terminal.finalReply === snapshots.at(-1)?.content).toBe(true);
+    const finalContent = snapshots.at(-1)?.content;
+    const finalText =
+      finalContent === undefined
+        ? undefined
+        : typeof finalContent === "string"
+          ? finalContent
+          : finalContent
+              .filter((part) => part.type === "text")
+              .map((part) => part.text)
+              .join("");
+    expect(terminal.finalReply).toBe(finalText);
     expect(sha256(terminal.finalReply ?? "")).toBe(
       fixture.facts.terminal.finalReplyHash,
     );

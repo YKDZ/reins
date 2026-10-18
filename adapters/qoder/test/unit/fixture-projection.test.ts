@@ -15,7 +15,7 @@ const metadata = {
   sdkVersion: "1.0.23",
   qoderCliVersion: "1.1.23",
   protocolVersion: "1.2.0",
-  projectionVersion: 2,
+  projectionVersion: 4,
   lineCount: 1,
   uniqueNativeToolCount: 0,
   artifactSha256:
@@ -57,6 +57,46 @@ const nonZeroUsage = {
 };
 
 describe("recorded Qoder projection", () => {
+  test("工具请求与结果保留结构化正文", () => {
+    const toolInput = { command: "cat notes.txt", options: { raw: true } };
+    const toolOutput = [{ type: "text", text: "完整输出" }];
+    const projected = projectRecordedQoderMessages([
+      {
+        type: "assistant",
+        message: {
+          id: "assistant-1",
+          content: [
+            {
+              type: "tool_use",
+              id: "tool-1",
+              name: "Bash",
+              input: toolInput,
+            },
+            {
+              type: "tool_result",
+              tool_use_id: "tool-1",
+              content: toolOutput,
+            },
+          ],
+          stop_reason: null,
+        },
+      },
+    ]);
+
+    expect(projected[0]).toMatchObject({
+      type: "assistant",
+      message: {
+        content: [
+          { type: "tool_use", input: toolInput },
+          { type: "tool_result", content: toolOutput },
+        ],
+      },
+    });
+    expect(toQoderSdkMessages(projected)[0]).toMatchObject({
+      message: { content: [{ input: toolInput }, { content: toolOutput }] },
+    });
+  });
+
   test("projects init to the closed saved-fixture contract", () => {
     const projected = projectRecordedQoderMessages([
       {

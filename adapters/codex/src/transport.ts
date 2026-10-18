@@ -15,6 +15,10 @@ import {
   type TurnId,
 } from "@reins/protocol";
 
+import type { ImageDetail } from "./generated/ImageDetail.ts";
+import type { TextElement } from "./generated/v2/TextElement.ts";
+import type { UserInput } from "./generated/v2/UserInput.ts";
+
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 1_000;
 const STDERR_CHUNK_BYTES = 16 * 1024;
@@ -160,20 +164,43 @@ function spawnRealChild(
 type ToolItemStatus = "inProgress" | "completed" | "failed" | "declined";
 
 export type CodexInboundItem =
+  | {
+      type: "userMessage";
+      id: string;
+      clientId: string | null;
+      content: readonly UserInput[];
+    }
   | { type: "agentMessage"; id: string; text: string }
   | {
       type: "commandExecution";
       id: string;
       status: ToolItemStatus;
+      command?: string;
       output: string | null;
     }
-  | { type: "fileChange"; id: string; status: ToolItemStatus; changes: string }
+  | {
+      type: "fileChange";
+      id: string;
+      status: ToolItemStatus;
+      changes: unknown;
+    }
   | {
       type: "mcpToolCall";
       id: string;
       status: "inProgress" | "completed" | "failed";
-      result: string;
+      arguments?: unknown;
+      result: unknown;
       error: { message: string } | null;
+    }
+  | {
+      type: "dynamicToolCall";
+      id: string;
+      namespace: string | null;
+      tool: string;
+      status: "inProgress" | "completed" | "failed";
+      arguments: unknown;
+      contentItems: unknown[] | null;
+      success: boolean | null;
     };
 
 type TokenCounts = {
@@ -238,7 +265,7 @@ export type InboundMessage =
   | {
       kind: "notification";
       method: "item/started" | "item/completed";
-      params: { item: CodexInboundItem };
+      params: { item: CodexInboundItem; turnId?: string };
     }
   | {
       kind: "notification";
@@ -687,6 +714,73 @@ export function createCodexTransport(options: {
     return typeof value === "object" && value !== null && !Array.isArray(value);
   }
 
+  function parseUserInput(value: unknown): UserInput | null {
+    if (!isRecord(value) || typeof value.type !== "string") return null;
+    if (value.type === "text") {
+      if (typeof value.text !== "string" || !Array.isArray(value.text_elements))
+        return null;
+      const textElements: TextElement[] = [];
+      for (const element of value.text_elements) {
+        if (
+          !isRecord(element) ||
+          !isRecord(element.byteRange) ||
+          typeof element.byteRange.start !== "number" ||
+          !Number.isInteger(element.byteRange.start) ||
+          element.byteRange.start < 0 ||
+          typeof element.byteRange.end !== "number" ||
+          !Number.isInteger(element.byteRange.end) ||
+          element.byteRange.end < element.byteRange.start ||
+          (element.placeholder !== null &&
+            typeof element.placeholder !== "string")
+        )
+          return null;
+        textElements.push({
+          byteRange: {
+            start: element.byteRange.start,
+            end: element.byteRange.end,
+          },
+          placeholder: element.placeholder,
+        });
+      }
+      return {
+        type: "text",
+        text: value.text,
+        text_elements: textElements,
+      };
+    }
+    if (value.type === "image" || value.type === "localImage") {
+      const rawDetail = value.detail;
+      let detail: ImageDetail | undefined;
+      if (rawDetail !== undefined) {
+        if (
+          rawDetail !== "auto" &&
+          rawDetail !== "low" &&
+          rawDetail !== "high" &&
+          rawDetail !== "original"
+        )
+          return null;
+        detail = rawDetail;
+      }
+      const optionalDetail = detail === undefined ? {} : { detail };
+      return value.type === "image" && typeof value.url === "string"
+        ? { type: "image", url: value.url, ...optionalDetail }
+        : value.type === "localImage" && typeof value.path === "string"
+          ? { type: "localImage", path: value.path, ...optionalDetail }
+          : null;
+    }
+    if (value.type === "audio" && typeof value.url === "string")
+      return { type: "audio", url: value.url };
+    if (value.type === "localAudio" && typeof value.path === "string")
+      return { type: "localAudio", path: value.path };
+    if (
+      (value.type === "skill" || value.type === "mention") &&
+      typeof value.name === "string" &&
+      typeof value.path === "string"
+    )
+      return { type: value.type, name: value.name, path: value.path };
+    return null;
+  }
+
   function isUnmappedApprovalDecision(value: unknown): boolean {
     if (!isRecord(value)) return false;
     const execPolicy = value.acceptWithExecpolicyAmendment;
@@ -708,11 +802,9 @@ export function createCodexTransport(options: {
   }
 
   const ignoredItemTypes = new Set([
-    "userMessage",
     "hookPrompt",
     "plan",
     "reasoning",
-    "dynamicToolCall",
     "collabAgentToolCall",
     "subAgentActivity",
     "webSearch",
@@ -744,6 +836,28 @@ export function createCodexTransport(options: {
       return typeof value.id === "string" ? { status: "ignored" } : null;
     }
     if (typeof value.id !== "string") return null;
+    if (value.type === "userMessage") {
+      if (
+        (value.clientId !== null && typeof value.clientId !== "string") ||
+        !Array.isArray(value.content)
+      )
+        return null;
+      const content: UserInput[] = [];
+      for (const candidate of value.content) {
+        const parsedInput = parseUserInput(candidate);
+        if (parsedInput === null) return null;
+        content.push(parsedInput);
+      }
+      return {
+        status: "mapped",
+        item: {
+          type: "userMessage",
+          id: value.id,
+          clientId: value.clientId as string | null,
+          content,
+        },
+      };
+    }
     if (value.type === "agentMessage") {
       return typeof value.text === "string"
         ? {
@@ -756,6 +870,7 @@ export function createCodexTransport(options: {
       const status = parseToolStatus(value.status);
       if (
         status === null ||
+        (value.command !== undefined && typeof value.command !== "string") ||
         (value.aggregatedOutput !== null &&
           typeof value.aggregatedOutput !== "string")
       )
@@ -766,6 +881,9 @@ export function createCodexTransport(options: {
           type: "commandExecution",
           id: value.id,
           status,
+          ...(typeof value.command === "string"
+            ? { command: value.command }
+            : {}),
           output: value.aggregatedOutput,
         },
       };
@@ -779,7 +897,7 @@ export function createCodexTransport(options: {
           type: "fileChange",
           id: value.id,
           status,
-          changes: JSON.stringify(value.changes),
+          changes: value.changes,
         },
       };
     }
@@ -800,8 +918,37 @@ export function createCodexTransport(options: {
           type: "mcpToolCall",
           id: value.id,
           status,
-          result: JSON.stringify(value.result),
+          ...(Object.hasOwn(value, "arguments")
+            ? { arguments: value.arguments }
+            : {}),
+          result: value.result,
           error: error === null ? null : { message: error.message as string },
+        },
+      };
+    }
+    if (value.type === "dynamicToolCall") {
+      const status = parseToolStatus(value.status);
+      if (
+        status === null ||
+        status === "declined" ||
+        (value.namespace !== null && typeof value.namespace !== "string") ||
+        typeof value.tool !== "string" ||
+        !hasOwn(value, "arguments") ||
+        (value.contentItems !== null && !Array.isArray(value.contentItems)) ||
+        (value.success !== null && typeof value.success !== "boolean")
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "dynamicToolCall",
+          id: value.id,
+          namespace: value.namespace,
+          tool: value.tool,
+          status,
+          arguments: value.arguments,
+          contentItems: value.contentItems,
+          success: value.success,
         },
       };
     }
@@ -874,6 +1021,11 @@ export function createCodexTransport(options: {
         : null;
     }
     if (method === "item/started" || method === "item/completed") {
+      if (
+        params.turnId !== undefined &&
+        (typeof params.turnId !== "string" || params.turnId.length === 0)
+      )
+        return null;
       const parsed = parseItem(params.item);
       if (parsed === null) return null;
       return parsed.status === "ignored"
@@ -881,7 +1033,12 @@ export function createCodexTransport(options: {
         : {
             kind: "notification",
             method,
-            params: { item: parsed.item },
+            params: {
+              item: parsed.item,
+              ...(typeof params.turnId === "string"
+                ? { turnId: params.turnId }
+                : {}),
+            },
           };
     }
     if (method === "thread/tokenUsage/updated") {

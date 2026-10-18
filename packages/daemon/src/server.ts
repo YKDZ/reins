@@ -48,7 +48,6 @@ import * as v from "valibot";
 import { createConsumerScope, type ConsumerScope } from "./consumer-scope.ts";
 import {
   createControlPlane,
-  DEFAULT_EVENT_LOG_LIMIT,
   type CommittedEvent,
   type ControlPlane,
 } from "./control-plane.ts";
@@ -60,7 +59,6 @@ import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
 import type { AdapterRegistry } from "./registry.ts";
 
 export const DEFAULT_IDLE_TIMEOUT_MS = 5 * 60 * 1000;
-export { DEFAULT_EVENT_LOG_LIMIT };
 
 const listenIoFailure = parseTransportFailureFact({
   kind: "transport_failure",
@@ -87,7 +85,6 @@ type AttachSubscription = {
   readonly subscriptionId: SubscriptionId;
   lastEventId: EventId | null;
   replaying: boolean;
-  pendingEvents: CommittedEvent[];
   active: boolean;
   readonly connection: TransportConnection<ProtocolMessage>;
 };
@@ -119,7 +116,6 @@ type PublicProtocolServerOptions = {
   runtimeScopeId: RuntimeScopeId;
   controlStore?: ControlStore;
   idleTimeoutMs?: number;
-  eventLogLimit?: number;
 };
 
 type ProtocolServerTestingOptions = {
@@ -145,9 +141,6 @@ export function createProtocolServer(
     consumerScope,
     controlStore,
     runtimeScopeId: options.runtimeScopeId,
-    ...(options.eventLogLimit === undefined
-      ? {}
-      : { eventLogLimit: options.eventLogLimit }),
   });
   return createProtocolServerInternal(
     {
@@ -498,8 +491,8 @@ export function createProtocolServerInternal(
     const { event, eventId } = entry;
     for (const subscription of Array.from(attachSubscriptions)) {
       if (subscription.sessionId !== event.sessionId) continue;
-      if (subscription.replaying) subscription.pendingEvents.push(entry);
-      else forwardToSubscription(subscription, event, eventId);
+      if (!subscription.replaying)
+        forwardToSubscription(subscription, event, eventId);
     }
     scheduleIdleExit();
   }
@@ -515,7 +508,8 @@ export function createProtocolServerInternal(
       (!("turnId" in event) || event.turnId !== subscription.target.turnId)
     )
       return;
-    subscription.lastEventId = eventId;
+    if (subscription.lastEventId === null || eventId > subscription.lastEventId)
+      subscription.lastEventId = eventId;
     sendSafe(subscription.connection, {
       kind: "notification",
       method: "event",
@@ -530,6 +524,56 @@ export function createProtocolServerInternal(
     ) {
       endAttach(subscription, event.stopReason);
     }
+  }
+
+  async function replayAndFollow(
+    subscription: AttachSubscription,
+    firstPage: ReturnType<ControlPlane["readAttachPage"]>,
+    terminal: StopReason | undefined,
+  ): Promise<void> {
+    let page = firstPage;
+    let afterEventId = 0;
+    const snapshotThrough = firstPage.throughEventId;
+
+    while (subscription.active) {
+      for (const entry of page.entries)
+        forwardToSubscription(subscription, entry.event, entry.eventId);
+      afterEventId = page.nextAfter;
+      if (!subscription.active || !page.hasMore) break;
+      await new Promise<void>((resolve) => setImmediate(resolve));
+      page = options.control.readAttachPage(
+        subscription.target,
+        afterEventId,
+        snapshotThrough,
+      );
+    }
+
+    while (subscription.active) {
+      const next = options.control.readAttachPage(
+        subscription.target,
+        afterEventId,
+      );
+      if (next.entries.length === 0) {
+        if (
+          next.throughEventId !== null &&
+          (subscription.lastEventId === null ||
+            next.throughEventId > subscription.lastEventId)
+        )
+          subscription.lastEventId = next.throughEventId;
+        subscription.replaying = false;
+        break;
+      }
+      for (const entry of next.entries)
+        forwardToSubscription(subscription, entry.event, entry.eventId);
+      afterEventId = next.nextAfter;
+      if (subscription.active)
+        await new Promise<void>((resolve) => setImmediate(resolve));
+    }
+
+    if (!subscription.active) return;
+    if (terminal !== undefined) endAttach(subscription, terminal);
+    else if (options.control.isSessionKilled(subscription.sessionId))
+      endAttach(subscription, "session_killed");
   }
 
   const unsubscribeControlEvents = options.control.subscribeEvents(
@@ -630,7 +674,6 @@ export function createProtocolServerInternal(
       lastEventId: replay.lastEventId,
       connection,
       replaying: true,
-      pendingEvents: [],
       active: true,
     };
     // 先完整验证再注册；注册后到 ACK 释放之间的事件进入同一队列。
@@ -652,15 +695,11 @@ export function createProtocolServerInternal(
     }
     afterAttachAck.set(request, () => {
       if (!subscription.active) return;
-      for (const entry of replay.entries)
-        forwardToSubscription(subscription, entry.event, entry.eventId);
-      subscription.replaying = false;
-      for (const entry of subscription.pendingEvents.splice(0))
-        forwardToSubscription(subscription, entry.event, entry.eventId);
-      if (!subscription.active) return;
-      if (terminal !== undefined) endAttach(subscription, terminal);
-      else if (options.control.isSessionKilled(params.sessionId))
-        endAttach(subscription, "session_killed");
+      void replayAndFollow(subscription, replay.firstPage, terminal).catch(
+        () => {
+          if (subscription.active) endAttach(subscription, "closed");
+        },
+      );
     });
     return {
       sessionId: params.sessionId,
@@ -671,7 +710,7 @@ export function createProtocolServerInternal(
         oldest: replay.oldest,
         head: replay.head,
       },
-      replayed: replay.entries.length,
+      replayed: replay.firstPage.total,
     };
   }
 

@@ -97,6 +97,31 @@ describe("SQLite控制存储", () => {
         spawnedAt: session.info.spawnedAt,
       },
       { type: "turn.started", sessionId, turnId: result.turnId },
+      {
+        type: "message",
+        sessionId,
+        turnId: result.turnId,
+        messageId: "caller-1" as never,
+        role: "caller",
+        content: "完整首条输入",
+      },
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: result.turnId,
+        toolCallId: "tool-1" as never,
+        name: "read-file",
+        input: { path: "report.json", options: { raw: true } },
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: result.turnId,
+        toolCallId: "tool-1" as never,
+        name: "read-file",
+        result: { content: "完整工具输出", metadata: { bytes: 18 } },
+        isError: false,
+      },
     ];
     store.markSpawnDispatched(key);
     expect(
@@ -111,8 +136,49 @@ describe("SQLite控制存储", () => {
       result,
     });
     expect(store.getSession(sessionId)).toEqual(session);
-    expect(store.sessionEvents(sessionId)).toHaveLength(2);
-    expect(store.eventWindow(sessionId)).toEqual({ head: 2, oldest: 1 });
+    expect(store.sessionEvents(sessionId)).toHaveLength(5);
+    expect(store.eventWindow(sessionId)).toEqual({ head: 5, oldest: 1 });
+    const firstPage = store.sessionEventsPage({
+      sessionId,
+      afterEventId: 0,
+      limit: 2,
+      turnId: result.turnId,
+    });
+    expect(firstPage).toEqual({
+      entries: events.slice(1, 3).map((event, index) => ({
+        event,
+        eventId: index + 2,
+      })),
+      nextAfter: 3,
+      throughEventId: 5,
+      head: 5,
+      oldest: 1,
+      total: 4,
+      hasMore: true,
+    });
+    const secondPage = store.sessionEventsPage({
+      sessionId,
+      afterEventId: firstPage.nextAfter,
+      throughEventId: firstPage.throughEventId,
+      limit: 2,
+      turnId: result.turnId,
+    });
+    expect(secondPage).toEqual({
+      entries: events.slice(3).map((event, index) => ({
+        event,
+        eventId: index + 4,
+      })),
+      nextAfter: 5,
+      throughEventId: 5,
+      head: 5,
+      oldest: 1,
+      total: 2,
+      hasMore: false,
+    });
+    expect(secondPage.entries[1]?.event).toMatchObject({
+      type: "tool.completed",
+      result: { content: "完整工具输出", metadata: { bytes: 18 } },
+    });
     expect(store.registerSpawn(identity)).toMatchObject({
       created: false,
       operation: { status: "succeeded", result },

@@ -15,6 +15,7 @@ import {
   sessionInfoSchema,
   spawnAckSchema,
   spawnParamsSchema,
+  turnIdSchema,
   type ConsumerContext,
   type DaemonGeneration,
   type DomainEvent,
@@ -25,6 +26,7 @@ import {
   type SessionId,
   type SpawnAck,
   type SpawnParams,
+  type TurnId,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -65,6 +67,24 @@ export type StoredCommittedEvent = {
   readonly eventId: EventId;
 };
 
+export type SessionEventsPageInput = {
+  readonly sessionId: SessionId;
+  readonly afterEventId: number;
+  readonly throughEventId?: EventId | null;
+  readonly limit: number;
+  readonly turnId?: TurnId;
+};
+
+export type SessionEventsPage = {
+  readonly entries: readonly StoredCommittedEvent[];
+  readonly nextAfter: number;
+  readonly throughEventId: EventId | null;
+  readonly head: EventId | null;
+  readonly oldest: EventId | null;
+  readonly total: number;
+  readonly hasMore: boolean;
+};
+
 export type ControlStore = {
   registerSpawn(input: ControlOperationInput): {
     readonly created: boolean;
@@ -87,6 +107,7 @@ export type ControlStore = {
   getSession(sessionId: SessionId): StoredSession | undefined;
   listSessions(): readonly StoredSession[];
   sessionEvents(sessionId: SessionId): readonly StoredCommittedEvent[];
+  sessionEventsPage(input: SessionEventsPageInput): SessionEventsPage;
   eventWindow(sessionId: SessionId): {
     readonly head: EventId | null;
     readonly oldest: EventId | null;
@@ -398,6 +419,94 @@ function createControlStore(database: DatabaseSync): ControlStore {
       .run(stableJson(info), sessionId);
   }
 
+  function readEventWindow(sessionId: SessionId): {
+    readonly head: EventId | null;
+    readonly oldest: EventId | null;
+  } {
+    assertOpen();
+    const row = database
+      .prepare(
+        "SELECT head, (SELECT min(event_id) FROM session_events WHERE session_id = ?) AS oldest FROM session_heads WHERE session_id = ?",
+      )
+      .get(sessionId, sessionId) as
+      | { head: number; oldest: number | null }
+      | undefined;
+    return {
+      head:
+        row === undefined || row.head === 0
+          ? null
+          : v.parse(eventIdSchema, row.head),
+      oldest: row?.oldest == null ? null : v.parse(eventIdSchema, row.oldest),
+    };
+  }
+
+  function readSessionEventsPage(
+    input: SessionEventsPageInput,
+  ): SessionEventsPage {
+    assertOpen();
+    const sessionId = v.parse(sessionIdSchema, input.sessionId);
+    if (!Number.isSafeInteger(input.afterEventId) || input.afterEventId < 0)
+      throw new Error("Event page cursor must be a non-negative integer");
+    if (!Number.isSafeInteger(input.limit) || input.limit < 1)
+      throw new Error("Event page limit must be a positive integer");
+    const turnId =
+      input.turnId === undefined
+        ? undefined
+        : v.parse(turnIdSchema, input.turnId);
+    const window = readEventWindow(sessionId);
+    const pinnedThrough =
+      input.throughEventId === undefined
+        ? undefined
+        : input.throughEventId === null
+          ? 0
+          : v.parse(eventIdSchema, input.throughEventId);
+    if (pinnedThrough !== undefined && pinnedThrough > (window.head ?? 0))
+      throw new Error("Event page boundary is ahead of the stored history");
+    const through = pinnedThrough ?? window.head ?? 0;
+    if (input.afterEventId > through)
+      throw new Error("Event page cursor is ahead of its history boundary");
+    const turnFilter =
+      turnId === undefined
+        ? ""
+        : " AND json_extract(event_json, '$.turnId') = ?";
+    const rangeParams: (string | number)[] = [
+      sessionId,
+      input.afterEventId,
+      through,
+      ...(turnId === undefined ? [] : [turnId]),
+    ];
+    const countRow = database
+      .prepare(
+        `SELECT COUNT(*) AS total FROM session_events WHERE session_id = ? AND event_id > ? AND event_id <= ?${turnFilter}`,
+      )
+      .get(...rangeParams) as { total: number };
+    const rows = database
+      .prepare(
+        `SELECT event_id, event_json FROM session_events WHERE session_id = ? AND event_id > ? AND event_id <= ?${turnFilter} ORDER BY event_id LIMIT ?`,
+      )
+      .all(...rangeParams, input.limit) as EventRow[];
+    const entries = rows.map((row) => {
+      const entry = eventFromRow(row);
+      if (entry.event.sessionId !== sessionId)
+        throw new Error("Stored event does not match its session");
+      return entry;
+    });
+    const total = Number(countRow.total);
+    const hasMore = total > entries.length;
+    const nextAfter = hasMore
+      ? (entries.at(-1)?.eventId ?? input.afterEventId)
+      : through;
+    return {
+      entries,
+      nextAfter,
+      throughEventId: through === 0 ? null : v.parse(eventIdSchema, through),
+      head: window.head,
+      oldest: window.oldest,
+      total,
+      hasMore,
+    };
+  }
+
   return {
     registerSpawn(input) {
       const operationKey = validatedOperationKey(input.operationKey);
@@ -602,22 +711,12 @@ function createControlStore(database: DatabaseSync): ControlStore {
         return entry;
       });
     },
+    sessionEventsPage(input) {
+      return readSessionEventsPage(input);
+    },
     eventWindow(sessionId) {
-      assertOpen();
-      const row = database
-        .prepare(
-          "SELECT head, (SELECT min(event_id) FROM session_events WHERE session_id = ?) AS oldest FROM session_heads WHERE session_id = ?",
-        )
-        .get(sessionId, sessionId) as
-        | { head: number; oldest: number | null }
-        | undefined;
-      return {
-        head:
-          row === undefined || row.head === 0
-            ? null
-            : v.parse(eventIdSchema, row.head),
-        oldest: row?.oldest == null ? null : v.parse(eventIdSchema, row.oldest),
-      };
+      sessionId = v.parse(sessionIdSchema, sessionId);
+      return readEventWindow(sessionId);
     },
     health() {
       return {

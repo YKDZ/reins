@@ -39,6 +39,7 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
         JSON.stringify({
           sessionId,
           turnId: spec.turnId,
+          messageId: spec.messageId,
           message: spec.message,
         }) + "\n",
       );
