@@ -81,6 +81,9 @@ type PublicFact<E> = E extends DomainEvent
         ? { content: string | PublicMessageContentPart[] }
         : {}) &
       (E extends { toolCallId: unknown } ? { toolKey: ToolKey } : {}) &
+      (E extends { type: "permission.requested" }
+        ? { toolKey?: ToolKey }
+        : {}) &
       (E extends { permissionId: unknown }
         ? { permissionHandle: PermissionHandle }
         : {}) &

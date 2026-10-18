@@ -148,11 +148,13 @@ async function setup(
 ): Promise<{
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
+  unavailableSessionIds: SessionId[];
   fake: ReturnType<typeof createFakeTransport>;
   driver: ReturnType<ReturnType<typeof createCodexDriver>>;
 }> {
   const fake = createFakeTransport();
   const diagnostics: DriverDiagnosticFact[] = [];
+  const unavailableSessionIds: SessionId[] = [];
   const factory = createCodexDriver({
     transportFactory: () => fake.transport,
     ...(terminateTimeoutMs === undefined ? {} : { terminateTimeoutMs }),
@@ -160,6 +162,7 @@ async function setup(
   const events: DomainEvent[] = [];
   const driver = factory({
     emit: (event) => events.push(event),
+    markControlUnavailable: () => unavailableSessionIds.push(sessionId),
     diagnostics: async (input) => {
       diagnostics.push(input);
       return undefined;
@@ -174,7 +177,7 @@ async function setup(
     ...(authorizationMode === "omitted" ? {} : { authorizationMode }),
     ...workerOverrides,
   });
-  return { events, diagnostics, fake, driver };
+  return { events, diagnostics, unavailableSessionIds, fake, driver };
 }
 
 async function setupWithMalformedResponse(
@@ -609,7 +612,7 @@ describe("codex driver", () => {
     expect(methods).toEqual(["initialize", "thread/start", "turn/start"]);
     const threadStart = fake.controls.requests()[1];
     expect(threadStart?.params).toEqual({
-      ephemeral: true,
+      ephemeral: false,
       cwd: "/tmp/demo",
       approvalPolicy: "on-request",
     });
@@ -724,7 +727,7 @@ describe("codex driver", () => {
 
     const threadStart = fake.controls.requests()[1];
     expect(threadStart?.params).toEqual({
-      ephemeral: true,
+      ephemeral: false,
       cwd: "/tmp/demo",
       approvalPolicy: "never",
       sandbox: "danger-full-access",
@@ -737,7 +740,7 @@ describe("codex driver", () => {
 
     const threadStart = fake.controls.requests()[1];
     expect(threadStart?.params).toEqual({
-      ephemeral: true,
+      ephemeral: false,
       cwd: "/tmp/demo",
     });
   });
@@ -754,7 +757,7 @@ describe("codex driver", () => {
     await flush();
 
     expect(fake.controls.requests()[1]?.params).toEqual({
-      ephemeral: true,
+      ephemeral: false,
       cwd: "/tmp/demo",
       approvalPolicy: "on-request",
     });
@@ -884,6 +887,248 @@ describe("codex driver", () => {
     ]);
   });
 
+  test("Codex 协作工具完成回合后仍保留同一工具正文与后台来源", async () => {
+    const { events, fake } = await setup();
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        turnId: "turn1",
+        item: {
+          type: "collabAgentToolCall",
+          id: "collab-1",
+          tool: "spawnAgent",
+          status: "inProgress",
+          prompt: "委派提示正文",
+          model: "custom-model",
+          reasoningEffort: "high",
+          agentsStates: [{ status: "running", message: "进行中的子代理正文" }],
+        },
+      },
+    });
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: {
+        turn: { id: "turn1", status: "completed", error: null },
+      },
+    });
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/completed",
+      params: {
+        turnId: "turn1",
+        item: {
+          type: "collabAgentToolCall",
+          id: "collab-1",
+          tool: "spawnAgent",
+          status: "completed",
+          prompt: "委派提示正文",
+          model: "custom-model",
+          reasoningEffort: "high",
+          agentsStates: [
+            { status: "completed", message: "已完成的子代理正文" },
+          ],
+        },
+      },
+    });
+    await flush();
+
+    expect(events).toEqual([
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "collabAgentToolCall",
+        input: {
+          tool: "spawnAgent",
+          prompt: "委派提示正文",
+          model: "custom-model",
+          reasoningEffort: "high",
+        },
+      },
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "codex_collaboration", id: "collab-1" },
+        status: "active",
+        causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "end_turn",
+        finalReply: null,
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "collabAgentToolCall",
+        result: [{ status: "completed", message: "已完成的子代理正文" }],
+        isError: false,
+      },
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "codex_collaboration", id: "collab-1" },
+        status: "completed",
+        causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+      },
+    ]);
+  });
+
+  test("公开计划与图像事实保留正文并在图像临时引用失效前读取", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "codex-native-facts-"));
+    const imagePath = join(directory, "image.png");
+    await writeFile(imagePath, Buffer.from([0, 1, 2, 255]));
+    const { events, fake, driver } = await setup();
+    try {
+      await flush();
+      for (const item of [
+        { type: "plan", id: "plan-1", text: "计划全文" },
+        {
+          type: "reasoning",
+          id: "reasoning-1",
+          summary: ["理由摘要"],
+          content: ["理由正文"],
+        },
+        {
+          type: "hookPrompt",
+          id: "hook-1",
+          fragments: [{ text: "hook 全文", hookRunId: "native-hook-id" }],
+        },
+        {
+          type: "enteredReviewMode",
+          id: "review-1",
+          review: "审查全文",
+        },
+        { type: "imageView", id: "image-view-1", path: imagePath },
+      ] as const)
+        fake.controls.pushInbound({
+          kind: "notification",
+          method: "item/completed",
+          params: { turnId: "turn1", item },
+        });
+      fake.controls.pushInbound({
+        kind: "notification",
+        method: "item/started",
+        params: {
+          turnId: "turn1",
+          item: {
+            type: "imageGeneration",
+            id: "image-generation-1",
+            status: "inProgress",
+            revisedPrompt: null,
+            result: "pending",
+            savedPath: imagePath,
+          },
+        },
+      });
+      fake.controls.pushInbound({
+        kind: "notification",
+        method: "item/completed",
+        params: {
+          turnId: "turn1",
+          item: {
+            type: "imageGeneration",
+            id: "image-generation-1",
+            status: "completed",
+            revisedPrompt: "修订后的提示",
+            result: "生成结果",
+            transparentBackground: true,
+            savedPath: imagePath,
+          },
+        },
+      });
+      await flush();
+
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "message",
+          role: "worker",
+          content: [
+            {
+              type: "opaque",
+              harness: "codex",
+              nativeType: "plan",
+              value: { text: "计划全文" },
+            },
+          ],
+        }),
+      );
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "message",
+          role: "worker",
+          content: [
+            {
+              type: "opaque",
+              harness: "codex",
+              nativeType: "reasoning",
+              value: { summary: ["理由摘要"], content: ["理由正文"] },
+            },
+          ],
+        }),
+      );
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "message",
+          role: "worker",
+          content: [
+            {
+              type: "opaque",
+              harness: "codex",
+              nativeType: "hookPrompt",
+              value: { fragments: ["hook 全文"] },
+            },
+          ],
+        }),
+      );
+      const imageView = events.find(
+        (event) => event.type === "message" && event.messageId === "w5",
+      );
+      expect(imageView?.type).toBe("message");
+      if (imageView?.type !== "message")
+        throw new Error("Codex 图像事实没有映射为消息");
+      expect(imageView.content).toEqual([
+        {
+          type: "image",
+          source: "bytes",
+          data: Buffer.from([0, 1, 2, 255]).toString("base64"),
+        },
+      ]);
+      expect(events).toContainEqual(
+        expect.objectContaining({
+          type: "tool.completed",
+          name: "imageGeneration",
+          result: {
+            status: "completed",
+            revisedPrompt: "修订后的提示",
+            result: "生成结果",
+            transparentBackground: true,
+            image: {
+              type: "image",
+              source: "bytes",
+              data: Buffer.from([0, 1, 2, 255]).toString("base64"),
+            },
+          },
+          isError: false,
+        }),
+      );
+      expect(JSON.stringify(events)).not.toContain(imagePath);
+      expect(JSON.stringify(events)).not.toContain("native-hook-id");
+      await driver.terminate(sessionId);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("动态工具关联保留参数、输出与 Reins 工具调用身份", async () => {
     const { events, fake } = await setup();
     await flush();
@@ -956,20 +1201,40 @@ describe("codex driver", () => {
     const { events, fake, driver } = await setup();
     await flush();
     fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        item: {
+          type: "commandExecution",
+          id: "e1",
+          command: "ls",
+          status: "inProgress",
+          output: null,
+        },
+        turnId: "turn1",
+      },
+    });
+    await flush();
+    fake.controls.pushInbound({
       kind: "request",
       id: 7,
       method: "item/commandExecution/requestApproval",
-      input: {
-        threadId: "thr1",
-        turnId: "turn1",
-        itemId: "e1",
-        command: "ls",
-      },
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn1",
+      itemId: "e1",
+      input: { command: "ls" },
       availableDecisions: ["accept", "acceptForSession", "decline"],
       requestedPermissions: {},
     });
     await flush();
 
+    expect(
+      events.find((event) => event.type === "tool.requested"),
+    ).toMatchObject({
+      type: "tool.requested",
+      toolCallId: "c1",
+      name: "commandExecution",
+    });
     const requested = events.find(
       (event) => event.type === "permission.requested",
     );
@@ -978,8 +1243,9 @@ describe("codex driver", () => {
       sessionId,
       turnId: firstTurnId,
       permissionId: "p1",
+      toolCallId: "c1",
       kind: "tool:commandExecution",
-      input: { threadId: "thr1", turnId: "turn1", itemId: "e1", command: "ls" },
+      input: { command: "ls" },
       options: [
         { outcome: "allow", scope: "once" },
         { outcome: "allow", scope: "session" },
@@ -994,6 +1260,80 @@ describe("codex driver", () => {
     expect(fake.controls.responded()).toEqual([
       { id: 7, result: { decision: "accept" } },
     ]);
+  });
+
+  test("turn/start 确认前到达的当前回合工具与授权按原生归属接续", async () => {
+    const { events, fake, driver } = await setup();
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { id: "turn1", status: "completed", error: null } },
+    });
+    await flush();
+
+    let acceptStart!: (result: { turn: { id: string } }) => void;
+    fake.controls.setResponse(
+      "turn/start",
+      new Promise<{ turn: { id: string } }>((resolve) => {
+        acceptStart = resolve;
+      }),
+    );
+    const delivery = driver.deliver(
+      sessionId,
+      secondTurnId,
+      "caller task",
+      "new_turn",
+    );
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        item: {
+          type: "commandExecution",
+          id: "e2",
+          command: "ls",
+          status: "inProgress",
+          output: null,
+        },
+        turnId: "turn2",
+      },
+    });
+    fake.controls.pushInbound({
+      kind: "request",
+      id: 12,
+      method: "item/commandExecution/requestApproval",
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn2",
+      itemId: "e2",
+      input: { command: "ls" },
+      availableDecisions: ["accept"],
+      requestedPermissions: {},
+    });
+    await flush();
+    expect(events.some((event) => event.type === "permission.requested")).toBe(
+      false,
+    );
+
+    acceptStart({ turn: { id: "turn2" } });
+    await delivery;
+    await flush();
+    const tool = events.find((event) => event.type === "tool.requested");
+    const permission = events.find(
+      (event) => event.type === "permission.requested",
+    );
+    expect(tool).toMatchObject({
+      type: "tool.requested",
+      turnId: secondTurnId,
+      toolCallId: "c1",
+    });
+    expect(permission).toMatchObject({
+      type: "permission.requested",
+      turnId: secondTurnId,
+      toolCallId: "c1",
+      input: { command: "ls" },
+    });
   });
 
   test("不支持的入站请求归一化为 compatibility_gap，不泄漏请求对象", async () => {
@@ -1076,11 +1416,10 @@ describe("codex driver", () => {
       kind: "request",
       id: 9,
       method: "item/commandExecution/requestApproval",
-      input: {
-        threadId: "thr1",
-        turnId: "turn1",
-        itemId: "e2",
-      },
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn1",
+      itemId: "e2",
+      input: {},
       availableDecisions: ["accept"],
       requestedPermissions: {},
     });
@@ -1092,6 +1431,7 @@ describe("codex driver", () => {
     expect(
       requested?.type === "permission.requested" ? requested.options : [],
     ).toEqual([{ outcome: "allow", scope: "once" }]);
+    expect(requested).not.toHaveProperty("toolCallId");
   });
 
   test("deny 映射 decline", async () => {
@@ -1101,7 +1441,10 @@ describe("codex driver", () => {
       kind: "request",
       id: 8,
       method: "item/fileChange/requestApproval",
-      input: { threadId: "thr1", turnId: "turn1", itemId: "f1" },
+      nativeThreadId: "thr1",
+      nativeTurnId: "turn1",
+      itemId: "f1",
+      input: {},
       availableDecisions: ["accept", "acceptForSession", "decline"],
       requestedPermissions: {},
     });
@@ -1405,7 +1748,7 @@ describe("codex driver", () => {
   });
 
   test("worker stream 读取异常只记录 read_error", async () => {
-    const { diagnostics, events, fake } = await setup();
+    const { diagnostics, events, fake, unavailableSessionIds } = await setup();
     await flush();
 
     fake.controls.fail(new Error("stdout read failed"));
@@ -1418,14 +1761,14 @@ describe("codex driver", () => {
         reason: "read_error",
       }),
     ]);
-    expect(events.at(-1)).toMatchObject({
-      type: "turn.completed",
-      stopReason: "failed",
-    });
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+    expect(unavailableSessionIds).toEqual([sessionId]);
   });
 
   test("worker stream 自然 EOF 只记录 closed_unexpectedly", async () => {
-    const { diagnostics, events, fake } = await setup();
+    const { diagnostics, events, fake, unavailableSessionIds } = await setup();
     await flush();
 
     fake.controls.end();
@@ -1443,10 +1786,10 @@ describe("codex driver", () => {
         reason: "exited_unexpectedly",
       }),
     ]);
-    expect(events.at(-1)).toMatchObject({
-      type: "turn.completed",
-      stopReason: "failed",
-    });
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+    expect(unavailableSessionIds).toEqual([sessionId]);
   });
 
   test("idle worker clean EOF 仍记录一次 exited_unexpectedly 且不伪造 turn", async () => {
@@ -1519,6 +1862,8 @@ test("adapter rejects an out-of-menu answer without consuming the original nativ
     kind: "request",
     id: 70,
     method: "item/commandExecution/requestApproval",
+    nativeThreadId: "thr1",
+    nativeTurnId: "turn1",
     input: {},
     availableDecisions: ["accept"],
     requestedPermissions: {},

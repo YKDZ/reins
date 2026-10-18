@@ -339,17 +339,20 @@ test.each([
                 event.type === "message" && event.content === "rejected steer",
             ),
         ).toBe(false);
-      expect(
-        plane.list({ sessionId: target.sessionId }, consumer)[0],
-      ).toMatchObject({
-        // 这是已提交投影；EOF 结果仍未知，准入栅栏阻止新 turn。
-        state:
-          failureMode === "transport_eof"
-            ? "idle"
-            : failureMode === "accepted_commit_failure"
-              ? "killed"
-              : "busy",
-      });
+      const listedSession = plane.list(
+        { sessionId: target.sessionId },
+        consumer,
+      )[0];
+      if (failureMode === "transport_eof")
+        expect(listedSession).toMatchObject({
+          state: "unreachable",
+          lastKnownState: "busy",
+          unreachableReason: "control_lost",
+        });
+      else
+        expect(listedSession).toMatchObject({
+          state: failureMode === "accepted_commit_failure" ? "killed" : "busy",
+        });
     } finally {
       try {
         await plane.terminateLiveSessions();
