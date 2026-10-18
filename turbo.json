@@ -2,9 +2,19 @@
   "concurrency": "50%",
   "boundaries": {
     "tags": {
-      "app": {
+      "runtime": {
         "dependencies": {
-          "allow": ["client", "protocol", "transport", "library"]
+          "allow": [
+            "client",
+            "protocol",
+            "transport",
+            "daemon",
+            "core",
+            "adapter",
+            "adapter-kit",
+            "event-journal",
+            "library"
+          ]
         }
       },
       "adapter": {

@@ -40,6 +40,13 @@ function fakeAdapter(options: {
     const driver: WorkerDriver = {
       start(spec) {
         current = { sessionId: spec.sessionId, turnId: spec.turnId };
+        const observationsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
+        if (observationsFile !== undefined) {
+          appendFileSync(
+            observationsFile,
+            `${JSON.stringify({ type: "worker_started", spec })}\n`,
+          );
+        }
         if (behavior === "complete") {
           if (spec.captureHarnessStderr === true) {
             for (const originalBytes of [20_000, 20_001, 20_002]) {
@@ -114,9 +121,16 @@ function fakeAdapter(options: {
           });
         }
       },
-      async deliver(_sessionId, turnId) {
+      async deliver(_sessionId, turnId, message) {
         if (current === null) return;
         const sessionId = current.sessionId;
+        const requestsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
+        if (requestsFile !== undefined) {
+          appendFileSync(
+            requestsFile,
+            `${JSON.stringify({ type: "message_delivered", sessionId, turnId, message })}\n`,
+          );
+        }
         queueMicrotask(() => {
           emit({
             type: "turn.completed",
