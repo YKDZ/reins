@@ -101,7 +101,9 @@ type IngressActionFrame = {
 type PendingDelivery = {
   readonly projection: IngressProjection;
   readonly events: DomainEvent[];
+  readonly lateEvents: DomainEvent[];
   readonly creating: boolean;
+  phase: "accepting" | "committing";
   readonly settled: Promise<void>;
   readonly settle: () => void;
   count: number;
@@ -115,7 +117,16 @@ function createPendingDelivery(
   const settled = new Promise<void>((resolve) => {
     settle = resolve;
   });
-  return { projection, creating, events: [], count: 0, settled, settle };
+  return {
+    projection,
+    creating,
+    phase: "accepting",
+    events: [],
+    lateEvents: [],
+    count: 0,
+    settled,
+    settle,
+  };
 }
 
 type WorkerEventIngressDecision =
@@ -912,7 +923,8 @@ export function createSessionMachine(options: {
     }
     const delivering = pendingDeliveries.get(event.sessionId);
     if (delivering === undefined) bus.publish(event);
-    else delivering.events.push(event);
+    else if (delivering.phase === "accepting") delivering.events.push(event);
+    else delivering.lateEvents.push(event);
   };
 
   function assertTurnTarget(target: TurnTarget): void {
@@ -1218,7 +1230,8 @@ export function createSessionMachine(options: {
               terminationError,
             );
           }
-          const batch = [started, caller, ...delivery.events] as const;
+          delivery.phase = "committing";
+          const batch = Object.freeze([started, caller, ...delivery.events]);
           try {
             await hooks?.commit?.(ack, batch);
           } catch (commitError) {
@@ -1241,9 +1254,13 @@ export function createSessionMachine(options: {
               terminationError,
             );
           }
+          bus.publish(batch);
+          while (delivery.lateEvents.length > 0) {
+            const lateBatch = delivery.lateEvents.splice(0);
+            bus.publish(lateBatch);
+          }
           pendingDeliveries.delete(sessionId);
           delivery.settle();
-          bus.publish(batch);
           return ack;
         } finally {
           if (pendingDeliveries.get(sessionId) === delivery) {

@@ -89,6 +89,12 @@ type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       error: ReinsFailure;
     }
   | {
+      status: "not_accepted_uncommitted" | "not_accepted_unconfirmed";
+      operationKey: OperationKey<Kind>;
+      error: ReinsFailure;
+      cause: ErrorCause;
+    }
+  | {
       status: "accepted_uncommitted";
       operationKey: OperationKey<Kind>;
       result: OperationResultByKind[Kind];
@@ -122,6 +128,7 @@ export type SendInput =
   | {
       placement: "active_turn";
       turnHandle: TurnHandle;
+      ifLastCompletedTurn?: never;
       message: string;
     };
 export type SendResult = {

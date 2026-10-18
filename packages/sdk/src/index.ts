@@ -705,6 +705,8 @@ async function connectClient(
           throw invalidInput("placement", "operation");
         let params: ProtocolParams<"send">;
         if (input.placement === "active_turn") {
+          if (Object.hasOwn(input, "ifLastCompletedTurn"))
+            throw invalidInput("ifLastCompletedTurn", "operation");
           const target = targetFromHandle(input.turnHandle, "turnHandle");
           params = {
             placement: "active_turn",
@@ -1165,6 +1167,14 @@ function projectOperationRecord<Kind extends "spawn" | "send">(
         status: "failed",
         operationKey,
         error: projectFailure(record.error),
+      } as OperationRecord<Kind>;
+    case "not_accepted_uncommitted":
+    case "not_accepted_unconfirmed":
+      return {
+        status: record.status,
+        operationKey,
+        error: projectFailure(record.error),
+        cause: record.cause,
       } as OperationRecord<Kind>;
     case "accepted_uncommitted":
       return {

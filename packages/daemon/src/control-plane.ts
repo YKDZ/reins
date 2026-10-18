@@ -224,6 +224,14 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     string,
     | { readonly status: "failed"; readonly error: MachineError }
     | {
+        readonly status:
+          | "not_accepted_uncommitted"
+          | "not_accepted_unconfirmed";
+        readonly error: MachineError;
+        readonly failureWriteError: unknown;
+        readonly verificationError?: unknown;
+      }
+    | {
         readonly status: "accepted_uncommitted" | "accepted_unconfirmed";
         readonly result: SendAck;
         readonly error: unknown;
@@ -631,6 +639,47 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     }
   }
 
+  function rememberUncommittedSendFailure(
+    operationKey: OperationKey,
+    failure: MachineError,
+    failureWriteError: unknown,
+  ): boolean {
+    let operation: ControlOperation | undefined;
+    let verificationError: unknown;
+    try {
+      operation = options.controlStore.getOperation(operationKey);
+    } catch (error) {
+      verificationError = error;
+    }
+    const recorded =
+      operation?.status === "failed" &&
+      canonical(operation.error) === canonical(failure);
+    if (recorded) return true;
+
+    const stateIsUncommitted =
+      verificationError === undefined &&
+      (operation === undefined ||
+        operation.status === "pending" ||
+        operation.status === "dispatched");
+    sendResults.set(operationKey, {
+      status: stateIsUncommitted
+        ? "not_accepted_uncommitted"
+        : "not_accepted_unconfirmed",
+      error: failure,
+      failureWriteError,
+      ...(verificationError === undefined
+        ? stateIsUncommitted
+          ? {}
+          : {
+              verificationError: new Error(
+                "Stored operation does not match the known rejection",
+              ),
+            }
+        : { verificationError }),
+    });
+    return false;
+  }
+
   function getOperation(
     operationKey: OperationKey,
     consumer: ConsumerContext | undefined,
@@ -674,6 +723,28 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           : { diagnosticId: error.diagnosticId }),
       });
     };
+    const knownNotAcceptedRecord = (
+      status: "not_accepted_uncommitted" | "not_accepted_unconfirmed",
+    ): OperationRecord => {
+      if (
+        known === undefined ||
+        (known.status !== "not_accepted_uncommitted" &&
+          known.status !== "not_accepted_unconfirmed")
+      )
+        throw new Error("No uncommitted send failure is recorded");
+      return record({
+        status,
+        operationKey,
+        error: known.error,
+        cause: makeErrorCause(
+          "io",
+          status === "not_accepted_uncommitted" ||
+            known.verificationError === undefined
+            ? errorMessage(known.failureWriteError)
+            : `${errorMessage(known.failureWriteError)}; durable state verification failed: ${errorMessage(known.verificationError)}`,
+        ),
+      });
+    };
     if (transientOperations.get(operationKey)?.method === kind)
       return record({
         status: "pending",
@@ -713,6 +784,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       if (operation === undefined) {
         if (known?.status === "accepted_uncommitted")
           return knownAcceptedRecord("accepted_unconfirmed");
+        if (
+          known?.status === "not_accepted_uncommitted" ||
+          known?.status === "not_accepted_unconfirmed"
+        )
+          return knownNotAcceptedRecord("not_accepted_uncommitted");
         if (known?.status === "failed")
           return record({ status: "failed", operationKey, error: known.error });
         if (known?.status === "outcome_unknown") return knownUnknownRecord();
@@ -732,6 +808,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         throw { code: "operation_key_scope_mismatch" } satisfies MachineError;
       switch (operation.status) {
         case "pending":
+          if (
+            known?.status === "not_accepted_uncommitted" ||
+            known?.status === "not_accepted_unconfirmed"
+          )
+            return knownNotAcceptedRecord("not_accepted_uncommitted");
           if (known?.status === "failed")
             return record({
               status: "failed",
@@ -743,6 +824,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             operationKey,
           });
         case "dispatched":
+          if (
+            known?.status === "not_accepted_uncommitted" ||
+            known?.status === "not_accepted_unconfirmed"
+          )
+            return knownNotAcceptedRecord("not_accepted_uncommitted");
           if (known?.status === "failed")
             return record({
               status: "failed",
@@ -799,6 +885,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         return knownAcceptedRecord("accepted_uncommitted");
       if (known?.status === "accepted_unconfirmed")
         return knownAcceptedRecord("accepted_unconfirmed");
+      if (
+        known?.status === "not_accepted_uncommitted" ||
+        known?.status === "not_accepted_unconfirmed"
+      )
+        return knownNotAcceptedRecord("not_accepted_unconfirmed");
       if (known?.status === "outcome_unknown") return knownUnknownRecord();
       if (known?.status === "failed")
         return record({ status: "failed", operationKey, error: known.error });
@@ -1104,8 +1195,13 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 sendResults.set(key, { status: "failed", error: failure });
                 try {
                   options.controlStore.failSend(key, failure);
-                } catch {
+                } catch (failureWriteError) {
                   wakeWaitersIfStoreUnavailable();
+                  rememberUncommittedSendFailure(
+                    key,
+                    failure,
+                    failureWriteError,
+                  );
                 }
                 throw failure;
               }
@@ -1248,15 +1344,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               options.controlStore.failSend(key, failure);
             } catch (storeError) {
               wakeWaitersIfStoreUnavailable();
-              let recorded = false;
-              try {
-                const operation = options.controlStore.getOperation(key);
-                recorded =
-                  operation?.status === "failed" &&
-                  canonical(operation.error) === canonical(failure);
-              } catch {
-                // 无法核实时保留原生明确未接受事实。
-              }
+              const recorded = rememberUncommittedSendFailure(
+                key,
+                failure,
+                storeError,
+              );
               if (!recorded)
                 throw storeUnavailable(
                   key,
@@ -2018,7 +2110,12 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
 
       if (!registration.created) {
         const known = sendResults.get(operationKey);
-        if (known?.status === "failed") return { error: known.error };
+        if (
+          known?.status === "failed" ||
+          known?.status === "not_accepted_uncommitted" ||
+          known?.status === "not_accepted_unconfirmed"
+        )
+          return { error: known.error };
         switch (registration.operation.status) {
           case "succeeded":
             return { result: registration.operation.result };
@@ -2071,9 +2168,13 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             });
             try {
               options.controlStore.failSend(operationKey, failure);
-            } catch {
+            } catch (failureWriteError) {
               wakeWaitersIfStoreUnavailable();
-              // 先前已知未派发，补记失败不会改变接受事实。
+              rememberUncommittedSendFailure(
+                operationKey,
+                failure,
+                failureWriteError,
+              );
             }
             return { error: failure };
           }
@@ -2083,6 +2184,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           const known = sendResults.get(operationKey);
           if (
             known?.status === "failed" ||
+            known?.status === "not_accepted_uncommitted" ||
+            known?.status === "not_accepted_unconfirmed" ||
             known?.status === "accepted_uncommitted" ||
             known?.status === "accepted_unconfirmed" ||
             known?.status === "outcome_unknown"
@@ -2117,10 +2220,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             options.controlStore.failSend(operationKey, result.error);
           } catch (error) {
             wakeWaitersIfStoreUnavailable();
-            sendResults.set(operationKey, {
-              status: "failed",
-              error: result.error,
-            });
+            rememberUncommittedSendFailure(operationKey, result.error, error);
             return {
               error: storeUnavailable(
                 operationKey,

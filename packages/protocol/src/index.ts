@@ -2718,6 +2718,12 @@ export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       readonly error: MachineError;
     }
   | {
+      readonly status: "not_accepted_uncommitted" | "not_accepted_unconfirmed";
+      readonly operationKey: OperationKey<Kind>;
+      readonly error: MachineError;
+      readonly cause: ErrorCause;
+    }
+  | {
       readonly status: "accepted_uncommitted" | "accepted_unconfirmed";
       readonly operationKey: OperationKey<Kind>;
       readonly result: RecoverableOperationResult[Kind];
@@ -2768,6 +2774,15 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       status: v.literal("failed"),
       operationKey: keySchema,
       error: machineErrorSchema,
+    }),
+    v.strictObject({
+      status: v.picklist([
+        "not_accepted_uncommitted",
+        "not_accepted_unconfirmed",
+      ]),
+      operationKey: keySchema,
+      error: machineErrorSchema,
+      cause: errorCauseSchema,
     }),
     v.strictObject({
       status: v.literal("accepted_uncommitted"),

@@ -68,6 +68,20 @@ const keyedSend = connection.send(newTurnSend, {
 });
 const sendOperationQuery: Promise<OperationRecord<"send">> =
   connection.getOperation(sendOperationKey);
+function inspectUncommittedSendFailure(record: OperationRecord<"send">): void {
+  if (
+    record.status !== "not_accepted_uncommitted" &&
+    record.status !== "not_accepted_unconfirmed"
+  )
+    return;
+  if (record.cause.kind === "io") {
+    const causeKind: "io" = record.cause.kind;
+    void causeKind;
+  }
+  const failureCode: ReinsFailure["code"] = record.error.code;
+  void failureCode;
+}
+void inspectUncommittedSendFailure;
 const target: AgentTarget = { scope: "turn", turnHandle };
 const waitInput: WaitInput = {
   targets: [turnHandle],

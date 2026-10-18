@@ -1374,6 +1374,80 @@ describe("daemon 协议面（缝 C）", () => {
     ]);
   });
 
+  test("新回合提交期间到达的终态仍进入已提交观察", async () => {
+    let fake!: ReturnType<typeof createFakeHarness>;
+    fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      deliver: async () => {
+        let remaining = 4;
+        const emitAfterCommitStarts = (): void => {
+          remaining -= 1;
+          if (remaining === 0) fake.controls.completeTurn();
+          else queueMicrotask(emitAfterCommitStarts);
+        };
+        queueMicrotask(emitAfterCommitStarts);
+      },
+    });
+    const controlStore = createInMemoryControlStore();
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    void daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "start the first turn",
+      }),
+    ) as { sessionId: SessionId };
+    fake.controls.completeTurn();
+
+    const sent = resultOf(
+      await requester("send", {
+        placement: "new_turn",
+        sessionId: spawned.sessionId,
+        message: "start the second turn",
+      }),
+    ) as { turnId: TurnId };
+    expect(
+      controlStore
+        .sessionEvents(spawned.sessionId)
+        .filter(({ event }) => event.type === "turn.completed")
+        .map(({ event }) =>
+          event.type === "turn.completed" ? event.turnId : "",
+        ),
+    ).toEqual(["t1", sent.turnId]);
+    expect(resultOf(await requester("list", {}))).toMatchObject([
+      { sessionId: spawned.sessionId, state: "idle", turns: 2 },
+    ]);
+    expect(
+      await requester("wait", {
+        targets: [{ sessionId: spawned.sessionId, turnId: sent.turnId }],
+        completion: "all",
+        timeoutMs: 50,
+      }),
+    ).toMatchObject({
+      result: {
+        status: "satisfied",
+        completed: [{ turnId: sent.turnId }],
+        pending: [],
+      },
+    });
+    connection.close();
+    await daemon.stop();
+    daemons.splice(daemons.indexOf(daemon), 1);
+  });
+
   test("跨连接 attach + send 后会话保持存活，连接断开不杀会话", async () => {
     const fake = createFakeHarness({
       harness: "codex",
@@ -4329,27 +4403,30 @@ test("新回合明确未接受但失败记录不可写时查询保留已知拒�
       cause: { message: expect.stringContaining("native queue rejected") },
     },
   });
+  const operationKey = testOperationKey(
+    connection,
+    "send",
+    request.testOperationId,
+  );
   const queried = await sendRaw(connection, {
     kind: "request",
     requestId: "send-not-accepted-query",
     method: "getOperation",
-    params: {
-      operationKey: testOperationKey(
-        connection,
-        "send",
-        request.testOperationId,
-      ),
-    },
+    params: { operationKey },
   });
   expect(queried).toMatchObject({
     result: {
-      status: "failed",
+      status: "not_accepted_uncommitted",
       error: {
         code: "internal_error",
         cause: { message: "native queue rejected the turn" },
       },
+      cause: { kind: "io", message: "send failure record unavailable" },
     },
   });
+  expect(backingStore.getOperation(operationKey as never)?.status).toBe(
+    "dispatched",
+  );
   const retry = await sendRaw(connection, {
     ...request,
     requestId: "send-not-accepted-retry",

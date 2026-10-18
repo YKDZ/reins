@@ -123,6 +123,17 @@ const wrongSpawnOperationKey: OperationKey<"spawn"> =
   connection.prepareOperation("send");
 // @ts-expect-error 操作键会在泛型推断中保留操作类型。
 const wrongOperation: OperationKey<"send"> = spawnOperationKey;
+const activeTurnVariableWithPrecondition = {
+  placement: "active_turn" as const,
+  turnHandle,
+  ifLastCompletedTurn: turnHandle,
+  message: "invalid active turn precondition",
+};
+// @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
+const invalidActiveTurnSend: SendInput = activeTurnVariableWithPrecondition;
+// @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
+connection.send(activeTurnVariableWithPrecondition);
+void invalidActiveTurnSend;
 declare const sendRecord: OperationRecord<"send">;
 // @ts-expect-error send 查询记录不能伪装成 spawn 查询记录。
 const wrongSendRecord: OperationRecord<"spawn"> = sendRecord;
@@ -152,14 +163,6 @@ const invalidSend: SendInput = {
   sessionHandle,
   message: "ambiguous target",
 };
-const activeTurnWithPrecondition: SendInput = {
-  placement: "active_turn",
-  turnHandle,
-  message: "active turns cannot carry a predecessor condition",
-  // @ts-expect-error 前驱条件只适用于 new_turn。
-  ifLastCompletedTurn: turnHandle,
-};
-
 const unreachableSessionFields = {
   sessionHandle,
   harness: "qoder" as const,
@@ -221,7 +224,6 @@ void wrongSendRecord;
 void inspectSendRecordKind;
 void wrongSpawnOperationKey;
 void invalidSend;
-void activeTurnWithPrecondition;
 void invalidReplay;
 void sessionTarget;
 void mismatchedTarget;

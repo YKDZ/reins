@@ -1165,6 +1165,12 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       sessionHandle: active.sessionHandle,
       message: "unknown placement",
     },
+    {
+      placement: "active_turn",
+      turnHandle: active.turnHandle,
+      ifLastCompletedTurn: active.turnHandle,
+      message: "conflicting active turn precondition",
+    },
   ]) {
     await expect(
       connection.send(input as unknown as SendInput, {
