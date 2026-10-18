@@ -1,6 +1,6 @@
 // 直接启动 daemon 长驻进程的生命周期接缝：真实 spawn、就绪等待（含启动失败/超时
 // 事实）、停止（SIGTERM 宽限→SIGKILL 升级）。日志自 spawn 起完整落盘。
-// 产品 CLI 自动拉起 sibling daemon 的路径不由本夹具启动，夹具只提供观察与兜底停止。
+// 运行包本地装配负责发现并按需启动共享 daemon；本夹具只提供进程观察与兜底停止。
 import { spawn } from "node:child_process";
 
 import { observe, waitForPath } from "./process.ts";

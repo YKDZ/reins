@@ -36,7 +36,7 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
 }
 
 describe("Codex 模型目录", () => {
-  test("能力查询与 worker 共用冷 HOME 首次 initialize 协调", async () => {
+  test("模型目录查询与 worker 共用冷 HOME 首次 initialize 协调", async () => {
     const previousHome = process.env.CODEX_HOME;
     process.env.CODEX_HOME = `/tmp/reins-codex-model-catalog-${randomUUID()}`;
     const workerFake = createFakeTransport();
@@ -52,7 +52,7 @@ describe("Codex 模型目录", () => {
       modelCatalogStarts += 1;
     };
     const sessionId =
-      "session:00000000-0000-4000-8000-000000000000:capabilitiesworker:1" as SessionId;
+      "session:00000000-0000-4000-8000-000000000000:modelcatalogworker:1" as SessionId;
     const worker = createCodexDriver({
       transportFactory: () => workerFake.transport,
     })({
