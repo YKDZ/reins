@@ -27,6 +27,7 @@ export type {
 };
 
 export type QoderQuery = AsyncIterable<unknown> & {
+  initializationResult(): Promise<unknown>;
   interrupt(): Promise<unknown>;
   close(): Promise<void>;
 };

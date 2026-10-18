@@ -8,7 +8,7 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
   let child: ChildProcessWithoutNullStreams;
   let current: Pick<WorkerSpec, "sessionId" | "turnId">;
   return {
-    start(spec) {
+    async start(spec) {
       current = { sessionId: spec.sessionId, turnId: spec.turnId };
       child = spawn(
         process.execPath,

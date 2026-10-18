@@ -54,7 +54,9 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
             });
         }
       })().catch((error: unknown) => {
-        rejectInitial(error instanceof Error ? error : new Error(String(error)));
+        rejectInitial(
+          error instanceof Error ? error : new Error(String(error)),
+        );
       });
       child.once("error", rejectInitial);
       child.stdin.write(

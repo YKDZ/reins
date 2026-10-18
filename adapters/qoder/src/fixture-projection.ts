@@ -631,6 +631,8 @@ export function toQoderSdkMessages(
       return {
         ...message,
         parent_tool_use_id: null,
+        uuid: "<fixture-uuid>",
+        session_id: "<fixture-session>",
       } as SDKMessage;
     }
     return {

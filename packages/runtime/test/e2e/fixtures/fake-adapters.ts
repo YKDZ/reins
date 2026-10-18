@@ -39,7 +39,7 @@ function fakeAdapter(options: {
   const factory: AdapterDriverFactory = ({ emit, diagnostics }) => {
     let current: { sessionId: SessionId; turnId: TurnId } | null = null;
     const driver: WorkerDriver = {
-      start(spec) {
+      async start(spec) {
         current = { sessionId: spec.sessionId, turnId: spec.turnId };
         const behavior =
           spec.captureHarnessStderr === true || !spec.message.startsWith("hold")

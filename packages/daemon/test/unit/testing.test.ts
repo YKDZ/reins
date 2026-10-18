@@ -44,7 +44,8 @@ async function request(
             generations.set(connection, {
               generation: initialized.daemonGeneration,
               consumerContext: String(
-                (message.params as { consumerContext?: unknown }).consumerContext,
+                (message.params as { consumerContext?: unknown })
+                  .consumerContext,
               ),
               runtimeScopeId: initialized.runtimeScopeId,
             });

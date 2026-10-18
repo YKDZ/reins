@@ -147,13 +147,13 @@ describe("routing driver invariants", () => {
   test("same-harness session actions reach only their own native worker", async () => {
     const { driver, workers, alpha, beta } = codexRoutingFixture();
     try {
-      driver.start(alpha);
+      await driver.start(alpha);
       await vi.waitFor(() => {
         expect(workers[0]?.controls.requests().at(-1)?.method).toBe(
           "turn/start",
         );
       });
-      driver.start(beta);
+      await driver.start(beta);
       await vi.waitFor(() => {
         expect(workers[1]?.controls.requests().at(-1)?.method).toBe(
           "turn/start",
@@ -230,7 +230,7 @@ describe("routing driver invariants", () => {
     const { driver, workers, events, alpha, beta } = codexRoutingFixture();
     try {
       for (const spec of [alpha, beta]) {
-        driver.start(spec);
+        await driver.start(spec);
         await vi.waitFor(() => {
           expect(workers.at(-1)?.controls.requests().at(-1)?.method).toBe(
             "turn/start",
@@ -343,7 +343,7 @@ describe("routing driver invariants", () => {
       record,
       query,
     })(() => {});
-    driver.start({
+    await driver.start({
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-verified"),
       harness: "codex",
@@ -551,7 +551,7 @@ describe("routing driver invariants", () => {
       sessionIdSchema,
       "session:00000000-0000-4000-8000-000000000000:stderr:1",
     );
-    driver.start({
+    await driver.start({
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-stderr"),
       harness: "codex",
@@ -623,7 +623,7 @@ describe("routing driver invariants", () => {
         throw new Error("not found");
       },
     })(() => {});
-    driver.start({
+    await driver.start({
       sessionId: v.parse(
         sessionIdSchema,
         "session:00000000-0000-4000-8000-000000000000:owned:1",
@@ -708,7 +708,7 @@ describe("routing driver invariants", () => {
       authorizationMode: "allowAll",
     };
 
-    driver.start(spec);
+    await driver.start(spec);
     const diagnosticId = await accepted;
     expect(diagnosticId).toBeDefined();
     await expect(
@@ -801,7 +801,7 @@ describe("routing driver invariants", () => {
       await expect(
         driver.deliver(sessionId, spec.turnId, "message", "active_turn"),
       ).rejects.toThrow("No routing entry");
-      driver.start(spec);
+      await driver.start(spec);
       await vi.waitFor(() => {
         expect(workers[0]?.controls.requests().at(-1)?.method).toBe(
           "turn/start",

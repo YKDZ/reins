@@ -83,8 +83,8 @@ export function createDaemonInternal(
   assertWriterLease?: () => Promise<void>,
 ): Daemon {
   const controlStore = options.controlStore ?? createInMemoryControlStore();
-  const consumerScope = createConsumerScope((sessionId) =>
-    controlStore.getSession(sessionId)?.consumer,
+  const consumerScope = createConsumerScope(
+    (sessionId) => controlStore.getSession(sessionId)?.consumer,
   );
   const diagnostics = orderDiagnosticsAcceptance(
     options.diagnostics,
@@ -147,8 +147,20 @@ export function createDaemonInternal(
     if (stopPromise !== undefined) return stopPromise;
     server.quiesce();
     const attempt = (async () => {
-      await control.terminateLiveSessions();
-      await server.stop();
+      const failures: unknown[] = [];
+      try {
+        await control.terminateLiveSessions();
+      } catch (error) {
+        failures.push(error);
+      }
+      try {
+        await server.stop();
+      } catch (error) {
+        failures.push(error);
+      }
+      if (failures.length === 1) throw failures[0];
+      if (failures.length > 1)
+        throw new AggregateError(failures, "Daemon stop did not fully succeed");
     })();
     stopPromise = attempt;
     void attempt.catch(() => {

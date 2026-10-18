@@ -1,15 +1,35 @@
+import { randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { DatabaseSync } from "node:sqlite";
 
 import { openControlStore } from "@reins/event-journal";
-import type { DomainEvent, SessionId, SpawnAck, SpawnParams } from "@reins/protocol";
+import {
+  consumerContextSchema,
+  daemonGenerationSchema,
+  makeErrorCause,
+  operationKeyClaimsSchema,
+  runtimeScopeIdSchema,
+  serializeOperationKey,
+  sessionIdSchema,
+  type DomainEvent,
+  type SpawnAck,
+  type SpawnParams,
+} from "@reins/protocol";
+import * as v from "valibot";
 import { describe, expect, test } from "vitest";
 
-const runtimeScopeId = "7aa79020-74c9-4d80-92ca-3c4fe0ebfdbc";
-const consumer = "test-consumer" as never;
-const generation = "g1" as never;
-const sessionId = "session:7aa79020-74c9-4d80-92ca-3c4fe0ebfdbc:g1:1" as SessionId;
+const runtimeScopeId = v.parse(
+  runtimeScopeIdSchema,
+  "7aa79020-74c9-4d80-92ca-3c4fe0ebfdbc",
+);
+const consumer = v.parse(consumerContextSchema, "test-consumer");
+const generation = v.parse(daemonGenerationSchema, "g1");
+const sessionId = v.parse(
+  sessionIdSchema,
+  "session:7aa79020-74c9-4d80-92ca-3c4fe0ebfdbc:g1:1",
+);
 const request: SpawnParams = {
   sessionLabel: "same-label-is-allowed",
   harness: "codex",
@@ -17,13 +37,25 @@ const request: SpawnParams = {
   cwd: "/tmp",
 };
 
-describe("SQLite control store", () => {
-  test("commits operation result, session ownership and creation events atomically across reopen", async () => {
+function operationKey() {
+  return serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, {
+      runtimeScopeId,
+      consumer,
+      kind: "spawn",
+      generation,
+      nonce: randomUUID(),
+    }),
+  );
+}
+
+describe("SQLite控制存储", () => {
+  test("重开后仍原子读取操作结果、会话归属与创建事件", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
     let store = await openControlStore({ directory });
-    const operationKey = "operation-key-1";
+    const key = operationKey();
     const identity = {
-      operationKey,
+      operationKey: key,
       runtimeScopeId,
       consumer,
       generation,
@@ -66,14 +98,14 @@ describe("SQLite control store", () => {
       },
       { type: "turn.started", sessionId, turnId: result.turnId },
     ];
-    store.markSpawnDispatched(operationKey);
+    store.markSpawnDispatched(key);
     expect(
-      store.commitSpawn({ operationKey, result, session, events }),
+      store.commitSpawn({ operationKey: key, result, session, events }),
     ).toEqual(events.map((event, index) => ({ event, eventId: index + 1 })));
     store.close();
 
     store = await openControlStore({ directory });
-    expect(store.getOperation(operationKey)).toMatchObject({
+    expect(store.getOperation(key)).toMatchObject({
       status: "succeeded",
       request,
       result,
@@ -86,14 +118,25 @@ describe("SQLite control store", () => {
       operation: { status: "succeeded", result },
     });
     store.close();
+
+    const database = new DatabaseSync(join(directory, "control.sqlite"));
+    database
+      .prepare("UPDATE sessions SET runtime_scope_id = ? WHERE session_id = ?")
+      .run("00000000-0000-4000-8000-000000000001", sessionId);
+    database.close();
+    const corrupted = await openControlStore({ directory });
+    expect(() => corrupted.getSession(sessionId)).toThrow(
+      "Stored session ownership does not match its identity",
+    );
+    corrupted.close();
     await rm(directory, { recursive: true, force: true });
   });
 
-  test("rejects a repeated key with any changed request field", async () => {
+  test("同一键绑定不同请求时拒绝登记", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
     const store = await openControlStore({ directory });
     const identity = {
-      operationKey: "operation-key-2",
+      operationKey: operationKey(),
       runtimeScopeId,
       consumer,
       generation,
@@ -109,6 +152,91 @@ describe("SQLite control store", () => {
     ).toThrow(expect.objectContaining({ code: "operation_key_conflict" }));
 
     store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  test("重开后保留接受结果未知的主因和停止次因", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
+    const store = await openControlStore({ directory });
+    const key = operationKey();
+    store.registerSpawn({
+      operationKey: key,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request,
+    });
+    store.markSpawnDispatched(key);
+    const error = {
+      code: "operation_outcome_unknown" as const,
+      operationKey: key,
+      cause: makeErrorCause("io", "queue receipt was lost"),
+      cleanupCause: makeErrorCause("closed", "close confirmation failed"),
+    };
+    store.recordSpawnOutcomeUnknown(key, error);
+    store.close();
+
+    const reopened = await openControlStore({ directory });
+    expect(reopened.getOperation(key)).toMatchObject({
+      status: "outcome_unknown",
+      error,
+    });
+    expect(
+      reopened.registerSpawn({
+        operationKey: key,
+        runtimeScopeId,
+        consumer,
+        generation,
+        request,
+      }),
+    ).toMatchObject({
+      created: false,
+      operation: { status: "outcome_unknown", error },
+    });
+    reopened.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  test("读取时拒绝OperationKey归属或状态损坏", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
+    const store = await openControlStore({ directory });
+    const key = operationKey();
+    store.registerSpawn({
+      operationKey: key,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request,
+    });
+    store.close();
+
+    const database = new DatabaseSync(join(directory, "control.sqlite"));
+    database
+      .prepare(
+        "UPDATE operations SET runtime_scope_id = ? WHERE operation_key = ?",
+      )
+      .run("00000000-0000-4000-8000-000000000000", key);
+    database.close();
+
+    const reopened = await openControlStore({ directory });
+    expect(() => reopened.getOperation(key)).toThrow(
+      "Stored spawn operation ownership does not match its key",
+    );
+    reopened.close();
+
+    const repairedDatabase = new DatabaseSync(
+      join(directory, "control.sqlite"),
+    );
+    repairedDatabase.exec("PRAGMA ignore_check_constraints = ON");
+    repairedDatabase
+      .prepare(
+        "UPDATE operations SET runtime_scope_id = ?, status = ? WHERE operation_key = ?",
+      )
+      .run(runtimeScopeId, "unknown-status", key);
+    repairedDatabase.close();
+    const statusCorrupted = await openControlStore({ directory });
+    expect(() => statusCorrupted.getOperation(key)).toThrow();
+    statusCorrupted.close();
     await rm(directory, { recursive: true, force: true });
   });
 });

@@ -1,9 +1,10 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   ModelInfo,
   SDKMessage,
   SDKUserMessage,
 } from "@qodercn-ai/qodercn-agent-sdk";
-import { randomUUID } from "node:crypto";
 import { createAsyncQueue } from "@reins/adapter-kit";
 
 import type { QoderOptions, QoderQuery, QoderSdk } from "#/sdk-seam";
@@ -22,6 +23,7 @@ export type FakeQoderControls = {
 
 export function createFakeSdk(
   behavior: {
+    initializationResult?: () => Promise<unknown>;
     interrupt?: () => Promise<unknown>;
     close?: () => Promise<void>;
   } = {},
@@ -30,7 +32,7 @@ export function createFakeSdk(
   controls: FakeQoderControls;
 } {
   const failureMarker = Symbol("failure");
-  const queue = createAsyncQueue<unknown | typeof failureMarker>();
+  const queue = createAsyncQueue<unknown>();
   let queryFailure: unknown;
   const delivered: SDKUserMessage[] = [];
   let lastOptions: QoderOptions | null = null;
@@ -77,6 +79,9 @@ export function createFakeSdk(
         interrupt: async () => {
           interruptCount += 1;
           return await behavior.interrupt?.();
+        },
+        initializationResult: async () => {
+          return await behavior.initializationResult?.();
         },
         close: () => {
           closeCount += 1;

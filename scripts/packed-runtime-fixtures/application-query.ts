@@ -45,7 +45,7 @@ async function main(): Promise<void> {
         message: "programmatic runtime consumption",
         cwd: process.env.REINS_WORKER_CWD ?? process.cwd(),
       },
-      connection.prepareOperation("spawn"),
+      { operationKey: connection.prepareOperation("spawn") },
     );
     const pending = await connection.wait({
       targets: [spawned.turnHandle],
@@ -74,7 +74,7 @@ async function main(): Promise<void> {
     }
     const killed = await connection.kill(
       { sessionHandle: spawned.sessionHandle },
-      connection.prepareOperation("kill"),
+      { operationKey: connection.prepareOperation("kill") },
     );
     const completed = await connection.wait({
       targets: [spawned.turnHandle],

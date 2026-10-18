@@ -272,6 +272,9 @@ export function createQoderFixtureSdk(
       for (const message of messages) replies.push(message);
       const query: QoderQuery = {
         [Symbol.asyncIterator]: () => replies[Symbol.asyncIterator](),
+        async initializationResult() {
+          return {};
+        },
         async interrupt() {},
         async close() {
           replies.end();

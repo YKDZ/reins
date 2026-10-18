@@ -131,8 +131,8 @@ export function createProtocolServer(
   options: PublicProtocolServerOptions,
 ): ProtocolServer {
   const controlStore = options.controlStore ?? createInMemoryControlStore();
-  const consumerScope = createConsumerScope((sessionId) =>
-    controlStore.getSession(sessionId)?.consumer,
+  const consumerScope = createConsumerScope(
+    (sessionId) => controlStore.getSession(sessionId)?.consumer,
   );
   const diagnostics = orderDiagnosticsAcceptance(
     options.diagnostics,
@@ -424,20 +424,42 @@ export function createProtocolServerInternal(
       cleanupByConnection.clear();
       attachSubscriptions.clear();
       pendingMessages.length = 0;
+      const failures: unknown[] = [];
       try {
-        await options.control.settleEvents();
-        if (daemonStarted && daemonStopReason === undefined) {
-          await recordDiagnostic({
-            kind: "lifecycle",
-            operation: "daemon",
-            reason,
-          });
-          daemonStopReason = reason;
+        try {
+          await options.control.settleEvents();
+        } catch (error) {
+          failures.push(error);
         }
-        await options.transport.close();
-      } catch (error) {
-        shutdownFailure = error;
-        throw error;
+        if (daemonStarted && daemonStopReason === undefined) {
+          try {
+            await recordDiagnostic({
+              kind: "lifecycle",
+              operation: "daemon",
+              reason,
+            });
+            daemonStopReason = reason;
+          } catch (error) {
+            failures.push(error);
+          }
+        }
+        try {
+          await options.transport.close();
+        } catch (error) {
+          failures.push(error);
+        }
+        if (failures.length === 1) {
+          shutdownFailure = failures[0];
+          throw failures[0];
+        }
+        if (failures.length > 1) {
+          const failure = new AggregateError(
+            failures,
+            "Daemon shutdown failed",
+          );
+          shutdownFailure = failure;
+          throw failure;
+        }
       } finally {
         unsubscribeControlEvents();
         options.control.close();

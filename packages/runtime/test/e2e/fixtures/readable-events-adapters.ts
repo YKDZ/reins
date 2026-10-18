@@ -13,7 +13,7 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
   let sessionId: Parameters<ReturnType<AdapterDriverFactory>["deliver"]>[0];
   const accepted = new Map<TurnId, () => void>();
   return {
-    start(spec) {
+    async start(spec) {
       sessionId = spec.sessionId;
       child = spawn(
         process.execPath,

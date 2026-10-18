@@ -259,14 +259,19 @@ export function serializeOperationKey<Kind extends SideEffectMethod>(
   ) as OperationKey<Kind>;
 }
 
-export function parseOperationKey<Kind extends SideEffectMethod = SideEffectMethod>(
+export function parseOperationKey(value: string): OperationKeyClaims;
+export function parseOperationKey<Kind extends SideEffectMethod>(
   value: string,
-  expectedKind?: Kind,
-): OperationKeyClaims<Kind> {
+  expectedKind: Kind,
+): OperationKeyClaims<Kind>;
+export function parseOperationKey(
+  value: string,
+  expectedKind?: SideEffectMethod,
+): OperationKeyClaims {
   const claims = decodeIdentity("operation1_", operationKeyClaimsSchema, value);
   if (expectedKind !== undefined && claims.kind !== expectedKind)
     throw new Error("OperationKey kind does not match the expected operation");
-  return claims as OperationKeyClaims<Kind>;
+  return claims;
 }
 
 export function makeDiagnosticId(
@@ -2278,6 +2283,8 @@ export const machineErrorSchema = v.union([
   v.strictObject({
     code: v.literal("operation_outcome_unknown"),
     operationKey: operationKeySchema,
+    cause: v.optional(errorCauseSchema),
+    cleanupCause: v.optional(errorCauseSchema),
   }),
   v.strictObject({
     code: v.literal("control_store_unavailable"),
@@ -2362,7 +2369,12 @@ export const machineErrorSchema = v.union([
   }),
   v.strictObject({ code: v.literal("diagnostics_unavailable") }),
   unexpectedError("model_catalog_query_failed"),
-  unexpectedError("internal_error"),
+  v.strictObject({
+    code: v.literal("internal_error"),
+    cause: v.optional(errorCauseSchema),
+    diagnosticId: v.optional(diagnosticIdSchema),
+    cleanupCause: v.optional(errorCauseSchema),
+  }),
   unexpectedError("diagnostics_store_corrupt"),
 ]);
 export type MachineError = v.InferOutput<typeof machineErrorSchema>;
@@ -2604,10 +2616,24 @@ export const attachResultSchema = v.strictObject({
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 
 export const operationRecordSchema = v.union([
-  v.strictObject({ status: v.literal("unknown"), operationKey: operationKeySchema }),
-  v.strictObject({ status: v.literal("unavailable"), operationKey: operationKeySchema }),
-  v.strictObject({ status: v.literal("pending"), operationKey: operationKeySchema }),
-  v.strictObject({ status: v.literal("outcome_unknown"), operationKey: operationKeySchema }),
+  v.strictObject({
+    status: v.literal("unknown"),
+    operationKey: operationKeySchema,
+  }),
+  v.strictObject({
+    status: v.literal("unavailable"),
+    operationKey: operationKeySchema,
+  }),
+  v.strictObject({
+    status: v.literal("pending"),
+    operationKey: operationKeySchema,
+  }),
+  v.strictObject({
+    status: v.literal("outcome_unknown"),
+    operationKey: operationKeySchema,
+    cause: v.optional(errorCauseSchema),
+    cleanupCause: v.optional(errorCauseSchema),
+  }),
   v.strictObject({
     status: v.literal("succeeded"),
     operationKey: operationKeySchema,
@@ -2620,6 +2646,13 @@ export const operationRecordSchema = v.union([
   }),
   v.strictObject({
     status: v.literal("accepted_uncommitted"),
+    operationKey: operationKeySchema,
+    result: spawnAckSchema,
+    cause: errorCauseSchema,
+    cleanupCause: v.optional(errorCauseSchema),
+  }),
+  v.strictObject({
+    status: v.literal("accepted_unconfirmed"),
     operationKey: operationKeySchema,
     result: spawnAckSchema,
     cause: errorCauseSchema,

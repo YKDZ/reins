@@ -117,7 +117,7 @@ async function fixture() {
         message,
         cwd: directory,
       },
-      connection.prepareOperation("spawn"),
+      { operationKey: connection.prepareOperation("spawn") },
     );
   }
 
@@ -154,7 +154,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
         await observer.resolvePermission(
           fact.permissionHandle,
           { outcome: "deny", feedback: "caller feedback" },
-          observer.prepareOperation("resolvePermission"),
+          { operationKey: observer.prepareOperation("resolvePermission") },
         );
       }
     }
@@ -410,7 +410,7 @@ test("turn observation ends at its target while session history crosses and resu
       sessionHandle: spawned.sessionHandle,
       message: JSON.stringify({ gate: secondGate, reply: "second" }),
     },
-    control.prepareOperation("send"),
+    { operationKey: control.prepareOperation("send") },
   );
 
   await writeFile(secondGate, "release second");
@@ -607,7 +607,7 @@ test("active replay remains bounded before a permission-blocked turn completes",
   await observer.resolvePermission(
     requested.permissionHandle,
     { outcome: "deny", feedback: "finish active replay test" },
-    observer.prepareOperation("resolvePermission"),
+    { operationKey: observer.prepareOperation("resolvePermission") },
   );
   const terminal: AgentFact[] = [];
   for (;;) {

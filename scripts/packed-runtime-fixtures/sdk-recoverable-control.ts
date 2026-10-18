@@ -6,7 +6,8 @@ import {
   parseSessionHandle,
   parseTurnHandle,
   ReinsSdkError,
-  type OperationCredential,
+  serializeOperationKey,
+  type OperationKey,
   type ReinsConnection,
   type AgentFact,
   type InterruptInput,
@@ -27,23 +28,23 @@ declare const process: {
 };
 
 type SpawnIntent = {
-  readonly credential: OperationCredential<"spawn">;
+  readonly operationKey: OperationKey<"spawn">;
   readonly input: SpawnInput;
 };
 type KillIntent = {
-  readonly credential: OperationCredential<"kill">;
+  readonly operationKey: OperationKey<"kill">;
   readonly sessionHandle: SessionHandle;
 };
 type SendIntent = {
-  readonly credential: OperationCredential<"send">;
+  readonly operationKey: OperationKey<"send">;
   readonly input: SendInput;
 };
 type InterruptIntent = {
-  readonly credential: OperationCredential<"interrupt">;
+  readonly operationKey: OperationKey<"interrupt">;
   readonly input: InterruptInput;
 };
 type PermissionIntent = {
-  readonly credential: OperationCredential<"resolvePermission">;
+  readonly operationKey: OperationKey<"resolvePermission">;
   readonly permissionHandle: PermissionHandle;
   readonly resolution: PermissionResolution;
 };
@@ -121,9 +122,9 @@ async function prepareSpawn(): Promise<void> {
   const connection = await connectSdk();
   try {
     const sessionsBefore = await connection.list();
-    const credential = connection.prepareOperation("spawn");
+    const operationKey = connection.prepareOperation("spawn");
     const input = spawnInput();
-    const serialized = publishIntent({ credential, input });
+    const serialized = publishIntent({ operationKey, input });
     const sessionsAfter = await connection.list();
     if (sessionsAfter.length !== sessionsBefore.length)
       throw new Error("Preparing an operation created a session");
@@ -148,25 +149,25 @@ async function spawnValidation(): Promise<void> {
     const invalidCwd = await expectFailure(() =>
       connection.spawn(
         { ...input, cwd: `${input.cwd}/missing-directory` },
-        connection.prepareOperation("spawn"),
+        { operationKey: connection.prepareOperation("spawn") },
       ),
     );
     const invalidModel = await expectFailure(() =>
       connection.spawn(
         { ...input, model: "fixture-missing-model" },
-        connection.prepareOperation("spawn"),
+        { operationKey: connection.prepareOperation("spawn") },
       ),
     );
     const unsupportedFeature = await expectFailure(() =>
       connection.spawn(
         { ...input, captureHarnessStderr: true },
-        connection.prepareOperation("spawn"),
+        { operationKey: connection.prepareOperation("spawn") },
       ),
     );
     const unknownHarness = await expectFailure(() =>
       connection.spawn(
         { ...input, harness: "qoder" },
-        connection.prepareOperation("spawn"),
+        { operationKey: connection.prepareOperation("spawn") },
       ),
     );
     const failures = [
@@ -197,12 +198,11 @@ async function spawnDrop(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.spawn(intent.input, intent.credential),
+      connection.spawn(intent.input, { operationKey: intent.operationKey }),
     );
     if (
-      error.failure.code !== "command_outcome_unknown" ||
-      error.failure.facts.operation !== "spawn" ||
-      error.failure.facts.cause !== "disconnected" ||
+      error.failure.code !== "operation_outcome_unknown" ||
+      error.failure.facts.operationKey !== intent.operationKey ||
       error.stage !== "operation"
     )
       throw new Error("The installed SDK omitted typed spawn recovery facts");
@@ -220,7 +220,9 @@ async function spawnRecover(): Promise<void> {
   );
   const connection = await connectSdk();
   try {
-    const result = await connection.spawn(intent.input, intent.credential);
+    const result = await connection.spawn(intent.input, {
+      operationKey: intent.operationKey,
+    });
     const sessions = await connection.list({
       sessionHandle: result.sessionHandle,
     });
@@ -250,10 +252,10 @@ async function spawnConflict(): Promise<void> {
     const error = await expectFailure(() =>
       connection.spawn(
         { ...intent.input, message: `${intent.input.message} changed` },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
-    if (error.failure.code !== "command_id_conflict")
+    if (error.failure.code !== "operation_key_conflict")
       throw new Error("The SDK did not preserve the daemon operation conflict");
     process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
   } finally {
@@ -261,7 +263,7 @@ async function spawnConflict(): Promise<void> {
   }
 }
 
-async function spawnWithNewCredential(): Promise<void> {
+async function spawnWithNewOperationKey(): Promise<void> {
   const intent = readIntent<SpawnIntent>(
     required("REINS_OPERATION_INTENT_JSON"),
   );
@@ -273,7 +275,7 @@ async function spawnWithNewCredential(): Promise<void> {
           ...intent.input,
           sessionLabel: "packed-model-catalog-retry",
         },
-        connection.prepareOperation("spawn"),
+        { operationKey: connection.prepareOperation("spawn") },
       ),
     );
     if (
@@ -283,7 +285,7 @@ async function spawnWithNewCredential(): Promise<void> {
       )
     )
       throw new Error(
-        "A new spawn credential did not revalidate the current model catalog",
+        "A new spawn operationKey did not revalidate the current model catalog",
       );
     process.stdout.write(
       `${JSON.stringify({ code: error.failure.code, path: "model" })}\n`,
@@ -305,7 +307,7 @@ async function prepareSend(): Promise<void> {
   const connection = await connectSdk();
   try {
     const intent: SendIntent = {
-      credential: connection.prepareOperation("send"),
+      operationKey: connection.prepareOperation("send"),
       input: sendInput(),
     };
     process.stdout.write(
@@ -320,7 +322,7 @@ async function prepareNewTurn(): Promise<void> {
   const connection = await connectSdk();
   try {
     const intent: SendIntent = {
-      credential: connection.prepareOperation("send"),
+      operationKey: connection.prepareOperation("send"),
       input: {
         placement: "new_turn",
         sessionHandle: parseSessionHandle(required("REINS_TARGET_SESSION")),
@@ -343,7 +345,9 @@ async function sendNewTurn(): Promise<void> {
     throw new Error("The saved send intent was not a new-turn send");
   const connection = await connectSdk();
   try {
-    const result = await connection.send(intent.input, intent.credential);
+    const result = await connection.send(intent.input, {
+      operationKey: intent.operationKey,
+    });
     if (
       result.sessionHandle !== intent.input.sessionHandle ||
       result.deliveryPoint !== "new_turn"
@@ -389,12 +393,11 @@ async function sendDrop(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.send(intent.input, intent.credential),
+      connection.send(intent.input, { operationKey: intent.operationKey }),
     );
     if (
-      error.failure.code !== "command_outcome_unknown" ||
-      error.failure.facts.operation !== "send" ||
-      error.failure.facts.cause !== "disconnected" ||
+      error.failure.code !== "operation_outcome_unknown" ||
+      error.failure.facts.operationKey !== intent.operationKey ||
       error.stage !== "operation"
     )
       throw new Error("The installed SDK omitted typed send recovery facts");
@@ -412,7 +415,9 @@ async function sendRecover(): Promise<void> {
   );
   const connection = await connectSdk();
   try {
-    const result = await connection.send(intent.input, intent.credential);
+    const result = await connection.send(intent.input, {
+      operationKey: intent.operationKey,
+    });
     if (intent.input.placement !== "active_turn")
       throw new Error("The saved send intent was not an active-turn send");
     if (
@@ -435,10 +440,10 @@ async function sendConflict(): Promise<void> {
     const error = await expectFailure(() =>
       connection.send(
         { ...intent.input, message: `${intent.input.message} changed` },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
-    if (error.failure.code !== "command_id_conflict")
+    if (error.failure.code !== "operation_key_conflict")
       throw new Error("The SDK did not preserve the send parameter conflict");
     process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
   } finally {
@@ -450,7 +455,7 @@ async function prepareInterrupt(): Promise<void> {
   const connection = await connectSdk();
   try {
     const intent: InterruptIntent = {
-      credential: connection.prepareOperation("interrupt"),
+      operationKey: connection.prepareOperation("interrupt"),
       input: { turnHandle: parseTurnHandle(required("REINS_TARGET_TURN")) },
     };
     process.stdout.write(
@@ -468,12 +473,11 @@ async function interruptDrop(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.interrupt(intent.input, intent.credential),
+      connection.interrupt(intent.input, { operationKey: intent.operationKey }),
     );
     if (
-      error.failure.code !== "command_outcome_unknown" ||
-      error.failure.facts.operation !== "interrupt" ||
-      error.failure.facts.cause !== "disconnected" ||
+      error.failure.code !== "operation_outcome_unknown" ||
+      error.failure.facts.operationKey !== intent.operationKey ||
       error.stage !== "operation"
     )
       throw new Error(
@@ -493,7 +497,9 @@ async function interruptRecover(): Promise<void> {
   );
   const connection = await connectSdk();
   try {
-    const result = await connection.interrupt(intent.input, intent.credential);
+    const result = await connection.interrupt(intent.input, {
+      operationKey: intent.operationKey,
+    });
     const observed = await connection.wait({
       targets: [intent.input.turnHandle],
       completion: "all",
@@ -518,7 +524,7 @@ async function prepareKill(): Promise<void> {
   const connection = await connectSdk();
   try {
     const intent: KillIntent = {
-      credential: connection.prepareOperation("kill"),
+      operationKey: connection.prepareOperation("kill"),
       sessionHandle: required("REINS_TARGET_SESSION") as SessionHandle,
     };
     process.stdout.write(
@@ -539,7 +545,7 @@ async function killFailureReplay(): Promise<void> {
     first = await expectFailure(() =>
       firstConnection.kill(
         { sessionHandle: intent.sessionHandle },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
   } finally {
@@ -550,7 +556,7 @@ async function killFailureReplay(): Promise<void> {
     const second = await expectFailure(() =>
       secondConnection.kill(
         { sessionHandle: intent.sessionHandle },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
     if (
@@ -574,7 +580,7 @@ async function prepareKillRetry(): Promise<void> {
   try {
     const prepared = {
       ...intent,
-      credential: connection.prepareOperation("kill"),
+      operationKey: connection.prepareOperation("kill"),
     } satisfies KillIntent;
     process.stdout.write(
       `${JSON.stringify({ prepared: true, intent: publishIntent(prepared) })}\n`,
@@ -593,18 +599,18 @@ async function killDrop(): Promise<void> {
     const error = await expectFailure(() =>
       connection.kill(
         { sessionHandle: intent.sessionHandle },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
     if (
-      error.failure.code !== "command_outcome_unknown" ||
-      error.failure.facts.operation !== "kill"
+      error.failure.code !== "operation_outcome_unknown" ||
+      error.failure.facts.operationKey !== intent.operationKey
     )
       throw new Error("The installed SDK omitted typed kill recovery facts");
     process.stdout.write(
       `${JSON.stringify({
         code: error.failure.code,
-        operation: error.failure.facts.operation,
+        operationKey: serializeOperationKey(error.failure.facts.operationKey),
         stage: error.stage,
       })}\n`,
     );
@@ -628,7 +634,7 @@ async function killRecover(): Promise<void> {
     }
     const result = await connection.kill(
       { sessionHandle: intent.sessionHandle },
-      intent.credential,
+      { operationKey: intent.operationKey },
     );
     const sessions = await connection.list({
       sessionHandle: intent.sessionHandle,
@@ -656,9 +662,9 @@ async function staleSpawn(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.spawn(intent.input, intent.credential),
+      connection.spawn(intent.input, { operationKey: intent.operationKey }),
     );
-    if (error.failure.code !== "stale_command_id")
+    if (error.failure.code !== "stale_operation_key")
       throw new Error("The SDK did not preserve the stale-generation failure");
     process.stdout.write(
       `${JSON.stringify({
@@ -678,9 +684,9 @@ async function staleSend(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.send(intent.input, intent.credential),
+      connection.send(intent.input, { operationKey: intent.operationKey }),
     );
-    if (error.failure.code !== "stale_command_id")
+    if (error.failure.code !== "stale_operation_key")
       throw new Error("The SDK did not preserve the stale send failure");
     process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
   } finally {
@@ -695,9 +701,9 @@ async function staleInterrupt(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.interrupt(intent.input, intent.credential),
+      connection.interrupt(intent.input, { operationKey: intent.operationKey }),
     );
-    if (error.failure.code !== "stale_command_id")
+    if (error.failure.code !== "stale_operation_key")
       throw new Error("The SDK did not preserve the stale interrupt failure");
     process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
   } finally {
@@ -711,7 +717,7 @@ async function staleHandle(): Promise<void> {
   try {
     const result = await connection.kill(
       { sessionHandle },
-      connection.prepareOperation("kill"),
+      { operationKey: connection.prepareOperation("kill") },
     );
     if (result.status !== "not_found" || result.sessionHandle !== sessionHandle)
       throw new Error("The SDK did not reject the previous-generation handle");
@@ -727,7 +733,7 @@ async function preparePermission(): Promise<void> {
   const connection = await connectSdk();
   try {
     const intent: PermissionIntent = {
-      credential: connection.prepareOperation("resolvePermission"),
+      operationKey: connection.prepareOperation("resolvePermission"),
       permissionHandle: parsePermissionHandle(
         required("REINS_PERMISSION_HANDLE"),
       ),
@@ -751,7 +757,7 @@ async function spawnPermission(): Promise<void> {
         message: "packed-permission",
         cwd: required("REINS_WORKER_CWD"),
       },
-      connection.prepareOperation("spawn"),
+      { operationKey: connection.prepareOperation("spawn") },
     );
     process.stdout.write(`${JSON.stringify({ result })}\n`);
   } finally {
@@ -798,28 +804,28 @@ async function permissionMismatchReplay(): Promise<void> {
       connection.resolvePermission(
         intent.permissionHandle,
         { outcome: "allow", scope: "session" },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
     const replay = await expectFailure(() =>
       connection.resolvePermission(
         intent.permissionHandle,
         { outcome: "allow", scope: "session" },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
     const conflict = await expectFailure(() =>
       connection.resolvePermission(
         intent.permissionHandle,
         { outcome: "deny" },
-        intent.credential,
+        { operationKey: intent.operationKey },
       ),
     );
     if (
       mismatch.failure.code !== "permission_resolution_mismatch" ||
       mismatch.failure.facts.permissionHandle !== intent.permissionHandle ||
       JSON.stringify(mismatch.failure) !== JSON.stringify(replay.failure) ||
-      conflict.failure.code !== "command_id_conflict"
+      conflict.failure.code !== "operation_key_conflict"
     )
       throw new Error(
         "The installed SDK did not preserve permission failure replay and conflict facts",
@@ -843,7 +849,7 @@ async function resolvePermission(): Promise<void> {
     const result = await connection.resolvePermission(
       intent.permissionHandle,
       intent.resolution,
-      intent.credential,
+      { operationKey: intent.operationKey },
     );
     if (
       result.status !== "resolved" ||
@@ -861,15 +867,13 @@ async function resolvePermissionDrop(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.resolvePermission(
-        intent.permissionHandle,
-        intent.resolution,
-        intent.credential,
-      ),
+      connection.resolvePermission(intent.permissionHandle, intent.resolution, {
+        operationKey: intent.operationKey,
+      }),
     );
     if (
-      error.failure.code !== "command_outcome_unknown" ||
-      error.failure.facts.operation !== "resolvePermission" ||
+      error.failure.code !== "operation_outcome_unknown" ||
+      error.failure.facts.operationKey !== intent.operationKey ||
       error.stage !== "operation"
     )
       throw new Error(
@@ -888,18 +892,14 @@ async function resolvePermissionFailureReplay(): Promise<void> {
   const connection = await connectSdk();
   try {
     const first = await expectFailure(() =>
-      connection.resolvePermission(
-        intent.permissionHandle,
-        intent.resolution,
-        intent.credential,
-      ),
+      connection.resolvePermission(intent.permissionHandle, intent.resolution, {
+        operationKey: intent.operationKey,
+      }),
     );
     const replay = await expectFailure(() =>
-      connection.resolvePermission(
-        intent.permissionHandle,
-        intent.resolution,
-        intent.credential,
-      ),
+      connection.resolvePermission(intent.permissionHandle, intent.resolution, {
+        operationKey: intent.operationKey,
+      }),
     );
     const query = await expectFailure(() => connection.diagnostics());
     if (
@@ -928,15 +928,13 @@ async function stalePermission(): Promise<void> {
   const connection = await connectSdk();
   try {
     const error = await expectFailure(() =>
-      connection.resolvePermission(
-        intent.permissionHandle,
-        intent.resolution,
-        intent.credential,
-      ),
+      connection.resolvePermission(intent.permissionHandle, intent.resolution, {
+        operationKey: intent.operationKey,
+      }),
     );
-    if (error.failure.code !== "stale_command_id")
+    if (error.failure.code !== "stale_operation_key")
       throw new Error(
-        "The SDK accepted a previous-generation permission credential",
+        "The SDK accepted a previous-generation permission operationKey",
       );
     process.stdout.write(`${JSON.stringify({ code: error.failure.code })}\n`);
   } finally {
@@ -952,10 +950,9 @@ async function harnessFailureDiagnostics(): Promise<void> {
       message: "packed-harness-failure",
       sessionLabel: "packed-harness-diagnostics",
     };
-    const spawned = await connection.spawn(
-      input,
-      connection.prepareOperation("spawn"),
-    );
+    const spawned = await connection.spawn(input, {
+      operationKey: connection.prepareOperation("spawn"),
+    });
     const waited = await connection.wait({
       targets: [spawned.turnHandle],
       completion: "all",
@@ -1037,7 +1034,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
       );
     const killed = await connection.kill(
       { sessionHandle: spawned.sessionHandle },
-      connection.prepareOperation("kill"),
+      { operationKey: connection.prepareOperation("kill") },
     );
     if (killed.status !== "killed")
       throw new Error("The Harness failure worker was not cleaned up");
@@ -1194,10 +1191,9 @@ async function replayWindow(): Promise<void> {
       }),
       cwd: required("REINS_WORKER_CWD"),
     };
-    const spawned = await connection.spawn(
-      input,
-      connection.prepareOperation("spawn"),
-    );
+    const spawned = await connection.spawn(input, {
+      operationKey: connection.prepareOperation("spawn"),
+    });
     const target = {
       scope: "turn" as const,
       turnHandle: spawned.turnHandle,
@@ -1304,8 +1300,8 @@ switch (mode) {
   case "spawn-conflict":
     await spawnConflict();
     break;
-  case "spawn-new-credential":
-    await spawnWithNewCredential();
+  case "spawn-new-operationKey":
+    await spawnWithNewOperationKey();
     break;
   case "prepare-send":
     await prepareSend();

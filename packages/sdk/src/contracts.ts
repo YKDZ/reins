@@ -41,6 +41,9 @@ export type OperationKind =
 export type OperationKey<Kind extends OperationKind> = string & {
   readonly [operationKeyBrand]: Kind;
 };
+export type OperationOptions<Kind extends OperationKind> = {
+  operationKey?: OperationKey<Kind>;
+};
 
 export type HarnessId = "codex" | "qoder";
 
@@ -61,13 +64,37 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type OperationRecord<Kind extends OperationKind = OperationKind> =
-  | { status: "unknown" | "unavailable" | "pending" | "outcome_unknown"; operationKey: OperationKey<Kind> }
-  | { status: "succeeded"; operationKey: OperationKey<Kind>; result: SpawnResult }
-  | { status: "failed"; operationKey: OperationKey<Kind>; error: ReinsFailure }
+export type OperationRecord =
+  | {
+      status: "unknown" | "unavailable" | "pending";
+      operationKey: OperationKey<"spawn">;
+    }
+  | {
+      status: "outcome_unknown";
+      operationKey: OperationKey<"spawn">;
+      cause?: ErrorCause;
+      cleanupCause?: ErrorCause;
+    }
+  | {
+      status: "succeeded";
+      operationKey: OperationKey<"spawn">;
+      result: SpawnResult;
+    }
+  | {
+      status: "failed";
+      operationKey: OperationKey<"spawn">;
+      error: ReinsFailure;
+    }
   | {
       status: "accepted_uncommitted";
-      operationKey: OperationKey<Kind>;
+      operationKey: OperationKey<"spawn">;
+      result: SpawnResult;
+      cause: ErrorCause;
+      cleanupCause?: ErrorCause;
+    }
+  | {
+      status: "accepted_unconfirmed";
+      operationKey: OperationKey<"spawn">;
       result: SpawnResult;
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
@@ -400,7 +427,11 @@ type FailureFactsByCode = {
   operation_key_scope_mismatch: Record<never, never>;
   stale_operation_key: Record<never, never>;
   operation_pending: { operationKey: OperationKey<OperationKind> };
-  operation_outcome_unknown: { operationKey: OperationKey<OperationKind> };
+  operation_outcome_unknown: {
+    operationKey: OperationKey<OperationKind>;
+    cause?: ErrorCause;
+    cleanupCause?: ErrorCause;
+  };
   control_store_unavailable: {
     operationKey: OperationKey<OperationKind>;
     stage: "register" | "dispatch" | "commit" | "failure";
@@ -424,7 +455,11 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     diagnosticId?: DiagnosticId;
   };
-  internal_error: { cause?: ErrorCause; diagnosticId?: DiagnosticId };
+  internal_error: {
+    cause?: ErrorCause;
+    diagnosticId?: DiagnosticId;
+    cleanupCause?: ErrorCause;
+  };
   diagnostics_store_corrupt: {
     cause?: ErrorCause;
     diagnosticId?: DiagnosticId;
@@ -468,31 +503,29 @@ export type ReinsConnection = {
     signal?: AbortSignal,
   ): Promise<FactSubscription>;
   prepareOperation<Kind extends OperationKind>(kind: Kind): OperationKey<Kind>;
-  getOperation<Kind extends OperationKind>(
-    operationKey: OperationKey<Kind>,
-  ): Promise<OperationRecord<Kind>>;
+  getOperation(operationKey: OperationKey<"spawn">): Promise<OperationRecord>;
   spawn(
     input: SpawnInput,
-    operationKey: OperationKey<"spawn">,
+    options?: OperationOptions<"spawn">,
   ): Promise<SpawnResult>;
   kill(
     input: KillInput,
-    operationKey: OperationKey<"kill">,
+    options?: OperationOptions<"kill">,
   ): Promise<KillResult>;
   resolvePermission(
     permissionHandle: PermissionHandle,
     resolution: PermissionResolution,
-    operationKey: OperationKey<"resolvePermission">,
+    options?: OperationOptions<"resolvePermission">,
   ): Promise<{ permissionHandle: PermissionHandle; status: "resolved" }>;
   diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsResult>;
   send(
     input: SendInput,
-    operationKey: OperationKey<"send">,
+    options?: OperationOptions<"send">,
   ): Promise<SendResult>;
   wait(input: WaitInput): Promise<WaitResult>;
   interrupt(
     input: InterruptInput,
-    operationKey: OperationKey<"interrupt">,
+    options?: OperationOptions<"interrupt">,
   ): Promise<InterruptResult>;
   close(): void;
 };

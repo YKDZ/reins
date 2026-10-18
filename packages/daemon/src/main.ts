@@ -10,9 +10,9 @@ import {
   createCodexDriver,
   createCodexTransport,
 } from "@reins/codex";
+import { openControlStore } from "@reins/event-journal";
 import type { HarnessId, ProtocolMessage } from "@reins/protocol";
 import { harnessIdSchema, makeErrorCause } from "@reins/protocol";
-import { openControlStore } from "@reins/event-journal";
 import {
   createQoderModelCatalog,
   createQoderDriver,

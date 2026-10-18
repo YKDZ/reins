@@ -84,7 +84,9 @@ function commandLifecycle(value: unknown): CommandLifecycle | undefined {
       String(candidate.state),
     )
   )
-    throw new Error("Qoder command_lifecycle did not match the pinned CLI shape");
+    throw new Error(
+      "Qoder command_lifecycle did not match the pinned CLI shape",
+    );
   return candidate as unknown as CommandLifecycle;
 }
 
@@ -100,7 +102,8 @@ function sdkMessage(value: unknown): value is SDKMessage {
     typeof candidate.session_id !== "string"
   )
     return false;
-  if (candidate.type === "stream_event") return record(candidate.event) !== undefined;
+  if (candidate.type === "stream_event")
+    return record(candidate.event) !== undefined;
   if (candidate.type === "assistant" || candidate.type === "user")
     return record(candidate.message) !== undefined;
   if (candidate.type === "system") return typeof candidate.subtype === "string";
@@ -343,16 +346,33 @@ export function createQoderDriver(deps: {
           );
         }
         void session.diagnostic({
-            kind: "lifecycle",
-            operation: "worker",
-            reason: "initialized",
-          });
-        // 启动reader后才提交首条输入；其queued回执可能先于system/init。
+          kind: "lifecycle",
+          operation: "worker",
+          reason: "initialized",
+        });
+        // reader先启动；首条输入等待官方initialize响应后再提交。
         runPromise = run();
-        initialInputSent = true;
-        stream.push(
-          userMessage(spec.message, "next", true, initialInputUuid),
-        );
+        const initialQuery = query;
+        const initialStream = stream;
+        const initialUuid = initialInputUuid;
+        void Promise.resolve()
+          .then(async () => {
+            await initialQuery.initializationResult();
+            if (startSettled || terminating) return;
+            initialInputSent = true;
+            initialStream.push(
+              userMessage(spec.message, "next", true, initialUuid),
+            );
+          })
+          .catch((error: unknown) => {
+            settleStart(
+              new WorkerStartFailure(
+                "Qoder initialization failed before the initial command",
+                "not_accepted",
+                { cause: error },
+              ),
+            );
+          });
         return accepted;
       },
       async deliver(sessionId, turnId, message, placement) {

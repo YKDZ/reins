@@ -32,7 +32,7 @@ afterEach(async () => {
         if (session.state === "killed") continue;
         await client.kill(
           { sessionHandle: session.sessionHandle },
-          client.prepareOperation("kill"),
+          { operationKey: client.prepareOperation("kill") },
         );
       }
     } catch {
@@ -120,7 +120,7 @@ async function spawnSession(
       cwd,
       ...input,
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
 }
 
@@ -314,7 +314,7 @@ test("Codex permission facts expose only native answers and apply the exact acce
     f.connection.resolvePermission(
       requested.permissionHandle,
       { outcome: "deny", feedback: "caller-authored feedback" },
-      f.connection.prepareOperation("resolvePermission"),
+      { operationKey: f.connection.prepareOperation("resolvePermission") },
     ),
   ).rejects.toMatchObject({
     failure: { code: "permission_resolution_mismatch" },
@@ -325,7 +325,7 @@ test("Codex permission facts expose only native answers and apply the exact acce
     await f.connection.resolvePermission(
       requested.permissionHandle,
       { outcome: "allow", scope: "once" },
-      f.connection.prepareOperation("resolvePermission"),
+      { operationKey: f.connection.prepareOperation("resolvePermission") },
     ),
   ).toMatchObject({ status: "resolved" });
   const resolved = await resolvedPromise;
@@ -391,7 +391,9 @@ test.each(["permission", "session-permission"] as const)(
           f.connection.resolvePermission(
             requested.permissionHandle,
             resolution,
-            f.connection.prepareOperation("resolvePermission"),
+            {
+              operationKey: f.connection.prepareOperation("resolvePermission"),
+            },
           ),
         ).rejects.toMatchObject({
           failure: { code: "permission_resolution_mismatch" },
@@ -416,7 +418,7 @@ test.each(["permission", "session-permission"] as const)(
       await f.connection.resolvePermission(
         requested.permissionHandle,
         resolution,
-        f.connection.prepareOperation("resolvePermission"),
+        { operationKey: f.connection.prepareOperation("resolvePermission") },
       ),
     ).toMatchObject({ status: "resolved" });
     const resolved = await resolvedPromise;
@@ -483,7 +485,7 @@ test("a natively resolved Codex approval cannot claim a caller resolution", asyn
     f.connection.resolvePermission(
       requested.permissionHandle,
       { outcome: "allow", scope: "once" },
-      f.connection.prepareOperation("resolvePermission"),
+      { operationKey: f.connection.prepareOperation("resolvePermission") },
     ),
   ).rejects.toMatchObject({ failure: { code: "permission_not_pending" } });
   const later = await Promise.race([

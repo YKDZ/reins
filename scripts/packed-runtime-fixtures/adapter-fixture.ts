@@ -65,7 +65,7 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
   const terminationAttempts = new Map<SessionId, number>();
 
   const driver: WorkerDriver = {
-    start(spec) {
+    async start(spec) {
       const child = spawn(
         process.execPath,
         [workerPath, "worker", activityPath ?? ""],

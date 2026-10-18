@@ -52,6 +52,7 @@ import {
   type DiagnosticsResult,
   type OperationKey,
   type OperationKind,
+  type OperationOptions,
   type OperationRecord,
   type ReinsConnection,
   type ReinsFailure,
@@ -114,6 +115,7 @@ export type {
   HarnessId,
   OperationKey,
   OperationKind,
+  OperationOptions,
   OperationRecord,
   HarnessModelCatalog,
   HarnessFailure,
@@ -195,18 +197,48 @@ export function parseResumeCursor(value: unknown): ResumeCursor {
 export function serializeResumeCursor(cursor: ResumeCursor): string {
   return v.parse(resumeCursorSchema, cursor);
 }
-export function parseOperationKey<Kind extends OperationKind = OperationKind>(
+export function parseOperationKey(value: unknown): OperationKey<OperationKind>;
+export function parseOperationKey<Kind extends OperationKind>(
   value: unknown,
-  kind?: Kind,
-): OperationKey<Kind> {
+  kind: Kind,
+): OperationKey<Kind>;
+export function parseOperationKey(
+  value: unknown,
+  kind?: OperationKind,
+): OperationKey<OperationKind> {
   if (typeof value !== "string") throw new Error("Invalid OperationKey");
-  parseProtocolOperationKey(value, kind);
-  return value as OperationKey<Kind>;
+  if (kind === undefined) parseProtocolOperationKey(value);
+  else parseProtocolOperationKey(value, kind);
+  return value as OperationKey<OperationKind>;
 }
 export function serializeOperationKey<Kind extends OperationKind>(
   operationKey: OperationKey<NoInfer<Kind>>,
 ): string {
-  return parseOperationKey<Kind>(operationKey);
+  return parseOperationKey(operationKey);
+}
+
+function operationKeyFor<Kind extends OperationKind>(
+  client: ControlClient,
+  kind: Kind,
+  options: OperationOptions<Kind> | undefined,
+): OperationKey<Kind> {
+  if (options === undefined)
+    return parseOperationKey(client.prepareOperation(kind), kind);
+  if (
+    typeof options !== "object" ||
+    options === null ||
+    Array.isArray(options) ||
+    Object.keys(options).some((key) => key !== "operationKey")
+  )
+    throw invalidInput("options", "operation");
+  const operationKey = (options as { operationKey?: unknown }).operationKey;
+  if (operationKey === undefined)
+    return parseOperationKey(client.prepareOperation(kind), kind);
+  try {
+    return parseOperationKey(operationKey, kind);
+  } catch {
+    throw invalidInput("operationKey", "operation");
+  }
 }
 export function parseAgentFactId(value: unknown): AgentFactId {
   if (typeof value !== "string" || !/^fact1_[A-Za-z0-9_-]+$/u.test(value))
@@ -428,22 +460,26 @@ export async function connect(
           );
         }
       },
-      async getOperation<Kind extends OperationKind>(
-        operationKey: OperationKey<Kind>,
-      ) {
+      async getOperation(operationKey: OperationKey<"spawn">) {
+        parseOperationKey(operationKey, "spawn");
         const result = await query(client!, "getOperation", {
           operationKey: serializeOperationKey(
             operationKey,
           ) as ProtocolOperationKey,
         });
-        return projectOperationRecord<Kind>(result);
+        return projectOperationRecord(result);
       },
-      async spawn(input, operationKey) {
+      async spawn(input, options) {
         return projectSpawnResult(
-          await perform(client!, "spawn", input, operationKey),
+          await perform(
+            client!,
+            "spawn",
+            input,
+            operationKeyFor(client!, "spawn", options),
+          ),
         );
       },
-      async kill(input, operationKey) {
+      async kill(input, options) {
         const result = await perform(
           client!,
           "kill",
@@ -453,14 +489,14 @@ export async function connect(
               "sessionHandle",
             ),
           },
-          operationKey,
+          operationKeyFor(client!, "kill", options),
         );
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
           status: result.status,
         };
       },
-      async resolvePermission(permissionHandle, resolution, operationKey) {
+      async resolvePermission(permissionHandle, resolution, options) {
         let target: ReturnType<typeof decodePermissionHandle>;
         try {
           target = decodePermissionHandle(
@@ -481,7 +517,7 @@ export async function connect(
           client!,
           "resolvePermission",
           { ...target, resolution },
-          operationKey,
+          operationKeyFor(client!, "resolvePermission", options),
           permissionHandle,
         );
         return {
@@ -491,7 +527,7 @@ export async function connect(
           status: "resolved",
         };
       },
-      async send(input: SendInput, operationKey) {
+      async send(input: SendInput, options) {
         if (
           typeof input !== "object" ||
           input === null ||
@@ -516,7 +552,12 @@ export async function connect(
             message: input.message,
           };
         }
-        const result = await perform(client!, "send", params, operationKey);
+        const result = await perform(
+          client!,
+          "send",
+          params,
+          operationKeyFor(client!, "send", options),
+        );
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
           turnHandle: parseTurnHandle(
@@ -570,9 +611,14 @@ export async function connect(
           ),
         } satisfies WaitResult;
       },
-      async interrupt(input: InterruptInput, operationKey) {
+      async interrupt(input: InterruptInput, options) {
         const target = targetFromHandle(input.turnHandle, "turnHandle");
-        await perform(client!, "interrupt", target, operationKey);
+        await perform(
+          client!,
+          "interrupt",
+          target,
+          operationKeyFor(client!, "interrupt", options),
+        );
         return {
           turnHandle: input.turnHandle,
           status: "accepted",
@@ -862,28 +908,36 @@ function projectSpawnResult(
   };
 }
 
-function projectOperationRecord<Kind extends OperationKind>(
+function projectOperationRecord(
   record: ProtocolOperationRecord,
-): OperationRecord<Kind> {
-  const operationKey = parseOperationKey(record.operationKey) as OperationKey<Kind>;
+): OperationRecord {
+  const operationKey = parseOperationKey(record.operationKey, "spawn");
   switch (record.status) {
     case "unknown":
     case "unavailable":
     case "pending":
+      return { status: record.status, operationKey };
     case "outcome_unknown":
-      return { status: record.status, operationKey } as OperationRecord<Kind>;
+      return {
+        status: "outcome_unknown",
+        operationKey,
+        ...(record.cause === undefined ? {} : { cause: record.cause }),
+        ...(record.cleanupCause === undefined
+          ? {}
+          : { cleanupCause: record.cleanupCause }),
+      };
     case "succeeded":
       return {
         status: "succeeded",
         operationKey,
         result: projectSpawnResult(record.result),
-      } as OperationRecord<Kind>;
+      };
     case "failed":
       return {
         status: "failed",
         operationKey,
         error: projectFailure(record.error),
-      } as OperationRecord<Kind>;
+      };
     case "accepted_uncommitted":
       return {
         status: "accepted_uncommitted",
@@ -893,7 +947,17 @@ function projectOperationRecord<Kind extends OperationKind>(
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
-      } as OperationRecord<Kind>;
+      };
+    case "accepted_unconfirmed":
+      return {
+        status: "accepted_unconfirmed",
+        operationKey,
+        result: projectSpawnResult(record.result),
+        cause: record.cause,
+        ...(record.cleanupCause === undefined
+          ? {}
+          : { cleanupCause: record.cleanupCause }),
+      };
   }
 }
 
@@ -927,10 +991,20 @@ function projectFailure(
     case "stale_operation_key":
       return { code: failure.code, facts: {} };
     case "operation_pending":
-    case "operation_outcome_unknown":
       return {
         code: failure.code,
         facts: { operationKey: parseOperationKey(failure.operationKey) },
+      };
+    case "operation_outcome_unknown":
+      return {
+        code: failure.code,
+        facts: {
+          operationKey: parseOperationKey(failure.operationKey),
+          ...(failure.cause === undefined ? {} : { cause: failure.cause }),
+          ...(failure.cleanupCause === undefined
+            ? {}
+            : { cleanupCause: failure.cleanupCause }),
+        },
       };
     case "control_store_unavailable":
       return {
@@ -1035,7 +1109,6 @@ function projectFailure(
         },
       };
     case "model_catalog_query_failed":
-    case "internal_error":
     case "diagnostics_store_corrupt":
       return {
         code: failure.code,
@@ -1044,6 +1117,19 @@ function projectFailure(
           ...(failure.diagnosticId === undefined
             ? {}
             : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+        },
+      };
+    case "internal_error":
+      return {
+        code: failure.code,
+        facts: {
+          ...(failure.cause === undefined ? {} : { cause: failure.cause }),
+          ...(failure.diagnosticId === undefined
+            ? {}
+            : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+          ...(failure.cleanupCause === undefined
+            ? {}
+            : { cleanupCause: failure.cleanupCause }),
         },
       };
     case "daemon_start_failed":
