@@ -855,21 +855,19 @@ test.skipIf(!live)(
         providerRequests,
         interruptToolRequestIndex,
       );
-      const interruptToolCommand = `node -e 'const fs=require("node:fs");fs.writeFileSync("interrupt-tool-started",String(process.pid));const timer=setInterval(()=>{if(fs.existsSync("release-interrupt-tool")){clearInterval(timer);fs.writeFileSync("interrupt-tool-late","late")}},25)'`;
+      const interruptToolCommand = `node -e 'const fs=require("node:fs");fs.writeFileSync("interrupt-tool-started",String(process.pid));process.stdout.write("INTERRUPT_TOOL_OUTPUT\\n");const timer=setInterval(()=>{if(fs.existsSync("release-interrupt-tool")){clearInterval(timer);fs.writeFileSync("interrupt-tool-late","late")}},25)'`;
       completeToolCall(
         interruptToolRequest,
         interruptToolRequestIndex,
         "exec_command",
         { cmd: interruptToolCommand, workdir: directory },
       );
-      const interruptToolFacts: AgentFact[] = [];
       let interruptedTool:
         | Extract<AgentFact, { type: "tool.requested" }>
         | undefined;
       while (interruptedTool === undefined) {
         const item = await interruptToolHistory.next();
         if (item.done) throw new Error("待中断回合未启动内置工具");
-        interruptToolFacts.push(item.value);
         interruptToolHistory.acknowledge(item.value);
         if (
           item.value.type === "tool.requested" &&
@@ -912,20 +910,11 @@ test.skipIf(!live)(
       for (;;) {
         const item = await interruptToolHistory.next();
         if (item.done) break;
-        interruptToolFacts.push(item.value);
         interruptToolHistory.acknowledge(item.value);
       }
       await expect(interruptToolHistory.done).resolves.toMatchObject({
         reason: "cancelled",
       });
-      expect(
-        interruptToolFacts.filter(
-          (fact) =>
-            fact.type === "tool.completed" &&
-            fact.toolKey === interruptedTool.toolKey,
-        ),
-      ).toHaveLength(0);
-
       const afterInterruptedToolRequestIndex = providerRequests.length + 1;
       const afterInterruptedTool = await activeConnection.send(
         {
@@ -960,6 +949,55 @@ test.skipIf(!live)(
           },
         ],
       });
+
+      const interruptedToolSessionHistory = await activeConnection.attach(
+        {
+          scope: "session",
+          sessionHandle: interruptToolSession.sessionHandle,
+        },
+        { mode: "history" },
+      );
+      if (interruptedToolSessionHistory.initial.mode !== "history")
+        throw new Error("中断工具会话历史未返回历史重放");
+      const interruptedToolSessionFacts: AgentFact[] = [];
+      for (
+        let index = 0;
+        index < interruptedToolSessionHistory.initial.replayed;
+        index += 1
+      ) {
+        const item = await interruptedToolSessionHistory.next();
+        if (item.done) throw new Error("中断工具会话历史未交付完整事实");
+        interruptedToolSessionFacts.push(item.value);
+        interruptedToolSessionHistory.acknowledge(item.value);
+      }
+      interruptedToolSessionHistory.close();
+      const interruptedTurnTerminalIndex =
+        interruptedToolSessionFacts.findIndex(
+          (fact) =>
+            fact.type === "turn.completed" &&
+            fact.turnHandle === interruptToolSession.turnHandle,
+        );
+      const lateInterruptedToolCompletions = interruptedToolSessionFacts.filter(
+        (fact) =>
+          fact.type === "tool.completed" &&
+          fact.toolKey === interruptedTool.toolKey,
+      );
+      expect(lateInterruptedToolCompletions).toHaveLength(1);
+      expect(lateInterruptedToolCompletions[0]).toMatchObject({
+        type: "tool.completed",
+        turnHandle: interruptToolSession.turnHandle,
+        toolKey: interruptedTool.toolKey,
+        name: "commandExecution",
+        result: expect.stringContaining("INTERRUPT_TOOL_OUTPUT"),
+        isError: true,
+      });
+      expect(
+        interruptedToolSessionFacts.findIndex(
+          (fact) =>
+            fact.type === "tool.completed" &&
+            fact.toolKey === interruptedTool.toolKey,
+        ),
+      ).toBeGreaterThan(interruptedTurnTerminalIndex);
 
       const history = await activeConnection.attach(
         { scope: "session", sessionHandle: spawned.sessionHandle },

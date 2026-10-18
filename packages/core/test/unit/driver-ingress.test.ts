@@ -12,6 +12,200 @@ import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testIdentity } from "./ids.ts";
 
 describe("driver event ingress ownership", () => {
+  test("retains one late tool completion on its completed turn without touching the next turn", async () => {
+    const diagnostics: CoreDiagnosticFact[] = [];
+    let lateCompletion: DomainEvent | undefined;
+    let fake!: ReturnType<typeof createFakeDriver>;
+    fake = createFakeDriver({
+      deliver() {
+        if (lateCompletion !== undefined) fake.controls.emit(lateCompletion);
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const { sessionId, turnId: firstTurnId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("late-native-tool-completion"),
+      harness: "codex",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+    const toolCallId = ids.toolCall("same-tool-id");
+    fake.controls.emit({
+      type: "tool.requested",
+      sessionId,
+      turnId: firstTurnId,
+      toolCallId,
+      name: "commandExecution",
+      input: "printf tool-output",
+    });
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId,
+      turnId: firstTurnId,
+      stopReason: "cancelled",
+      finalReply: null,
+    });
+    lateCompletion = {
+      type: "tool.completed",
+      sessionId,
+      turnId: firstTurnId,
+      toolCallId,
+      name: "commandExecution",
+      result: "tool-output",
+      isError: true,
+    };
+
+    const second = await machine.send({
+      placement: "new_turn",
+      sessionId,
+      message: "continue",
+    });
+    fake.controls.emit({
+      type: "tool.requested",
+      sessionId,
+      turnId: second.turnId,
+      toolCallId,
+      name: "commandExecution",
+      input: "printf next-tool-output",
+    });
+
+    expect(events).toContainEqual(lateCompletion);
+    expect(machine.list()).toEqual([
+      expect.objectContaining({
+        sessionId,
+        state: "busy",
+        activeTurnId: second.turnId,
+        turns: 1,
+      }),
+    ]);
+    fake.controls.emit({
+      ...lateCompletion,
+      turnId: second.turnId,
+      result: "next-tool-output",
+      isError: false,
+    });
+    fake.controls.emit({
+      type: "turn.completed",
+      sessionId,
+      turnId: second.turnId,
+      stopReason: "end_turn",
+      finalReply: null,
+      usage: {},
+    });
+    fake.controls.emit(lateCompletion);
+
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(1));
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "tool.completed" && event.toolCallId === toolCallId,
+      ),
+    ).toEqual([
+      lateCompletion,
+      {
+        ...lateCompletion,
+        turnId: second.turnId,
+        result: "next-tool-output",
+        isError: false,
+      },
+    ]);
+    expect(diagnostics[0]).toMatchObject({
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+      reason: "event_after_turn_completed",
+      eventTurnId: firstTurnId,
+      eventType: "tool.completed",
+    });
+    expect(machine.list()).toEqual([
+      expect.objectContaining({ sessionId, state: "idle", turns: 2 }),
+    ]);
+  });
+
+  test("accepts and consumes one late completion buffered during spawn", async () => {
+    const diagnostics: CoreDiagnosticFact[] = [];
+    let fake!: ReturnType<typeof createFakeDriver>;
+    fake = createFakeDriver({
+      start(spec) {
+        fake.controls.emit({
+          type: "tool.requested",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          toolCallId: ids.toolCall("spawn-tool"),
+          name: "commandExecution",
+          input: "printf spawn-output",
+        });
+        fake.controls.emit({
+          type: "turn.completed",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          stopReason: "cancelled",
+          finalReply: null,
+        });
+        fake.controls.emit({
+          type: "tool.completed",
+          sessionId: spec.sessionId,
+          turnId: spec.turnId,
+          toolCallId: ids.toolCall("spawn-tool"),
+          name: "commandExecution",
+          result: "spawn-output",
+          isError: true,
+        });
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+
+    const { sessionId, turnId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("spawn-late-tool-completion"),
+      harness: "codex",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+    const completion: DomainEvent = {
+      type: "tool.completed",
+      sessionId,
+      turnId,
+      toolCallId: ids.toolCall("spawn-tool"),
+      name: "commandExecution",
+      result: "spawn-output",
+      isError: true,
+    };
+    expect(events).toContainEqual(completion);
+    expect(diagnostics).toEqual([]);
+    fake.controls.emit(completion);
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(1));
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "tool.completed" &&
+          event.toolCallId === ids.toolCall("spawn-tool"),
+      ),
+    ).toEqual([completion]);
+    expect(machine.list()).toEqual([
+      expect.objectContaining({ sessionId, state: "idle", turns: 1 }),
+    ]);
+  });
+
   test("registers best-effort diagnostics immediately and isolates recorder failures", async () => {
     let recordCalls = 0;
     const fake = createFakeDriver();

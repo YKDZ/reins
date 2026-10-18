@@ -1567,6 +1567,144 @@ describe("codex driver", () => {
     ).toMatchObject([{ turnId: firstTurnId, stopReason: "cancelled" }]);
   });
 
+  test("interrupt ACK 等待期间启动的同回合原生 exec 仍会被精确终止", async () => {
+    const { fake, driver } = await setup();
+    await flush();
+    const acceptance = deferred<Record<string, never>>();
+    fake.controls.setResponse("turn/interrupt", acceptance.promise);
+    fake.controls.setResponse("thread/backgroundTerminals/list", {
+      data: [
+        {
+          itemId: "exec-during-interrupt",
+          processId: "native-during-interrupt",
+          command: "/bin/sh -c wait",
+          cwd: "/tmp/demo",
+          osPid: 202,
+          cpuPercent: 0,
+          rssKb: null,
+        },
+      ],
+      nextCursor: null,
+    });
+    fake.controls.setResponse("thread/backgroundTerminals/terminate", {
+      terminated: true,
+    });
+
+    const interrupt = driver.interrupt(sessionId, firstTurnId);
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        turnId: "turn1",
+        item: {
+          type: "commandExecution",
+          id: "exec-during-interrupt",
+          status: "inProgress",
+          processId: "native-during-interrupt",
+          source: "unifiedExecStartup",
+          output: null,
+        },
+      },
+    });
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { id: "turn1", status: "interrupted", error: null } },
+    });
+    await flush();
+    acceptance.resolve({});
+    await interrupt;
+
+    expect(
+      fake.controls
+        .requests()
+        .filter(({ method }) =>
+          method.startsWith("thread/backgroundTerminals/"),
+        ),
+    ).toEqual([
+      {
+        method: "thread/backgroundTerminals/list",
+        params: { threadId: "thr1" },
+      },
+      {
+        method: "thread/backgroundTerminals/terminate",
+        params: { threadId: "thr1", processId: "native-during-interrupt" },
+      },
+    ]);
+  });
+
+  test("interrupt 被拒后仍保留活动回合工具以供重试", async () => {
+    const { events, fake, driver } = await setup();
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        turnId: "turn1",
+        item: {
+          type: "commandExecution",
+          id: "exec-retry",
+          status: "inProgress",
+          processId: "native-retry",
+          source: "unifiedExecStartup",
+          output: null,
+        },
+      },
+    });
+    await flush();
+    fake.controls.setResponse(
+      "turn/interrupt",
+      Promise.reject(new CodexRequestError("native interrupt refused")),
+    );
+
+    await expect(
+      driver.interrupt(sessionId, firstTurnId),
+    ).rejects.toMatchObject({ acceptance: "not_accepted" });
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+
+    fake.controls.setResponse("turn/interrupt", {});
+    fake.controls.setResponse("thread/backgroundTerminals/list", {
+      data: [
+        {
+          itemId: "exec-retry",
+          processId: "native-retry",
+          command: "/bin/sh -c wait",
+          cwd: "/tmp/demo",
+          osPid: 303,
+          cpuPercent: 0,
+          rssKb: null,
+        },
+      ],
+      nextCursor: null,
+    });
+    fake.controls.setResponse("thread/backgroundTerminals/terminate", {
+      terminated: true,
+    });
+
+    await expect(
+      driver.interrupt(sessionId, firstTurnId),
+    ).resolves.toBeUndefined();
+    expect(
+      fake.controls
+        .requests()
+        .filter(({ method }) =>
+          method.startsWith("thread/backgroundTerminals/"),
+        ),
+    ).toEqual([
+      {
+        method: "thread/backgroundTerminals/list",
+        params: { threadId: "thr1" },
+      },
+      {
+        method: "thread/backgroundTerminals/terminate",
+        params: { threadId: "thr1", processId: "native-retry" },
+      },
+    ]);
+  });
+
   test("interrupt 走 turn/interrupt，interrupted 合成 cancelled", async () => {
     const { events, fake, driver } = await setup();
     await flush();

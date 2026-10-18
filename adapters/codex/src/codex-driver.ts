@@ -101,6 +101,7 @@ export function createCodexDriver(deps: {
     const nativeTurns = new Map<TurnId, Promise<string>>();
     const nativeTurnToReins = new Map<string, TurnId>();
     const nativeExecItemsByTurn = new Map<string, Map<string, string>>();
+    const nativeExecInterruptsInFlight = new Set<string>();
     const pendingNativeStartTurnIds = new Set<TurnId>();
     const pendingTurnNotifications: Array<{
       message: Extract<InboundMessage, { kind: "notification" }>;
@@ -312,7 +313,8 @@ export function createCodexDriver(deps: {
         message.method === "turn/completed" &&
         message.params.turn.id !== activeTurnId
       ) {
-        nativeExecItemsByTurn.delete(message.params.turn.id);
+        if (!nativeExecInterruptsInFlight.has(message.params.turn.id))
+          nativeExecItemsByTurn.delete(message.params.turn.id);
         return;
       }
       const callerMessageId = takeCallerMessage(message);
@@ -336,7 +338,10 @@ export function createCodexDriver(deps: {
         }
         emit(event);
       }
-      if (message.method === "turn/completed")
+      if (
+        message.method === "turn/completed" &&
+        !nativeExecInterruptsInFlight.has(message.params.turn.id)
+      )
         nativeExecItemsByTurn.delete(message.params.turn.id);
       if (
         message.method === "item/started" &&
@@ -791,42 +796,49 @@ export function createCodexDriver(deps: {
         const nativeExecItems = new Map(
           nativeExecItemsByTurn.get(nativeTurnId) ?? [],
         );
+        nativeExecInterruptsInFlight.add(nativeTurnId);
         try {
-          await transport.request("turn/interrupt", {
-            threadId,
-            turnId: nativeTurnId,
-          });
-        } catch (error) {
-          if (error instanceof CodexRequestError && session.turnId !== turnId)
-            throw {
-              code: "turn_not_active",
-              sessionId,
-              turnId,
-            } satisfies MachineError;
-          if (error instanceof CodexRequestError)
+          try {
+            await transport.request("turn/interrupt", {
+              threadId,
+              turnId: nativeTurnId,
+            });
+          } catch (error) {
+            if (error instanceof CodexRequestError && session.turnId !== turnId)
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
+            if (error instanceof CodexRequestError)
+              throw new WorkerInterruptFailure(
+                "Codex rejected the interrupt request",
+                "not_accepted",
+                { cause: error },
+              );
             throw new WorkerInterruptFailure(
-              "Codex rejected the interrupt request",
-              "not_accepted",
+              "Codex interrupt acceptance is unknown",
+              "unknown",
               { cause: error },
             );
-          throw new WorkerInterruptFailure(
-            "Codex interrupt acceptance is unknown",
-            "unknown",
-            { cause: error },
+          }
+          for (const [itemId, processId] of nativeExecItemsByTurn.get(
+            nativeTurnId,
+          ) ?? [])
+            nativeExecItems.set(itemId, processId);
+          await stopNativeExecItems(
+            sessionId,
+            turnId,
+            [...nativeExecItems].map(([itemId, processId]) => ({
+              itemId,
+              processId,
+            })),
           );
+        } finally {
+          nativeExecInterruptsInFlight.delete(nativeTurnId);
+          if (session.turnId !== turnId)
+            nativeExecItemsByTurn.delete(nativeTurnId);
         }
-        for (const [itemId, processId] of nativeExecItemsByTurn.get(
-          nativeTurnId,
-        ) ?? [])
-          nativeExecItems.set(itemId, processId);
-        await stopNativeExecItems(
-          sessionId,
-          turnId,
-          [...nativeExecItems].map(([itemId, processId]) => ({
-            itemId,
-            processId,
-          })),
-        );
       },
       resolvePermission(sessionId, permissionId, resolution) {
         if (controlLost)
