@@ -410,6 +410,114 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
   ]);
 }, 20_000);
 
+test("重启后只读旧世代已提交回合并明确标记失去控制的目标", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-application-old-gen-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const options = {
+    consumerContext: "old-generation-observation",
+    env: {
+      ...process.env,
+      REINS_SOCKET: join(directory, "reins.sock"),
+      REINS_STATE_DIR: join(directory, "state"),
+      REINS_DAEMON_BIN: daemonLauncher,
+      REINS_ADAPTERS_MODULE: adaptersModule,
+      REINS_IDLE_TIMEOUT_MS: "120000",
+    },
+  };
+  const original = await openLocal(options);
+  clients.push(original);
+  const completed = await original.spawn({
+    harness: "codex",
+    message: "complete before daemon restart",
+    cwd: process.cwd(),
+  });
+  await expect(
+    original.wait({ targets: [completed.turnHandle], completion: "all" }),
+  ).resolves.toMatchObject({ status: "satisfied" });
+
+  const active = await original.spawn({
+    harness: "codex",
+    message: "hold across daemon restart",
+    cwd: process.cwd(),
+  });
+  const killed = await original.spawn({
+    harness: "codex",
+    message: "hold then close before daemon restart",
+    cwd: process.cwd(),
+  });
+  await original.kill({ sessionHandle: killed.sessionHandle });
+
+  const originalGeneration = original.handshake.daemonGeneration;
+  const originalPid = Number((await readFile(daemonPids, "utf8")).trim());
+  process.kill(originalPid, "SIGKILL");
+  await waitForProcessExit(originalPid);
+  await new Promise((resolve) => setTimeout(resolve, 35_000));
+  const reconnected = await openLocal(options);
+  clients.push(reconnected);
+  expect(reconnected.handshake.daemonGeneration).not.toBe(originalGeneration);
+  expect(await reconnected.list()).toEqual([]);
+  expect(
+    await reconnected.list({ sessionHandle: completed.sessionHandle }),
+  ).toMatchObject([
+    {
+      state: "unreachable",
+      lastKnownState: "idle",
+      lastCompletedTurn: {
+        turnHandle: completed.turnHandle,
+        stopReason: "end_turn",
+      },
+    },
+  ]);
+  expect(
+    await reconnected.list({ sessionHandle: active.sessionHandle }),
+  ).toMatchObject([
+    {
+      state: "unreachable",
+      lastKnownState: "busy",
+      lastKnownActiveTurn: active.turnHandle,
+    },
+  ]);
+  expect(
+    await reconnected.list({ sessionHandle: killed.sessionHandle }),
+  ).toMatchObject([{ state: "killed" }]);
+
+  await expect(
+    reconnected.wait({
+      targets: [completed.turnHandle, active.turnHandle],
+      completion: "any",
+    }),
+  ).resolves.toMatchObject({
+    status: "satisfied",
+    completed: [{ turnHandle: completed.turnHandle, stopReason: "end_turn" }],
+    pending: [],
+    unreachable: [{ turnHandle: active.turnHandle }],
+  });
+  await expect(
+    reconnected.wait({
+      targets: [completed.turnHandle, active.turnHandle],
+      completion: "all",
+    }),
+  ).resolves.toMatchObject({
+    status: "unreachable",
+    completed: [{ turnHandle: completed.turnHandle, stopReason: "end_turn" }],
+    pending: [],
+    unreachable: [{ turnHandle: active.turnHandle }],
+  });
+  await expect(
+    reconnected.wait({ targets: [killed.turnHandle], completion: "all" }),
+  ).resolves.toMatchObject({
+    status: "satisfied",
+    completed: [{ turnHandle: killed.turnHandle, stopReason: "killed" }],
+  });
+}, 60_000);
+
 test("application startup failure keeps the raw transport code", async () => {
   const directory = await mkdtemp(join(tmpdir(), "reins-application-error-"));
   const daemonPids = join(directory, "daemon-pids.txt");

@@ -301,6 +301,7 @@ export const sessionStateSchema = v.union([
   v.literal("busy"),
   v.literal("idle"),
   v.literal("killed"),
+  v.literal("unreachable"),
 ]);
 export type SessionState = v.InferOutput<typeof sessionStateSchema>;
 
@@ -513,11 +514,30 @@ export const turnCompletedSchema = v.variant("stopReason", [
 ]);
 export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
-export const waitResultSchema = v.strictObject({
-  status: v.picklist(["satisfied", "timeout"]),
+const unreachableWaitTargetSchema = v.strictObject({
+  ...turnTargetSchema.entries,
+  reason: v.picklist([
+    "previous_generation",
+    "control_lost",
+    "commit_unavailable",
+  ]),
+});
+const waitResultFields = {
   completed: v.array(turnCompletedSchema),
   pending: v.array(turnTargetSchema),
-});
+};
+export const waitResultSchema = v.variant("status", [
+  v.strictObject({
+    ...waitResultFields,
+    status: v.picklist(["satisfied", "timeout"]),
+    unreachable: v.optional(v.array(unreachableWaitTargetSchema)),
+  }),
+  v.strictObject({
+    ...waitResultFields,
+    status: v.literal("unreachable"),
+    unreachable: v.array(unreachableWaitTargetSchema),
+  }),
+]);
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 
 export const interruptParamsSchema = turnTargetSchema;
@@ -651,7 +671,7 @@ const sessionInfoFields = {
   turns: v.number(),
   lastCompletedTurn: v.optional(completedTurnSummarySchema),
 };
-export const sessionInfoSchema = v.variant("state", [
+export const sessionInfoSchema = v.union([
   v.strictObject({
     ...sessionInfoFields,
     state: v.literal("busy"),
@@ -663,6 +683,28 @@ export const sessionInfoSchema = v.variant("state", [
     lastCompletedTurn: completedTurnSummarySchema,
   }),
   v.strictObject({ ...sessionInfoFields, state: v.literal("killed") }),
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("unreachable"),
+    lastKnownState: v.literal("busy"),
+    lastKnownActiveTurn: turnIdSchema,
+    unreachableReason: v.picklist([
+      "previous_generation",
+      "control_lost",
+      "commit_unavailable",
+    ]),
+  }),
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("unreachable"),
+    lastKnownState: v.literal("idle"),
+    lastCompletedTurn: completedTurnSummarySchema,
+    unreachableReason: v.picklist([
+      "previous_generation",
+      "control_lost",
+      "commit_unavailable",
+    ]),
+  }),
 ]);
 export type SessionInfo = v.InferOutput<typeof sessionInfoSchema>;
 
