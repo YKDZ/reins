@@ -1,4 +1,4 @@
-import { unlink } from "node:fs/promises";
+import { lstat, unlink } from "node:fs/promises";
 import { connect, createServer, type Server, type Socket } from "node:net";
 
 import { createNdjsonDecoder, encodeNdjson } from "./ndjson.ts";
@@ -110,6 +110,7 @@ export function createUnixSocketServer<TMessage = unknown>(options: {
   path: string;
 }): TransportServer<TMessage> {
   let server: Server | null = null;
+  let listenAttempt: Promise<void> | null = null;
   const connections = new Set<TransportConnection<TMessage>>();
   const connectionListeners = new Set<
     (connection: TransportConnection<TMessage>) => void
@@ -117,54 +118,64 @@ export function createUnixSocketServer<TMessage = unknown>(options: {
 
   return {
     async listen() {
+      if (listenAttempt !== null) return listenAttempt;
       if (server !== null) return;
-      server = createServer((socket) => {
-        const connection = wrapUnixSocket<TMessage>(socket);
-        connections.add(connection);
-        connection.onEvent((event) => {
-          if (event.kind === "closed") connections.delete(connection);
-        });
-        for (const listener of Array.from(connectionListeners)) {
-          listener(connection);
-        }
-      });
-      const srv = server;
-      await new Promise<void>((resolve, reject) => {
-        const onError = (error: Error & { code?: string }): void => {
-          srv.removeListener("listening", onListening);
-          server = null;
-          if (error.code === "EADDRINUSE") {
-            reject(
-              createTransportError({
-                code: "address_in_use",
-                fact: {
-                  kind: "transport_failure",
-                  operation: "listen",
-                  reason: "io_error",
-                },
-              }),
-            );
-          } else {
-            reject(
-              createTransportError({
-                code: "io_error",
-                fact: {
-                  kind: "transport_failure",
-                  operation: "listen",
-                  reason: "io_error",
-                },
-              }),
-            );
+      const attempt = (async () => {
+        await removeStaleSocket(options.path);
+        server = createServer((socket) => {
+          const connection = wrapUnixSocket<TMessage>(socket);
+          connections.add(connection);
+          connection.onEvent((event) => {
+            if (event.kind === "closed") connections.delete(connection);
+          });
+          for (const listener of Array.from(connectionListeners)) {
+            listener(connection);
           }
-        };
-        const onListening = (): void => {
-          srv.removeListener("error", onError);
-          resolve();
-        };
-        srv.once("error", onError);
-        srv.once("listening", onListening);
-        srv.listen(options.path);
-      });
+        });
+        const srv = server;
+        await new Promise<void>((resolve, reject) => {
+          const onError = (error: Error & { code?: string }): void => {
+            srv.removeListener("listening", onListening);
+            server = null;
+            if (error.code === "EADDRINUSE") {
+              reject(
+                createTransportError({
+                  code: "address_in_use",
+                  fact: {
+                    kind: "transport_failure",
+                    operation: "listen",
+                    reason: "io_error",
+                  },
+                }),
+              );
+            } else {
+              reject(
+                createTransportError({
+                  code: "io_error",
+                  fact: {
+                    kind: "transport_failure",
+                    operation: "listen",
+                    reason: "io_error",
+                  },
+                }),
+              );
+            }
+          };
+          const onListening = (): void => {
+            srv.removeListener("error", onError);
+            resolve();
+          };
+          srv.once("error", onError);
+          srv.once("listening", onListening);
+          srv.listen(options.path);
+        });
+      })();
+      listenAttempt = attempt;
+      try {
+        await attempt;
+      } finally {
+        if (listenAttempt === attempt) listenAttempt = null;
+      }
     },
     async close() {
       if (server === null) return;
@@ -185,6 +196,63 @@ export function createUnixSocketServer<TMessage = unknown>(options: {
       };
     },
   };
+}
+
+async function removeStaleSocket(path: string): Promise<void> {
+  let observed: Awaited<ReturnType<typeof lstat>>;
+  try {
+    observed = await lstat(path, { bigint: true });
+  } catch (error) {
+    if (isMissingPath(error)) return;
+    throw error;
+  }
+  if (!observed.isSocket()) return;
+  if (await isSocketListening(path)) return;
+
+  let current: Awaited<ReturnType<typeof lstat>>;
+  try {
+    current = await lstat(path, { bigint: true });
+  } catch (error) {
+    if (isMissingPath(error)) return;
+    throw error;
+  }
+  if (
+    !current.isSocket() ||
+    current.dev !== observed.dev ||
+    current.ino !== observed.ino
+  )
+    return;
+  await unlink(path).catch((error: unknown) => {
+    if (!isMissingPath(error)) throw error;
+  });
+}
+
+function isSocketListening(path: string): Promise<boolean> {
+  return new Promise((resolve, reject) => {
+    const socket = connect(path);
+    let settled = false;
+    const finish = (action: () => void): void => {
+      if (settled) return;
+      settled = true;
+      socket.destroy();
+      action();
+    };
+    socket.once("connect", () => finish(() => resolve(true)));
+    socket.once("error", (error: NodeJS.ErrnoException) => {
+      if (error.code === "ECONNREFUSED" || isMissingPath(error))
+        finish(() => resolve(false));
+      else finish(() => reject(error));
+    });
+  });
+}
+
+function isMissingPath(error: unknown): boolean {
+  return (
+    typeof error === "object" &&
+    error !== null &&
+    "code" in error &&
+    error.code === "ENOENT"
+  );
 }
 
 export function createUnixSocketClient<TMessage = unknown>(

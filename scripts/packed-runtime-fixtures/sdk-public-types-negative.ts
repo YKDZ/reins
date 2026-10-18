@@ -1,6 +1,7 @@
 import {
   type AgentTarget,
   type CompletedTurn,
+  type DiagnosticRecord,
   type DiagnosticId,
   type MessageContentPart,
   type MessageKey,
@@ -12,8 +13,10 @@ import {
   type ReinsConnection,
   type SendInput,
   type SessionHandle,
+  type SessionInfo,
   type ToolKey,
   type TurnHandle,
+  type WaitResult,
   parseOperationKey,
   serializeDiagnosticId,
   serializeMessageKey,
@@ -45,6 +48,69 @@ const invalidToolResultPart: MessageContentPart = {
   // @ts-expect-error 原生工具调用 ID 不作为 SDK 正文身份公开。
   toolCallId: "native-tool-id",
 };
+
+const diagnosticWithUnknownField: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "info",
+  source: "daemon",
+  kind: "lifecycle",
+  operation: "daemon",
+  reason: "started",
+  // @ts-expect-error 公开诊断记录不能夹带未定义字段。
+  privatePayload: "secret",
+};
+const diagnosticWithUnknownReason: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "info",
+  source: "daemon",
+  kind: "lifecycle",
+  operation: "daemon",
+  // @ts-expect-error 来源、阶段、原因必须匹配具体诊断类型。
+  reason: "unlisted_reason",
+};
+const diagnosticWithMismatchedStage: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "error",
+  source: "daemon",
+  kind: "request_failure",
+  operation: "send",
+  // @ts-expect-error 请求阶段必须与操作匹配。
+  stage: "start_session",
+  reason: "upstream_error",
+  message: { text: "failed", truncated: false, originalBytes: 6 },
+};
+const diagnosticWithInvalidWorkerEventState: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "error",
+  source: "core",
+  sessionHandle,
+  kind: "protocol_violation",
+  operation: "validate_worker_event",
+  reason: "unknown_session",
+  eventType: "message",
+  // @ts-expect-error unknown_session 只能对应 unknown 状态。
+  sessionState: "busy",
+};
+
+function readRequiredToolCallId(record: DiagnosticRecord): string | undefined {
+  if (
+    record.kind === "protocol_violation" &&
+    record.operation === "validate_worker_event" &&
+    record.reason === "tool_already_requested"
+  ) {
+    const toolCallId: string = record.toolCallId;
+    return toolCallId;
+  }
+  return undefined;
+}
 
 // @ts-expect-error 会话句柄与回合句柄具有不同的公开身份。
 const wrongTurn: TurnHandle = sessionHandle;
@@ -86,6 +152,49 @@ const invalidSend: SendInput = {
   sessionHandle,
   message: "ambiguous target",
 };
+
+const unreachableSessionFields = {
+  sessionHandle,
+  harness: "qoder" as const,
+  model: null,
+  reasoning: null,
+  cwd: "/consumer/workspace",
+  spawnedAt: "2026-10-18T00:00:00.000Z",
+  turns: 1,
+};
+// @ts-expect-error 已知 busy 状态必须保留活动回合。
+const unreachableBusyWithoutActiveTurn: SessionInfo = {
+  ...unreachableSessionFields,
+  state: "unreachable",
+  lastKnownState: "busy",
+  unreachableReason: "control_lost",
+};
+// @ts-expect-error 已知 idle 状态必须保留最近完成回合。
+const unreachableIdleWithoutCompletedTurn: SessionInfo = {
+  ...unreachableSessionFields,
+  state: "unreachable",
+  lastKnownState: "idle",
+  unreachableReason: "previous_generation",
+};
+const unreachableIdleWithActiveTurn: SessionInfo = {
+  ...unreachableSessionFields,
+  state: "unreachable",
+  lastKnownState: "idle",
+  lastCompletedTurn: { turnHandle, stopReason: "end_turn" },
+  // @ts-expect-error idle 状态不能携带活动回合。
+  lastKnownActiveTurn: turnHandle,
+  unreachableReason: "previous_generation",
+};
+// @ts-expect-error unreachable 结果必须说明至少一个不可达目标。
+const unreachableWaitWithoutTargets: WaitResult = {
+  status: "unreachable",
+  completed: [],
+  pending: [],
+};
+void unreachableIdleWithActiveTurn;
+void unreachableBusyWithoutActiveTurn;
+void unreachableIdleWithoutCompletedTurn;
+void unreachableWaitWithoutTargets;
 const missingCursor = { mode: "after" } as const;
 // @ts-expect-error 续接操作必须提供精确的恢复游标。
 const invalidReplay: ReplayPolicy = missingCursor;
@@ -145,3 +254,8 @@ void operationFailureWithoutKey;
 void resumeCursor;
 void invalidToolCallPart;
 void invalidToolResultPart;
+void diagnosticWithUnknownField;
+void diagnosticWithUnknownReason;
+void diagnosticWithMismatchedStage;
+void diagnosticWithInvalidWorkerEventState;
+void readRequiredToolCallId;

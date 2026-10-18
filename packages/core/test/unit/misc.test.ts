@@ -87,6 +87,7 @@ describe("权限与事件", () => {
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "permission.requested",
       "turn.completed",
     ]);
@@ -161,18 +162,18 @@ describe("权限与事件", () => {
       message: "开始",
       cwd: "/tmp/demo",
     });
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(3);
 
     unsubscribe();
     fake.controls.emit({
       type: "text.delta",
       sessionId: id,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m2"),
       delta: "继续",
     });
 
-    expect(events).toHaveLength(2);
+    expect(events).toHaveLength(3);
   });
 
   test("订阅者抛错经 onListenerError 上报，不打断机器", async () => {
@@ -201,9 +202,9 @@ describe("权限与事件", () => {
       cwd: "/tmp/demo",
     });
 
-    expect(sink).toHaveLength(2);
+    expect(sink).toHaveLength(3);
     expect(machine.list()[0]?.sessionId).toBe(id);
-    await vi.waitFor(() => expect(diagnostics).toHaveLength(2));
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(3));
     expect(diagnostics[0]).toEqual(
       expect.objectContaining({
         sessionId: id,

@@ -2,6 +2,7 @@ import {
   makeDiagnosticId,
   type CoreDiagnosticFact,
   type DomainEvent,
+  type RuntimeScopeId,
 } from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
 
@@ -9,6 +10,9 @@ import { createSessionMachine } from "#/session-machine";
 
 import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testDiagnostics, testIdentity } from "./ids.ts";
+
+const diagnosticRuntimeScopeId =
+  "00000000-0000-4000-8000-000000000000" as RuntimeScopeId;
 
 describe("send", () => {
   test("active delivery failure records send/steer once", async () => {
@@ -56,7 +60,11 @@ describe("send", () => {
   });
 
   test("active failure carrying a diagnostic id is not recorded again", async () => {
-    const diagnosticId = makeDiagnosticId("test", "steer");
+    const diagnosticId = makeDiagnosticId(
+      diagnosticRuntimeScopeId,
+      "test",
+      "steer",
+    );
     const fake = createFakeDriver({
       deliver: () => {
         throw {
@@ -119,7 +127,7 @@ describe("send", () => {
     ).resolves.toEqual({
       sessionId: id,
       turnId: ids.turn("t2"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m2"),
       deliveryPoint: "new_turn",
     });
     expect(fake.controls.delivered).toEqual([
@@ -128,6 +136,7 @@ describe("send", () => {
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "turn.completed",
       "turn.started",
       "message",

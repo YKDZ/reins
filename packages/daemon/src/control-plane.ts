@@ -178,6 +178,7 @@ function canonical(value: unknown): string {
 
 export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   const eventListeners = new Set<(entry: CommittedEvent) => void>();
+  const waitListeners = new Set<(entry?: CommittedEvent) => void>();
   const committedEvents = new Map<SessionId, StoredCommittedEvent[]>();
   const transientOperations = new Map<
     string,
@@ -203,9 +204,15 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   const eventWriteFailures = new Map<SessionId, DomainEvent>();
   const eventOperationFailures = new Map<
     SessionId,
-    { readonly operationKey: OperationKey; readonly event: DomainEvent }
+    {
+      readonly operationKey: OperationKey<"kill">;
+      readonly event: DomainEvent;
+    }
   >();
-  const activeKillOperationKeys = new Map<SessionId, Set<OperationKey>>();
+  const activeKillOperationKeys = new Map<
+    SessionId,
+    Set<OperationKey<"kill">>
+  >();
   const eventFailureCleanupFailures = new Map<SessionId, unknown>();
   const eventFailureStops = new Map<SessionId, Promise<void>>();
 
@@ -224,10 +231,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     });
     eventFailureStops.set(sessionId, stopping);
   }
-
   const unsubscribeMachine = options.machine.subscribe((event) => {
     try {
-      void acceptEvent(event).catch(() => {});
+      void acceptEvent(event).catch(() => undefined);
     } catch {
       // EventBus routes synchronous persistence failures to its listener error sink.
     }
@@ -540,6 +546,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         ...(error?.cleanupCause === undefined
           ? {}
           : { cleanupCause: error.cleanupCause }),
+        ...(error?.diagnosticId === undefined
+          ? {}
+          : { diagnosticId: error.diagnosticId }),
       });
     };
     if (transientOperations.get(operationKey)?.method === "spawn")
@@ -620,6 +629,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             ...(operation.error.cleanupCause === undefined
               ? {}
               : { cleanupCause: operation.error.cleanupCause }),
+            ...(operation.error.diagnosticId === undefined
+              ? {}
+              : { diagnosticId: operation.error.diagnosticId }),
           });
         case "succeeded":
           return v.parse(operationRecordSchema, {
@@ -742,6 +754,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         try {
           options.controlStore.markSpawnDispatched(key);
         } catch (error) {
+          wakeWaitersIfStoreUnavailable();
           throw {
             code: "control_store_unavailable",
             operationKey: key,
@@ -767,6 +780,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 events,
               });
             } catch (commitError) {
+              wakeWaitersIfStoreUnavailable();
               const verification = verifyCommittedSpawn({
                 operationKey: key,
                 request: spawnParams,
@@ -837,6 +851,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 code: "operation_outcome_unknown",
                 operationKey: key,
                 cause: failureCause(error.failure),
+                ...(error.failure.code !== "internal_error" ||
+                error.failure.diagnosticId === undefined
+                  ? {}
+                  : { diagnosticId: error.failure.diagnosticId }),
                 ...(error.terminationError === undefined
                   ? {}
                   : {
@@ -859,6 +877,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                   >,
                 );
               } catch (storeError) {
+                wakeWaitersIfStoreUnavailable();
                 let recorded = false;
                 try {
                   const operation = options.controlStore.getOperation(key);
@@ -889,6 +908,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             try {
               options.controlStore.failSpawn(key, failure);
             } catch (storeError) {
+              wakeWaitersIfStoreUnavailable();
               let recorded = false;
               try {
                 const operation = options.controlStore.getOperation(key);
@@ -927,7 +947,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         const params = rawParams as WaitParams;
         for (const target of params.targets)
           assertSessionScope(target.sessionId, consumer);
-        return await options.machine.wait(params);
+        return await waitForCommittedTargets(params);
       }
       case "interrupt": {
         const params = rawParams as Parameters<SessionMachine["interrupt"]>[0];
@@ -991,22 +1011,63 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     consumer?: ConsumerContext,
   ): SessionInfo[] {
     const criteria = filter ?? {};
-    return options.controlStore
-      .listSessions()
-      .map(({ info }) => info)
-      .filter(
-        (session) =>
-          (criteria.sessionId === undefined ||
-            session.sessionId === criteria.sessionId) &&
-          (criteria.harness === undefined ||
-            session.harness === criteria.harness) &&
-          (criteria.state === undefined || session.state === criteria.state) &&
-          (criteria.sessionLabel === undefined ||
-            session.sessionLabel === criteria.sessionLabel) &&
-          (criteria.model === undefined || session.model === criteria.model) &&
-          (consumer === undefined ||
-            options.consumerScope.inScope(consumer, session.sessionId)),
-      );
+    const liveSessionIds = new Set(
+      options.machine.list().map((session) => session.sessionId),
+    );
+    const storeUnavailable =
+      eventWriteFailure !== undefined ||
+      options.controlStore.health().status !== "available";
+    return options.controlStore.listSessions().flatMap((stored) => {
+      const { info } = stored;
+      if (
+        criteria.sessionId === undefined &&
+        stored.generation !== options.diagnostics.generation
+      )
+        return [];
+      if (
+        criteria.sessionId !== undefined &&
+        info.sessionId !== criteria.sessionId
+      )
+        return [];
+      if (
+        consumer !== undefined &&
+        !options.consumerScope.inScope(consumer, info.sessionId)
+      )
+        return [];
+
+      let session = info;
+      if (info.state !== "killed" && info.state !== "unreachable") {
+        const unreachableReason = storeUnavailable
+          ? "commit_unavailable"
+          : stored.generation !== options.diagnostics.generation
+            ? "previous_generation"
+            : liveSessionIds.has(info.sessionId)
+              ? undefined
+              : "control_lost";
+        if (unreachableReason !== undefined)
+          session = unreachableSessionInfo(info, unreachableReason);
+      }
+      if (
+        criteria.harness !== undefined &&
+        session.harness !== criteria.harness
+      )
+        return [];
+      if (criteria.state !== undefined) {
+        const stateMatches =
+          session.state === criteria.state ||
+          (session.state === "unreachable" &&
+            session.lastKnownState === criteria.state);
+        if (!stateMatches) return [];
+      }
+      if (
+        criteria.sessionLabel !== undefined &&
+        session.sessionLabel !== criteria.sessionLabel
+      )
+        return [];
+      if (criteria.model !== undefined && session.model !== criteria.model)
+        return [];
+      return [session];
+    });
   }
 
   function acceptEvent(event: DomainEvent): Promise<void> {
@@ -1028,9 +1089,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         entry = options.controlStore.recordEvent(event, session);
       }
       for (const listener of Array.from(eventListeners)) listener(entry);
+      wakeWaiters(entry);
       return Promise.resolve();
     } catch (error) {
       eventWriteFailure ??= error;
+      wakeWaiters();
       if (!eventWriteFailures.has(event.sessionId)) {
         eventWriteFailures.set(event.sessionId, event);
         if (
@@ -1050,8 +1113,30 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     }
   }
 
+  function wakeWaiters(entry?: CommittedEvent): void {
+    for (const listener of Array.from(waitListeners)) {
+      try {
+        listener(entry);
+      } catch {
+        // 每个等待者负责把读取失败转为自己的拒绝，不阻断事件提交链。
+      }
+    }
+  }
+
+  function wakeWaitersIfStoreUnavailable(): void {
+    try {
+      if (
+        eventWriteFailure !== undefined ||
+        options.controlStore.health().status !== "available"
+      )
+        wakeWaiters();
+    } catch {
+      wakeWaiters();
+    }
+  }
+
   async function settleEvents(operation?: {
-    readonly operationKey: OperationKey;
+    readonly operationKey: OperationKey<"kill">;
     readonly sessionId: SessionId;
   }): Promise<void> {
     await Promise.all(eventFailureStops.values());
@@ -1101,6 +1186,216 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         );
       throw eventWriteFailure;
     }
+  }
+
+  function unreachableSessionInfo(
+    info: Exclude<SessionInfo, { state: "killed" | "unreachable" }>,
+    unreachableReason:
+      | "previous_generation"
+      | "control_lost"
+      | "commit_unavailable",
+  ): SessionInfo {
+    if (info.state === "busy") {
+      const { activeTurnId, ...fields } = info;
+      return {
+        ...fields,
+        state: "unreachable",
+        lastKnownState: "busy",
+        lastKnownActiveTurn: activeTurnId,
+        unreachableReason,
+      };
+    }
+    return {
+      ...info,
+      state: "unreachable",
+      lastKnownState: "idle",
+      unreachableReason,
+    };
+  }
+
+  function readWaitFacts(params: WaitParams): Omit<WaitResult, "status"> {
+    const completed: WaitResult["completed"] = [];
+    const pending: WaitResult["pending"] = [];
+    const unreachable: NonNullable<WaitResult["unreachable"]> = [];
+    const sessions = new Map<SessionId, StoredSession>();
+    const events = new Map<string, readonly StoredCommittedEvent[]>();
+    const machineSessions = new Set(
+      options.machine.list().map((session) => session.sessionId),
+    );
+    const commitUnavailable =
+      eventWriteFailure !== undefined ||
+      options.controlStore.health().status !== "available";
+
+    for (const target of params.targets) {
+      let stored = sessions.get(target.sessionId);
+      if (stored === undefined) {
+        stored = options.controlStore.getSession(target.sessionId);
+        if (stored === undefined)
+          throw {
+            code: "session_not_found",
+            sessionId: target.sessionId,
+          } satisfies MachineError;
+        sessions.set(target.sessionId, stored);
+      }
+      const historyKey = `${target.sessionId}:${target.turnId}`;
+      let history = events.get(historyKey);
+      if (history === undefined) {
+        const pageInput = {
+          sessionId: target.sessionId,
+          afterEventId: 0,
+          limit: ATTACH_REPLAY_PAGE_SIZE,
+          turnId: target.turnId,
+        } as const;
+        const firstPage = options.controlStore.sessionEventsPage(pageInput);
+        const entries = [...firstPage.entries];
+        let page = firstPage;
+        while (page.hasMore) {
+          page = options.controlStore.sessionEventsPage({
+            ...pageInput,
+            afterEventId: page.nextAfter,
+            throughEventId: firstPage.throughEventId,
+          });
+          entries.push(...page.entries);
+        }
+        history = entries;
+        events.set(historyKey, history);
+      }
+      const targetEvents = history;
+      const terminal = targetEvents.find(
+        ({ event }) => event.type === "turn.completed",
+      )?.event;
+      const knownActiveTurn =
+        stored.info.state === "busy" &&
+        stored.info.activeTurnId === target.turnId;
+      const knownStarted = targetEvents.some(
+        ({ event }) => event.type === "turn.started",
+      );
+      if (terminal?.type === "turn.completed") {
+        const { type: _type, ...turn } = terminal;
+        completed.push(turn);
+        continue;
+      }
+      if (!knownStarted && !knownActiveTurn)
+        throw {
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "targets.turnId" }],
+        } satisfies MachineError;
+
+      let reason:
+        | "previous_generation"
+        | "control_lost"
+        | "commit_unavailable"
+        | undefined;
+      if (commitUnavailable) reason = "commit_unavailable";
+      else if (stored.generation !== options.diagnostics.generation)
+        reason = "previous_generation";
+      else if (
+        stored.info.state === "killed" ||
+        stored.info.state === "unreachable" ||
+        !machineSessions.has(target.sessionId)
+      )
+        reason = "control_lost";
+
+      if (reason === undefined) pending.push(target);
+      else unreachable.push({ ...target, reason });
+    }
+    return {
+      completed,
+      pending,
+      ...(unreachable.length === 0 ? {} : { unreachable }),
+    };
+  }
+
+  function settledWaitResult(
+    params: WaitParams,
+    facts: Omit<WaitResult, "status">,
+  ): WaitResult | undefined {
+    if (params.completion === "any") {
+      if (facts.completed.length > 0) return { status: "satisfied", ...facts };
+      if (
+        facts.pending.length === 0 &&
+        facts.unreachable !== undefined &&
+        facts.unreachable.length > 0
+      )
+        return {
+          status: "unreachable",
+          ...facts,
+          unreachable: facts.unreachable,
+        };
+      return undefined;
+    }
+    if (facts.unreachable !== undefined && facts.unreachable.length > 0)
+      return {
+        status: "unreachable",
+        ...facts,
+        unreachable: facts.unreachable,
+      };
+    if (facts.pending.length === 0) return { status: "satisfied", ...facts };
+    return undefined;
+  }
+
+  function waitForCommittedTargets(params: WaitParams): Promise<WaitResult> {
+    const initialFacts = readWaitFacts(params);
+    const initialResult = settledWaitResult(params, initialFacts);
+    if (initialResult !== undefined) return Promise.resolve(initialResult);
+    if (params.timeoutMs === 0)
+      return Promise.resolve({ status: "timeout", ...initialFacts });
+
+    return new Promise<WaitResult>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        waitListeners.delete(observe);
+        if (timer !== undefined) clearTimeout(timer);
+        action();
+      };
+      const observe = (entry?: CommittedEvent): void => {
+        if (entry !== undefined) {
+          const event = entry.event;
+          if (
+            event.type !== "turn.completed" ||
+            !params.targets.some(
+              (target) =>
+                target.sessionId === event.sessionId &&
+                target.turnId === event.turnId,
+            )
+          )
+            return;
+        }
+        try {
+          const facts = readWaitFacts(params);
+          const result = settledWaitResult(params, facts);
+          if (result !== undefined) finish(() => resolve(result));
+        } catch (error) {
+          finish(() => reject(error));
+        }
+      };
+      waitListeners.add(observe);
+      if (params.timeoutMs !== undefined) {
+        const deadline = performance.now() + params.timeoutMs;
+        const observeDeadline = (): void => {
+          const remaining = deadline - performance.now();
+          if (remaining > 0) {
+            timer = setTimeout(
+              observeDeadline,
+              Math.min(remaining, 2_147_483_647),
+            );
+            return;
+          }
+          try {
+            const facts = readWaitFacts(params);
+            const result = settledWaitResult(params, facts);
+            finish(() => resolve(result ?? { status: "timeout", ...facts }));
+          } catch (error) {
+            finish(() => reject(error));
+          }
+        };
+        observeDeadline();
+      }
+      observe();
+    });
   }
 
   function attachReplay(
@@ -1225,7 +1520,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     event: DomainEvent,
     error: unknown,
     cleanupFailure?: { readonly sessionId: SessionId; readonly error: unknown },
-    operationKey?: OperationKey,
+    operationKey?: OperationKey<"kill">,
   ): MachineError {
     const eventFields = {
       sessionId: event.sessionId,
@@ -1305,12 +1600,12 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     const sessionId = sessionIdFromParams(params);
     if (sessionId === undefined) return performSafely(perform);
     const operationKeys = activeKillOperationKeys.get(sessionId) ?? new Set();
-    operationKeys.add(operationKey);
+    operationKeys.add(operationKey as OperationKey<"kill">);
     activeKillOperationKeys.set(sessionId, operationKeys);
     try {
       return await performSafely(perform);
     } finally {
-      operationKeys.delete(operationKey);
+      operationKeys.delete(operationKey as OperationKey<"kill">);
       if (operationKeys.size === 0) activeKillOperationKeys.delete(sessionId);
     }
   }
@@ -1327,6 +1622,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     if (
       request.method === "getOperation" ||
       request.method === "list" ||
+      request.method === "wait" ||
       request.method === "attach" ||
       request.method === "modelCatalog" ||
       request.method === "diagnostics"
@@ -1352,6 +1648,17 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     } catch (error) {
       return { error: asMachineError(error) };
     }
+    const killSessionId =
+      request.method === "kill"
+        ? sessionIdFromParams(request.params)
+        : undefined;
+    const operationEventContext =
+      killSessionId === undefined
+        ? undefined
+        : {
+            operationKey: operationKey as OperationKey<"kill">,
+            sessionId: killSessionId,
+          };
 
     const fingerprint = canonical({
       method: request.method,
@@ -1377,6 +1684,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           request: parsed.output,
         });
       } catch (error) {
+        wakeWaitersIfStoreUnavailable();
         const known = asMachineError(error);
         return known.code === "operation_key_conflict"
           ? { error: known }
@@ -1438,6 +1746,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             try {
               options.controlStore.failSpawn(operationKey, failure);
             } catch {
+              wakeWaitersIfStoreUnavailable();
               // 保留原始存储故障，不能因补记失败改称动作已派发。
             }
             return { error: failure };
@@ -1475,6 +1784,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           try {
             options.controlStore.failSpawn(operationKey, result.error);
           } catch (error) {
+            wakeWaitersIfStoreUnavailable();
             return {
               error: storeUnavailable(
                 operationKey,
@@ -1524,14 +1834,6 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 eventWriteFailure ?? "Control store is unavailable",
               ),
             };
-          const killSessionId =
-            request.method === "kill"
-              ? sessionIdFromParams(request.params)
-              : undefined;
-          const operationEventContext =
-            killSessionId === undefined
-              ? undefined
-              : { operationKey, sessionId: killSessionId };
           const result = await performWithKillOperationContext(
             request.method,
             request.params,
@@ -1552,15 +1854,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               const cleanupError =
                 result.error.code === "internal_error"
                   ? result.error
-                  : request.method === "kill"
-                    ? eventFailureCleanupFailures.get(
-                        (
-                          request.params as Parameters<
-                            SessionMachine["kill"]
-                          >[0]
-                        ).sessionId,
-                      )
-                    : undefined;
+                  : killSessionId === undefined
+                    ? undefined
+                    : eventFailureCleanupFailures.get(killSessionId);
               return {
                 error: storeUnavailable(
                   operationKey,
@@ -1601,15 +1897,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                   "accepted",
                   eventWriteFailure ?? error,
                   undefined,
-                  request.method === "kill"
-                    ? eventFailureCleanupFailures.get(
-                        (
-                          request.params as Parameters<
-                            SessionMachine["kill"]
-                          >[0]
-                        ).sessionId,
-                      )
-                    : undefined,
+                  killSessionId === undefined
+                    ? undefined
+                    : eventFailureCleanupFailures.get(killSessionId),
                 ),
               };
             }
@@ -1640,12 +1930,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     attachReplay,
     readAttachPage,
     async waitForAttachTurn(target) {
-      const result = await options.machine.wait({
+      const result = await waitForCommittedTargets({
         targets: [target],
         completion: "all",
         timeoutMs: 0,
       });
-      await settleEvents();
       return result;
     },
     isSessionKilled(sessionId) {
@@ -1695,6 +1984,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     close() {
       unsubscribeMachine();
       eventListeners.clear();
+      wakeWaiters();
+      waitListeners.clear();
       options.controlStore.close();
     },
   };

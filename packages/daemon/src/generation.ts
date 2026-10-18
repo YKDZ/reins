@@ -198,7 +198,11 @@ export function createDaemonIdFactory(
     },
     diagnostic() {
       diagnosticCounter += 1n;
-      return makeDiagnosticId(generation, diagnosticCounter.toString(36));
+      return makeDiagnosticId(
+        runtimeScopeId,
+        generation,
+        diagnosticCounter.toString(36),
+      );
     },
   };
 }

@@ -4,6 +4,7 @@ import {
   consumerContextSchema,
   diagnosticIdSchema,
   diagnosticRecordSchema,
+  makeDiagnosticId,
   sessionIdSchema,
   textEvidenceSchema,
   turnIdSchema,
@@ -12,6 +13,7 @@ import {
   type DiagnosticRecord,
   type DiagnosticsParams,
   type DiagnosticsResult,
+  type RuntimeScopeId,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -122,6 +124,7 @@ export class DiagnosticsStoreError extends Error {
 
 export type DiagnosticsStoreOptions = {
   directory: string;
+  runtimeScopeId?: RuntimeScopeId;
   maxAgeMs?: number;
   maxBytes?: number;
 };
@@ -192,7 +195,12 @@ export async function openDiagnosticsStoreInternal(
   );
   try {
     await ensurePrivateDirectory(options.directory, filesystem);
-    const loaded = await loadFiles(options.directory, stderr, filesystem);
+    const loaded = await loadFiles(
+      options.directory,
+      stderr,
+      filesystem,
+      options.runtimeScopeId,
+    );
     const store = new RollingDiagnosticsStore({
       ...options,
       maxAgeMs,
@@ -569,6 +577,7 @@ async function loadFiles(
   directory: string,
   stderr: (message: string) => void,
   filesystem: LeaseGuardedDiagnosticsFilesystem,
+  runtimeScopeId: RuntimeScopeId | undefined,
 ): Promise<{
   segments: Segment[];
   activeRecords: StoredDiagnostic[];
@@ -593,7 +602,7 @@ async function loadFiles(
     const bytes = await filesystem.readFile(path);
     if (bytes.length > 0 && bytes.at(-1) !== 0x0a)
       corrupt("Immutable segment has an incomplete line");
-    const parsed = parseCompleteLines(bytes, name);
+    const parsed = parseCompleteLines(bytes, name, runtimeScopeId);
     segments.push({
       path,
       records: parsed.records,
@@ -634,14 +643,18 @@ async function loadFiles(
       activeBytes = activeBytes.subarray(0, tailStart);
     }
     if (complete !== undefined) {
-      parseRecord(complete);
+      parseRecord(complete, runtimeScopeId);
       await filesystem.appendFile(activePath, "\n", 0o600);
       repairs.push({ kind: "tail_repaired", affectedBytes: 0 });
       stderr("Diagnostics active record missing newline; newline restored");
       activeBytes = Buffer.concat([activeBytes, Buffer.from("\n")]);
     }
   }
-  const parsedActive = parseCompleteLines(activeBytes, ACTIVE_FILE);
+  const parsedActive = parseCompleteLines(
+    activeBytes,
+    ACTIVE_FILE,
+    runtimeScopeId,
+  );
   if (parsedActive.migratedLegacy) {
     migrations.push({ path: activePath, records: parsedActive.records });
   }
@@ -676,7 +689,11 @@ async function loadFiles(
   };
 }
 
-function parseCompleteLines(bytes: Buffer, file: string): ParsedRecords {
+function parseCompleteLines(
+  bytes: Buffer,
+  file: string,
+  runtimeScopeId: RuntimeScopeId | undefined,
+): ParsedRecords {
   let text: string;
   try {
     text = strictUtf8.decode(bytes);
@@ -690,7 +707,7 @@ function parseCompleteLines(bytes: Buffer, file: string): ParsedRecords {
   let migratedLegacy = false;
   const records = lines.map((line) => {
     try {
-      const parsed = parseRecordWithMigration(JSON.parse(line));
+      const parsed = parseRecordWithMigration(JSON.parse(line), runtimeScopeId);
       migratedLegacy ||= parsed.migratedLegacy;
       return parsed.record;
     } catch (error) {
@@ -701,8 +718,11 @@ function parseCompleteLines(bytes: Buffer, file: string): ParsedRecords {
   return { records, migratedLegacy };
 }
 
-function parseRecord(input: unknown): StoredDiagnostic {
-  return parseRecordWithMigration(input).record;
+function parseRecord(
+  input: unknown,
+  runtimeScopeId: RuntimeScopeId | undefined,
+): StoredDiagnostic {
+  return parseRecordWithMigration(input, runtimeScopeId).record;
 }
 
 // store 内部的归属键：从持久化行里剥离，不进入公开 DiagnosticRecord。
@@ -720,7 +740,10 @@ function splitOwnership(input: unknown): {
   return { payload: rest, consumer: parsed.output };
 }
 
-function parseRecordWithMigration(input: unknown): {
+function parseRecordWithMigration(
+  input: unknown,
+  runtimeScopeId: RuntimeScopeId | undefined,
+): {
   record: StoredDiagnostic;
   migratedLegacy: boolean;
 } {
@@ -734,17 +757,21 @@ function parseRecordWithMigration(input: unknown): {
     default:
       corrupt("Diagnostic record has an unknown schema version");
   }
-  const parsed = v.safeParse(diagnosticRecordSchema, payload);
+  const migratedIdentity = rewriteLegacyDiagnosticId(payload, runtimeScopeId);
+  const parsed = v.safeParse(diagnosticRecordSchema, migratedIdentity.payload);
   if (parsed.success) {
     return {
       record:
         consumer === undefined
           ? { record: parsed.output }
           : { record: parsed.output, consumer },
-      migratedLegacy: false,
+      migratedLegacy: migratedIdentity.migrated,
     };
   }
-  const legacy = v.safeParse(legacyV1TransportFailureRecordSchema, payload);
+  const legacy = v.safeParse(
+    legacyV1TransportFailureRecordSchema,
+    migratedIdentity.payload,
+  );
   if (!legacy.success) corrupt("Diagnostic record does not match schema v1");
   const migrated = { ...legacy.output };
   Reflect.deleteProperty(migrated, "message");
@@ -756,6 +783,29 @@ function parseRecordWithMigration(input: unknown): {
         ? { record: current.output }
         : { record: current.output, consumer },
     migratedLegacy: true,
+  };
+}
+
+function rewriteLegacyDiagnosticId(
+  payload: object,
+  runtimeScopeId: RuntimeScopeId | undefined,
+): { payload: object; migrated: boolean } {
+  if (!("diagnosticId" in payload) || typeof payload.diagnosticId !== "string")
+    return { payload, migrated: false };
+  const match = /^diagnostic:([a-z0-9]+):([1-9a-z][0-9a-z]*)$/u.exec(
+    payload.diagnosticId,
+  );
+  if (match === null) return { payload, migrated: false };
+  if (runtimeScopeId === undefined) {
+    corrupt("Legacy diagnostic identity has no runtime scope");
+  }
+  const [, generation, counter] = match;
+  return {
+    payload: {
+      ...payload,
+      diagnosticId: makeDiagnosticId(runtimeScopeId, generation!, counter!),
+    },
+    migrated: true,
   };
 }
 

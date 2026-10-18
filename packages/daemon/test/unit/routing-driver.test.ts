@@ -305,7 +305,7 @@ describe("routing driver invariants", () => {
       sessionIdSchema,
       "session:00000000-0000-4000-8000-000000000000:verified:1",
     );
-    const diagnosticId = makeDiagnosticId("route", "1");
+    const diagnosticId = makeDiagnosticId(testRuntimeScopeId, "route", "1");
     const query = vi.fn(async () => ({
       record: {
         v: 1 as const,
@@ -417,8 +417,8 @@ describe("routing driver invariants", () => {
         sessionIdSchema,
         "session:00000000-0000-4000-8000-000000000000:unrelated:1",
       );
-      const suppliedId = makeDiagnosticId("route", "2");
-      const fallbackId = makeDiagnosticId("route", "3");
+      const suppliedId = makeDiagnosticId(testRuntimeScopeId, "route", "2");
+      const fallbackId = makeDiagnosticId(testRuntimeScopeId, "route", "3");
       const query = vi.fn(async () => ({
         record: {
           v: 1 as const,

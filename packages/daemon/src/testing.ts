@@ -87,7 +87,10 @@ export async function openEphemeralDaemonForTest(options: {
     runtime = await openDiagnosticsRuntimeForTest({
       resolveState: async () => state,
       openStore: async () =>
-        await openDiagnosticsStore({ directory: state.diagnosticsDirectory }),
+        await openDiagnosticsStore({
+          directory: state.diagnosticsDirectory,
+          runtimeScopeId: state.runtimeScopeId,
+        }),
       allocateGeneration: async () => v.parse(daemonGenerationSchema, "test"),
     });
     const openedRuntime = runtime;

@@ -161,6 +161,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   await consuming;
   expect(await live.done).toMatchObject({ reason: "end_turn" });
   expect(facts.map((fact) => fact.type)).toEqual([
+    "turn.started",
     "message",
     "text.delta",
     "text.delta",

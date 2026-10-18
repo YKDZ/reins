@@ -107,6 +107,7 @@ describe("driver event ingress ownership", () => {
     expect(events.map(({ type }) => type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "turn.completed",
     ]);
     expect(machine.list()).toEqual([
@@ -168,7 +169,7 @@ describe("driver event ingress ownership", () => {
       type: "message",
       sessionId: active,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m4"),
       role: "worker",
       content: "secret-message",
     });
@@ -176,7 +177,7 @@ describe("driver event ingress ownership", () => {
       type: "message",
       sessionId: active,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m4"),
       role: "worker",
       content: "secret-duplicate",
     });
@@ -345,7 +346,7 @@ describe("driver event ingress ownership", () => {
         eventTurnId: ids.turn("t99"),
         activeTurnId: ids.turn("t1"),
       },
-      { reason: "message_already_completed", messageId: ids.message("m1") },
+      { reason: "message_already_completed", messageId: ids.message("m4") },
       { reason: "tool_already_requested", toolCallId: ids.toolCall("c1") },
       { reason: "tool_already_completed", toolCallId: ids.toolCall("c2") },
       {
@@ -383,12 +384,16 @@ describe("driver event ingress ownership", () => {
         sessionState: "unknown",
       },
     ]);
+    const messageContents = events.flatMap((event) => {
+      if (event.type !== "message") return [];
+      return typeof event.content === "string"
+        ? [event.content]
+        : event.content.flatMap((part) => ("text" in part ? [part.text] : []));
+    });
     expect(
-      events.some(
-        (event) =>
-          "content" in event &&
-          event.content.startsWith("secret-") &&
-          event.content !== "secret-message",
+      messageContents.some(
+        (content) =>
+          content.startsWith("secret-") && content !== "secret-message",
       ),
     ).toBe(false);
     const serialized = JSON.stringify(violations);

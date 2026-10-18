@@ -1272,36 +1272,30 @@ async function replayWindow(): Promise<void> {
     } finally {
       available.close();
     }
-    let accepted: Awaited<ReturnType<ReinsConnection["attach"]>> | undefined;
-    let expired: ReinsSdkError | undefined;
+    const resumed = await connection.attach(target, {
+      mode: "after",
+      cursor: staleCursor,
+    });
+    const resumedFacts: AgentFact[] = [];
     try {
-      accepted = await connection.attach(target, {
-        mode: "after",
-        cursor: staleCursor,
-      });
-    } catch (error) {
-      expired = failure(error);
-    }
-    if (expired === undefined) {
-      accepted?.close();
-      throw new Error(
-        `The installed SDK accepted an expired cursor: oldest=${window.oldest}, head=${window.head}, cursor=${staleCursor}`,
-      );
+      for await (const fact of resumed) resumedFacts.push(fact);
+      const end = await resumed.done;
+      if (end.reason !== "end_turn")
+        throw new Error("The old cursor replay had the wrong end reason");
+    } finally {
+      resumed.close();
     }
     const retainedMessages = facts.filter((fact) => fact.type === "message");
     if (
-      !window.truncated ||
-      window.oldest === null ||
-      window.oldest <= 1 ||
+      window.truncated ||
+      window.oldest !== 1 ||
       window.head === null ||
-      facts.length !== 1000 ||
-      retainedMessages.length !== 999 ||
-      expired.failure.code !== "event_cursor_expired" ||
-      expired.failure.facts.oldest !== window.oldest ||
-      expired.failure.facts.head !== window.head
+      facts.length !== 1008 ||
+      retainedMessages.length !== 1006 ||
+      resumedFacts.length !== 1006
     )
       throw new Error(
-        "The installed SDK did not report the bounded replay window and typed cursor gap",
+        "The installed SDK did not preserve and replay the complete event history",
       );
     process.stdout.write(
       `${JSON.stringify({
@@ -1311,7 +1305,62 @@ async function replayWindow(): Promise<void> {
         retainedMessages: retainedMessages.length,
         window,
         factCount: facts.length,
-        expired: expired.failure,
+        resumedFactCount: resumedFacts.length,
+      })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
+async function unknownSpawnDiagnostics(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const operationKey = connection.prepareOperation("spawn");
+    const error = await expectFailure(() =>
+      connection.spawn(
+        { ...spawnInput(), message: "packed-unknown-spawn-diagnostic" },
+        { operationKey },
+      ),
+    );
+    if (error.failure.code !== "operation_outcome_unknown")
+      throw new Error("未知 spawn 没有保留类型化操作错误");
+    if (
+      error.failure.facts.cause?.message !== "夹具原生启动回执丢失" ||
+      error.failure.facts.cleanupCause?.message !== "夹具无法确认原生清理"
+    )
+      throw new Error("未知 spawn 没有同时保留主因和清理次因");
+    const diagnosticId = error.failure.facts.diagnosticId;
+    if (diagnosticId === undefined)
+      throw new Error("未知 spawn 错误没有可查询的主诊断引用");
+
+    const operation = await connection.getOperation(operationKey);
+    if (
+      operation.status !== "outcome_unknown" ||
+      operation.diagnosticId !== diagnosticId ||
+      operation.cause?.message !== "夹具原生启动回执丢失" ||
+      operation.cleanupCause?.message !== "夹具无法确认原生清理"
+    )
+      throw new Error("操作查询没有保留原始诊断引用");
+    const queried = await connection.diagnostics({ diagnosticId });
+    if (
+      !("record" in queried) ||
+      queried.record.diagnosticId !== diagnosticId ||
+      queried.record.source !== "core" ||
+      queried.record.kind !== "request_failure" ||
+      queried.record.operation !== "spawn"
+    )
+      throw new Error("SDK 无法按操作诊断引用读取正式诊断记录");
+
+    process.stdout.write(
+      `${JSON.stringify({
+        code: error.failure.code,
+        diagnosticId,
+        operationStatus: operation.status,
+        operationDiagnosticId: operation.diagnosticId,
+        diagnosticSource: queried.record.source,
+        diagnosticKind: queried.record.kind,
+        diagnosticOperation: queried.record.operation,
       })}\n`,
     );
   } finally {
@@ -1425,6 +1474,9 @@ switch (mode) {
     break;
   case "harness-failure-diagnostics":
     await harnessFailureDiagnostics();
+    break;
+  case "unknown-spawn-diagnostics":
+    await unknownSpawnDiagnostics();
     break;
   case "replay-facts":
     await replayFacts();

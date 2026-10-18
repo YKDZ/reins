@@ -32,7 +32,7 @@ describe("回合生命周期", () => {
       type: "text.delta",
       sessionId: id,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m2"),
       delta: "思考中",
     });
     fake.controls.emit({
@@ -71,6 +71,7 @@ describe("回合生命周期", () => {
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "text.delta",
       "tool.requested",
       "tool.completed",

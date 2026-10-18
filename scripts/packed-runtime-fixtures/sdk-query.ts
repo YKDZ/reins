@@ -107,6 +107,15 @@ function inspectSession(session: SessionInfo): string {
     const last: LastCompletedTurn = session.lastCompletedTurn;
     return last.turnHandle;
   }
+  if (session.state === "unreachable") {
+    const lastKnownState: "busy" | "idle" = session.lastKnownState;
+    const reason = session.unreachableReason;
+    return (
+      session.lastKnownActiveTurn ??
+      session.lastCompletedTurn?.turnHandle ??
+      `${lastKnownState}:${reason}`
+    );
+  }
   return session.lastCompletedTurn?.stopReason ?? session.sessionHandle;
 }
 
