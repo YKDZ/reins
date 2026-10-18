@@ -100,6 +100,7 @@ type IngressProjection = {
 type IngressActionFrame = {
   accepting: boolean;
   readonly projections: Map<SessionId, IngressProjection>;
+  readonly nativeEvents: DomainEvent[];
 };
 
 type PendingDelivery = {
@@ -464,14 +465,20 @@ export class InterruptRequestFailure extends Error {
 export class PermissionResolutionCommitFailure extends Error {
   readonly result: ResolvePermissionAck;
   readonly commitError: unknown;
+  readonly verificationError: unknown;
 
-  constructor(result: ResolvePermissionAck, commitError: unknown) {
+  constructor(
+    result: ResolvePermissionAck,
+    commitError: unknown,
+    verificationError?: unknown,
+  ) {
     super(
       "Permission resolution was accepted natively but its control record failed to commit",
     );
     this.name = "PermissionResolutionCommitFailure";
     this.result = result;
     this.commitError = commitError;
+    this.verificationError = verificationError;
   }
 }
 
@@ -686,9 +693,15 @@ export function createSessionMachine(options: {
       const projection = projections.get(event.sessionId);
       if (projection !== undefined) projectEvent(projection, event);
     }
-    const frame: IngressActionFrame = { accepting: true, projections };
+    const frame: IngressActionFrame = {
+      accepting: true,
+      projections,
+      nativeEvents: [],
+    };
     ingressActions.push(frame);
     let committed = false;
+    let failed = false;
+    let failure: unknown;
     try {
       bus.transaction(lead, () => {
         try {
@@ -698,6 +711,9 @@ export function createSessionMachine(options: {
         }
       });
       committed = true;
+    } catch (error) {
+      failed = true;
+      failure = error;
     } finally {
       ingressActions.pop();
       if (committed) {
@@ -709,6 +725,9 @@ export function createSessionMachine(options: {
         }
       }
     }
+    // 原生事实不随本地操作记录的回滚而消失；lead 仍只在控制提交成功后发布。
+    if (frame.nativeEvents.length > 0) bus.publish(frame.nativeEvents);
+    if (failed) throw failure;
   }
 
   function projectEvent(
@@ -1064,8 +1083,11 @@ export function createSessionMachine(options: {
       return;
     }
     const delivering = pendingDeliveries.get(event.sessionId);
-    if (delivering === undefined) bus.publish(event);
-    else if (delivering.phase === "accepting") delivering.events.push(event);
+    if (delivering === undefined) {
+      const action = ingressActions.at(-1);
+      if (action?.accepting === true) action.nativeEvents.push(event);
+      else bus.publish(event);
+    } else if (delivering.phase === "accepting") delivering.events.push(event);
     else delivering.lateEvents.push(event);
   };
 
@@ -1843,6 +1865,7 @@ export function createSessionMachine(options: {
           },
         );
       } catch (error) {
+        if (error instanceof PermissionResolutionCommitFailure) throw error;
         if (phase.value === "commit")
           throw new PermissionResolutionCommitFailure(result, error);
         const failure = await unexpectedFailure(options.diagnostics, error, {

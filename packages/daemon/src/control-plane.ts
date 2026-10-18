@@ -362,6 +362,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         readonly result: ResolvePermissionAck;
         readonly error: unknown;
         readonly verificationError?: unknown;
+        readonly cleanupError?: unknown;
       }
     | {
         readonly status: "outcome_unknown";
@@ -1112,7 +1113,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   }):
     | { readonly status: "committed"; readonly event: StoredCommittedEvent }
     | { readonly status: "not_committed" }
-    | { readonly status: "unconfirmed"; readonly error: unknown } {
+    | {
+        readonly status: "unconfirmed";
+        readonly error: unknown;
+        readonly retryable?: boolean;
+      } {
     try {
       const operation = options.controlStore.getOperation(input.operationKey);
       if (
@@ -1150,7 +1155,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         };
       return { status: "committed", event };
     } catch (error) {
-      return { status: "unconfirmed", error };
+      return { status: "unconfirmed", error, retryable: true };
     }
   }
 
@@ -1199,6 +1204,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     result: ResolvePermissionAck,
     error: unknown,
     verificationError?: unknown,
+    cleanupError?: unknown,
   ): void {
     permissionResults.set(operationKey, {
       status:
@@ -1208,6 +1214,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       result,
       error,
       ...(verificationError === undefined ? {} : { verificationError }),
+      ...(cleanupError === undefined ? {} : { cleanupError }),
     });
   }
 
@@ -1348,6 +1355,14 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             ? errorMessage(known.error)
             : `${errorMessage(known.error)}; durable state verification failed: ${errorMessage(known.verificationError)}`,
         ),
+        ...(known.cleanupError === undefined
+          ? {}
+          : {
+              cleanupCause: makeErrorCause(
+                "closed",
+                errorMessage(known.cleanupError),
+              ),
+            }),
       });
     };
     const notAcceptedRecord = (
@@ -2061,6 +2076,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           "accepted",
           prior.error,
           prior.result,
+          prior.cleanupError,
         );
       if (
         prior?.status === "not_accepted_uncommitted" ||
@@ -2110,6 +2126,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               "accepted",
               known.error,
               known.result,
+              known.cleanupError,
             );
           if (
             known?.status === "not_accepted_uncommitted" ||
@@ -2141,13 +2158,6 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     if (registration.operation.status !== "pending")
       throw { code: "operation_pending", operationKey: key };
 
-    const event: Extract<DomainEvent, { type: "permission.resolved" }> = {
-      type: "permission.resolved",
-      sessionId: params.sessionId,
-      turnId: params.turnId,
-      permissionId: params.permissionId,
-      resolution: params.resolution,
-    };
     try {
       await assertWriterLease();
       return await options.machine.resolvePermission(params, {
@@ -2169,22 +2179,28 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             });
           } catch (commitError) {
             wakeWaitersIfStoreUnavailable();
-            const verification = verifyCommittedResolvePermission({
+            let verification = verifyCommittedResolvePermission({
               operationKey: key,
               request: params,
               result,
               event: committedEvent,
             });
+            if (verification.status === "unconfirmed" && verification.retryable)
+              verification = verifyCommittedResolvePermission({
+                operationKey: key,
+                request: params,
+                result,
+                event: committedEvent,
+              });
             if (verification.status === "committed") {
               committed = verification.event;
             } else {
               throw new PermissionResolutionCommitFailure(
                 result,
+                commitError,
                 verification.status === "unconfirmed"
-                  ? new Error(
-                      `${errorMessage(commitError)}; durable state verification failed: ${errorMessage(verification.error)}`,
-                    )
-                  : commitError,
+                  ? verification.error
+                  : undefined,
               );
             }
           }
@@ -2193,30 +2209,32 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       });
     } catch (error) {
       if (error instanceof PermissionResolutionCommitFailure) {
-        const verification = verifyCommittedResolvePermission({
-          operationKey: key,
-          request: params,
-          result: error.result,
-          event,
-        });
-        if (verification.status === "committed") {
-          queueCommittedEvents(error.result.sessionId, [verification.event]);
-          return error.result;
-        }
         rememberUncommittedPermissionAcceptance(
           key,
           error.result,
           error.commitError,
-          verification.status === "unconfirmed"
-            ? verification.error
-            : undefined,
+          error.verificationError,
         );
+        let cleanupError: unknown;
+        try {
+          await options.machine.kill({ sessionId: error.result.sessionId });
+        } catch (stopError) {
+          cleanupError = stopError;
+          rememberUncommittedPermissionAcceptance(
+            key,
+            error.result,
+            error.commitError,
+            error.verificationError,
+            cleanupError,
+          );
+        }
         throw storeUnavailable(
           key,
           "commit",
           "accepted",
           error.commitError,
           error.result,
+          cleanupError,
         );
       }
 

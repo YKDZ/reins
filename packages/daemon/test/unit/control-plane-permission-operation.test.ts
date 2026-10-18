@@ -14,6 +14,7 @@ import {
   WorkerPermissionFailure,
   type CoreDiagnosticFact,
   type DiagnosticsResult,
+  type DomainEvent,
   type HarnessId,
   type OperationKey,
   type OperationKeyClaims,
@@ -37,7 +38,9 @@ const runtimeScopeId = v.parse(
 const consumer = v.parse(consumerContextSchema, "permission-operation-test");
 const generation = v.parse(daemonGenerationSchema, "permissionoperationtest");
 
-function operationKey(kind: "spawn" | "resolvePermission"): OperationKey {
+function operationKey(
+  kind: "spawn" | "send" | "resolvePermission",
+): OperationKey {
   const claims: OperationKeyClaims = v.parse(operationKeyClaimsSchema, {
     runtimeScopeId,
     consumer,
@@ -54,9 +57,14 @@ test.each([
   "failure_record_failed",
   "unknown",
   "commit_failed",
+  "commit_failed_with_native_completion",
+  "commit_failed_stop_failed",
   "commit_succeeded_then_threw",
+  "commit_succeeded_then_threw_first_read_fail",
 ] as const)("授权决议 %s 保留首次原生结果且同键不重派", async (scenario) => {
   const baseStore = createInMemoryControlStore();
+  let failFirstVerificationRead = false;
+  let permissionCommitUnavailable = false;
   const store: ControlStore = {
     ...baseStore,
     registerResolvePermission(input) {
@@ -64,18 +72,50 @@ test.each([
         throw new Error("permission registration write rejected");
       return baseStore.registerResolvePermission(input);
     },
+    registerSend(input) {
+      if (permissionCommitUnavailable)
+        throw new Error("control store is unavailable");
+      return baseStore.registerSend(input);
+    },
     failResolvePermission(key, error) {
       if (scenario === "failure_record_failed")
         throw new Error("permission failure record write rejected");
       return baseStore.failResolvePermission(key, error);
     },
     commitResolvePermission(input) {
-      if (scenario === "commit_failed")
+      if (
+        scenario === "commit_failed" ||
+        scenario === "commit_failed_with_native_completion" ||
+        scenario === "commit_failed_stop_failed"
+      ) {
+        permissionCommitUnavailable = scenario === "commit_failed_stop_failed";
         throw new Error("permission commit rejected");
+      }
       const committed = baseStore.commitResolvePermission(input);
       if (scenario === "commit_succeeded_then_threw")
         throw new Error("permission commit acknowledgement was lost");
+      if (scenario === "commit_succeeded_then_threw_first_read_fail") {
+        failFirstVerificationRead = true;
+        throw new Error("permission commit acknowledgement was lost");
+      }
       return committed;
+    },
+    getOperation(key) {
+      if (failFirstVerificationRead) {
+        failFirstVerificationRead = false;
+        throw new Error("first verification read failed");
+      }
+      return baseStore.getOperation(key);
+    },
+    recordEvent(event, session) {
+      if (permissionCommitUnavailable)
+        throw new Error("control store is unavailable");
+      return baseStore.recordEvent(event, session);
+    },
+    health() {
+      return permissionCommitUnavailable
+        ? { status: "unavailable" }
+        : baseStore.health();
     },
   };
   let sessionCounter = 0;
@@ -116,6 +156,13 @@ test.each([
     },
   };
   let resolutionCalls = 0;
+  let terminationCalls = 0;
+  let deliveryCalls = 0;
+  let activeSpawn: SpawnAck | undefined;
+  let emitNative!: (event: DomainEvent) => void;
+  let stopRejected = scenario === "commit_failed_stop_failed";
+  const machineEvents: unknown[] = [];
+  const liveEvents: unknown[] = [];
   const adapters = new Map<HarnessId, HarnessAdapter>([
     [
       "codex",
@@ -137,34 +184,54 @@ test.each([
       },
     },
     diagnostics: coreDiagnostics,
-    driverFactory: (emit) => ({
-      async start(spec) {
-        emit({
-          type: "permission.requested",
-          sessionId: spec.sessionId,
-          turnId: spec.turnId,
-          permissionId: "permission-1" as never,
-          kind: "tool:Bash",
-          options: [{ outcome: "allow", scope: "once" }],
-        });
-      },
-      async deliver() {},
-      async interrupt() {},
-      resolvePermission() {
-        resolutionCalls += 1;
-        if (scenario === "not_accepted" || scenario === "failure_record_failed")
-          throw new WorkerPermissionFailure(
-            "native rejected permission resolution",
-            "not_accepted",
-          );
-        if (scenario === "unknown")
-          throw new WorkerPermissionFailure(
-            "native permission receipt was lost",
-            "unknown",
-          );
-      },
-      async terminate() {},
-    }),
+    driverFactory: (emit) => {
+      emitNative = emit;
+      return {
+        async start(spec) {
+          emit({
+            type: "permission.requested",
+            sessionId: spec.sessionId,
+            turnId: spec.turnId,
+            permissionId: "permission-1" as never,
+            kind: "tool:Bash",
+            options: [{ outcome: "allow", scope: "once" }],
+          });
+        },
+        async deliver() {
+          deliveryCalls += 1;
+        },
+        async interrupt() {},
+        resolvePermission(nativeSessionId) {
+          resolutionCalls += 1;
+          if (scenario === "commit_failed_with_native_completion")
+            emitNative({
+              type: "turn.completed",
+              sessionId: nativeSessionId,
+              turnId: activeSpawn!.turnId,
+              stopReason: "end_turn",
+              finalReply: null,
+              usage: { inputTokens: 0, outputTokens: 0 },
+            });
+          if (
+            scenario === "not_accepted" ||
+            scenario === "failure_record_failed"
+          )
+            throw new WorkerPermissionFailure(
+              "native rejected permission resolution",
+              "not_accepted",
+            );
+          if (scenario === "unknown")
+            throw new WorkerPermissionFailure(
+              "native permission receipt was lost",
+              "unknown",
+            );
+        },
+        async terminate() {
+          terminationCalls += 1;
+          if (stopRejected) throw new Error("required stop rejected");
+        },
+      };
+    },
   });
   const plane = createControlPlane({
     machine,
@@ -175,7 +242,7 @@ test.each([
     runtimeScopeId,
   });
   const execute = (
-    method: "spawn" | "resolvePermission",
+    method: "spawn" | "resolvePermission" | "send",
     params: unknown,
     key: OperationKey,
   ) =>
@@ -196,6 +263,9 @@ test.each([
     if (!("result" in spawned))
       throw new Error(`测试会话创建失败：${JSON.stringify(spawned)}`);
     const spawnResult = spawned.result as SpawnAck;
+    activeSpawn = spawnResult;
+    machine.subscribe((event) => machineEvents.push(event));
+    plane.subscribeEvents((entry) => liveEvents.push(entry.event));
     const request: ResolvePermissionParams = {
       sessionId: spawnResult.sessionId,
       turnId: spawnResult.turnId,
@@ -265,6 +335,161 @@ test.each([
           permissionId: request.permissionId,
         },
       });
+      expect(terminationCalls).toBe(1);
+      expect(
+        await execute(
+          "send",
+          {
+            placement: "active_turn",
+            sessionId: spawnResult.sessionId,
+            turnId: spawnResult.turnId,
+            message: "must not be delivered",
+          },
+          operationKey("send"),
+        ),
+      ).toMatchObject({ error: { code: "session_killed" } });
+      expect(deliveryCalls).toBe(0);
+    } else if (scenario === "commit_failed_stop_failed") {
+      expect(resolved).toMatchObject({
+        error: {
+          code: "control_store_unavailable",
+          stage: "commit",
+          acceptance: "accepted",
+          cause: { kind: "io", message: "permission commit rejected" },
+          cleanupCause: {
+            kind: "closed",
+            message: expect.stringContaining("required stop rejected"),
+          },
+        },
+      });
+      expect(terminationCalls).toBe(1);
+      expect(
+        await plane.dispatch("getOperation", { operationKey: key }, consumer),
+      ).toMatchObject({
+        status: "accepted_uncommitted",
+        operationKey: key,
+        result: { sessionId: spawnResult.sessionId },
+        cleanupCause: {
+          kind: "closed",
+          message: expect.stringContaining("required stop rejected"),
+        },
+      });
+      expect(
+        await execute(
+          "send",
+          {
+            placement: "active_turn",
+            sessionId: spawnResult.sessionId,
+            turnId: spawnResult.turnId,
+            message: "must not be delivered",
+          },
+          operationKey("send"),
+        ),
+      ).toMatchObject({ error: { code: "control_store_unavailable" } });
+      expect(deliveryCalls).toBe(0);
+    } else if (scenario === "commit_failed_with_native_completion") {
+      expect(resolved).toMatchObject({
+        error: {
+          code: "control_store_unavailable",
+          stage: "commit",
+          acceptance: "accepted",
+          acceptedResult: {
+            sessionId: spawnResult.sessionId,
+            turnId: spawnResult.turnId,
+            permissionId: request.permissionId,
+          },
+        },
+      });
+      expect(terminationCalls).toBe(1);
+      expect(machineEvents).toContainEqual({
+        type: "turn.completed",
+        sessionId: spawnResult.sessionId,
+        turnId: spawnResult.turnId,
+        stopReason: "end_turn",
+        finalReply: null,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      });
+      expect(
+        baseStore
+          .sessionEvents(spawnResult.sessionId)
+          .map(({ event }) => event),
+      ).toContainEqual({
+        type: "turn.completed",
+        sessionId: spawnResult.sessionId,
+        turnId: spawnResult.turnId,
+        stopReason: "end_turn",
+        finalReply: null,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      });
+      expect(
+        await execute(
+          "send",
+          {
+            placement: "active_turn",
+            sessionId: spawnResult.sessionId,
+            turnId: spawnResult.turnId,
+            message: "must not be delivered",
+          },
+          operationKey("send"),
+        ),
+      ).toMatchObject({ error: { code: "session_killed" } });
+      expect(deliveryCalls).toBe(0);
+    } else if (scenario === "commit_succeeded_then_threw_first_read_fail") {
+      expect(resolved).toMatchObject({
+        result: {
+          sessionId: spawnResult.sessionId,
+          turnId: spawnResult.turnId,
+          permissionId: request.permissionId,
+        },
+      });
+      const permissionResolved = {
+        type: "permission.resolved",
+        sessionId: spawnResult.sessionId,
+        turnId: spawnResult.turnId,
+        permissionId: request.permissionId,
+        resolution: request.resolution,
+      };
+      expect(machineEvents).toContainEqual(permissionResolved);
+      expect(liveEvents).toContainEqual(permissionResolved);
+      expect(
+        await plane.dispatch("getOperation", { operationKey: key }, consumer),
+      ).toMatchObject({ status: "succeeded", operationKey: key });
+      const baseline = plane.attachInitial(
+        {
+          sessionId: spawnResult.sessionId,
+          scope: "session",
+          start: { mode: "snapshot" },
+        },
+        consumer,
+      );
+      expect(baseline.initial).toMatchObject({
+        mode: "snapshot",
+        baseline: { pendingPermissions: [] },
+      });
+      emitNative({
+        type: "turn.completed",
+        sessionId: spawnResult.sessionId,
+        turnId: spawnResult.turnId,
+        stopReason: "end_turn",
+        finalReply: null,
+        usage: { inputTokens: 0, outputTokens: 0 },
+      });
+      await plane.settleEvents();
+      expect(
+        baseStore
+          .sessionEvents(spawnResult.sessionId)
+          .map(({ event }) => event.type),
+      ).toEqual([
+        "session.created",
+        "turn.started",
+        "message",
+        "permission.requested",
+        "permission.resolved",
+        "turn.completed",
+      ]);
+      expect(plane.list({ sessionId: spawnResult.sessionId })).toMatchObject([
+        { state: "idle", lastCompletedTurn: { turnId: spawnResult.turnId } },
+      ]);
     } else if (scenario === "unknown") {
       expect(resolved).toMatchObject({
         error: { code: "operation_outcome_unknown", operationKey: key },
@@ -315,7 +540,13 @@ test.each([
     await execute("resolvePermission", request, key);
     expect(resolutionCalls).toBe(1);
   } finally {
-    await plane.terminateLiveSessions();
+    stopRejected = false;
+    await Promise.allSettled(
+      machine
+        .list()
+        .filter(({ state }) => state !== "killed")
+        .map(({ sessionId }) => machine.kill({ sessionId })),
+    );
     plane.close();
     store.close();
     await diagnostics.close();
