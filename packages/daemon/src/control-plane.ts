@@ -468,6 +468,20 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
 
   function knownOperationKeysForSession(sessionId: SessionId): OperationKey[] {
     const keys = new Set<OperationKey>();
+    for (const [key, fingerprint] of interruptRequestFingerprints) {
+      try {
+        const request = (
+          JSON.parse(fingerprint) as {
+            readonly request?: { readonly sessionId?: unknown };
+          }
+        ).request;
+        const target = v.safeParse(sessionIdSchema, request?.sessionId);
+        if (target.success && target.output === sessionId)
+          keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
+      } catch {
+        // 本地规范请求指纹损坏时，不推断操作归属。
+      }
+    }
     for (const [key, value] of spawnResults)
       if (operationSessionId(value) === sessionId)
         keys.add(v.parse(operationKeySchema, key) as unknown as OperationKey);
@@ -2188,15 +2202,14 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     if (!options.consumerScope.inScope(consumer, sessionId))
       throw { code: "session_not_found", sessionId } satisfies MachineError;
 
-    const knownOperationKeys = knownOperationKeysForSession(sessionId);
-    const deletionInput = {
+    const deletionInput = (unreachable = false) => ({
       sessionId,
       runtimeScopeId: options.runtimeScopeId,
       consumer,
       currentGeneration: options.diagnostics.generation,
-      unreachable: false,
-      knownOperationKeys,
-    } as const;
+      unreachable,
+      knownOperationKeys: knownOperationKeysForSession(sessionId),
+    });
     const finishDeletion = (
       result: Extract<
         ReturnType<ControlStore["deleteSessionRecords"]>,
@@ -2234,7 +2247,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           deleted.consumer !== consumer
         )
           throw { code: "session_not_found", sessionId } satisfies MachineError;
-        const result = options.controlStore.deleteSessionRecords(deletionInput);
+        const result =
+          options.controlStore.deleteSessionRecords(deletionInput());
         if (result.status === "deleted") return finishDeletion(result);
       }
 
@@ -2259,8 +2273,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         } satisfies MachineError;
 
       const result = options.controlStore.deleteSessionRecords({
-        ...deletionInput,
-        unreachable,
+        ...deletionInput(unreachable),
       });
       if (result.status === "not_found")
         throw { code: "session_not_found", sessionId } satisfies MachineError;
@@ -2282,7 +2295,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           deleted.consumer === consumer
         ) {
           const result =
-            options.controlStore.deleteSessionRecords(deletionInput);
+            options.controlStore.deleteSessionRecords(deletionInput());
           if (result.status === "deleted") return finishDeletion(result);
         }
       } catch {
