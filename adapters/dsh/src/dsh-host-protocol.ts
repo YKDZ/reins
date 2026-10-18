@@ -50,6 +50,11 @@ export type DshHostCommand =
     }
   | {
       readonly id: number;
+      readonly type: "cancel-turn-binding";
+      readonly nativeTurn: number;
+    }
+  | {
+      readonly id: number;
       readonly type: "resolve-approval";
       readonly approvalId: string;
       readonly outcome: "allowed-once" | "rejected" | "unavailable";
@@ -100,6 +105,7 @@ export type DshHostResponse =
     }
   | { readonly id: number; readonly type: "interrupted" }
   | { readonly id: number; readonly type: "bound" }
+  | { readonly id: number; readonly type: "binding-cancelled" }
   | {
       readonly id: number;
       readonly type: "approval-decided";

@@ -37,13 +37,22 @@ type NativeCaller = {
   readonly messageId: MessageId;
 };
 
+type NativeTurnBindingResult =
+  | { readonly status: "bound"; readonly turnId: TurnId }
+  | { readonly status: "unavailable" }
+  | { readonly status: "cancelled" };
+
+type PendingNativeTurnBinding = {
+  readonly promise: Promise<TurnId | undefined>;
+  resolve(turnId: TurnId | undefined): void;
+};
+
 type NativeApproval = {
   readonly id: string;
   readonly toolName: string;
   readonly callId?: string;
   readonly reason?: string;
   readonly nativeTurn?: number;
-  readonly turnId?: TurnId;
   claimed: boolean;
   aborted: boolean;
   outcome?: ApprovalOutcome;
@@ -52,6 +61,14 @@ type NativeApproval = {
   decide(outcome: ApprovalOutcome): void;
   removeAbortListener?: () => void;
 };
+
+function createNativeTurnBinding(): PendingNativeTurnBinding {
+  let resolvePromise!: (turnId: TurnId | undefined) => void;
+  const promise = new Promise<TurnId | undefined>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
 
 const hostCommandSchema = v.union([
   v.strictObject({
@@ -84,6 +101,11 @@ const hostCommandSchema = v.union([
     type: v.literal("bind-turn"),
     nativeTurn: v.number(),
     turnId: turnIdSchema,
+  }),
+  v.strictObject({
+    id: v.number(),
+    type: v.literal("cancel-turn-binding"),
+    nativeTurn: v.number(),
   }),
   v.strictObject({
     id: v.number(),
@@ -267,6 +289,7 @@ export async function runDshRuntimeHost(): Promise<void> {
   let approvalSubscription: (() => void) | undefined;
   const pendingNativeTurns: NativeTurn[] = [];
   const nativeTurnIds = new Map<number, TurnId>();
+  const pendingNativeTurnBindings = new Map<number, PendingNativeTurnBinding>();
   const nativeMessageTurns = new Map<string, TurnId>();
   const nativeCallerMessageIds = new Map<string, NativeCaller>();
   const activePreSteps = new Map<number, AbortSignal>();
@@ -280,6 +303,8 @@ export async function runDshRuntimeHost(): Promise<void> {
   const closeProfile = (): Promise<void> => {
     if (closing !== undefined) return closing;
     closing = (async () => {
+      for (const nativeTurn of pendingNativeTurnBindings.keys())
+        settleNativeTurnBinding(nativeTurn, undefined);
       const failures: unknown[] = [];
       try {
         await handle?.dispose();
@@ -403,9 +428,73 @@ export async function runDshRuntimeHost(): Promise<void> {
       (existingTurnId !== undefined && existingTurnId !== turnId)
     )
       return false;
-    nativeTurnIds.set(nativeTurn, turnId);
+    setNativeTurnId(nativeTurn, turnId);
     return true;
   };
+
+  function setNativeTurnId(nativeTurn: number, turnId: TurnId): void {
+    nativeTurnIds.set(nativeTurn, turnId);
+    settleNativeTurnBinding(nativeTurn, turnId);
+  }
+
+  function settleNativeTurnBinding(
+    nativeTurn: number,
+    turnId: TurnId | undefined,
+  ): void {
+    const binding = pendingNativeTurnBindings.get(nativeTurn);
+    if (binding === undefined) return;
+    pendingNativeTurnBindings.delete(nativeTurn);
+    binding.resolve(turnId);
+  }
+
+  async function waitForApprovalTurn(
+    approval: NativeApproval,
+    signal: AbortSignal | undefined,
+  ): Promise<NativeTurnBindingResult> {
+    const nativeTurn = approval.nativeTurn;
+    if (nativeTurn === undefined) return { status: "unavailable" };
+    const boundTurnId = nativeTurnIds.get(nativeTurn);
+    if (boundTurnId !== undefined)
+      return { status: "bound", turnId: boundTurnId };
+    if (signal?.aborted === true) return { status: "cancelled" };
+    const agent = handle?.agent;
+    const boundary =
+      agent === undefined
+        ? undefined
+        : profile.ctx.sessionProjections.stateOf(agent.session, "turnBoundary");
+    const preStepSignal = activePreSteps.get(nativeTurn);
+    if (
+      agent === undefined ||
+      agent.status !== "running" ||
+      boundary === undefined ||
+      boundary.openTurnStartSeq === null ||
+      boundary.lastTurn !== nativeTurn ||
+      preStepSignal === undefined ||
+      preStepSignal.aborted
+    )
+      return { status: "unavailable" };
+    let binding = pendingNativeTurnBindings.get(nativeTurn);
+    if (binding === undefined) {
+      binding = createNativeTurnBinding();
+      pendingNativeTurnBindings.set(nativeTurn, binding);
+    }
+    const bindingResult = binding.promise.then((turnId) =>
+      turnId === undefined
+        ? ({ status: "unavailable" } as const)
+        : ({ status: "bound", turnId } as const),
+    );
+    if (signal === undefined) return await bindingResult;
+    let abort!: () => void;
+    const cancelled = new Promise<NativeTurnBindingResult>((resolve) => {
+      abort = () => resolve({ status: "cancelled" });
+      signal.addEventListener("abort", abort, { once: true });
+    });
+    try {
+      return await Promise.race([bindingResult, cancelled]);
+    } finally {
+      signal.removeEventListener("abort", abort);
+    }
+  }
 
   const acceptSteer = (
     agent: Agent,
@@ -554,10 +643,6 @@ export async function runDshRuntimeHost(): Promise<void> {
           if (nativeSession.id !== handle?.agent.session.id) return;
           if (event.type === "approval/asked") {
             const nativeTurn = nativeTurnOf(event) ?? openNativeTurn;
-            const turnId =
-              nativeTurn === undefined
-                ? undefined
-                : nativeTurnIds.get(nativeTurn);
             let decide!: (outcome: ApprovalOutcome) => void;
             const decided = new Promise<ApprovalOutcome>((resolve) => {
               decide = resolve;
@@ -572,7 +657,6 @@ export async function runDshRuntimeHost(): Promise<void> {
                 ? {}
                 : { reason: event.data.reason }),
               ...(nativeTurn === undefined ? {} : { nativeTurn }),
-              ...(turnId === undefined ? {} : { turnId }),
               claimed: false,
               aborted: false,
               decided,
@@ -589,7 +673,7 @@ export async function runDshRuntimeHost(): Promise<void> {
           if (event.type === "turn/start") {
             const pending = pendingNativeTurns.shift();
             if (pending !== undefined)
-              nativeTurnIds.set(event.data.turn, pending.turnId);
+              setNativeTurnId(event.data.turn, pending.turnId);
           }
           const eventNativeTurn = nativeTurnOf(event);
           const nativeTurn =
@@ -600,7 +684,7 @@ export async function runDshRuntimeHost(): Promise<void> {
               ? nativeMessageTurns.get(event.data.id)
               : undefined;
           if (nativeTurn !== undefined && messageTurn !== undefined)
-            nativeTurnIds.set(nativeTurn, messageTurn);
+            setNativeTurnId(nativeTurn, messageTurn);
           const turnId =
             event.type === "user/message"
               ? messageTurn
@@ -618,6 +702,7 @@ export async function runDshRuntimeHost(): Promise<void> {
             nativeMessageTurns.delete(event.data.id);
           }
           if (event.type === "turn/end") {
+            settleNativeTurnBinding(event.data.turn, undefined);
             activePreSteps.delete(event.data.turn);
             nativeTurnIds.delete(event.data.turn);
             for (const [
@@ -640,6 +725,8 @@ export async function runDshRuntimeHost(): Promise<void> {
       approvalSubscription = handle.agent.ctx.on(
         "approval/request",
         async (request: ApprovalRequestEvent): Promise<ApprovalOutcome> => {
+          const requestAborted = (): boolean =>
+            request.signal?.aborted === true;
           const callId =
             request.callId === undefined ? undefined : String(request.callId);
           const candidates = [...nativeApprovals.values()].filter(
@@ -652,14 +739,21 @@ export async function runDshRuntimeHost(): Promise<void> {
           if (
             candidates.length !== 1 ||
             candidates[0]?.nativeTurn === undefined ||
-            candidates[0].turnId === undefined ||
-            request.signal?.aborted === true
+            requestAborted()
           )
-            return request.signal?.aborted === true
-              ? "cancelled"
-              : "unavailable";
+            return requestAborted() ? "cancelled" : "unavailable";
           const approval = candidates[0];
           if (approval === undefined) return "unavailable";
+          const binding = await waitForApprovalTurn(approval, request.signal);
+          if (binding.status !== "bound")
+            return binding.status === "cancelled" ? "cancelled" : "unavailable";
+          if (
+            nativeApprovals.get(approval.id) !== approval ||
+            approval.claimed ||
+            approval.aborted ||
+            approval.outcome !== undefined
+          )
+            return requestAborted() ? "cancelled" : "unavailable";
           approval.claimed = true;
           return await new Promise<ApprovalOutcome>((resolve) => {
             approval.answer = resolve;
@@ -685,7 +779,7 @@ export async function runDshRuntimeHost(): Promise<void> {
                 type: "approval-requested",
                 approvalId: approval.id,
                 nativeTurn: approval.nativeTurn!,
-                turnId: approval.turnId!,
+                turnId: binding.turnId,
                 toolName: approval.toolName,
                 ...(approval.callId === undefined
                   ? {}
@@ -785,7 +879,16 @@ export async function runDshRuntimeHost(): Promise<void> {
     if (command.type === "bind-turn") {
       if (bindNativeTurn(handle.agent, command.nativeTurn, command.turnId))
         send({ id: command.id, type: "bound" });
-      else reject(command.id, "not_accepted");
+      else {
+        if (!nativeTurnIds.has(command.nativeTurn))
+          settleNativeTurnBinding(command.nativeTurn, undefined);
+        reject(command.id, "not_accepted");
+      }
+      return;
+    }
+    if (command.type === "cancel-turn-binding") {
+      settleNativeTurnBinding(command.nativeTurn, undefined);
+      send({ id: command.id, type: "binding-cancelled" });
       return;
     }
     if (command.type === "interrupt") {

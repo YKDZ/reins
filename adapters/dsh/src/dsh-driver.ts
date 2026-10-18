@@ -451,6 +451,24 @@ export function createDshDriver(): AdapterDriverFactory {
             });
             if (pendingNativeTurnBindings.get(nativeTurn) === binding)
               pendingNativeTurnBindings.delete(nativeTurn);
+            const currentHost = host;
+            if (currentHost !== undefined) {
+              try {
+                const response = await currentHost.request({
+                  type: "cancel-turn-binding",
+                  nativeTurn,
+                });
+                if (response.type !== "binding-cancelled")
+                  throw new Error(
+                    "The official DSH host did not release the pending turn binding",
+                  );
+              } catch (cleanupCause) {
+                throw new AggregateError(
+                  [error, cleanupCause],
+                  "The autonomous DSH turn could not be bound or released",
+                );
+              }
+            }
             throw error;
           }
           try {
