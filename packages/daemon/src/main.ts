@@ -10,6 +10,11 @@ import {
   createCodexDriver,
   createCodexTransport,
 } from "@reins/codex";
+import {
+  createDshDriver,
+  createDshModelCatalog,
+  runDshHostProcess,
+} from "@reins/dsh";
 import { openControlStore } from "@reins/event-journal";
 import type { HarnessId, ProtocolMessage } from "@reins/protocol";
 import { harnessIdSchema, makeErrorCause } from "@reins/protocol";
@@ -32,7 +37,7 @@ import type { HarnessAdapter } from "./registry.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS } from "./server.ts";
 import { resolveDaemonState } from "./state.ts";
 
-// 发布阶段的拼接点（ADR-0011）：默认注册两个真实 adapter；
+// 发布阶段的拼接点（ADR-0011）：默认注册三个真实 adapter；
 // --adapters <module> 可用外部模块整体替换注册表（测试与扩展入口）。
 function builtInAdapters(): Map<HarnessId, HarnessAdapter> {
   const qoderSdk = createRealQoderSdk();
@@ -56,6 +61,14 @@ function builtInAdapters(): Map<HarnessId, HarnessAdapter> {
         }),
         modelCatalog: createCodexModelCatalog(),
         canCaptureHarnessStderr: true,
+      },
+    ],
+    [
+      "dsh",
+      {
+        driverFactory: createDshDriver(),
+        modelCatalog: createDshModelCatalog(),
+        canCaptureHarnessStderr: false,
       },
     ],
   ]);
@@ -129,6 +142,19 @@ function installCrashHandlers(): void {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "--reins-dsh-runtime-host") {
+    try {
+      await runDshHostProcess();
+    } catch {
+      process.send?.({
+        type: "fatal",
+        failure: { code: "DSH_PROFILE_UNAVAILABLE" },
+      });
+      process.exitCode = 1;
+      process.disconnect?.();
+    }
+    return;
+  }
   installCrashHandlers();
   const state = await resolveDaemonState();
   const writerLease = await acquireAdvisoryFileLease(

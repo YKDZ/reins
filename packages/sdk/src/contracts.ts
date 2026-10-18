@@ -90,7 +90,7 @@ export type MessageContentPart =
     };
 export type MessageContent = string | MessageContentPart[];
 
-export type HarnessId = "codex" | "qoder";
+export type HarnessId = "codex" | "dsh" | "qoder";
 export type BackgroundActivitySource = { kind: string; id: string };
 export type BackgroundActivityStatus =
   | "active"

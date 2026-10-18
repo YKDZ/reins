@@ -1,6 +1,9 @@
 import { stat } from "node:fs/promises";
 
-import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
+import {
+  isAlreadyDiagnosedError,
+  isHarnessModelCatalogFailure,
+} from "@reins/adapter-kit";
 import {
   SendCommitFailure,
   SendDeliveryFailure,
@@ -29,6 +32,7 @@ import type {
   DomainEvent,
   EventId,
   HarnessId,
+  HarnessFailure,
   HarnessModelCatalog,
   ModelCatalogResult,
   MachineError,
@@ -557,6 +561,14 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           ...(diagnosticId === undefined ? {} : { diagnosticId }),
         });
       } else {
+        const failure: HarnessFailure = isHarnessModelCatalogFailure(
+          result.reason,
+        )
+          ? result.reason.failure
+          : {
+              failureCategory: "unclassified",
+              retryDisposition: "unknown",
+            };
         const suppliedDiagnosticId = await verifiedModelCatalogDiagnostic(
           result.reason,
           harness,
@@ -574,10 +586,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         failures.push({
           harness,
           code: "model_catalog_query_failed",
-          failure: {
-            failureCategory: "unclassified",
-            retryDisposition: "unknown",
-          },
+          failure,
           ...(diagnosticId === undefined ? {} : { diagnosticId }),
         });
       }

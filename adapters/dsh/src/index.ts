@@ -1,4 +1,6 @@
-// DeepSeek harness（dsh）worker adapter 占位。
-import type { SessionId } from "@reins/protocol";
+export { createDshDriver } from "./dsh-driver.ts";
+export { encodeDshModelId } from "./model-catalog.ts";
+export { createDshModelCatalog } from "./model-catalog.ts";
+export { runDshRuntimeHost as runDshHostProcess } from "./dsh-host.ts";
 
-export type { SessionId };
+export type { SessionId } from "@reins/protocol";

@@ -1,6 +1,9 @@
 import { randomUUID } from "node:crypto";
 
-import { AlreadyDiagnosedError } from "@reins/adapter-kit";
+import {
+  AlreadyDiagnosedError,
+  HarnessModelCatalogFailure,
+} from "@reins/adapter-kit";
 import { createSessionMachine } from "@reins/core";
 import {
   createInMemoryControlStore,
@@ -2592,6 +2595,40 @@ describe("daemon 协议面（缝 C）", () => {
         },
       ],
     });
+  });
+
+  test("模型目录聚合保留 adapter 提供的结构化失败分类", async () => {
+    const adapter: HarnessAdapter = {
+      driverFactory: () => ({
+        async start() {},
+        async deliver() {},
+        async interrupt() {},
+        resolvePermission() {},
+        async terminate() {},
+      }),
+      async modelCatalog() {
+        throw new HarnessModelCatalogFailure({
+          failureCategory: "credential_rejected",
+          retryDisposition: "external_state_change",
+        });
+      },
+    };
+    const { server } = startDaemon(new Map([["dsh", adapter]]));
+    const client = server.connect();
+    await flush();
+
+    const response = await makeRequester(client).request("modelCatalog", {});
+    const result = resultOf(response) as ModelCatalogResult;
+    expect(result.failures).toEqual([
+      {
+        harness: "dsh",
+        code: "model_catalog_query_failed",
+        failure: {
+          failureCategory: "credential_rejected",
+          retryDisposition: "external_state_change",
+        },
+      },
+    ]);
   });
 
   test("伪造 AlreadyDiagnosed 结构不会污染 modelCatalog response", async () => {

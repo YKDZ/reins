@@ -263,7 +263,7 @@ describe("list 过滤与参数校验", () => {
     await expect(
       machine.spawn({
         sessionLabel: ids.sessionLabel("fixture-inline-4"),
-        harness: "dsh" as never,
+        harness: "unknown" as never,
         message: "x",
         cwd: "/tmp/demo",
       }),

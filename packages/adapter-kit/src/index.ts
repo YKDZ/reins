@@ -13,3 +13,7 @@ export {
   type AdapterDiagnosticSink,
   type DiagnosticSink,
 } from "./diagnostic.ts";
+export {
+  HarnessModelCatalogFailure,
+  isHarnessModelCatalogFailure,
+} from "./model-catalog-failure.ts";

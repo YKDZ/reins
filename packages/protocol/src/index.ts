@@ -1,6 +1,6 @@
 import * as v from "valibot";
 
-export const harnessIdSchema = v.picklist(["codex", "qoder"]);
+export const harnessIdSchema = v.picklist(["codex", "dsh", "qoder"]);
 export type HarnessId = v.InferOutput<typeof harnessIdSchema>;
 
 // —— 会话与状态 ——
