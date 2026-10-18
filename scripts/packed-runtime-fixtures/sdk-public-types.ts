@@ -15,6 +15,7 @@ import {
   type ModelCatalogFailure,
   type ModelCatalogResult,
   type DiagnosticId,
+  type KillResult,
   type MessageKey,
   type OperationRecord,
   type OperationKey,
@@ -73,6 +74,33 @@ const keyedSend = connection.send(newTurnSend, {
 });
 const sendOperationQuery: Promise<OperationRecord<"send">> =
   connection.getOperation(sendOperationKey);
+const killOperationKey = connection.prepareOperation("kill");
+const killOperationQuery: Promise<OperationRecord<"kill">> =
+  connection.getOperation(killOperationKey);
+async function inspectKillOperation(): Promise<SessionHandle | undefined> {
+  const operation = await killOperationQuery;
+  if (operation.status === "succeeded") {
+    const result: KillResult = operation.result;
+    return result.sessionHandle;
+  }
+  if (
+    operation.status === "partial_effect_uncommitted" ||
+    operation.status === "partial_effect_unconfirmed"
+  ) {
+    const closedSession: SessionHandle =
+      operation.error.facts.effect.sessionHandle;
+    return closedSession;
+  }
+  return undefined;
+}
+void inspectKillOperation;
+const wrongKillOperation: OperationRecord<"kill"> = {
+  status: "succeeded",
+  // @ts-expect-error Kill results remain accurately associated with kill keys.
+  operationKey: sendOperationKey,
+  result: { sessionHandle, status: "killed" },
+};
+void wrongKillOperation;
 const interruptOperationQuery: Promise<OperationRecord<"interrupt">> =
   connection.getOperation(interruptOperationKey);
 void interruptOperationQuery;

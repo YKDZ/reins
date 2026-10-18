@@ -73,6 +73,13 @@ export class ProtocolBoundaryError extends AlreadyDiagnosedError {}
 
 export class CodexRequestError extends Error {}
 
+export class CodexTransportClosedError extends Error {
+  constructor() {
+    super("codex app-server closed");
+    this.name = "CodexTransportClosedError";
+  }
+}
+
 export type CodexChild = {
   readonly stdin: NodeJS.WritableStream;
   readonly stdout: NodeJS.ReadableStream;
@@ -610,7 +617,7 @@ export function createCodexTransport(options: {
     inbox.end();
     for (const [, entry] of pending) {
       clearTimeout(entry.timer);
-      entry.reject(new Error("codex app-server closed"));
+      entry.reject(new CodexTransportClosedError());
     }
     pending.clear();
     resolveStdoutDone?.();
@@ -1522,7 +1529,7 @@ export function createCodexTransport(options: {
       params: unknown,
     ): Promise<CodexRequestResultMap[TMethod]> {
       if (closed) {
-        return Promise.reject(new Error("codex app-server closed"));
+        return Promise.reject(new CodexTransportClosedError());
       }
       nextId += 1;
       const id = nextId;

@@ -199,6 +199,7 @@ test.each(["explicit_rejection", "transport_eof"] as const)(
         }),
       );
 
+    let cleanupError: unknown;
     try {
       const spawned = await execute(
         "spawn",
@@ -234,14 +235,47 @@ test.each(["explicit_rejection", "transport_eof"] as const)(
         });
       } else {
         expect(rejected).toMatchObject({
-          error: { code: "operation_outcome_unknown" },
+          error: {
+            code: "operation_outcome_unknown",
+            cause: {
+              kind: "exception",
+              message: "codex app-server closed",
+            },
+            cleanupCause: {
+              kind: "closed",
+              message: expect.stringContaining(
+                "Codex app-server closed before thread deletion was confirmed",
+              ),
+            },
+          },
         });
         expect(record).toMatchObject({
           status: "outcome_unknown",
           operationKey: sendKey,
+          cause: { kind: "exception", message: "codex app-server closed" },
+          cleanupCause: {
+            kind: "closed",
+            message: expect.stringContaining(
+              "Codex app-server closed before thread deletion was confirmed",
+            ),
+          },
         });
       }
       expect(await execute("send", params, sendKey)).toEqual(rejected);
+      if (failureMode === "transport_eof") {
+        const blockedNewTurn = await execute(
+          "send",
+          {
+            sessionId: target.sessionId,
+            placement: "new_turn",
+            message: "must stay fenced",
+          },
+          operationKey("send"),
+        );
+        expect(blockedNewTurn).toMatchObject({
+          error: { code: "session_busy" },
+        });
+      }
       expect(
         requests.filter((request) => request.method === "turn/steer"),
       ).toHaveLength(1);
@@ -252,18 +286,26 @@ test.each(["explicit_rejection", "transport_eof"] as const)(
         .sessionEvents(target.sessionId)
         .map((entry) => entry.event.type);
       expect(childClosed).toBe(failureMode === "transport_eof");
-      expect(eventTypes.includes("session.killed")).toBe(
-        failureMode === "transport_eof",
-      );
+      expect(eventTypes.includes("session.killed")).toBe(false);
       expect(
         plane.list({ sessionId: target.sessionId }, consumer)[0],
       ).toMatchObject({
-        state: failureMode === "transport_eof" ? "killed" : "busy",
+        // 这是已提交投影；EOF 结果仍未知，准入栅栏阻止新 turn。
+        state: failureMode === "transport_eof" ? "idle" : "busy",
       });
     } finally {
-      await plane.terminateLiveSessions();
+      try {
+        await plane.terminateLiveSessions();
+      } catch (error) {
+        cleanupError = error;
+      }
       plane.close();
       await diagnostics.close();
     }
+    if (failureMode === "transport_eof")
+      expect(cleanupError).toMatchObject({
+        errors: [{ code: "internal_error", cause: { kind: "closed" } }],
+      });
+    else expect(cleanupError).toBeUndefined();
   },
 );

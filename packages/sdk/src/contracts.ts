@@ -132,11 +132,12 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type RecoverableOperationKind = "spawn" | "send" | "interrupt";
+export type RecoverableOperationKind = "spawn" | "send" | "interrupt" | "kill";
 type OperationResultByKind = {
   spawn: SpawnResult;
   send: SendResult;
   interrupt: InterruptResult;
+  kill: KillResult;
 };
 type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
@@ -195,6 +196,16 @@ type OperationRecordForKind<Kind extends RecoverableOperationKind> =
           };
           cause: ErrorCause;
         }
+      : never)
+  | (Kind extends "kill"
+      ? {
+          status: "partial_effect_uncommitted" | "partial_effect_unconfirmed";
+          operationKey: OperationKey<"kill">;
+          error: Extract<ReinsFailure, { code: "internal_error" }> & {
+            facts: { effect: SessionCloseEffect };
+          };
+          cause: ErrorCause;
+        }
       : never);
 export type OperationRecord<
   Kind extends RecoverableOperationKind = RecoverableOperationKind,
@@ -205,6 +216,10 @@ export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
   status: "killed" | "not_found";
+};
+export type SessionCloseEffect = {
+  kind: "session_closed";
+  sessionHandle: SessionHandle;
 };
 export type SendInput =
   | {
@@ -1010,7 +1025,11 @@ type FailureFactsByCode = {
         stage: "register" | "dispatch" | "commit" | "failure";
         acceptance: "not_dispatched" | "unknown" | "accepted";
         cause: ErrorCause;
-        acceptedResult?: SpawnResult | SendResult | InterruptResult;
+        acceptedResult?:
+          | SpawnResult
+          | SendResult
+          | InterruptResult
+          | KillResult;
         cleanupCause?: ErrorCause;
         effect?: OperationEffect;
       }

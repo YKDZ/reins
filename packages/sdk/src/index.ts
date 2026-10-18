@@ -174,6 +174,7 @@ export type {
   DiagnosticsResult,
   KillInput,
   KillResult,
+  SessionCloseEffect,
   SendInput,
   SendResult,
   WaitInput,
@@ -681,17 +682,18 @@ async function connectClient(
           );
         }
       },
-      async getOperation<Kind extends "spawn" | "send" | "interrupt">(
+      async getOperation<Kind extends "spawn" | "send" | "interrupt" | "kill">(
         operationKey: OperationKey<Kind>,
       ): Promise<OperationRecord<Kind>> {
-        let kind: "spawn" | "send" | "interrupt";
+        let kind: "spawn" | "send" | "interrupt" | "kill";
         let generation: ProtocolDaemonGeneration;
         try {
           const claims = parseProtocolOperationKey(operationKey);
           if (
             claims.kind !== "spawn" &&
             claims.kind !== "send" &&
-            claims.kind !== "interrupt"
+            claims.kind !== "interrupt" &&
+            claims.kind !== "kill"
           )
             throw new Error("Operation kind is not recoverable");
           kind = claims.kind;
@@ -1239,13 +1241,25 @@ function projectSpawnResult(
   };
 }
 
+function projectKillResult(
+  result: ProtocolResult<"kill">,
+): import("./contracts.ts").KillResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    status: result.status,
+  };
+}
+
 type ProjectedOperationResultByKind = {
   spawn: SpawnResult;
   send: SendResult;
   interrupt: InterruptResult;
+  kill: import("./contracts.ts").KillResult;
 };
 
-function projectOperationRecord<Kind extends "spawn" | "send" | "interrupt">(
+function projectOperationRecord<
+  Kind extends "spawn" | "send" | "interrupt" | "kill",
+>(
   record: ProtocolOperationRecord,
   kind: Kind,
   generation: ProtocolDaemonGeneration,
@@ -1342,7 +1356,9 @@ function projectOperationEffect(
   };
 }
 
-function projectOperationResult<Kind extends "spawn" | "send" | "interrupt">(
+function projectOperationResult<
+  Kind extends "spawn" | "send" | "interrupt" | "kill",
+>(
   kind: Kind,
   result: ProtocolResult<Kind>,
   generation: ProtocolDaemonGeneration,
@@ -1355,6 +1371,10 @@ function projectOperationResult<Kind extends "spawn" | "send" | "interrupt">(
     return projectSendResult(
       result as ProtocolResult<"send">,
       generation,
+    ) as ProjectedOperationResultByKind[Kind];
+  if (kind === "kill")
+    return projectKillResult(
+      result as ProtocolResult<"kill">,
     ) as ProjectedOperationResultByKind[Kind];
   return projectInterruptResult(
     result as ProtocolResult<"interrupt">,
@@ -1507,16 +1527,28 @@ function projectFailure(
           ...(failure.acceptedResult === undefined
             ? {}
             : {
-                acceptedResult:
-                  "deliveryPoint" in failure.acceptedResult
-                    ? projectSendResult(
-                        failure.acceptedResult,
-                        parseProtocolOperationKey(failure.operationKey)
-                          .generation,
-                      )
-                    : "cwd" in failure.acceptedResult
-                      ? projectSpawnResult(failure.acceptedResult)
-                      : projectInterruptResult(failure.acceptedResult),
+                acceptedResult: (() => {
+                  const kind = parseProtocolOperationKey(
+                    failure.operationKey,
+                  ).kind;
+                  if (kind === "send")
+                    return projectSendResult(
+                      failure.acceptedResult as ProtocolResult<"send">,
+                      parseProtocolOperationKey(failure.operationKey)
+                        .generation,
+                    );
+                  if (kind === "kill")
+                    return projectKillResult(
+                      failure.acceptedResult as ProtocolResult<"kill">,
+                    );
+                  if (kind === "interrupt")
+                    return projectInterruptResult(
+                      failure.acceptedResult as ProtocolResult<"interrupt">,
+                    );
+                  return projectSpawnResult(
+                    failure.acceptedResult as ProtocolResult<"spawn">,
+                  );
+                })(),
               }),
           ...(failure.cleanupCause === undefined
             ? {}

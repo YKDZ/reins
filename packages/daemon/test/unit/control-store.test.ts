@@ -8,12 +8,14 @@ import { openControlStore } from "@reins/event-journal";
 import {
   consumerContextSchema,
   daemonGenerationSchema,
+  killParamsSchema,
   makeErrorCause,
   operationKeyClaimsSchema,
   runtimeScopeIdSchema,
   serializeOperationKey,
   sessionIdSchema,
   type DomainEvent,
+  type KillResult,
   type InterruptAck,
   type SendAck,
   type SpawnAck,
@@ -39,7 +41,7 @@ const request: SpawnParams = {
   cwd: "/tmp",
 };
 
-function operationKey(kind: "spawn" | "send" | "interrupt" = "spawn") {
+function operationKey(kind: "spawn" | "send" | "interrupt" | "kill" = "spawn") {
   return serializeOperationKey(
     v.parse(operationKeyClaimsSchema, {
       runtimeScopeId,
@@ -426,6 +428,168 @@ describe("SQLite控制存储", () => {
     expect(store.getSession(sessionId)).toEqual(sendSession);
     expect(store.sessionEvents(sessionId).slice(-3)).toEqual(
       sendEvents.map((event, index) => ({ event, eventId: index + 4 })),
+    );
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  test("kill 结果、会话终态和关闭事实作为同一操作重开", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
+    let store = await openControlStore({ directory });
+    const spawnKey = operationKey();
+    const spawnResult: SpawnAck = {
+      sessionId,
+      turnId: "t1" as never,
+      cwd: "/tmp",
+    };
+    const activeSession = {
+      info: {
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: "2026-10-18T00:00:00.000Z",
+        turns: 0,
+        state: "busy" as const,
+        activeTurnId: spawnResult.turnId,
+      },
+      runtimeScopeId,
+      consumer,
+      generation,
+    };
+    store.registerSpawn({
+      operationKey: spawnKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request,
+    });
+    store.markSpawnDispatched(spawnKey);
+    store.commitSpawn({
+      operationKey: spawnKey,
+      result: spawnResult,
+      session: activeSession,
+      events: [
+        {
+          type: "session.created",
+          sessionId,
+          sessionLabel: request.sessionLabel,
+          harness: request.harness,
+          model: null,
+          reasoning: null,
+          cwd: request.cwd,
+          spawnedAt: activeSession.info.spawnedAt,
+        },
+        { type: "turn.started", sessionId, turnId: spawnResult.turnId },
+      ],
+    });
+
+    const killKey = operationKey("kill");
+    const killRequest = v.parse(killParamsSchema, { sessionId });
+    store.registerKill({
+      operationKey: killKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request: killRequest,
+    });
+    store.markKillDispatched(killKey);
+    const { activeTurnId: _activeTurnId, ...killedFields } = activeSession.info;
+    const killedSession = {
+      ...activeSession,
+      info: {
+        ...killedFields,
+        turns: 1,
+        state: "killed" as const,
+        lastCompletedTurn: {
+          turnId: spawnResult.turnId,
+          stopReason: "killed" as const,
+        },
+      },
+    };
+    const killResult: KillResult = { sessionId, status: "killed" };
+    const killEvents: DomainEvent[] = [
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: spawnResult.turnId,
+        stopReason: "killed",
+        finalReply: null,
+      },
+      { type: "session.killed", sessionId },
+    ];
+    expect(
+      store.commitKill({
+        operationKey: killKey,
+        result: killResult,
+        session: killedSession,
+        events: killEvents,
+      }),
+    ).toEqual(
+      killEvents.map((event, index) => ({ event, eventId: index + 3 })),
+    );
+
+    const alreadyKilledKey = operationKey("kill");
+    store.registerKill({
+      operationKey: alreadyKilledKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request: killRequest,
+    });
+    store.markKillDispatched(alreadyKilledKey);
+    expect(
+      store.commitKill({
+        operationKey: alreadyKilledKey,
+        result: killResult,
+        session: killedSession,
+        events: [],
+      }),
+    ).toEqual([]);
+
+    const missingSessionId = v.parse(
+      sessionIdSchema,
+      "session:7aa79020-74c9-4d80-92ca-3c4fe0ebfdbc:g1:2",
+    );
+    const notFoundKey = operationKey("kill");
+    store.registerKill({
+      operationKey: notFoundKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request: { sessionId: missingSessionId },
+    });
+    store.markKillDispatched(notFoundKey);
+    store.commitKill({
+      operationKey: notFoundKey,
+      result: { sessionId: missingSessionId, status: "not_found" },
+      events: [],
+    });
+    store.close();
+
+    store = await openControlStore({ directory });
+    expect(store.getOperation(killKey)).toMatchObject({
+      kind: "kill",
+      status: "succeeded",
+      request: killRequest,
+      result: killResult,
+    });
+    expect(store.getOperation(notFoundKey)).toMatchObject({
+      kind: "kill",
+      status: "succeeded",
+      request: { sessionId: missingSessionId },
+      result: { sessionId: missingSessionId, status: "not_found" },
+    });
+    expect(store.getOperation(alreadyKilledKey)).toMatchObject({
+      kind: "kill",
+      status: "succeeded",
+      result: killResult,
+    });
+    expect(store.getSession(sessionId)).toEqual(killedSession);
+    expect(store.sessionEvents(sessionId).slice(-2)).toEqual(
+      killEvents.map((event, index) => ({ event, eventId: index + 3 })),
     );
     store.close();
     await rm(directory, { recursive: true, force: true });
