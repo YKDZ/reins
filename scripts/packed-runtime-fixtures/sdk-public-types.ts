@@ -14,9 +14,11 @@ import {
   type ModelCatalogResult,
   type DiagnosticId,
   type ReinsConnection,
+  type ReinsFailure,
   type ResumeCursor,
   type SendInput,
   type SessionHandle,
+  type SessionInfo,
   type SessionState,
   type SpawnInput,
   type TurnHandle,
@@ -79,10 +81,26 @@ const restoredDiagnosticId = parseDiagnosticId(
 
 const supportedHarness: HarnessId = "qoder";
 const unreachableState: SessionState = "unreachable";
-async function inspectSpawnOperation() {
+async function inspectSpawnOperation(): Promise<
+  string | DiagnosticId | undefined
+> {
   const operation = await connection.getOperation(spawnOperationKey);
   if (operation.status === "succeeded") return operation.result.cwd;
+  if (operation.status === "outcome_unknown" && operation.diagnosticId) {
+    const evidence = await connection.diagnostics({
+      diagnosticId: operation.diagnosticId,
+    });
+    if ("record" in evidence) return evidence.record.diagnosticId;
+  }
   return undefined;
+}
+
+function inspectUnknownSpawnFailure(
+  failure: ReinsFailure,
+): DiagnosticId | undefined {
+  return failure.code === "operation_outcome_unknown"
+    ? failure.facts.diagnosticId
+    : undefined;
 }
 
 function spawnWithHarness<Harness extends SpawnInput["harness"]>(
@@ -112,10 +130,18 @@ async function inspectModelCatalog(): Promise<
 
 function inspectWaitResult(result: WaitResult): string[] {
   if (result.status === "unreachable")
-    return (result.unreachable ?? []).map(
+    return result.unreachable.map(
       ({ turnHandle, reason }) => `${reason}:${turnHandle}`,
     );
   return result.pending;
+}
+
+function inspectUnreachableSession(
+  session: SessionInfo,
+): TurnHandle | undefined {
+  if (session.state !== "unreachable") return undefined;
+  if (session.lastKnownState === "busy") return session.lastKnownActiveTurn;
+  return session.lastCompletedTurn.turnHandle;
 }
 
 void connect;
@@ -125,7 +151,9 @@ void invalidHarness;
 void invalidSpawn;
 void inspectModelCatalog;
 void inspectWaitResult;
+void inspectUnreachableSession;
 void inspectSpawnOperation;
+void inspectUnknownSpawnFailure;
 void started;
 void generatedOperation;
 void activeTurnSend;

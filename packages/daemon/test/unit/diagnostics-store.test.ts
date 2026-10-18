@@ -20,6 +20,7 @@ import {
   turnIdSchema,
   type ConsumerContext,
   type DiagnosticRecord,
+  type RuntimeScopeId,
 } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
@@ -32,6 +33,8 @@ import {
 import { withChildHarness } from "../helpers/child-process.ts";
 
 const temporaryDirectories: string[] = [];
+const diagnosticRuntimeScopeId =
+  "00000000-0000-4000-8000-000000000000" as RuntimeScopeId;
 
 async function temporaryStoreDirectory(): Promise<string> {
   const directory = await mkdtemp(join(tmpdir(), "reins-diagnostics-store-"));
@@ -46,7 +49,7 @@ function record(counter: string, recordedAt: string): DiagnosticRecord {
     operation: "daemon",
     reason: "started",
     v: 1,
-    diagnosticId: makeDiagnosticId("1", counter),
+    diagnosticId: makeDiagnosticId(diagnosticRuntimeScopeId, "1", counter),
     recordedAt,
     severity: "info",
   });
@@ -69,7 +72,7 @@ function legacyTransportRecord(
       originalBytes: Buffer.byteLength(message),
     },
     v: 1 as const,
-    diagnosticId: makeDiagnosticId("legacy", counter),
+    diagnosticId: makeDiagnosticId(diagnosticRuntimeScopeId, "legacy", counter),
     recordedAt: "2026-08-26T00:00:00.000Z",
     severity: "error" as const,
   };
@@ -94,6 +97,42 @@ afterEach(async () => {
 });
 
 describe("DiagnosticsStore contract", () => {
+  test("rebinds a persisted legacy diagnostic reference to its state scope", async () => {
+    const directory = await temporaryStoreDirectory();
+    const initial = await openDiagnosticsStore({ directory });
+    await initial.close();
+    const expected = record("1", "2026-08-20T00:00:00.000Z");
+    const legacy = { ...expected, diagnosticId: "diagnostic:1:1" };
+    await writeFile(
+      join(directory, "active.ndjson"),
+      `${JSON.stringify(legacy)}\n`,
+      { mode: 0o600 },
+    );
+
+    const store = await openDiagnosticsStoreForTest({
+      directory,
+      runtimeScopeId: diagnosticRuntimeScopeId,
+      now: fixtureClock,
+    });
+    try {
+      await expect(
+        store.query({ diagnosticId: expected.diagnosticId }),
+      ).resolves.toEqual({ record: expected });
+      const persisted = (
+        await Promise.all(
+          (await readdir(directory))
+            .filter(
+              (name) => name === "active.ndjson" || name.startsWith("segment-"),
+            )
+            .map(async (name) => await readFile(join(directory, name), "utf8")),
+        )
+      ).join("\n");
+      expect(persisted).toContain(expected.diagnosticId);
+      expect(persisted).not.toContain('"diagnosticId":"diagnostic:1:1"');
+    } finally {
+      await store.close();
+    }
+  });
   test("accepted records are immediately queryable and survive restart", async () => {
     const directory = await temporaryStoreDirectory();
     const first = record("1", "2026-08-20T00:00:00.000Z");
@@ -165,7 +204,11 @@ describe("DiagnosticsStore contract", () => {
         originalBytes: Buffer.byteLength(secretSentinel),
       },
       v: 1 as const,
-      diagnosticId: makeDiagnosticId("legacy", String(index + 1)),
+      diagnosticId: makeDiagnosticId(
+        diagnosticRuntimeScopeId,
+        "legacy",
+        String(index + 1),
+      ),
       recordedAt: "2026-08-20T00:00:00.000Z",
       severity: "error" as const,
     }));
@@ -532,7 +575,7 @@ describe("DiagnosticsStore contract", () => {
         originalBytes: 7,
       },
       v: 1,
-      diagnosticId: makeDiagnosticId("legacy", "2"),
+      diagnosticId: makeDiagnosticId(diagnosticRuntimeScopeId, "legacy", "2"),
       recordedAt: "2026-08-20T00:00:00.000Z",
       severity: "error",
     } as const;
@@ -588,7 +631,7 @@ describe("DiagnosticsStore contract", () => {
       reason: "read_error",
       message: { text: "failed", truncated: false, originalBytes: 6 },
       v: 1,
-      diagnosticId: makeDiagnosticId("1", "3"),
+      diagnosticId: makeDiagnosticId(diagnosticRuntimeScopeId, "1", "3"),
       recordedAt: "2026-08-20T00:00:02.000Z",
       severity: "error",
     });
@@ -631,7 +674,13 @@ describe("DiagnosticsStore contract", () => {
       store.query({ sources: ["adapter"], limit: 1 }),
     ).resolves.toEqual({ records: [], truncated: false });
     await expect(
-      store.query({ diagnosticId: makeDiagnosticId("1", "missing") }),
+      store.query({
+        diagnosticId: makeDiagnosticId(
+          diagnosticRuntimeScopeId,
+          "1",
+          "missing",
+        ),
+      }),
     ).rejects.toMatchObject({ code: "diagnostic_not_found" });
     await store.close();
   });
@@ -764,7 +813,7 @@ describe("DiagnosticsStore contract", () => {
       reason: "unsupported_input",
       fields: Array.from({ length: 100_000 }, () => "agent"),
       v: 1,
-      diagnosticId: makeDiagnosticId("1", "1"),
+      diagnosticId: makeDiagnosticId(diagnosticRuntimeScopeId, "1", "1"),
       recordedAt: "2026-08-20T00:00:00.000Z",
       severity: "warning",
     });
@@ -1427,7 +1476,16 @@ describe("DiagnosticsStore 消费者归属（01 票第 2、3 项）", () => {
       store.query({ diagnosticId: foreign.diagnosticId }, alpha),
     ).rejects.toMatchObject({ code: "diagnostic_not_found" });
     await expect(
-      store.query({ diagnosticId: makeDiagnosticId("1", "missing") }, alpha),
+      store.query(
+        {
+          diagnosticId: makeDiagnosticId(
+            diagnosticRuntimeScopeId,
+            "1",
+            "missing",
+          ),
+        },
+        alpha,
+      ),
     ).rejects.toMatchObject({ code: "diagnostic_not_found" });
     await store.close();
   });

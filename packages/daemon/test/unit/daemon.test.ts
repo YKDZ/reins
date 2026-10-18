@@ -115,7 +115,7 @@ const testDiagnostics: DiagnosticsRuntime = {
   sessionId: testIdentity.session,
   async record(input) {
     return input.kind === "lifecycle" && input.operation === "daemon"
-      ? makeDiagnosticId("test", "1")
+      ? makeDiagnosticId(testRuntimeScopeId, "test", "1")
       : undefined;
   },
   async query() {
@@ -1120,6 +1120,92 @@ describe("daemon 协议面（缝 C）", () => {
     connection.close();
     await expect(daemon.stop()).rejects.toThrow();
     await expect(running).rejects.toThrow();
+  });
+
+  test("其他 spawn 登记写失败会唤醒已等待的回合", async () => {
+    const backingStore = createInMemoryControlStore();
+    let unavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      health() {
+        return unavailable ? { status: "unavailable" } : backingStore.health();
+      },
+      registerSpawn(input) {
+        if (input.request.message === "fail the next registration") {
+          unavailable = true;
+          throw new Error("spawn registration write failed");
+        }
+        return backingStore.registerSpawn(input);
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "keep this turn active",
+      }),
+    ) as { sessionId: SessionId; turnId: TurnId };
+    const waiting = requester("wait", {
+      targets: [{ sessionId: spawned.sessionId, turnId: spawned.turnId }],
+      completion: "all",
+    });
+    await flush();
+
+    expect(
+      await requester("spawn", {
+        harness: "codex",
+        message: "fail the next registration",
+      }),
+    ).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "register",
+      },
+    });
+
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const waited = await Promise.race([
+      waiting,
+      new Promise<"still_waiting">((resolve) => {
+        timer = setTimeout(() => resolve("still_waiting"), 250);
+      }),
+    ]);
+    if (timer !== undefined) clearTimeout(timer);
+    expect(waited).toMatchObject({
+      result: {
+        status: "unreachable",
+        completed: [],
+        pending: [],
+        unreachable: [
+          {
+            sessionId: spawned.sessionId,
+            turnId: spawned.turnId,
+            reason: "commit_unavailable",
+          },
+        ],
+      },
+    });
+    connection.close();
+    await daemon.stop();
+    await running;
+    daemons.splice(daemons.indexOf(daemon), 1);
   });
 
   test("当前世代记录失去 machine 控制时仍可查询并标明不可等待", async () => {
@@ -2178,7 +2264,7 @@ describe("daemon 协议面（缝 C）", () => {
       async modelCatalog() {
         throw new AlreadyDiagnosedError(
           "supplied",
-          makeDiagnosticId("test", "1"),
+          makeDiagnosticId(testRuntimeScopeId, "test", "1"),
         );
       },
     };
@@ -2196,8 +2282,8 @@ describe("daemon 协议面（缝 C）", () => {
   });
 
   test("模型目录忽略不相关诊断并记录一次 fallback", async () => {
-    const suppliedId = makeDiagnosticId("test", "2");
-    const fallbackId = makeDiagnosticId("test", "3");
+    const suppliedId = makeDiagnosticId(testRuntimeScopeId, "test", "2");
+    const fallbackId = makeDiagnosticId(testRuntimeScopeId, "test", "3");
     const modelCatalogRecords: unknown[] = [];
     const diagnostics: DiagnosticsRuntime = {
       ...testDiagnostics,
@@ -2209,7 +2295,7 @@ describe("daemon 协议面（缝 C）", () => {
           modelCatalogRecords.push(input);
           return fallbackId;
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
       async query(params) {
         if ("diagnosticId" in params && params.diagnosticId === suppliedId) {
@@ -3175,7 +3261,7 @@ describe("daemon 空闲退出", () => {
         if (input.kind === "lifecycle" && input.operation === "daemon") {
           lifecycle.push(input.reason);
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     const server = createInMemoryTransportServer<ProtocolMessage>();
@@ -3219,7 +3305,7 @@ describe("daemon 空闲退出", () => {
         ) {
           return undefined;
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     const server = createInMemoryTransportServer<ProtocolMessage>();
@@ -3318,7 +3404,7 @@ describe("daemon 空闲退出", () => {
         if (input.kind === "lifecycle" && input.operation === "daemon") {
           lifecycle.push(input.reason);
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     let rejectClose = true;

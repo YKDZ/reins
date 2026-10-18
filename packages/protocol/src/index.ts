@@ -275,14 +275,21 @@ export function parseOperationKey(
 }
 
 export function makeDiagnosticId(
+  runtimeScopeId: RuntimeScopeId,
   generation: string,
   counter: string,
 ): DiagnosticId {
-  return v.parse(diagnosticIdSchema, `diagnostic:${generation}:${counter}`);
+  return v.parse(
+    diagnosticIdSchema,
+    `diagnostic:${runtimeScopeId}:${generation}:${counter}`,
+  );
 }
 export const diagnosticIdSchema = identifier(
   "DiagnosticId",
-  /^diagnostic:[a-z0-9]+:[1-9a-z][0-9a-z]*$/u,
+  new RegExp(
+    `^diagnostic:${runtimeScopeIdSource}:[a-z0-9]+:[1-9a-z][0-9a-z]*$`,
+    "u",
+  ),
 );
 export type DiagnosticId = v.InferOutput<typeof diagnosticIdSchema>;
 
@@ -507,23 +514,30 @@ export const turnCompletedSchema = v.variant("stopReason", [
 ]);
 export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
-export const waitResultSchema = v.strictObject({
-  status: v.picklist(["satisfied", "timeout", "unreachable"]),
+const unreachableWaitTargetSchema = v.strictObject({
+  ...turnTargetSchema.entries,
+  reason: v.picklist([
+    "previous_generation",
+    "control_lost",
+    "commit_unavailable",
+  ]),
+});
+const waitResultFields = {
   completed: v.array(turnCompletedSchema),
   pending: v.array(turnTargetSchema),
-  unreachable: v.optional(
-    v.array(
-      v.strictObject({
-        ...turnTargetSchema.entries,
-        reason: v.picklist([
-          "previous_generation",
-          "control_lost",
-          "commit_unavailable",
-        ]),
-      }),
-    ),
-  ),
-});
+};
+export const waitResultSchema = v.variant("status", [
+  v.strictObject({
+    ...waitResultFields,
+    status: v.picklist(["satisfied", "timeout"]),
+    unreachable: v.optional(v.array(unreachableWaitTargetSchema)),
+  }),
+  v.strictObject({
+    ...waitResultFields,
+    status: v.literal("unreachable"),
+    unreachable: v.array(unreachableWaitTargetSchema),
+  }),
+]);
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 
 export const interruptParamsSchema = turnTargetSchema;
@@ -657,7 +671,7 @@ const sessionInfoFields = {
   turns: v.number(),
   lastCompletedTurn: v.optional(completedTurnSummarySchema),
 };
-export const sessionInfoSchema = v.variant("state", [
+export const sessionInfoSchema = v.union([
   v.strictObject({
     ...sessionInfoFields,
     state: v.literal("busy"),
@@ -672,8 +686,19 @@ export const sessionInfoSchema = v.variant("state", [
   v.strictObject({
     ...sessionInfoFields,
     state: v.literal("unreachable"),
-    lastKnownState: v.picklist(["busy", "idle"]),
-    lastKnownActiveTurn: v.optional(turnIdSchema),
+    lastKnownState: v.literal("busy"),
+    lastKnownActiveTurn: turnIdSchema,
+    unreachableReason: v.picklist([
+      "previous_generation",
+      "control_lost",
+      "commit_unavailable",
+    ]),
+  }),
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("unreachable"),
+    lastKnownState: v.literal("idle"),
+    lastCompletedTurn: completedTurnSummarySchema,
     unreachableReason: v.picklist([
       "previous_generation",
       "control_lost",
@@ -2309,6 +2334,7 @@ export const machineErrorSchema = v.union([
     operationKey: operationKeySchema,
     cause: v.optional(errorCauseSchema),
     cleanupCause: v.optional(errorCauseSchema),
+    diagnosticId: v.optional(diagnosticIdSchema),
   }),
   v.strictObject({
     code: v.literal("control_store_unavailable"),
@@ -2657,6 +2683,7 @@ export const operationRecordSchema = v.union([
     operationKey: operationKeySchema,
     cause: v.optional(errorCauseSchema),
     cleanupCause: v.optional(errorCauseSchema),
+    diagnosticId: v.optional(diagnosticIdSchema),
   }),
   v.strictObject({
     status: v.literal("succeeded"),

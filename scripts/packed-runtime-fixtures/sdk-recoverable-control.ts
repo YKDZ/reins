@@ -1319,6 +1319,61 @@ async function replayWindow(): Promise<void> {
   }
 }
 
+async function unknownSpawnDiagnostics(): Promise<void> {
+  const connection = await connectSdk();
+  try {
+    const operationKey = connection.prepareOperation("spawn");
+    const error = await expectFailure(() =>
+      connection.spawn(
+        { ...spawnInput(), message: "packed-unknown-spawn-diagnostic" },
+        { operationKey },
+      ),
+    );
+    if (error.failure.code !== "operation_outcome_unknown")
+      throw new Error("未知 spawn 没有保留类型化操作错误");
+    if (
+      error.failure.facts.cause?.message !== "夹具原生启动回执丢失" ||
+      error.failure.facts.cleanupCause?.message !== "夹具无法确认原生清理"
+    )
+      throw new Error("未知 spawn 没有同时保留主因和清理次因");
+    const diagnosticId = error.failure.facts.diagnosticId;
+    if (diagnosticId === undefined)
+      throw new Error("未知 spawn 错误没有可查询的主诊断引用");
+
+    const operation = await connection.getOperation(operationKey);
+    if (
+      operation.status !== "outcome_unknown" ||
+      operation.diagnosticId !== diagnosticId ||
+      operation.cause?.message !== "夹具原生启动回执丢失" ||
+      operation.cleanupCause?.message !== "夹具无法确认原生清理"
+    )
+      throw new Error("操作查询没有保留原始诊断引用");
+    const queried = await connection.diagnostics({ diagnosticId });
+    if (
+      !("record" in queried) ||
+      queried.record.diagnosticId !== diagnosticId ||
+      queried.record.source !== "core" ||
+      queried.record.kind !== "request_failure" ||
+      queried.record.operation !== "spawn"
+    )
+      throw new Error("SDK 无法按操作诊断引用读取正式诊断记录");
+
+    process.stdout.write(
+      `${JSON.stringify({
+        code: error.failure.code,
+        diagnosticId,
+        operationStatus: operation.status,
+        operationDiagnosticId: operation.diagnosticId,
+        diagnosticSource: queried.record.source,
+        diagnosticKind: queried.record.kind,
+        diagnosticOperation: queried.record.operation,
+      })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
 const mode = process.argv[2];
 switch (mode) {
   case "prepare-spawn":
@@ -1425,6 +1480,9 @@ switch (mode) {
     break;
   case "harness-failure-diagnostics":
     await harnessFailureDiagnostics();
+    break;
+  case "unknown-spawn-diagnostics":
+    await unknownSpawnDiagnostics();
     break;
   case "replay-facts":
     await replayFacts();

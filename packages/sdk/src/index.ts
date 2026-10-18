@@ -755,12 +755,24 @@ async function connectClient(
             ? {}
             : { timeoutMs: input.timeoutMs }),
         });
-        return {
-          status: result.status,
+        const fields = {
           completed: result.completed.map(projectCompletedTurn),
           pending: result.pending.map((target) =>
             parseTurnHandle(encodeTurnHandle(target)),
           ),
+        };
+        if (result.status === "unreachable")
+          return {
+            ...fields,
+            status: result.status,
+            unreachable: result.unreachable.map(({ reason, ...target }) => ({
+              turnHandle: parseTurnHandle(encodeTurnHandle(target)),
+              reason,
+            })),
+          } satisfies WaitResult;
+        return {
+          ...fields,
+          status: result.status,
           ...(result.unreachable === undefined
             ? {}
             : {
@@ -1097,6 +1109,9 @@ function projectOperationRecord(
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
+        ...(record.diagnosticId === undefined
+          ? {}
+          : { diagnosticId: parseDiagnosticId(record.diagnosticId) }),
       };
     case "succeeded":
       return {
@@ -1176,6 +1191,9 @@ function projectFailure(
           ...(failure.cleanupCause === undefined
             ? {}
             : { cleanupCause: failure.cleanupCause }),
+          ...(failure.diagnosticId === undefined
+            ? {}
+            : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
         },
       };
     case "control_store_unavailable":
@@ -1367,24 +1385,29 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
       state: "idle",
       lastCompletedTurn: lastCompletedTurn!,
     };
-  if (session.state === "unreachable")
+  if (session.state === "unreachable") {
+    if (session.lastKnownState === "busy")
+      return {
+        ...common,
+        state: "unreachable",
+        lastKnownState: session.lastKnownState,
+        lastKnownActiveTurn: parseTurnHandle(
+          encodeTurnHandle({
+            sessionId: session.sessionId,
+            turnId: session.lastKnownActiveTurn,
+          }),
+        ),
+        ...(lastCompletedTurn === undefined ? {} : { lastCompletedTurn }),
+        unreachableReason: session.unreachableReason,
+      };
     return {
       ...common,
       state: "unreachable",
       lastKnownState: session.lastKnownState,
-      ...(session.lastKnownActiveTurn === undefined
-        ? {}
-        : {
-            lastKnownActiveTurn: parseTurnHandle(
-              encodeTurnHandle({
-                sessionId: session.sessionId,
-                turnId: session.lastKnownActiveTurn,
-              }),
-            ),
-          }),
-      ...(lastCompletedTurn === undefined ? {} : { lastCompletedTurn }),
+      lastCompletedTurn: lastCompletedTurn!,
       unreachableReason: session.unreachableReason,
     };
+  }
   return {
     ...common,
     state: "killed",

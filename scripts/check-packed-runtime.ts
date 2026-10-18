@@ -976,6 +976,23 @@ async function runRecoveryAcceptance(options: {
       "SDK 未按精确 turn/session 查询结构化诊断",
     );
 
+    const unknownSpawn = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "unknown-spawn-diagnostics",
+    );
+    assert(
+      unknownSpawn.code === "operation_outcome_unknown" &&
+        unknownSpawn.operationStatus === "outcome_unknown" &&
+        typeof unknownSpawn.diagnosticId === "string" &&
+        unknownSpawn.operationDiagnosticId === unknownSpawn.diagnosticId &&
+        unknownSpawn.diagnosticSource === "core" &&
+        unknownSpawn.diagnosticKind === "request_failure" &&
+        unknownSpawn.diagnosticOperation === "spawn",
+      "安装型 SDK 未贯通未知 spawn 的错误、持久操作与可查询诊断",
+    );
+
     const generationBeforeRestart = String(prepared.daemonGeneration);
     await stopDirectDaemon(daemon, options.handles);
     daemon = await startDirectDaemon({

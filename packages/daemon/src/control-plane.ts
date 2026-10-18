@@ -512,6 +512,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         ...(error?.cleanupCause === undefined
           ? {}
           : { cleanupCause: error.cleanupCause }),
+        ...(error?.diagnosticId === undefined
+          ? {}
+          : { diagnosticId: error.diagnosticId }),
       });
     };
     if (transientOperations.get(operationKey)?.method === "spawn")
@@ -592,6 +595,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             ...(operation.error.cleanupCause === undefined
               ? {}
               : { cleanupCause: operation.error.cleanupCause }),
+            ...(operation.error.diagnosticId === undefined
+              ? {}
+              : { diagnosticId: operation.error.diagnosticId }),
           });
         case "succeeded":
           return v.parse(operationRecordSchema, {
@@ -714,6 +720,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         try {
           options.controlStore.markSpawnDispatched(key);
         } catch (error) {
+          wakeWaitersIfStoreUnavailable();
           throw {
             code: "control_store_unavailable",
             operationKey: key,
@@ -739,6 +746,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 events,
               });
             } catch (commitError) {
+              wakeWaitersIfStoreUnavailable();
               const verification = verifyCommittedSpawn({
                 operationKey: key,
                 request: spawnParams,
@@ -809,6 +817,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                 code: "operation_outcome_unknown",
                 operationKey: key,
                 cause: failureCause(error.failure),
+                ...(error.failure.code !== "internal_error" ||
+                error.failure.diagnosticId === undefined
+                  ? {}
+                  : { diagnosticId: error.failure.diagnosticId }),
                 ...(error.terminationError === undefined
                   ? {}
                   : {
@@ -831,6 +843,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
                   >,
                 );
               } catch (storeError) {
+                wakeWaitersIfStoreUnavailable();
                 let recorded = false;
                 try {
                   const operation = options.controlStore.getOperation(key);
@@ -861,6 +874,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             try {
               options.controlStore.failSpawn(key, failure);
             } catch (storeError) {
+              wakeWaitersIfStoreUnavailable();
               let recorded = false;
               try {
                 const operation = options.controlStore.getOperation(key);
@@ -1060,6 +1074,18 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     }
   }
 
+  function wakeWaitersIfStoreUnavailable(): void {
+    try {
+      if (
+        eventWriteFailure !== undefined ||
+        options.controlStore.health().status !== "available"
+      )
+        wakeWaiters();
+    } catch {
+      wakeWaiters();
+    }
+  }
+
   async function settleEvents(): Promise<void> {
     if (eventWriteFailure !== undefined) throw eventWriteFailure;
   }
@@ -1170,14 +1196,26 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     params: WaitParams,
     facts: Omit<WaitResult, "status">,
   ): WaitResult | undefined {
-    const unreachableCount = facts.unreachable?.length ?? 0;
     if (params.completion === "any") {
       if (facts.completed.length > 0) return { status: "satisfied", ...facts };
-      if (facts.pending.length === 0 && unreachableCount > 0)
-        return { status: "unreachable", ...facts };
+      if (
+        facts.pending.length === 0 &&
+        facts.unreachable !== undefined &&
+        facts.unreachable.length > 0
+      )
+        return {
+          status: "unreachable",
+          ...facts,
+          unreachable: facts.unreachable,
+        };
       return undefined;
     }
-    if (unreachableCount > 0) return { status: "unreachable", ...facts };
+    if (facts.unreachable !== undefined && facts.unreachable.length > 0)
+      return {
+        status: "unreachable",
+        ...facts,
+        unreachable: facts.unreachable,
+      };
     if (facts.pending.length === 0) return { status: "satisfied", ...facts };
     return undefined;
   }
@@ -1452,6 +1490,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           request: parsed.output,
         });
       } catch (error) {
+        wakeWaitersIfStoreUnavailable();
         const known = asMachineError(error);
         return known.code === "operation_key_conflict"
           ? { error: known }
@@ -1513,6 +1552,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             try {
               options.controlStore.failSpawn(operationKey, failure);
             } catch {
+              wakeWaitersIfStoreUnavailable();
               // 保留原始存储故障，不能因补记失败改称动作已派发。
             }
             return { error: failure };
@@ -1550,6 +1590,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           try {
             options.controlStore.failSpawn(operationKey, result.error);
           } catch (error) {
+            wakeWaitersIfStoreUnavailable();
             return {
               error: storeUnavailable(
                 operationKey,
