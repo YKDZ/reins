@@ -1,4 +1,4 @@
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
@@ -267,9 +267,24 @@ export function createQoderFixtureSdk(
   messages: readonly SDKMessage[],
 ): QoderSdk {
   return {
-    query() {
-      const replies = createAsyncQueue<SDKMessage>();
-      for (const message of messages) replies.push(message);
+    query({ prompt }) {
+      const replies = createAsyncQueue<unknown>();
+      let replayed = false;
+      const promptReader = (async () => {
+        for await (const input of prompt) {
+          if (replayed) continue;
+          replayed = true;
+          replies.push({
+            type: "command_lifecycle",
+            command_uuid: input.uuid,
+            state: "queued",
+            uuid: randomUUID(),
+            session_id: "00000000-0000-4000-8000-000000000001",
+          });
+          for (const message of messages) replies.push(message);
+        }
+      })();
+      void promptReader.catch(() => undefined);
       const query: QoderQuery = {
         [Symbol.asyncIterator]: () => replies[Symbol.asyncIterator](),
         async initializationResult() {
@@ -278,6 +293,7 @@ export function createQoderFixtureSdk(
         async interrupt() {},
         async close() {
           replies.end();
+          await promptReader;
         },
       };
       return query;

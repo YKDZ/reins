@@ -12,6 +12,7 @@ import {
   type PermissionId,
   type TurnId,
   type MachineError,
+  WorkerStartFailure,
 } from "@reins/protocol";
 
 import type { UserInput } from "#/generated/v2/UserInput";
@@ -81,14 +82,21 @@ export function createCodexDriver(deps: {
     const nativeTurns = new Map<TurnId, Promise<string>>();
     const pendingByRequest = new Map<number, PermissionId>();
 
-    async function startTurn(message: string): Promise<string> {
+    async function startTurn(
+      message: string,
+      onDispatch?: () => void,
+    ): Promise<string> {
       if (transport === null || threadId === "" || ended)
         throw new Error("Codex session is unavailable");
-      const turn = await transport.request("turn/start", {
+      if (onDispatch !== undefined && transport.isClosed())
+        throw new Error("codex app-server closed");
+      const pendingTurn = transport.request("turn/start", {
         threadId,
         input: [textInput(message)],
         ...turnOverrides,
       });
+      onDispatch?.();
+      const turn = await pendingTurn;
       activeTurnId = turn.turn.id;
       return turn.turn.id;
     }
@@ -265,6 +273,7 @@ export function createCodexDriver(deps: {
         const startingTransport = transport;
         if (startingTransport === null)
           throw new Error("Codex transport is unavailable");
+        let initialTurnDispatched = false;
         try {
           await initializeCodexTransport(startingTransport);
           const thread = await startingTransport.request("thread/start", {
@@ -281,7 +290,11 @@ export function createCodexDriver(deps: {
           });
           threadId = thread?.thread.id ?? "";
           workerInitialized = true;
-          resolveInitial(await startTurn(spec.message));
+          resolveInitial(
+            await startTurn(spec.message, () => {
+              initialTurnDispatched = true;
+            }),
+          );
         } catch (error) {
           rejectInitial(error);
           if (threadId !== "" && !threadDeleted) {
@@ -293,7 +306,13 @@ export function createCodexDriver(deps: {
             }
           }
           await startingTransport.close().catch(() => undefined);
-          throw error;
+          throw new WorkerStartFailure(
+            errorMessage(error),
+            initialTurnDispatched && !(error instanceof CodexRequestError)
+              ? "unknown"
+              : "not_accepted",
+            { cause: error },
+          );
         }
         runPromise = run();
         void session?.diagnostic({

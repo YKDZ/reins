@@ -159,9 +159,7 @@ export function createReinsClient(
     terminalReason = reason;
     const error = new ReinsClientError(reason);
     for (const entry of pending.values())
-      entry.reject(
-        entry.unknown?.() ?? error,
-      );
+      entry.reject(entry.unknown?.() ?? error);
     pending.clear();
     cancelledResponses.clear();
     for (const listener of Array.from(closedListeners)) listener(reason);
@@ -236,12 +234,10 @@ export function createReinsClient(
       ? (operationKey ?? createOperationKey(method))
       : undefined;
     const unknown = (): ReinsClientError => {
-      return new ReinsClientError(
-        {
-          code: "operation_outcome_unknown",
-          operationKey: requestOperationKey!,
-        },
-      );
+      return new ReinsClientError({
+        code: "operation_outcome_unknown",
+        operationKey: requestOperationKey!,
+      });
     };
     seq += 1;
     const requestId = v.parse(requestIdSchema, `req${seq}`);

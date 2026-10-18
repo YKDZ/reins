@@ -1,4 +1,7 @@
-import { REINS_PROTOCOL_MAJOR_VERSION, parseOperationKey } from "@reins/protocol";
+import {
+  REINS_PROTOCOL_MAJOR_VERSION,
+  parseOperationKey,
+} from "@reins/protocol";
 import { createInMemoryTransportPair } from "@reins/transport";
 import { expect, test, vi } from "vitest";
 

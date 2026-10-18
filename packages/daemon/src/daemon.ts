@@ -156,7 +156,7 @@ export function createDaemonInternal(
         } catch (shutdownError) {
           throw new AggregateError(
             [error, shutdownError],
-            "daemon 停止未完全成功",
+            "Daemon stop did not fully succeed",
           );
         }
         throw error;
