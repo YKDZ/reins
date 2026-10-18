@@ -1131,9 +1131,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   function withCleanupCause(
     failure: MachineError,
     cleanupError: unknown,
+    kind: "closed" | "io" = "closed",
   ): MachineError {
     if (cleanupError === undefined) return failure;
-    const cleanupCause = makeErrorCause("closed", errorMessage(cleanupError));
+    const cleanupCause = makeErrorCause(kind, errorMessage(cleanupError));
     if (failure.code === "internal_error") return { ...failure, cleanupCause };
     return {
       code: "internal_error",
@@ -1237,7 +1238,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             return { error: { code: "operation_pending", operationKey } };
           case "dispatched": {
             const known = spawnResults.get(operationKey);
-            if (known?.status === "accepted_uncommitted")
+            if (
+              known?.status === "accepted_uncommitted" ||
+              known?.status === "accepted_unconfirmed"
+            )
               return {
                 error: storeUnavailable(
                   operationKey,
@@ -1359,6 +1363,16 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               ),
             };
           const result = await performSafely(perform);
+          if (requiredStop && "error" in result) {
+            try {
+              await settleEvents();
+            } catch (error) {
+              return {
+                error: withCleanupCause(result.error, error, "io"),
+              };
+            }
+            return result;
+          }
           if (requiredStop && "result" in result) {
             const noSessionToStop =
               request.method === "kill" &&

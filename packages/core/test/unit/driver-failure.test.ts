@@ -55,7 +55,10 @@ describe("driver 抛错时动作整体回滚", () => {
     await vi.waitFor(() =>
       expect(diagnostics).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ kind: "request_failure", operation: "spawn" }),
+          expect.objectContaining({
+            kind: "request_failure",
+            operation: "spawn",
+          }),
         ]),
       ),
     );

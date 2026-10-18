@@ -684,7 +684,7 @@ async function main(): Promise<void> {
         message: "control through the public byte channel",
         cwd: required("REINS_WORKER_CWD"),
       },
-      first.connection.prepareOperation("spawn"),
+      { operationKey: first.connection.prepareOperation("spawn") },
     );
     const observed = await second.connection.list({
       sessionHandle: spawned.sessionHandle,
@@ -720,7 +720,7 @@ async function main(): Promise<void> {
 
     await third.connection.kill(
       { sessionHandle: spawned.sessionHandle },
-      third.connection.prepareOperation("kill"),
+      { operationKey: third.connection.prepareOperation("kill") },
     );
     const completed = await third.connection.wait({
       targets: [spawned.turnHandle],

@@ -439,6 +439,19 @@ async function runRecoveryAcceptance(options: {
       "prepareOperation 执行了远端副作用或未返回可保存输入",
     );
     const spawnIntent = prepared.intent;
+    const operationQuery = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "operation-query-validation",
+      { REINS_OPERATION_INTENT_JSON: spawnIntent },
+    );
+    assert(
+      operationQuery.malformedCode === "invalid_params" &&
+        operationQuery.malformedStage === "query" &&
+        operationQuery.validStatus === "unknown",
+      "SDK 操作查询未验证无效键或未读取合法身份",
+    );
 
     const workersBeforeValidation = readJsonLines(observationPath).filter(
       ({ type }) => type === "worker_started",

@@ -284,13 +284,13 @@ export class SpawnCommitFailure extends Error {
   readonly sessionId: SessionId;
   readonly result: SpawnAck;
   readonly commitError: unknown;
-  readonly terminationError: unknown | undefined;
+  readonly terminationError: unknown;
 
   constructor(
     sessionId: SessionId,
     result: SpawnAck,
     commitError: unknown,
-    terminationError: unknown | undefined,
+    terminationError: unknown,
   ) {
     super("Spawn was accepted but its control record could not be committed");
     this.name = "SpawnCommitFailure";
@@ -305,13 +305,13 @@ export class SpawnStartFailure extends Error {
   readonly sessionId: SessionId;
   readonly acceptance: "not_accepted" | "unknown";
   readonly failure: MachineError;
-  readonly terminationError: unknown | undefined;
+  readonly terminationError: unknown;
 
   constructor(
     sessionId: SessionId,
     acceptance: "not_accepted" | "unknown",
     failure: MachineError,
-    terminationError: unknown | undefined,
+    terminationError: unknown,
   ) {
     super("Worker start did not reach a known accepted state");
     this.name = "SpawnStartFailure";
@@ -851,8 +851,7 @@ export function createSessionMachine(options: {
     }
     if (spawning !== undefined) {
       if (spawning.phase === "accepting") spawning.events.push(event);
-      else if (spawning.phase === "committing")
-        spawning.lateEvents.push(event);
+      else if (spawning.phase === "committing") spawning.lateEvents.push(event);
       return;
     }
     const delivering = pendingDeliveries.get(event.sessionId);
@@ -1029,7 +1028,10 @@ export function createSessionMachine(options: {
         } catch (terminationError) {
           stopError = terminationError;
         }
-        if (stopError === undefined && pendingSpawns.get(sessionId)?.token === spawnScope.token)
+        if (
+          stopError === undefined &&
+          pendingSpawns.get(sessionId)?.token === spawnScope.token
+        )
           pendingSpawns.delete(sessionId);
         throw new SpawnCommitFailure(sessionId, result, error, stopError);
       }
@@ -1374,7 +1376,10 @@ export function createSessionMachine(options: {
         }),
       );
       const failures = results
-        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .filter(
+          (result): result is PromiseRejectedResult =>
+            result.status === "rejected",
+        )
         .map((result) => result.reason);
       if (failures.length > 0)
         throw new AggregateError(failures, "Pending worker cleanup failed");

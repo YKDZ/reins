@@ -142,6 +142,42 @@ async function prepareSpawn(): Promise<void> {
   }
 }
 
+async function operationQueryValidation(): Promise<void> {
+  const intent = readIntent<SpawnIntent>(
+    required("REINS_OPERATION_INTENT_JSON"),
+  );
+  const connection = await connectSdk();
+  try {
+    const malformed = await expectFailure(() =>
+      connection.getOperation("invalid-operation-key" as OperationKey<"spawn">),
+    );
+    if (
+      malformed.stage !== "query" ||
+      malformed.failure.code !== "invalid_params" ||
+      !malformed.failure.facts.issues.some(
+        (issue) =>
+          issue.issue === "invalid_value" && issue.path === "operationKey",
+      )
+    )
+      throw new Error("已安装 SDK 未将无效操作键映射为查询参数错误");
+    const operation = await connection.getOperation(intent.operationKey);
+    if (
+      operation.status !== "unknown" ||
+      operation.operationKey !== intent.operationKey
+    )
+      throw new Error("已安装 SDK 未能查询有效的新操作键");
+    process.stdout.write(
+      `${JSON.stringify({
+        malformedCode: malformed.failure.code,
+        malformedStage: malformed.stage,
+        validStatus: operation.status,
+      })}\n`,
+    );
+  } finally {
+    connection.close();
+  }
+}
+
 async function spawnValidation(): Promise<void> {
   const connection = await connectSdk();
   try {
@@ -1288,6 +1324,9 @@ switch (mode) {
   case "prepare-spawn":
     await prepareSpawn();
     break;
+  case "operation-query-validation":
+    await operationQueryValidation();
+    break;
   case "spawn-drop":
     await spawnDrop();
     break;
@@ -1300,7 +1339,7 @@ switch (mode) {
   case "spawn-conflict":
     await spawnConflict();
     break;
-  case "spawn-new-operationKey":
+  case "spawn-new-operation-key":
     await spawnWithNewOperationKey();
     break;
   case "prepare-send":

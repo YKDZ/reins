@@ -609,7 +609,11 @@ async function connectClient(
         }
       },
       async getOperation(operationKey: OperationKey<"spawn">) {
-        parseOperationKey(operationKey, "spawn");
+        try {
+          parseOperationKey(operationKey, "spawn");
+        } catch {
+          throw invalidInput("operationKey", "query");
+        }
         const result = await query(client!, "getOperation", {
           operationKey: serializeOperationKey(
             operationKey,

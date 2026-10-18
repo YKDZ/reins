@@ -147,20 +147,21 @@ export function createDaemonInternal(
     if (stopPromise !== undefined) return stopPromise;
     server.quiesce();
     const attempt = (async () => {
-      const failures: unknown[] = [];
       try {
         await control.terminateLiveSessions();
       } catch (error) {
-        failures.push(error);
+        if (control.liveSessionIds().length > 0) throw error;
+        try {
+          await server.stop();
+        } catch (shutdownError) {
+          throw new AggregateError(
+            [error, shutdownError],
+            "daemon 停止未完全成功",
+          );
+        }
+        throw error;
       }
-      try {
-        await server.stop();
-      } catch (error) {
-        failures.push(error);
-      }
-      if (failures.length === 1) throw failures[0];
-      if (failures.length > 1)
-        throw new AggregateError(failures, "Daemon stop did not fully succeed");
+      await server.stop();
     })();
     stopPromise = attempt;
     void attempt.catch(() => {

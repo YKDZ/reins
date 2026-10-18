@@ -2370,6 +2370,66 @@ describe("daemon 空闲退出", () => {
     await expect(running).rejects.toThrow();
   });
 
+  test("既有事件写故障不覆盖失败的原生停止原因", async () => {
+    const backingStore = createInMemoryControlStore();
+    let failEventWrite = false;
+    let terminationAttempts = 0;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      recordEvent(event, session) {
+        if (failEventWrite) throw new Error("先前事件无法写入存储");
+        return backingStore.recordEvent(event, session);
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async () => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1) throw new Error("原生停止请求被拒绝");
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "stop-error-cause",
+        message: "创建活动 worker",
+      }),
+    ) as { sessionId: SessionId };
+    failEventWrite = true;
+    fake.controls.emitWorkerMessage("触发事件写入失败");
+
+    const stopped = await requester("kill", { sessionId: spawned.sessionId });
+    expect(stopped).toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { message: "原生停止请求被拒绝" },
+        cleanupCause: {
+          kind: "io",
+          message: expect.stringContaining("先前事件无法写入存储"),
+        },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    connection.close();
+    await expect(daemon.stop()).rejects.toThrow();
+    await expect(running).rejects.toThrow();
+    expect(terminationAttempts).toBe(2);
+  });
+
   test("提交已落盘但回执丢失时保留持久成功结果", async () => {
     const backingStore = createInMemoryControlStore();
     let lostAcknowledgment = true;
@@ -2434,6 +2494,104 @@ describe("daemon 空闲退出", () => {
     });
     expect(fake.calls.starts).toBe(1);
     expect(fake.calls.terminated).toHaveLength(0);
+    connection.close();
+    await daemon.stop();
+    await running;
+  });
+
+  test("接受已知但提交状态无法核实时，同键重试保留接受事实", async () => {
+    const backingStore = createInMemoryControlStore();
+    let commitPending = true;
+    let verificationUnavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      commitSpawn() {
+        if (commitPending) {
+          commitPending = false;
+          verificationUnavailable = true;
+          throw new Error("spawn 提交回执丢失");
+        }
+        throw new Error("spawn 不应重复提交");
+      },
+      getOperation(operationKey) {
+        if (verificationUnavailable)
+          throw new Error("spawn 提交状态核验不可用");
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    await makeRequester(connection)("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext: "test-consumer",
+    });
+    const operationKey = testOperationKey(
+      connection,
+      "spawn",
+      "01234567-0123-4123-8123-0123456789bd",
+    );
+    const request = {
+      kind: "request",
+      method: "spawn",
+      operationKey,
+      params: {
+        harness: "codex",
+        sessionLabel: "accepted-unconfirmed",
+        cwd: "/tmp",
+        message: "保留首次已接受的结果",
+      },
+    } as const;
+    const first = await sendRaw(connection, {
+      ...request,
+      requestId: "spawn-unconfirmed-first",
+    });
+    expect(first).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+      },
+    });
+    const retry = await sendRaw(connection, {
+      ...request,
+      requestId: "spawn-unconfirmed-retry",
+    });
+    expect(retry).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+      },
+    });
+    const queried = await sendRaw(connection, {
+      kind: "request",
+      requestId: "spawn-unconfirmed-query",
+      method: "getOperation",
+      params: { operationKey },
+    });
+    expect(queried).toMatchObject({
+      result: {
+        status: "accepted_unconfirmed",
+        operationKey,
+        result: { sessionId: expect.any(String) },
+      },
+    });
+    expect(fake.calls.starts).toBe(1);
     connection.close();
     await daemon.stop();
     await running;

@@ -58,8 +58,8 @@ const wrongOperation: OperationKey<"send"> = spawnOperationKey;
 // @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
 parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
 // @ts-expect-error 仅创建记录在本票提供可恢复结果查询。
-connection.getOperation(sendOperationKey);
-connection.spawn(
+void connection.getOperation(sendOperationKey);
+void connection.spawn(
   { harness: "codex", cwd: "/tmp", message: "x" },
   {
     // @ts-expect-error 显式操作键必须和动作种类一致。
