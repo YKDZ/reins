@@ -877,6 +877,7 @@ export type AgentFact =
   | (TurnFactBase & {
       type: "permission.requested";
       permissionHandle: PermissionHandle;
+      toolKey?: ToolKey | undefined;
       kind: string;
       input?: unknown;
       options: PermissionOption[];

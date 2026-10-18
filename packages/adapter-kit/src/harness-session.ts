@@ -130,6 +130,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     input: unknown,
     options: PermissionOption[],
     attachment: TAttachment,
+    toolCallId?: ToolCallId,
   ): PermissionId {
     this.permissionSeq += 1;
     const permissionId = `p${this.permissionSeq}` as PermissionId;
@@ -139,6 +140,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
       sessionId: this.sessionId,
       turnId: this.requireTurnId(),
       permissionId,
+      ...(toolCallId === undefined ? {} : { toolCallId }),
       kind,
       input,
       options,

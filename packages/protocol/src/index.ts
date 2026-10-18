@@ -956,6 +956,7 @@ export const domainEventSchema = v.union([
     sessionId: sessionIdSchema,
     turnId: turnIdSchema,
     permissionId: permissionIdSchema,
+    toolCallId: v.optional(toolCallIdSchema),
     kind: v.string(),
     input: v.optional(v.unknown()),
     options: v.array(permissionOptionSchema),
@@ -2844,11 +2845,13 @@ export interface WorkerDriver {
 
 export type WorkerDriverFactory = (
   emit: (event: DomainEvent) => void,
+  markControlUnavailable?: (sessionId: SessionId) => void,
 ) => WorkerDriver;
 
 // adapter 构造只在 daemon 路由层发生；上下文只含控制面的领域事件与类型化诊断。
 export type AdapterDriverFactory = (context: {
   emit: (event: DomainEvent) => void;
+  markControlUnavailable?: () => void;
   beginAutonomousTurn?: (cause?: AutonomousTurnCause) => Promise<TurnId>;
   diagnostics: (
     input: DriverDiagnosticFact,
@@ -3022,6 +3025,7 @@ const attachPermissionEventSchema = v.strictObject({
   sessionId: sessionIdSchema,
   turnId: turnIdSchema,
   permissionId: permissionIdSchema,
+  toolCallId: v.optional(toolCallIdSchema),
   kind: v.string(),
   input: v.optional(v.unknown()),
   options: v.array(permissionOptionSchema),

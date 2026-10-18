@@ -17,6 +17,7 @@ import {
   type HarnessId,
   type OperationKey,
   type OperationKeyClaims,
+  type SessionId,
   type SpawnAck,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -75,6 +76,7 @@ function createFixture() {
   let sessionCounter = 0;
   let stopCount = 0;
   let interruptCount = 0;
+  let markControlUnavailable: ((sessionId: SessionId) => void) | undefined;
   let assertWriterLease: () => Promise<void> = async () => {};
   let resolveLeaseEntered: (() => void) | undefined;
   const leaseEntered = new Promise<void>((resolve) => {
@@ -123,21 +125,24 @@ function createFixture() {
       },
     },
     diagnostics: coreDiagnostics,
-    driverFactory: () => ({
-      async start() {},
-      async deliver() {},
-      async interrupt() {
-        interruptCount += 1;
-        throw new WorkerInterruptFailure(
-          "native interrupt response was lost",
-          "unknown",
-        );
-      },
-      resolvePermission() {},
-      async terminate() {
-        stopCount += 1;
-      },
-    }),
+    driverFactory: (_emit, markUnavailable) => {
+      markControlUnavailable = markUnavailable;
+      return {
+        async start() {},
+        async deliver() {},
+        async interrupt() {
+          interruptCount += 1;
+          throw new WorkerInterruptFailure(
+            "native interrupt response was lost",
+            "unknown",
+          );
+        },
+        resolvePermission() {},
+        async terminate() {
+          stopCount += 1;
+        },
+      };
+    },
   });
   const plane = createControlPlane({
     machine,
@@ -190,6 +195,9 @@ function createFixture() {
     },
     setWriterLease(check: () => Promise<void>) {
       assertWriterLease = check;
+    },
+    markControlUnavailable(sessionId: SessionId) {
+      markControlUnavailable?.(sessionId);
     },
     counts() {
       return { stopCount, interruptCount };
@@ -320,6 +328,38 @@ describe("记录删除与现场操作归属", () => {
         ),
       ).toMatchObject({ error: { code: "operation_key_conflict" } });
       expect(fixture.counts()).toEqual(beforeRetry);
+    } finally {
+      await fixture.close();
+    }
+  });
+
+  test("同世代控制失控会话可删除且删除不会触发原生停止", async () => {
+    const fixture = createFixture();
+    try {
+      const spawned = await fixture.execute(
+        "spawn",
+        { harness: "codex", cwd: "/tmp", message: "control lost" },
+        operationKey("spawn"),
+      );
+      if (!("result" in spawned)) throw new Error("测试会话创建失败");
+      const target = spawned.result as SpawnAck;
+      fixture.markControlUnavailable(target.sessionId);
+
+      expect(
+        await fixture.plane.dispatch(
+          "list",
+          { sessionId: target.sessionId },
+          consumer,
+        ),
+      ).toMatchObject([
+        { state: "unreachable", unreachableReason: "control_lost" },
+      ]);
+      expect(
+        await fixture.execute("deleteRecords", { sessionId: target.sessionId }),
+      ).toMatchObject({ result: { status: "deleted" } });
+      expect(fixture.store.getSession(target.sessionId)).toBeUndefined();
+      expect(fixture.store.getDeletedSession(target.sessionId)).toBeDefined();
+      expect(fixture.counts().stopCount).toBe(0);
     } finally {
       await fixture.close();
     }

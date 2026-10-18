@@ -237,6 +237,9 @@ export type ControlPlane = {
   subscribeEvents(listener: (entry: CommittedEvent) => void): () => void;
   subscribeControlUnavailable(listener: () => void): () => void;
   subscribeSessionDeleted(listener: (sessionId: SessionId) => void): () => void;
+  subscribeSessionUnavailable(
+    listener: (sessionId: SessionId) => void,
+  ): () => void;
   assertSessionScope(sessionId: SessionId, consumer?: ConsumerContext): void;
   list(
     filter: Parameters<SessionMachine["list"]>[0],
@@ -286,6 +289,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   const eventListeners = new Set<(entry: CommittedEvent) => void>();
   const controlUnavailableListeners = new Set<() => void>();
   const sessionDeletedListeners = new Set<(sessionId: SessionId) => void>();
+  const sessionUnavailableListeners = new Set<(sessionId: SessionId) => void>();
   const waitListeners = new Set<(entry?: CommittedEvent) => void>();
   const committedEvents = new Map<SessionId, StoredCommittedEvent[]>();
   function queueCommittedEvents(
@@ -577,6 +581,17 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       // EventBus routes synchronous persistence failures to its listener error sink.
     }
   });
+  const unsubscribeMachineControlUnavailable =
+    options.machine.subscribeControlUnavailable((sessionId) => {
+      wakeWaiters();
+      for (const listener of Array.from(sessionUnavailableListeners)) {
+        try {
+          listener(sessionId);
+        } catch {
+          // 单会话可用性通知不能中断其他订阅的收束。
+        }
+      }
+    });
 
   function recordDiagnostic(input: DaemonDiagnosticFact) {
     if (options.diagnostics.health().status === "degraded")
@@ -3378,7 +3393,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           ? "commit_unavailable"
           : stored.generation !== options.diagnostics.generation
             ? "previous_generation"
-            : liveSessionIds.has(info.sessionId)
+            : liveSessionIds.has(info.sessionId) &&
+                !options.machine.isControlUnavailable(info.sessionId)
               ? undefined
               : "control_lost";
         if (unreachableReason !== undefined)
@@ -3691,6 +3707,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       else if (
         stored.info.state === "killed" ||
         stored.info.state === "unreachable" ||
+        options.machine.isControlUnavailable(target.sessionId) ||
         !machineSessions.has(target.sessionId)
       )
         reason = "control_lost";
@@ -3940,6 +3957,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     })[0];
     const canFollow =
       storedSession.generation === options.diagnostics.generation &&
+      !options.machine.isControlUnavailable(params.sessionId) &&
       liveSession !== undefined &&
       sessionInfo.state !== "unreachable" &&
       sessionInfo.state !== "killed";
@@ -5461,6 +5479,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       sessionDeletedListeners.add(listener);
       return () => sessionDeletedListeners.delete(listener);
     },
+    subscribeSessionUnavailable(listener) {
+      sessionUnavailableListeners.add(listener);
+      return () => sessionUnavailableListeners.delete(listener);
+    },
     assertSessionScope,
     list,
     attachInitial,
@@ -5519,9 +5541,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     },
     close() {
       unsubscribeMachine();
+      unsubscribeMachineControlUnavailable();
       eventListeners.clear();
       controlUnavailableListeners.clear();
       sessionDeletedListeners.clear();
+      sessionUnavailableListeners.clear();
       wakeWaiters();
       waitListeners.clear();
       options.controlStore.close();

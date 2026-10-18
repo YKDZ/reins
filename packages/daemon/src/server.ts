@@ -458,6 +458,7 @@ export function createProtocolServerInternal(
         unsubscribeControlEvents();
         unsubscribeControlUnavailable();
         unsubscribeSessionDeleted();
+        unsubscribeSessionUnavailable();
         options.control.close();
         startedResolve?.();
         startedResolve = null;
@@ -599,6 +600,12 @@ export function createProtocolServerInternal(
           endAttach(subscription, "session_deleted");
     },
   );
+  const unsubscribeSessionUnavailable =
+    options.control.subscribeSessionUnavailable((sessionId) => {
+      for (const subscription of Array.from(attachSubscriptions))
+        if (subscription.sessionId === sessionId)
+          endAttach(subscription, "control_unavailable");
+    });
 
   function requestIdOf(raw: unknown): RequestId | null {
     if (typeof raw !== "object" || raw === null) return null;
