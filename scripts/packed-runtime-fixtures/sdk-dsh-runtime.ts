@@ -776,6 +776,7 @@ try {
       permissionRequested.options[0].scope === "once" &&
       permissionRequested.options[1]?.outcome === "deny" &&
       permissionRequested.options[1].feedback === false &&
+      permissionRequested.toolKey !== undefined &&
       containsValueText(permissionRequested.input, "bash"),
     "官方 DSH 原生问询未按其一次性授权能力完整呈现",
   );
@@ -855,6 +856,7 @@ try {
         "DSH_PERMISSION_TOOL_CONFIRMED" &&
       authorizedTool?.type === "tool.requested" &&
       authorizedToolResult?.type === "tool.completed" &&
+      permissionRequested.toolKey === authorizedTool.toolKey &&
       authorizedTool.toolKey === authorizedToolResult.toolKey &&
       containsValueText(authorizedTool.input, permissionAllowPath) &&
       containsValueText(authorizedTool.input, "danger-full-access") &&

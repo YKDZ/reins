@@ -92,15 +92,6 @@ function turnFailureEvidence(): TurnFailureEvidence {
   };
 }
 
-function streamFailureEvidence(): TurnFailureEvidence {
-  return {
-    kind: "stream_failure",
-    operation: "receive_worker_stream",
-    reason: "read_error",
-    message: makeTextEvidence("The official DSH host stopped unexpectedly"),
-  };
-}
-
 function textContent(
   content: readonly { readonly type: string; readonly text?: string }[],
 ): string | null {
@@ -151,7 +142,12 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function createDshDriver(): AdapterDriverFactory {
-  return ({ emit, beginAutonomousTurn, diagnostics }) => {
+  return ({
+    emit,
+    beginAutonomousTurn,
+    diagnostics,
+    markControlUnavailable = () => undefined,
+  }) => {
     const diagnosticSink: DiagnosticSink = diagnostics;
     let host: DshHostClient | undefined;
     let session: HarnessSession<NativeApproval> | undefined;
@@ -160,6 +156,7 @@ export function createDshDriver(): AdapterDriverFactory {
     let terminating = false;
     let termination: Promise<void> | undefined;
     let startAccepted = false;
+    let controlUnavailable = false;
     const attemptMessageIds = new Map<string, string>();
     const attemptTurns = new Map<string, TurnId>();
     const attemptByEventSeq = new Map<number, string>();
@@ -174,19 +171,25 @@ export function createDshDriver(): AdapterDriverFactory {
     const nativeApprovals = new Map<PermissionId, NativeApproval>();
     let hostEventQueue = Promise.resolve();
 
-    function emitFailureTurn(failure: HarnessFailure): void {
-      if (session === undefined || session.turnId === null) return;
-      void session
-        .failActiveTurn(failure, streamFailureEvidence())
-        .catch(() => undefined);
+    function markHostControlUnavailable(): void {
+      if (controlUnavailable || session === undefined) return;
+      controlUnavailable = true;
+      markControlUnavailable();
     }
 
     function handleHostExit(): void {
       if (terminating || !startAccepted || session === undefined) return;
-      emitFailureTurn({
-        failureCategory: "runtime_unavailable",
-        retryDisposition: "external_state_change",
-      });
+      markHostControlUnavailable();
+      void session
+        .diagnostic({
+          kind: "lifecycle",
+          operation: "worker",
+          reason: "exited_unexpectedly",
+          message: makeTextEvidence(
+            "The official DSH host exited unexpectedly",
+          ),
+        })
+        .catch(() => undefined);
     }
 
     function turnForEvent(event: DshHostEvent): TurnId | undefined {
@@ -562,11 +565,22 @@ export function createDshDriver(): AdapterDriverFactory {
             { outcome: "deny", feedback: false },
           ],
           approval,
+          nativeCall?.toolCallId,
         );
         nativeApprovals.set(permissionId, approval);
       } else if (event.type === "fatal") {
         if (!startAccepted || terminating) return;
-        emitFailureTurn(failureFromSafeFacts(event.failure));
+        markHostControlUnavailable();
+        void session
+          ?.diagnostic({
+            kind: "lifecycle",
+            operation: "worker",
+            reason: "exited_unexpectedly",
+            message: makeTextEvidence(
+              "The official DSH host reported a fatal failure",
+            ),
+          })
+          .catch(() => undefined);
       }
     }
 
@@ -574,11 +588,7 @@ export function createDshDriver(): AdapterDriverFactory {
       hostEventQueue = hostEventQueue
         .then(() => handleHostEvent(event))
         .catch(() => {
-          if (session?.turnId !== null && session !== undefined)
-            emitFailureTurn({
-              failureCategory: "runtime_unavailable",
-              retryDisposition: "external_state_change",
-            });
+          markHostControlUnavailable();
         });
     }
 
@@ -614,6 +624,7 @@ export function createDshDriver(): AdapterDriverFactory {
 
         terminating = false;
         startAccepted = false;
+        controlUnavailable = false;
         hostEventQueue = Promise.resolve();
         attemptMessageIds.clear();
         attemptTurns.clear();
