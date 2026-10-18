@@ -3277,6 +3277,16 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             };
         }
       };
+      if (
+        cached?.status === "failed" ||
+        cached?.status === "outcome_unknown" ||
+        cached?.status === "not_accepted_uncommitted" ||
+        cached?.status === "not_accepted_unconfirmed" ||
+        cached?.status === "partial_effect_uncommitted" ||
+        cached?.status === "partial_effect_unconfirmed"
+      )
+        return cachedOutcome(cached);
+
       let registration: ReturnType<ControlStore["registerKill"]> | undefined;
       try {
         registration = options.controlStore.registerKill({
@@ -3347,9 +3357,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             const known = killResults.get(key);
             if (
               known?.status === "accepted_uncommitted" ||
-              known?.status === "accepted_unconfirmed" ||
-              known?.status === "partial_effect_uncommitted" ||
-              known?.status === "partial_effect_unconfirmed"
+              known?.status === "accepted_unconfirmed"
             )
               break;
             if (
