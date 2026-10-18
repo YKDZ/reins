@@ -71,6 +71,32 @@ const diagnosticWithMismatchedStage: DiagnosticRecord = {
   reason: "upstream_error",
   message: { text: "failed", truncated: false, originalBytes: 6 },
 };
+const diagnosticWithInvalidWorkerEventState: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "error",
+  source: "core",
+  sessionHandle,
+  kind: "protocol_violation",
+  operation: "validate_worker_event",
+  reason: "unknown_session",
+  eventType: "message",
+  // @ts-expect-error unknown_session 只能对应 unknown 状态。
+  sessionState: "busy",
+};
+
+function readRequiredToolCallId(record: DiagnosticRecord): string | undefined {
+  if (
+    record.kind === "protocol_violation" &&
+    record.operation === "validate_worker_event" &&
+    record.reason === "tool_already_requested"
+  ) {
+    const toolCallId: string = record.toolCallId;
+    return toolCallId;
+  }
+  return undefined;
+}
 
 // @ts-expect-error 会话句柄与回合句柄具有不同的公开身份。
 const wrongTurn: TurnHandle = sessionHandle;
@@ -136,3 +162,5 @@ void resumeCursor;
 void diagnosticWithUnknownField;
 void diagnosticWithUnknownReason;
 void diagnosticWithMismatchedStage;
+void diagnosticWithInvalidWorkerEventState;
+void readRequiredToolCallId;

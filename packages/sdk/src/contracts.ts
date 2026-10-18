@@ -345,19 +345,88 @@ type DiagnosticWorkerEventType =
   | "permission.resolved"
   | "turn.completed"
   | "session.killed";
-type DiagnosticWorkerEventReason =
-  | "unknown_session"
-  | "session_killed"
-  | "driver_event_forbidden"
-  | "turn_not_active"
-  | "turn_mismatch"
-  | "event_after_turn_completed"
-  | "message_already_completed"
-  | "tool_already_requested"
-  | "tool_already_completed"
-  | "permission_id_reused"
-  | "permission_not_pending"
-  | "permission_turn_mismatch";
+type DiagnosticTurnWorkerEventType =
+  | "turn.started"
+  | "text.delta"
+  | "message"
+  | "tool.requested"
+  | "tool.completed"
+  | "permission.requested"
+  | "permission.resolved"
+  | "turn.completed";
+type DiagnosticActiveTurnAssociation = {
+  sessionState: "spawning" | "busy";
+  eventTurnId: string;
+  activeTurnId: string;
+};
+type DiagnosticWorkerEventRejection =
+  | {
+      reason: "unknown_session";
+      eventType: DiagnosticWorkerEventType;
+      sessionState: "unknown";
+      eventTurnId?: string;
+    }
+  | {
+      reason: "session_killed";
+      eventType: DiagnosticWorkerEventType;
+      sessionState: "killed";
+      eventTurnId?: string;
+    }
+  | {
+      reason: "driver_event_forbidden";
+      eventType: "session.created" | "turn.started" | "session.killed";
+      sessionState: "spawning" | "busy" | "idle";
+    }
+  | {
+      reason: "turn_not_active";
+      eventType: DiagnosticTurnWorkerEventType;
+      sessionState: "idle";
+      eventTurnId: string;
+    }
+  | ({
+      reason: "turn_mismatch";
+      eventType: DiagnosticTurnWorkerEventType;
+    } & DiagnosticActiveTurnAssociation)
+  | {
+      reason: "event_after_turn_completed";
+      eventType: DiagnosticTurnWorkerEventType;
+      sessionState: "idle";
+      eventTurnId: string;
+    }
+  | ({
+      reason: "event_after_turn_completed";
+      eventType: DiagnosticTurnWorkerEventType;
+    } & DiagnosticActiveTurnAssociation)
+  | ({
+      reason: "message_already_completed";
+      eventType: "text.delta" | "message";
+      messageId: string;
+    } & DiagnosticActiveTurnAssociation)
+  | ({
+      reason: "tool_already_requested";
+      eventType: "tool.requested";
+      toolCallId: string;
+    } & DiagnosticActiveTurnAssociation)
+  | ({
+      reason: "tool_already_completed";
+      eventType: "tool.completed";
+      toolCallId: string;
+    } & DiagnosticActiveTurnAssociation)
+  | ({
+      reason: "permission_id_reused";
+      eventType: "permission.requested";
+      permissionId: string;
+    } & DiagnosticActiveTurnAssociation)
+  | ({
+      reason: "permission_not_pending";
+      eventType: "permission.resolved";
+      permissionId: string;
+    } & DiagnosticActiveTurnAssociation)
+  | ({
+      reason: "permission_turn_mismatch";
+      eventType: "permission.resolved";
+      permissionId: string;
+    } & DiagnosticActiveTurnAssociation);
 
 export type DiagnosticRecord =
   | (DiagnosticRecordEnvelope & {
@@ -515,16 +584,8 @@ export type DiagnosticRecord =
       sessionHandle: SessionHandle;
       kind: "protocol_violation";
       operation: "validate_worker_event";
-      reason: DiagnosticWorkerEventReason;
-      eventType: DiagnosticWorkerEventType;
-      sessionState: "unknown" | "killed" | "spawning" | "busy" | "idle";
-      eventTurnId?: string;
-      activeTurnId?: string;
-      messageId?: string;
-      toolCallId?: string;
-      permissionId?: string;
       severity: "error";
-    })
+    } & DiagnosticWorkerEventRejection)
   | (DiagnosticRecordEnvelope &
       DiagnosticControlAssociation & {
         kind: "protocol_violation";
