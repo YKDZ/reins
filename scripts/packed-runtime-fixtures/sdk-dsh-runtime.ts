@@ -1,5 +1,9 @@
 import { openLocal } from "@ykdz/reins";
-import type { AgentFact, ReinsConnection } from "@ykdz/reins-sdk";
+import type {
+  AgentFact,
+  MessageContent,
+  ReinsConnection,
+} from "@ykdz/reins-sdk";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -27,6 +31,26 @@ async function collect(
   } finally {
     subscription.close();
   }
+}
+
+function containsMessageText(
+  content: MessageContent,
+  expected: string,
+): boolean {
+  if (typeof content === "string") return content.includes(expected);
+  return content.some(
+    (part) =>
+      (part.type === "text" || part.type === "thinking") &&
+      part.text.includes(expected),
+  );
+}
+
+function containsValueText(value: unknown, expected: string): boolean {
+  if (typeof value === "string") return value.includes(expected);
+  if (Array.isArray(value))
+    return value.some((part) => containsValueText(part, expected));
+  if (typeof value !== "object" || value === null) return false;
+  return Object.values(value).some((part) => containsValueText(part, expected));
 }
 
 const environment = process.env;
@@ -103,27 +127,59 @@ try {
     (fact): fact is Extract<AgentFact, { type: "message" }> =>
       fact.type === "message" && fact.role === "caller",
   );
+  const callerMessageKey = callerMessages[0]?.messageKey;
+  const callerSnapshots = callerMessages.filter(
+    (fact) =>
+      Array.isArray(fact.content) &&
+      containsMessageText(fact.content, "Read evidence.txt"),
+  );
   const toolRequested = firstFacts.find(
     (fact) => fact.type === "tool.requested",
   );
   const toolCompleted = firstFacts.find(
     (fact) => fact.type === "tool.completed",
   );
+  const workerMessages = firstFacts.filter(
+    (fact): fact is Extract<AgentFact, { type: "message" }> =>
+      fact.type === "message" && fact.role === "worker",
+  );
   assert(
-    callerMessages.length === 1 &&
-      callerMessages[0]?.content.includes("Read evidence.txt") &&
-      toolRequested?.name === "read" &&
-      toolCompleted?.name === "read" &&
+    callerMessages.length > 0 &&
+      new Set(callerMessages.map((fact) => fact.messageKey)).size === 1 &&
+      callerSnapshots.length === 1 &&
+      callerSnapshots[0]?.messageKey === callerMessageKey,
+    "DSH 未保留精确 caller 消息",
+  );
+  assert(
+    toolRequested?.name === "read" &&
+      containsValueText(toolRequested.input, "evidence.txt"),
+    "DSH 未保留工具调用名称与原始输入",
+  );
+  assert(
+    toolCompleted?.name === "read" &&
       toolCompleted.isError === false &&
-      toolCompleted.result?.includes("OFFICIAL_TOOL_READ_ONCE") &&
-      toolRequested.toolKey === toolCompleted.toolKey &&
-      firstFacts.some(
+      containsValueText(toolCompleted.result, "OFFICIAL_TOOL_READ_ONCE") &&
+      toolRequested?.toolKey === toolCompleted.toolKey,
+    "DSH 未保留带关联身份的完整工具结果",
+  );
+  assert(
+    workerMessages.some((fact) =>
+      containsMessageText(fact.content, "DSH_READ_CONFIRMED"),
+    ),
+    "DSH 未保留助手正文",
+  );
+  assert(
+    toolRequested !== undefined &&
+      workerMessages.some(
         (fact) =>
-          fact.type === "message" &&
-          fact.role === "worker" &&
-          fact.content === "DSH_READ_CONFIRMED",
+          Array.isArray(fact.content) &&
+          fact.content.some(
+            (part) =>
+              part.type === "tool_call" &&
+              part.toolKey === toolRequested.toolKey,
+          ),
       ),
-    "DSH 工具结果、消息身份或 caller 关联不正确",
+    "DSH 助手正文中的工具引用与工具调用身份不一致",
   );
 
   const second = await connection.send(
@@ -148,6 +204,29 @@ try {
     secondWait.status === "satisfied" &&
       secondWait.completed[0]?.finalReply === "DSH_NEW_TURN_CONFIRMED",
     "官方 DSH profile 未完成同一会话的新回合",
+  );
+  const secondFacts = await collect(
+    await connection.attach(
+      { scope: "turn", turnHandle: second.turnHandle },
+      { mode: "available" },
+    ),
+  );
+  const secondCallerMessages = secondFacts.filter(
+    (fact): fact is Extract<AgentFact, { type: "message" }> =>
+      fact.type === "message" && fact.role === "caller",
+  );
+  const secondCallerKey = secondCallerMessages[0]?.messageKey;
+  const secondNativeCallerSnapshots = secondCallerMessages.filter(
+    (fact) =>
+      Array.isArray(fact.content) &&
+      containsMessageText(fact.content, "Continue in the same session"),
+  );
+  assert(
+    secondCallerMessages.length > 0 &&
+      new Set(secondCallerMessages.map((fact) => fact.messageKey)).size === 1 &&
+      secondNativeCallerSnapshots.length === 1 &&
+      secondNativeCallerSnapshots[0]?.messageKey === secondCallerKey,
+    "DSH 新回合未保留精确 caller 消息",
   );
 
   const killed = await connection.kill(

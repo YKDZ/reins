@@ -5,7 +5,12 @@ import { join } from "node:path";
 import type { Agent, AssistantStreamFrame } from "@deepseek-ai/dsh-agent";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
 import type { runProfile } from "@deepseek-ai/dsh/profile-boot";
-import { turnIdSchema, type TurnId } from "@reins/protocol";
+import {
+  messageIdSchema,
+  turnIdSchema,
+  type MessageId,
+  type TurnId,
+} from "@reins/protocol";
 import * as v from "valibot";
 
 import {
@@ -20,12 +25,18 @@ type NativeTurn = {
   readonly nativeMessageId: string;
 };
 
+type NativeCaller = {
+  readonly turnId: TurnId;
+  readonly messageId: MessageId;
+};
+
 const hostCommandSchema = v.union([
   v.strictObject({
     id: v.number(),
     type: v.literal("start"),
     sessionId: v.string(),
     turnId: turnIdSchema,
+    messageId: v.optional(messageIdSchema),
     message: v.string(),
     cwd: v.string(),
     provider: v.optional(v.string()),
@@ -36,6 +47,7 @@ const hostCommandSchema = v.union([
     id: v.number(),
     type: v.literal("deliver"),
     turnId: turnIdSchema,
+    messageId: v.optional(messageIdSchema),
     message: v.string(),
   }),
   v.strictObject({ id: v.number(), type: v.literal("close") }),
@@ -130,11 +142,16 @@ function nativeTurnOf(event: SessionEvent): number | undefined {
   return undefined;
 }
 
-function sendSessionEvent(event: SessionEvent, turnId?: TurnId): void {
+function sendSessionEvent(
+  event: SessionEvent,
+  turnId?: TurnId,
+  callerMessageId?: MessageId,
+): void {
   send({
     type: "session-event",
     event,
     ...(turnId === undefined ? {} : { turnId }),
+    ...(callerMessageId === undefined ? {} : { callerMessageId }),
   });
 }
 
@@ -197,6 +214,7 @@ export async function runDshRuntimeHost(): Promise<void> {
   const pendingNativeTurns: NativeTurn[] = [];
   const nativeTurnIds = new Map<number, TurnId>();
   const nativeMessageTurns = new Map<string, TurnId>();
+  const nativeCallerMessageIds = new Map<string, NativeCaller>();
   const attemptTurnIds = new Map<string, TurnId>();
   let closed = false;
   let closing: Promise<void> | undefined;
@@ -240,6 +258,7 @@ export async function runDshRuntimeHost(): Promise<void> {
     agent: Agent,
     turnId: TurnId,
     text: string,
+    messageId?: MessageId,
   ): Promise<
     | { readonly accepted: true; readonly nativeMessageId: string }
     | {
@@ -259,6 +278,8 @@ export async function runDshRuntimeHost(): Promise<void> {
     };
     pendingNativeTurns.push(pending);
     nativeMessageTurns.set(message.id, turnId);
+    if (messageId !== undefined)
+      nativeCallerMessageIds.set(message.id, { turnId, messageId });
     try {
       agent.followup(message);
     } catch (error) {
@@ -378,8 +399,27 @@ export async function runDshRuntimeHost(): Promise<void> {
               : nativeTurn === undefined
                 ? undefined
                 : nativeTurnIds.get(nativeTurn);
-          sendSessionEvent(event, turnId);
-          if (event.type === "turn/end") nativeTurnIds.delete(event.data.turn);
+          const caller =
+            event.type === "user/message"
+              ? nativeCallerMessageIds.get(event.data.id)
+              : undefined;
+          sendSessionEvent(event, turnId, caller?.messageId);
+          if (event.type === "user/message") {
+            nativeCallerMessageIds.delete(event.data.id);
+            nativeMessageTurns.delete(event.data.id);
+          }
+          if (event.type === "turn/end") {
+            nativeTurnIds.delete(event.data.turn);
+            for (const [
+              nativeMessageId,
+              pendingCaller,
+            ] of nativeCallerMessageIds) {
+              if (pendingCaller.turnId === turnId) {
+                nativeCallerMessageIds.delete(nativeMessageId);
+                nativeMessageTurns.delete(nativeMessageId);
+              }
+            }
+          }
         },
       );
       streamSubscription = handle.agent.ctx.on(
@@ -402,6 +442,7 @@ export async function runDshRuntimeHost(): Promise<void> {
         handle.agent,
         command.turnId,
         command.message,
+        command.messageId,
       );
       if (accepted.accepted) {
         send({
@@ -433,6 +474,7 @@ export async function runDshRuntimeHost(): Promise<void> {
       handle.agent,
       command.turnId,
       command.message,
+      command.messageId,
     );
     if (accepted.accepted) {
       send({
@@ -468,6 +510,9 @@ export async function runDshRuntimeHost(): Promise<void> {
             type: "start",
             sessionId: command.sessionId,
             turnId: command.turnId,
+            ...(command.messageId === undefined
+              ? {}
+              : { messageId: command.messageId }),
             message: command.message,
             cwd: command.cwd,
             ...(command.provider === undefined
@@ -478,7 +523,17 @@ export async function runDshRuntimeHost(): Promise<void> {
               ? {}
               : { reasoningEffort: command.reasoningEffort }),
           }
-        : command;
+        : command.type === "deliver"
+          ? {
+              id: command.id,
+              type: "deliver",
+              turnId: command.turnId,
+              ...(command.messageId === undefined
+                ? {}
+                : { messageId: command.messageId }),
+              message: command.message,
+            }
+          : command;
     void handleCommand(normalizedCommand).catch((error: unknown) => {
       send({
         id: normalizedCommand.id,

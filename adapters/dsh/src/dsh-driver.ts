@@ -3,6 +3,9 @@ import type {
   AdapterDriverFactory,
   HarnessFailure,
   MachineError,
+  MessageContent,
+  MessageContentPart,
+  MessageId,
   SessionId,
   TurnId,
   WorkerDriver,
@@ -79,10 +82,37 @@ function textContent(
     : textBlocks.map((block) => block.text).join("");
 }
 
-function toolResultText(
-  content: readonly { readonly type: string; readonly text?: string }[],
-): string | null {
-  return textContent(content);
+function nativeContent(
+  content: readonly import("@deepseek-ai/dsh-llm").ContentBlock[],
+  session: HarnessSession,
+): MessageContent {
+  const parts: MessageContentPart[] = content.map((block) => {
+    switch (block.type) {
+      case "text":
+        return { type: "text", text: block.text };
+      case "reasoning":
+        return { type: "thinking", text: block.text };
+      case "tool-call":
+        return {
+          type: "tool_call",
+          toolCallId: session.toolCallId(block.id),
+        };
+      default: {
+        const nativeBlock: unknown = block;
+        const nativeType =
+          isRecord(nativeBlock) && typeof nativeBlock.type === "string"
+            ? nativeBlock.type
+            : "unknown";
+        return {
+          type: "opaque",
+          harness: "dsh",
+          nativeType,
+          value: nativeBlock,
+        };
+      }
+    }
+  });
+  return parts;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -133,25 +163,25 @@ export function createDshDriver(): AdapterDriverFactory {
       )
         return;
       assistantByEventSeq.delete(seq);
-      attemptByEventSeq.delete(seq);
       const message = pending.event.data.message;
       const content = textContent(message.content);
-      const nativeId = attemptMessageIds.get(attemptId) ?? attemptId;
+      const nativeId =
+        attemptMessageIds.get(attemptId) ??
+        pending.event.data.message.id ??
+        attemptId;
       const messageId = session.messageId(nativeId);
-      if (content === null) {
-        return;
-      }
-      session.setFinalText(content);
+      if (content !== null) session.setFinalText(content);
       emit({
         type: "message",
         sessionId: session.sessionId,
         turnId: pending.turnId,
         messageId,
         role: "worker",
-        content,
+        content: nativeContent(message.content, session),
       });
       if ("usage" in pending.event.data && isRecord(pending.event.data.usage))
         session.setUsage(pending.event.data.usage);
+      attemptByEventSeq.delete(seq);
     }
 
     function handleAssistantFrame(
@@ -247,6 +277,18 @@ export function createDshDriver(): AdapterDriverFactory {
         flushAssistantMessage(nativeEvent.seq);
         return;
       }
+      if (nativeEvent.type === "user/message") {
+        if (event.callerMessageId === undefined) return;
+        emit({
+          type: "message",
+          sessionId: session.sessionId,
+          turnId,
+          messageId: event.callerMessageId,
+          role: "caller",
+          content: nativeContent(nativeEvent.data.content, session),
+        });
+        return;
+      }
       if (nativeEvent.type === "tool/call") {
         session.toolNames.set(nativeEvent.data.callId, nativeEvent.data.name);
         emit({
@@ -255,6 +297,7 @@ export function createDshDriver(): AdapterDriverFactory {
           turnId,
           toolCallId: session.toolCallId(nativeEvent.data.callId),
           name: nativeEvent.data.name,
+          input: nativeEvent.data.arguments,
         });
         return;
       }
@@ -268,7 +311,10 @@ export function createDshDriver(): AdapterDriverFactory {
           turnId,
           toolCallId: session.toolCallId(nativeCallId),
           name,
-          result: toolResultText(nativeEvent.data.message.content),
+          result: nativeContent(nativeEvent.data.message.content, session),
+          ...(nativeEvent.data.error === undefined
+            ? {}
+            : { error: nativeEvent.data.error }),
           isError: nativeEvent.data.message.isError === true,
         });
         session.toolNames.delete(nativeCallId);
@@ -346,6 +392,9 @@ export function createDshDriver(): AdapterDriverFactory {
             type: "start",
             sessionId: spec.sessionId,
             turnId: spec.turnId,
+            ...(spec.messageId === undefined
+              ? {}
+              : { messageId: spec.messageId }),
             message: spec.message,
             cwd: spec.cwd,
             ...(modelRoute === undefined
@@ -376,6 +425,7 @@ export function createDshDriver(): AdapterDriverFactory {
         turnId: TurnId,
         message: string,
         placement: "active_turn" | "new_turn",
+        messageId?: MessageId,
       ): Promise<void> {
         if (
           host === undefined ||
@@ -393,6 +443,7 @@ export function createDshDriver(): AdapterDriverFactory {
           const response = await host.request({
             type: "deliver",
             turnId,
+            ...(messageId === undefined ? {} : { messageId }),
             message,
           });
           assertHostResponse(response);

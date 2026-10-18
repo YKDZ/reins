@@ -1,6 +1,6 @@
 import type { AssistantStreamFrame } from "@deepseek-ai/dsh-agent";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
-import type { TurnId } from "@reins/protocol";
+import type { MessageId, TurnId } from "@reins/protocol";
 
 export type DshSafeFailure = {
   readonly code?: string;
@@ -14,6 +14,7 @@ export type DshHostCommand =
       readonly type: "start";
       readonly sessionId: string;
       readonly turnId: TurnId;
+      readonly messageId?: MessageId;
       readonly message: string;
       readonly cwd: string;
       readonly provider?: string;
@@ -24,6 +25,7 @@ export type DshHostCommand =
       readonly id: number;
       readonly type: "deliver";
       readonly turnId: TurnId;
+      readonly messageId?: MessageId;
       readonly message: string;
     }
   | { readonly id: number; readonly type: "close" }
@@ -36,6 +38,7 @@ export type DshHostEvent =
       readonly type: "session-event";
       readonly event: SessionEvent;
       readonly turnId?: TurnId;
+      readonly callerMessageId?: MessageId;
     }
   | {
       readonly type: "assistant-stream";
