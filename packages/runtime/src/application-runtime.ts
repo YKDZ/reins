@@ -194,7 +194,7 @@ export async function connectWithStartup<T>(
           args.push("--adapters", adaptersModule);
         }
         child = spawn(args[0] ?? process.execPath, args.slice(1), {
-          // fd 3 只承载启动窗口的有界机器报告；正常后台 stdout/stderr 仍不进入 CLI。
+          // fd 3 只承载启动窗口的有界机器报告；后台输出不进入调用方管道。
           stdio: ["ignore", "ignore", "ignore", "pipe"],
           env: {
             ...env,

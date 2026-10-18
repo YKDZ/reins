@@ -4,7 +4,6 @@ import {
   isCommandOutcomeUnknown,
   OperationCredentialError,
   ReinsClientError,
-  createPresentationProjector as createClientPresentationProjector,
   type ReinsClient as ControlClient,
 } from "@reins/client/control";
 import type {
@@ -46,7 +45,6 @@ import {
   type ReinsConnection,
   type ReinsFailure,
   type AgentFact,
-  type AgentPresentation,
   type AgentSubscriptionEnd,
   type AgentTarget,
   type ReplayPolicy,
@@ -109,7 +107,6 @@ export type {
   TurnHandle,
   AgentFact,
   AgentFactId,
-  AgentPresentation,
   AgentSubscriptionEnd,
   AgentSubscriptionEstablishment,
   AgentTarget,
@@ -435,14 +432,6 @@ export async function connect(
       stage,
     );
   }
-}
-
-export function createPresentationProjector(): (
-  fact: AgentFact,
-) => AgentPresentation[] {
-  return createClientPresentationProjector() as unknown as (
-    fact: AgentFact,
-  ) => AgentPresentation[];
 }
 
 function projectAttachParams(

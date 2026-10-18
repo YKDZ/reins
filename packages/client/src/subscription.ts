@@ -43,22 +43,6 @@ type PublicFact<E> = E extends DomainEvent
   : never;
 
 export type AgentFact = PublicFact<DomainEvent> & { factId: AgentFactId };
-export type AgentPresentation =
-  | (Exclude<DomainEvent, { type: "text.delta" | "message" }> extends infer E
-      ? E extends DomainEvent
-        ? Omit<PublicFact<E>, "messageKey" | "toolKey">
-        : never
-      : never)
-  | {
-      type: "text";
-      sessionHandle: SessionHandle;
-      turnHandle: TurnHandle;
-      role: "caller" | "worker";
-      content: string;
-      operation: "append" | "replace";
-      complete: boolean;
-      start: boolean;
-    };
 
 export type AgentTarget =
   | { scope: "session"; sessionHandle: SessionHandle }
@@ -154,79 +138,4 @@ export function createAgentFact(
     ) as AgentFactId,
   };
   return fact as AgentFact;
-}
-
-export function createPresentationProjector(): (
-  fact: AgentFact,
-) => AgentPresentation[] {
-  const messages = new Map<
-    MessageKey,
-    { text: string; complete: boolean; turnHandle: TurnHandle }
-  >();
-  const tools = new Map<ToolKey, { name: string; turnHandle: TurnHandle }>();
-  return (fact) => {
-    if (fact.type === "text.delta" || fact.type === "message") {
-      const start = !messages.has(fact.messageKey);
-      const state = messages.get(fact.messageKey) ?? {
-        text: "",
-        complete: false,
-        turnHandle: fact.turnHandle,
-      };
-      if (state.complete) return [];
-      let content: string;
-      let operation: "append" | "replace" = "append";
-      if (fact.type === "text.delta") {
-        content = fact.delta;
-        state.text += content;
-      } else {
-        operation = fact.content.startsWith(state.text) ? "append" : "replace";
-        content =
-          operation === "append"
-            ? fact.content.slice(state.text.length)
-            : fact.content;
-        state.text = fact.content;
-        state.complete = true;
-      }
-      messages.set(fact.messageKey, state);
-      return [
-        {
-          type: "text",
-          sessionHandle: fact.sessionHandle,
-          turnHandle: fact.turnHandle,
-          role: fact.type === "message" ? fact.role : "worker",
-          content,
-          operation,
-          complete: state.complete,
-          start,
-        },
-      ];
-    }
-    if (fact.type === "tool.requested") {
-      tools.set(fact.toolKey, {
-        name: fact.name,
-        turnHandle: fact.turnHandle,
-      });
-      const { factId: _factId, toolKey: _toolKey, ...presentation } = fact;
-      return [presentation];
-    }
-    if (fact.type === "tool.completed") {
-      const requested = tools.get(fact.toolKey);
-      tools.delete(fact.toolKey);
-      const { factId: _factId, toolKey: _toolKey, ...presentation } = fact;
-      return [
-        {
-          ...presentation,
-          ...(requested === undefined ? {} : { name: requested.name }),
-        },
-      ];
-    }
-    if (fact.type === "turn.completed") {
-      for (const [key, state] of messages)
-        if (state.turnHandle === fact.turnHandle) messages.delete(key);
-      for (const [key, state] of tools)
-        if (state.turnHandle === fact.turnHandle) tools.delete(key);
-    }
-    const { factId: _factId, ...presentation } = fact;
-    return [presentation] as AgentPresentation[];
-  };
 }

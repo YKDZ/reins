@@ -3,7 +3,7 @@ import { join } from "node:path";
 
 export type JsonObject = Record<string, unknown>;
 
-const releaseAuthorityDirectory = "apps/cli";
+const releaseAuthorityDirectory = "packages/runtime";
 const runtimeDistributionEntryDirectories = [
   releaseAuthorityDirectory,
   "packages/daemon",
@@ -69,7 +69,9 @@ export function assertReleaseVersionAuthority(repository: string): {
     typeof authority.version !== "string" ||
     !stableVersionPattern.test(authority.version)
   ) {
-    throw new Error("apps/cli must be the versioned reins release authority");
+    throw new Error(
+      "packages/runtime must be the versioned reins release authority",
+    );
   }
   const sdkSource = readManifest(repository, "packages/sdk");
   if (sdkSource.name !== sdkPackageName || sdkSource.private !== true) {
@@ -337,7 +339,7 @@ export function createSdkReleaseStagingManifest(
   dependencies: Record<string, string>,
 ): JsonObject {
   if (typeof authority.version !== "string") {
-    throw new Error("apps/cli must provide the SDK release version");
+    throw new Error("packages/runtime must provide the SDK release version");
   }
   return {
     name: sdkPackageName,

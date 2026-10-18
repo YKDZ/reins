@@ -12,18 +12,20 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import { consumerContextSchema } from "@reins/protocol";
-import type { ReinsConnection, SessionHandle } from "@ykdz/reins-sdk";
+import {
+  connect,
+  type ReinsConnection,
+  type SessionHandle,
+} from "@ykdz/reins-sdk";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
+import { connectReins } from "@ykdz/reins/application";
 import * as v from "valibot";
 import { afterEach, expect, test } from "vitest";
 
-import { connectReins } from "../../src/application.ts";
-
-const repository = fileURLToPath(new URL("../../../../", import.meta.url));
-const daemonBin = join(repository, "packages/daemon/dist/main.js");
-const adaptersModule = join(
-  repository,
-  "apps/cli/test/e2e/fixtures/fake-adapters.ts",
+const runtimePackage = fileURLToPath(new URL("../../", import.meta.url));
+const daemonBin = join(runtimePackage, "node_modules/.bin/reins-daemon");
+const adaptersModule = fileURLToPath(
+  new URL("./fixtures/fake-adapters.ts", import.meta.url),
 );
 const fixtureDaemonBin = fileURLToPath(
   new URL("./fixtures/daemon-fixture.mjs", import.meta.url),
@@ -100,7 +102,7 @@ afterEach(async () => {
   }
 });
 
-test("non-CLI callers share one real daemon and reconnect to the same session", async () => {
+test("programmatic callers share one real daemon and reconnect to the same session", async () => {
   const directory = await mkdtemp(join(tmpdir(), "reins-application-"));
   const daemonPids = join(directory, "daemon-pids.txt");
   fixtures.push({ directory, daemonPids });
@@ -108,7 +110,7 @@ test("non-CLI callers share one real daemon and reconnect to the same session", 
   const daemonSockets = join(directory, "daemon-sockets.txt");
   await writeFile(
     daemonLauncher,
-    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nprintf '%s\\n' "$REINS_SOCKET" >> '${daemonSockets}'\nexec '${process.execPath}' '${daemonBin}' "$@"\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nprintf '%s\\n' "$REINS_SOCKET" >> '${daemonSockets}'\nexec '${daemonBin}' "$@"\n`,
     { mode: 0o700 },
   );
   const env: NodeJS.ProcessEnv = {
@@ -189,7 +191,7 @@ test("application startup failure keeps the raw transport code", async () => {
   const daemonSockets = join(directory, "daemon-sockets.txt");
   await writeFile(
     daemonLauncher,
-    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nprintf '%s\\n' "$REINS_SOCKET" >> '${daemonSockets}'\nexec '${process.execPath}' '${daemonBin}' "$@"\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nprintf '%s\\n' "$REINS_SOCKET" >> '${daemonSockets}'\nexec '${daemonBin}' "$@"\n`,
     { mode: 0o700 },
   );
   const env: NodeJS.ProcessEnv = {
@@ -246,7 +248,7 @@ test("application reports local startup IO failures and can retry", async () => 
   const daemonLauncher = join(directory, "reins-daemon");
   await writeFile(
     daemonLauncher,
-    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${process.execPath}' '${daemonBin}' "$@"\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
     { mode: 0o700 },
   );
   const env: NodeJS.ProcessEnv = {
@@ -344,4 +346,151 @@ test("a connected daemon handshake failure does not launch a replacement", async
   await expect(readFile(launchMarker, "utf8")).rejects.toMatchObject({
     code: "ENOENT",
   });
+});
+
+test("public SDK keeps bounded stderr evidence and rejects unsupported capture", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-application-stderr-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: join(directory, "reins.sock"),
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_DAEMON_BIN: daemonLauncher,
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_IDLE_TIMEOUT_MS: "120000",
+  };
+  const connection = await connectReins({
+    consumerContext: "application-stderr-e2e",
+    env,
+  });
+  clients.push(connection);
+
+  const captured = await connection.spawn(
+    {
+      harness: "capture",
+      message: "capture diagnostic evidence",
+      sessionName: "capture-stderr",
+      cwd: process.cwd(),
+      captureHarnessStderr: true,
+    },
+    connection.prepareOperation("spawn"),
+  );
+  let result = await connection.diagnostics({
+    sessionHandle: captured.sessionHandle,
+    kinds: ["harness_stderr"],
+  });
+  const deadline = Date.now() + 5_000;
+  while (!("records" in result && result.records.length === 3) && Date.now() < deadline) {
+    await new Promise((resolve) => setTimeout(resolve, 25));
+    result = await connection.diagnostics({
+      sessionHandle: captured.sessionHandle,
+      kinds: ["harness_stderr"],
+    });
+  }
+  expect(result).toMatchObject({ truncated: false });
+  if (!("records" in result)) throw new Error("missing bounded stderr diagnostics");
+  expect(result.records[0]?.text).toMatchObject({
+    text: "é".repeat(8_192),
+    truncated: true,
+    originalBytes: 20_000,
+  });
+  expect(Buffer.byteLength(result.records[0]?.text?.text ?? "", "utf8")).toBe(
+    16 * 1024,
+  );
+
+  const unsupportedSessionName = "unsupported-stderr-capture";
+  await expect(
+    connection.spawn(
+      {
+        harness: "fake",
+        message: "capture is unavailable",
+        sessionName: unsupportedSessionName,
+        cwd: process.cwd(),
+        captureHarnessStderr: true,
+      },
+      connection.prepareOperation("spawn"),
+    ),
+  ).rejects.toMatchObject({
+    failure: { code: "unsupported_feature", facts: { feature: "capture_harness_stderr" } },
+  });
+  expect(
+    await connection.list({ sessionName: unsupportedSessionName }),
+  ).toEqual([]);
+});
+
+test("SDK consumer binding isolates another consumer's sessions and controls", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-application-scope-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: join(directory, "reins.sock"),
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_DAEMON_BIN: daemonLauncher,
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_IDLE_TIMEOUT_MS: "120000",
+  };
+  const owner = await connectReins({ consumerContext: "scope-owner", env });
+  clients.push(owner);
+  const spawned = await owner.spawn(
+    {
+      harness: "fake",
+      message: "owned session",
+      sessionName: "owned-session",
+      cwd: process.cwd(),
+    },
+    owner.prepareOperation("spawn"),
+  );
+  const foreign = await connect({
+    socketPath: env.REINS_SOCKET!,
+    consumerContext: "scope-foreign",
+  });
+  clients.push(foreign);
+
+  expect(await foreign.list()).toEqual([]);
+  expect(
+    await foreign.kill(
+      { sessionHandle: spawned.sessionHandle },
+      foreign.prepareOperation("kill"),
+    ),
+  ).toEqual({ sessionHandle: spawned.sessionHandle, status: "not_found" });
+  await expect(
+    foreign.send(
+      {
+        placement: "new_turn",
+        sessionHandle: spawned.sessionHandle,
+        message: "foreign input",
+      },
+      foreign.prepareOperation("send"),
+    ),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "session_not_found",
+      facts: { sessionHandle: spawned.sessionHandle },
+    },
+  });
+  await expect(
+    foreign.wait({ targets: [spawned.turnHandle], completion: "all" }),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "session_not_found",
+      facts: { sessionHandle: spawned.sessionHandle },
+    },
+  });
+  expect(await owner.list({ sessionHandle: spawned.sessionHandle })).toHaveLength(
+    1,
+  );
 });

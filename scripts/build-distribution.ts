@@ -238,9 +238,8 @@ for (const name of ["README.md", "LICENSE"] as const) {
 const runtimeBundle = await rolldown({
   cwd: repository,
   input: {
-    reins: "apps/cli/src/cli.ts",
     "reins-daemon": "packages/daemon/src/main.ts",
-    application: "apps/cli/src/application.ts",
+    application: "packages/runtime/src/application.ts",
   },
   platform: "node",
   external: (specifier) =>
@@ -265,10 +264,10 @@ const runtimeChunks = runtimeOutput.output.filter(
 verifyBundle(
   runtimeChunks,
   Object.keys(runtimeDependencies),
-  ["reins.js", "reins-daemon.js", "application.js"],
+  ["reins-daemon.js", "application.js"],
   true,
 );
-for (const name of ["reins.js", "reins-daemon.js"] as const) {
+for (const name of ["reins-daemon.js"] as const) {
   const path = join(runtimeDistributionDirectory, name);
   if (!readFileSync(path, "utf8").startsWith("#!/usr/bin/env node\n")) {
     throw new Error(`Executable omitted shebang: ${path}`);
@@ -281,7 +280,7 @@ for (const name of [
   "application.d.ts",
   "application-contracts.d.ts",
 ] as const) {
-  const declaration = join(repository, "apps", "cli", "dist", name);
+  const declaration = join(repository, "packages", "runtime", "dist", name);
   if (!readFileSync(declaration, "utf8")) {
     throw new Error(`Application declaration is empty: ${declaration}`);
   }

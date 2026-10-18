@@ -12,7 +12,7 @@ test("initialize 以必填消费者上下文与协议主版本握手并交出 da
   const handshake = client.initialize();
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd" as never,
@@ -21,7 +21,7 @@ test("initialize 以必填消费者上下文与协议主版本握手并交出 da
 
   await expect(handshake).resolves.toEqual({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
@@ -40,7 +40,7 @@ test("握手请求携带消费者绑定而非领域参数", async () => {
   const handshake = client.initialize();
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd" as never,
@@ -51,7 +51,7 @@ test("握手请求携带消费者绑定而非领域参数", async () => {
   expect(sent).toEqual([
     {
       kind: "request",
-      requestId: "cli1",
+      requestId: "req1",
       method: "initialize",
       params: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
@@ -87,7 +87,7 @@ test("版本不匹配的握手响应原样交出且不再发出领域请求", as
   const handshake = client.initialize();
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     error: {
       code: "protocol_version_mismatch" as never,
       requestedProtocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION + 1,
@@ -115,7 +115,7 @@ test("a schema-invalid response result rejects as invalid daemon response", asyn
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
   const pending = client.request("capabilities", {});
-  pair.server.send({ kind: "response", requestId: "cli1", result: {} });
+  pair.server.send({ kind: "response", requestId: "req1", result: {} });
   await expect(pending).rejects.toThrow("invalid_daemon_response");
   client.close();
 });
@@ -134,7 +134,7 @@ test("an invalid result terminates the client with invalid_daemon_response", asy
   const client = createReinsClient(pair.client as never, binding);
   const reason = new Promise((resolve) => client.onClosed(resolve));
   const pending = client.request("capabilities", {});
-  pair.server.send({ kind: "response", requestId: "cli1", result: {} });
+  pair.server.send({ kind: "response", requestId: "req1", result: {} });
   await expect(pending).rejects.toThrow("invalid_daemon_response");
   await expect(reason).resolves.toEqual({ code: "invalid_daemon_response" });
   client.close();
@@ -150,7 +150,7 @@ test("a malformed notification after a valid response preserves invalid_daemon_r
   });
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       sessionId: "prompt@g1",
       subscriptionId: "subscription-1",
@@ -192,7 +192,7 @@ test("a settled response removes its request timer", async () => {
     expect(vi.getTimerCount()).toBe(1);
     pair.server.send({
       kind: "response",
-      requestId: "cli1",
+      requestId: "req1",
       result: { capabilities: [], failures: [] },
     });
     await expect(pending).resolves.toMatchObject({ kind: "response" });
@@ -228,7 +228,7 @@ test("副作用超时保留命令身份、不泄露原参，也不自动重发",
   const handshake = client.initialize();
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
@@ -295,7 +295,7 @@ test.each([
     const initialized = client.initialize();
     pair.server.send({
       kind: "response",
-      requestId: "cli1",
+      requestId: "req1",
       result: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
         daemonGeneration: "ab12cd",
@@ -349,7 +349,7 @@ test("已关闭客户端确定未发送；安全查询断连保持普通错误",
   client.close();
 });
 
-test("显式恢复保留原目录事实，不要求调用方重填 CLI 自动投影的目录身份", async () => {
+test("显式恢复保留原目录事实，不要求调用方重填目录对象身份", async () => {
   const pair = createInMemoryTransportPair();
   const client = createReinsClient(pair.client as never, binding);
   const sent: Array<Record<string, unknown>> = [];
@@ -360,7 +360,7 @@ test("显式恢复保留原目录事实，不要求调用方重填 CLI 自动投
   const initialized = client.initialize();
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
@@ -397,7 +397,7 @@ test("显式恢复保留原目录事实，不要求调用方重填 CLI 自动投
   });
   pair.server.send({
     kind: "response",
-    requestId: "cli3",
+    requestId: "req3",
     result: {
       sessionId: "original-dir@gab12cd",
       turnId: "t1",
@@ -414,7 +414,7 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
   const initialized = client.initialize();
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
@@ -431,7 +431,7 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
     client.request("kill", { sessionId: "worker@gab12cd" as never }),
     client.request("capabilities", {}),
   ]);
-  pair.server.send({ kind: "response", requestId: "cli2", result: {} });
+  pair.server.send({ kind: "response", requestId: "req2", result: {} });
   const failures = (await pending).map((result) => {
     expect(result.status).toBe("rejected");
     if (result.status !== "rejected") throw new Error("Expected rejection");
@@ -464,7 +464,7 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
   const initialized = client.initialize();
   pair.server.send({
     kind: "response",
-    requestId: "cli1",
+    requestId: "req1",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
@@ -480,10 +480,10 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
     code: "session_not_found",
     sessionId: "missing@gab12cd",
   };
-  pair.server.send({ kind: "response", requestId: "cli2", error });
+  pair.server.send({ kind: "response", requestId: "req2", error });
   await expect(failed).resolves.toEqual({
     kind: "response",
-    requestId: "cli2",
+    requestId: "req2",
     error,
   });
   const succeeded = client.request("kill", {
@@ -491,12 +491,12 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
   });
   pair.server.send({
     kind: "response",
-    requestId: "cli3",
+    requestId: "req3",
     result: { sessionId: "worker@gab12cd", status: "killed" },
   });
   await expect(succeeded).resolves.toEqual({
     kind: "response",
-    requestId: "cli3",
+    requestId: "req3",
     result: { sessionId: "worker@gab12cd", status: "killed" },
   });
   client.close();
@@ -523,7 +523,7 @@ test.each([undefined, 60_000])(
       expect(settled).toBe(false);
       pair.server.send({
         kind: "response",
-        requestId: "cli1",
+        requestId: "req1",
         result: {
           status: "satisfied",
           completed: [
@@ -561,7 +561,7 @@ test.each(["disconnect", "malformed"])(
     else
       pair.server.send({
         kind: "response",
-        requestId: "cli1",
+        requestId: "req1",
         result: { status: "timeout", completed: "not an array", pending: [] },
       });
     await expect(waiting).rejects.toThrow(

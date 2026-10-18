@@ -324,7 +324,7 @@ export const spawnParamsSchema = v.strictObject({
   ),
   cwdIdentity: v.optional(
     v.strictObject({
-      // 本机 CLI 投影的目录对象证据，只在接受边界比对，不作运行期身份。
+      // 调用方可提供目录对象事实；仅在接受边界比对，不作运行期身份。
       device: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
       inode: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
     }),
@@ -2079,7 +2079,7 @@ export type AdapterCapabilities = v.InferOutput<
   typeof adapterCapabilitiesSchema
 >;
 
-// —— 错误码与机器错误（程序化契约；可读文案由 CLI / MCP 映射） ——
+// —— 错误码与机器错误（程序化契约；用户文案由调用方映射） ——
 
 export const errorCodeSchema = v.union([
   v.literal("session_busy"),

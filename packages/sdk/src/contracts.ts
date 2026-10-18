@@ -290,25 +290,6 @@ export type AgentFact =
       stopReason: "end_turn" | "cancelled" | "killed";
     })
   | (FactBase & { type: "session.killed" });
-export type AgentPresentation =
-  | Omit<Extract<AgentFact, { type: "session.created" }>, "factId">
-  | Omit<Extract<AgentFact, { type: "turn.started" }>, "factId">
-  | Omit<Extract<AgentFact, { type: "tool.requested" }>, "factId" | "toolKey">
-  | Omit<Extract<AgentFact, { type: "tool.completed" }>, "factId" | "toolKey">
-  | Omit<Extract<AgentFact, { type: "permission.requested" }>, "factId">
-  | Omit<Extract<AgentFact, { type: "permission.resolved" }>, "factId">
-  | Omit<Extract<AgentFact, { type: "turn.completed" }>, "factId">
-  | Omit<Extract<AgentFact, { type: "session.killed" }>, "factId">
-  | {
-      type: "text";
-      sessionHandle: SessionHandle;
-      turnHandle: TurnHandle;
-      role: "caller" | "worker";
-      content: string;
-      operation: "append" | "replace";
-      complete: boolean;
-      start: boolean;
-    };
 export type FactSubscription = AsyncIterableIterator<AgentFact> & {
   readonly establishment: AgentSubscriptionEstablishment;
   readonly done: Promise<AgentSubscriptionEnd>;

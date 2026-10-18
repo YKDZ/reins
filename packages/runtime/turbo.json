@@ -20,13 +20,6 @@
       "tags": ["work:repair"],
       "cache": false
     },
-    "postbuild": {
-      "tags": ["work:lifecycle"],
-      "cache": false
-    },
-    "test": {
-      "tags": ["quality:light"]
-    },
     "typecheck": {
       "tags": ["quality:light"]
     }

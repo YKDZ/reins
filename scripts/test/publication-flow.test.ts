@@ -89,7 +89,7 @@ async function fixture() {
     );
     assert.equal(built.status, 0, built.stderr);
     const { version } = JSON.parse(
-      await readFile("apps/cli/package.json", "utf8"),
+      await readFile("packages/runtime/package.json", "utf8"),
     ) as { version: string };
     const runtimeFile = `ykdz-reins-${version}.tgz`;
     const sdkFile = `ykdz-reins-sdk-${version}.tgz`;

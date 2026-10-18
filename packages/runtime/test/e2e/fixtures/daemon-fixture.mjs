@@ -127,7 +127,7 @@ if (mode === "startup-never-listens") {
 if (socketPath === undefined) throw new Error("REINS_SOCKET is required");
 
 if (mode === "cold-launch-barrier") {
-  // 保证两个 CLI 都完成首次无 socket 探测后，唯一 launcher 才开始监听。
+  // 保证两个程序化入口都完成首次无 socket 探测后，唯一 launcher 才开始监听。
   await new Promise((resolve) => setTimeout(resolve, 300));
   let served = 0;
   const sockets = new Set();

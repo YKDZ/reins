@@ -30,7 +30,7 @@ void test("双包候选回执绑定实际字节，替换其中一个包后拒绝
     );
     assert.equal(built.status, 0, built.stderr);
     const manifest = JSON.parse(
-      await readFile("apps/cli/package.json", "utf8"),
+      await readFile("packages/runtime/package.json", "utf8"),
     ) as { version: string };
     const sdkFile = `ykdz-reins-sdk-${manifest.version}.tgz`;
     const runtimeFile = `ykdz-reins-${manifest.version}.tgz`;

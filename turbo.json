@@ -173,10 +173,6 @@
       "tags": ["work:repair"],
       "cache": false
     },
-    "//#reins": {
-      "tags": ["work:development"],
-      "cache": false
-    },
     "//#check:heavy": {
       "tags": ["quality:entry"],
       "cache": false

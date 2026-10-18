@@ -1,6 +1,5 @@
 import {
   createAgentFact,
-  createPresentationProjector,
   projectSubscriptionTarget,
   type SubscribeFacts,
   type FactSubscription,
@@ -12,7 +11,6 @@ export type {
   FactSubscription,
   FactSubscriptionEnd,
 } from "./subscription.ts";
-export { createPresentationProjector };
 import { randomUUID } from "node:crypto";
 
 import type {
@@ -329,7 +327,7 @@ export function createReinsClient(
       );
     };
     seq += 1;
-    const requestId = v.parse(requestIdSchema, `cli${seq}`);
+    const requestId = v.parse(requestIdSchema, `req${seq}`);
     return new Promise<ProtocolResponseFor<M>>((resolve, reject) => {
       let settled = false;
       let abortListener: (() => void) | undefined;

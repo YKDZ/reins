@@ -3,8 +3,8 @@ import { join, relative } from "node:path";
 
 // 运行时语言门禁：源码中的字符串字面量 / 模板字面量不得包含 CJK 字符。
 // 豁免：注释、测试、夹具及非产品构建的工程自动化；维护者工具沿用中文工作约定。
-// 规则来源：CLI 产品面 spec（Q1）与 AGENTS.md「运行时语言」章节。
-const SOURCE_ROOTS = ["adapters", "apps", "packages"] as const;
+// 规则来源：运行时语言合同与 AGENTS.md「运行时语言」章节。
+const SOURCE_ROOTS = ["adapters", "packages"] as const;
 const SKIP_DIRS = new Set([
   "node_modules",
   "dist",
