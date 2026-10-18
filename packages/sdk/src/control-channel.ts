@@ -128,14 +128,14 @@ export function createControlByteTransport(
       terminationFailed =
         termination.exitCode !== 0 || termination.signal !== null;
       void requestChannelClose().catch(() => {
-        if (!terminationObserved) emitFailure(ioFailure("connection"));
+        emitFailure(ioFailure("connection"));
       });
     },
     () => {
       terminationObserved = true;
       terminationFailed = true;
       void requestChannelClose().catch(() => {
-        if (!terminationObserved) emitFailure(ioFailure("connection"));
+        emitFailure(ioFailure("connection"));
       });
     },
   );

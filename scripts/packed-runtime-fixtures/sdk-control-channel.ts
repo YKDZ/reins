@@ -503,6 +503,79 @@ async function verifyExitDrainsTailResponse(
   }
 }
 
+async function verifyExitCloseFailureEndsPending(
+  target: ControlRuntimeTarget,
+): Promise<void> {
+  const handshakeBytes = deferred<Uint8Array>();
+  const readableEnd = deferred<void>();
+  const termination = deferred<{
+    exitCode: number | null;
+    signal: string | null;
+  }>();
+  let closeCalls = 0;
+  const channel: ControlByteChannel = {
+    readable: (async function* () {
+      yield await handshakeBytes.promise;
+      await readableEnd.promise;
+    })(),
+    diagnostics: (async function* () {})(),
+    async write(bytes) {
+      const request = JSON.parse(new TextDecoder().decode(bytes)) as {
+        requestId: string;
+        method: string;
+        params?: { protocolMajorVersion?: number };
+      };
+      if (request.method === "initialize")
+        handshakeBytes.resolve(
+          wireResponse(request, {
+            protocolMajorVersion: request.params?.protocolMajorVersion,
+            daemonGeneration: "ab12cd",
+            runtimeScopeId: target.runtimeScopeId,
+          }),
+        );
+      else if (request.method === "list")
+        termination.resolve({ exitCode: 1, signal: null });
+    },
+    async close() {
+      closeCalls += 1;
+      throw new Error("The target bridge failed to close after process exit");
+    },
+    terminated: termination.promise,
+  };
+  const connection = await openControl({
+    consumerContext: "packed-byte-consumer",
+    runtimeTarget: target,
+    openControlChannel: async () => channel,
+  });
+  try {
+    const pending = connection.list().then(
+      () => false,
+      () => true,
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    let rejectedBeforeReadableEnd: boolean;
+    try {
+      rejectedBeforeReadableEnd = await Promise.race([
+        pending,
+        new Promise<boolean>((resolve) => {
+          timer = setTimeout(() => resolve(false), 300);
+        }),
+      ]);
+    } finally {
+      if (timer !== undefined) clearTimeout(timer);
+    }
+    if (!rejectedBeforeReadableEnd)
+      throw new Error(
+        "A failed close after target exit left a request pending until readable EOF",
+      );
+    if (closeCalls !== 1)
+      throw new Error("Target exit did not attempt byte channel close once");
+  } finally {
+    readableEnd.resolve(undefined);
+    connection.close();
+  }
+}
+
 async function main(): Promise<void> {
   const target = JSON.parse(
     required("REINS_CONTROL_RUNTIME_TARGET"),
@@ -539,6 +612,10 @@ async function main(): Promise<void> {
       [
         "tail response after target exit",
         () => verifyExitDrainsTailResponse(target),
+      ],
+      [
+        "close failure after target exit",
+        () => verifyExitCloseFailureEndsPending(target),
       ],
     ] as const) {
       try {
