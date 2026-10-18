@@ -48,6 +48,27 @@ type NativeJob = {
   readonly causedBy?: BackgroundActivityCause;
 };
 
+type NativeTurnBindingResult =
+  | { readonly status: "bound"; readonly turnId: TurnId }
+  | {
+      readonly status: "unavailable";
+      readonly turnId?: TurnId;
+      readonly cause?: unknown;
+    };
+
+type PendingNativeTurnBinding = {
+  readonly promise: Promise<NativeTurnBindingResult>;
+  resolve(result: NativeTurnBindingResult): void;
+};
+
+function createNativeTurnBinding(): PendingNativeTurnBinding {
+  let resolvePromise!: (result: NativeTurnBindingResult) => void;
+  const promise = new Promise<NativeTurnBindingResult>((resolve) => {
+    resolvePromise = resolve;
+  });
+  return { promise, resolve: resolvePromise };
+}
+
 type TurnFailureEvidence = Parameters<HarnessSession["failTurn"]>[1];
 
 function turnFailureEvidence(): TurnFailureEvidence {
@@ -134,6 +155,10 @@ export function createDshDriver(): AdapterDriverFactory {
     const attemptByEventSeq = new Map<number, string>();
     const assistantByEventSeq = new Map<number, PendingAssistantMessage>();
     const nativeTurns = new Map<number, TurnId>();
+    const pendingNativeTurnBindings = new Map<
+      number,
+      PendingNativeTurnBinding
+    >();
     const nativeToolCalls = new Map<string, NativeToolCall>();
     const nativeJobs = new Map<string, NativeJob>();
     let hostEventQueue = Promise.resolve();
@@ -158,6 +183,22 @@ export function createDshDriver(): AdapterDriverFactory {
       return "nativeTurn" in event && event.nativeTurn !== undefined
         ? nativeTurns.get(event.nativeTurn)
         : undefined;
+    }
+
+    async function waitForNativeTurnBinding(
+      turnId: TurnId,
+    ): Promise<NativeTurnBindingResult | undefined> {
+      const pending = Array.from(pendingNativeTurnBindings.values());
+      if (pending.length === 0) return undefined;
+      const results = await Promise.all(
+        pending.map((binding) => binding.promise),
+      );
+      return (
+        results.find((result) => result.turnId === turnId) ?? {
+          status: "unavailable",
+          cause: new Error("The autonomous DSH turn target did not match"),
+        }
+      );
     }
 
     function jobCause(data: JobRegisteredData): NativeJob {
@@ -376,12 +417,50 @@ export function createDshDriver(): AdapterDriverFactory {
             beginAutonomousTurn === undefined
           )
             return;
-          messageTurnId = await beginAutonomousTurn({
-            source,
-            ...(job?.causedBy === undefined ? {} : { causedBy: job.causedBy }),
-          });
-          session.beginTurn(messageTurnId);
-          nativeTurns.set(event.nativeTurn, messageTurnId);
+          const nativeTurn = event.nativeTurn;
+          const binding = createNativeTurnBinding();
+          pendingNativeTurnBindings.set(nativeTurn, binding);
+          try {
+            messageTurnId = await beginAutonomousTurn({
+              source,
+              ...(job?.causedBy === undefined
+                ? {}
+                : { causedBy: job.causedBy }),
+            });
+            session.beginTurn(messageTurnId);
+            nativeTurns.set(nativeTurn, messageTurnId);
+          } catch (error) {
+            binding.resolve({
+              status: "unavailable",
+              ...(messageTurnId === undefined ? {} : { turnId: messageTurnId }),
+              cause: error,
+            });
+            if (pendingNativeTurnBindings.get(nativeTurn) === binding)
+              pendingNativeTurnBindings.delete(nativeTurn);
+            throw error;
+          }
+          try {
+            const currentHost = host;
+            if (currentHost === undefined)
+              throw new Error("The official DSH host is unavailable");
+            const response = await currentHost.request({
+              type: "bind-turn",
+              nativeTurn,
+              turnId: messageTurnId,
+            });
+            if (response.type !== "bound")
+              throw new Error("The official DSH host did not bind the turn");
+            binding.resolve({ status: "bound", turnId: messageTurnId });
+          } catch (error) {
+            binding.resolve({
+              status: "unavailable",
+              turnId: messageTurnId,
+              cause: error,
+            });
+          } finally {
+            if (pendingNativeTurnBindings.get(nativeTurn) === binding)
+              pendingNativeTurnBindings.delete(nativeTurn);
+          }
         }
         if (messageTurnId !== session.turnId) return;
         emit({
@@ -495,6 +574,7 @@ export function createDshDriver(): AdapterDriverFactory {
         attemptByEventSeq.clear();
         assistantByEventSeq.clear();
         nativeTurns.clear();
+        pendingNativeTurnBindings.clear();
         nativeToolCalls.clear();
         nativeJobs.clear();
         session = new HarnessSession({
@@ -562,6 +642,17 @@ export function createDshDriver(): AdapterDriverFactory {
         )
           throw { code: "session_not_found", sessionId } satisfies MachineError;
         if (placement === "new_turn") session.beginTurn(turnId);
+        if (placement === "active_turn") {
+          const binding = await waitForNativeTurnBinding(turnId);
+          if (binding?.status === "unavailable")
+            throw new WorkerDeliveryFailure(
+              "The official DSH host could not confirm the exact autonomous turn",
+              "not_accepted",
+              binding.cause === undefined
+                ? undefined
+                : { cause: binding.cause },
+            );
+        }
         try {
           const response = await host.request({
             type: "deliver",
@@ -574,7 +665,8 @@ export function createDshDriver(): AdapterDriverFactory {
         } catch (error) {
           const acceptance =
             error instanceof DshHostRequestError ? error.acceptance : "unknown";
-          if (acceptance === "not_accepted") session.turnId = null;
+          if (placement === "new_turn" && acceptance === "not_accepted")
+            session.turnId = null;
           throw new WorkerDeliveryFailure(
             `The official DSH host did not confirm ${placement} message acceptance`,
             acceptance,
@@ -589,6 +681,13 @@ export function createDshDriver(): AdapterDriverFactory {
           session.sessionId !== sessionId
         )
           throw { code: "session_not_found", sessionId } satisfies MachineError;
+        const binding = await waitForNativeTurnBinding(turnId);
+        if (binding?.status === "unavailable")
+          throw new WorkerInterruptFailure(
+            "The official DSH host could not confirm the exact autonomous turn",
+            "not_accepted",
+            binding.cause === undefined ? undefined : { cause: binding.cause },
+          );
         try {
           const response = await host.request({ type: "interrupt", turnId });
           if (response.type === "interrupted") return;

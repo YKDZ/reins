@@ -58,6 +58,12 @@ const hostCommandSchema = v.union([
     type: v.literal("interrupt"),
     turnId: turnIdSchema,
   }),
+  v.strictObject({
+    id: v.number(),
+    type: v.literal("bind-turn"),
+    nativeTurn: v.number(),
+    turnId: turnIdSchema,
+  }),
   v.strictObject({ id: v.number(), type: v.literal("close") }),
   v.strictObject({ id: v.number(), type: v.literal("catalog") }),
 ]);
@@ -346,6 +352,31 @@ export async function runDshRuntimeHost(): Promise<void> {
     return nativeTurn;
   };
 
+  const bindNativeTurn = (
+    agent: Agent,
+    nativeTurn: number,
+    turnId: TurnId,
+  ): boolean => {
+    const boundary = profile.ctx.sessionProjections.stateOf(
+      agent.session,
+      "turnBoundary",
+    );
+    const signal = activePreSteps.get(nativeTurn);
+    const existingTurnId = nativeTurnIds.get(nativeTurn);
+    if (
+      agent.status !== "running" ||
+      boundary === undefined ||
+      boundary.openTurnStartSeq === null ||
+      boundary.lastTurn !== nativeTurn ||
+      signal === undefined ||
+      signal.aborted ||
+      (existingTurnId !== undefined && existingTurnId !== turnId)
+    )
+      return false;
+    nativeTurnIds.set(nativeTurn, turnId);
+    return true;
+  };
+
   const acceptSteer = (
     agent: Agent,
     turnId: TurnId,
@@ -600,6 +631,12 @@ export async function runDshRuntimeHost(): Promise<void> {
         type: "rejected",
         acceptance: "not_accepted",
       });
+      return;
+    }
+    if (command.type === "bind-turn") {
+      if (bindNativeTurn(handle.agent, command.nativeTurn, command.turnId))
+        send({ id: command.id, type: "bound" });
+      else reject(command.id, "not_accepted");
       return;
     }
     if (command.type === "interrupt") {

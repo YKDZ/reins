@@ -36,6 +36,12 @@ export type DshHostCommand =
       readonly type: "interrupt";
       readonly turnId: TurnId;
     }
+  | {
+      readonly id: number;
+      readonly type: "bind-turn";
+      readonly nativeTurn: number;
+      readonly turnId: TurnId;
+    }
   | { readonly id: number; readonly type: "close" }
   | { readonly id: number; readonly type: "catalog" };
 
@@ -72,6 +78,7 @@ export type DshHostResponse =
       readonly nativeMessageId: string;
     }
   | { readonly id: number; readonly type: "interrupted" }
+  | { readonly id: number; readonly type: "bound" }
   | {
       readonly id: number;
       readonly type: "catalog";
