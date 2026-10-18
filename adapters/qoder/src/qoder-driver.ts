@@ -70,6 +70,23 @@ type ToolUseOwnerWaiter = {
   readonly resolve: (phase: NativePhase) => void;
   readonly reject: (error: unknown) => void;
 };
+type QoderTaskOwner = {
+  readonly phase: NativePhase;
+  readonly toolUseId: string;
+};
+
+type QoderTaskSystemMessage = Extract<
+  SDKMessage,
+  {
+    type: "system";
+    subtype:
+      | "task_started"
+      | "task_progress"
+      | "task_notification"
+      | "task_updated"
+      | "background_tasks_changed";
+  }
+>;
 
 class UnownedQueuedInputError extends Error {
   constructor() {
@@ -233,11 +250,29 @@ function systemInit(value: unknown): string | undefined {
   return candidate.qodercli_version;
 }
 
+function qoderTaskMessage(message: SDKMessage): QoderTaskSystemMessage | null {
+  if (message.type !== "system") return null;
+  switch (message.subtype) {
+    case "task_started":
+    case "task_progress":
+    case "task_notification":
+    case "task_updated":
+    case "background_tasks_changed":
+      return message;
+    default:
+      return null;
+  }
+}
+
 export function createQoderDriver(deps: {
   sdk: QoderSdk;
   expectedCliVersion?: string;
 }): AdapterDriverFactory {
-  return ({ emit, diagnostics: runtimeDiagnostics }) => {
+  return ({
+    emit,
+    diagnostics: runtimeDiagnostics,
+    markControlUnavailable = () => undefined,
+  }) => {
     const diagnosticSink = runtimeDiagnostics;
     let stream: ReturnType<typeof createAsyncQueue<SDKUserMessage>> | null =
       null;
@@ -256,6 +291,7 @@ export function createQoderDriver(deps: {
     const phasesByUuid = new Map<string, NativePhase>();
     let currentPhase: NativePhase | null = null;
     const phaseByToolUseId = new Map<string, NativePhase>();
+    const qoderTaskOwners = new Map<string, QoderTaskOwner | null>();
     const toolUseOwnerWaiters = new Map<string, Set<ToolUseOwnerWaiter>>();
     let initialInputSent = false;
     let nativeSessionId: string | null = null;
@@ -284,6 +320,138 @@ export function createQoderDriver(deps: {
         sessionId: session!.sessionId,
         turnId: phase.turnId,
       };
+    }
+
+    function qoderTaskCause(
+      taskId: string,
+      toolUseId?: string,
+      sealUnknown = false,
+    ): QoderTaskOwner | undefined {
+      const known = qoderTaskOwners.get(taskId);
+      if (known !== undefined) {
+        return known !== null &&
+          (toolUseId === undefined || known.toolUseId === toolUseId)
+          ? known
+          : undefined;
+      }
+      if (toolUseId === undefined) {
+        if (sealUnknown) qoderTaskOwners.set(taskId, null);
+        return undefined;
+      }
+      const phase = phaseByToolUseId.get(toolUseId);
+      if (phase === undefined) {
+        qoderTaskOwners.set(taskId, null);
+        return undefined;
+      }
+      const owner = { phase, toolUseId };
+      qoderTaskOwners.set(taskId, owner);
+      return owner;
+    }
+
+    function qoderTaskActivity(
+      taskId: string,
+      status: Extract<DomainEvent, { type: "background.activity" }>["status"],
+      toolUseId?: string,
+      sealUnknown = false,
+    ): DomainEvent {
+      const owner = qoderTaskCause(taskId, toolUseId, sealUnknown);
+      return {
+        type: "background.activity",
+        sessionId: session!.sessionId,
+        source: { kind: "qoder_task", id: taskId },
+        status,
+        ...(owner === undefined
+          ? {}
+          : {
+              causedBy: {
+                turnId: owner.phase.turnId,
+                toolCallId: session!.toolCallId(owner.toolUseId),
+              },
+            }),
+      };
+    }
+
+    function qoderTaskActivities(
+      message: QoderTaskSystemMessage,
+    ): DomainEvent[] {
+      switch (message.subtype) {
+        case "task_started":
+        case "task_progress": {
+          if (
+            typeof message.task_id !== "string" ||
+            message.task_id.length === 0
+          )
+            throw new Error(`Qoder ${message.subtype} omitted task_id`);
+          return [
+            qoderTaskActivity(
+              message.task_id,
+              "active",
+              typeof message.tool_use_id === "string"
+                ? message.tool_use_id
+                : undefined,
+              message.subtype === "task_started",
+            ),
+          ];
+        }
+        case "task_notification": {
+          if (
+            typeof message.task_id !== "string" ||
+            message.task_id.length === 0
+          )
+            throw new Error("Qoder task_notification omitted task_id");
+          const status =
+            message.status === "completed"
+              ? "completed"
+              : message.status === "failed"
+                ? "failed"
+                : message.status === "stopped"
+                  ? "cancelled"
+                  : undefined;
+          if (status === undefined)
+            throw new Error("Qoder task_notification had an unknown status");
+          return [
+            qoderTaskActivity(
+              message.task_id,
+              status,
+              typeof message.tool_use_id === "string"
+                ? message.tool_use_id
+                : undefined,
+            ),
+          ];
+        }
+        case "task_updated": {
+          if (
+            typeof message.task_id !== "string" ||
+            message.task_id.length === 0
+          )
+            throw new Error("Qoder task_updated omitted task_id");
+          const status = message.patch.status;
+          const activityStatus =
+            status === "pending" || status === "running" || status === "paused"
+              ? "active"
+              : status === "completed"
+                ? "completed"
+                : status === "failed"
+                  ? "failed"
+                  : status === "killed"
+                    ? "cancelled"
+                    : undefined;
+          return activityStatus === undefined
+            ? []
+            : [qoderTaskActivity(message.task_id, activityStatus)];
+        }
+        case "background_tasks_changed": {
+          if (!Array.isArray(message.tasks))
+            throw new Error("Qoder background_tasks_changed omitted tasks");
+          return message.tasks.flatMap((task) => {
+            if (typeof task.task_id !== "string" || task.task_id.length === 0)
+              throw new Error(
+                "Qoder background_tasks_changed contained a task without task_id",
+              );
+            return [qoderTaskActivity(task.task_id, "active")];
+          });
+        }
+      }
     }
 
     function phaseIsFailed(phase: NativePhase): boolean {
@@ -620,6 +788,7 @@ export function createQoderDriver(deps: {
             input,
             derivePermissionOptions(options.suggestions),
             entry,
+            session!.toolCallId(options.toolUseID),
           );
           const removePending = () => {
             session?.takePending(permissionId);
@@ -704,6 +873,11 @@ export function createQoderDriver(deps: {
           }
           if (!sdkMessage(rawMessage))
             throw new Error("Qoder SDK returned an unrecognized message");
+          const taskMessage = qoderTaskMessage(rawMessage);
+          if (taskMessage !== null) {
+            for (const event of qoderTaskActivities(taskMessage)) emit(event);
+            continue;
+          }
           const phase = currentPhase;
           if (rawMessage.type === "result") {
             if (phase === null || phase.closed)
@@ -812,17 +986,8 @@ export function createQoderDriver(deps: {
           );
           if (unresolved !== undefined) session.setTurnId(unresolved.turnId);
         }
-        if (session.turnId === null) {
-          if (evidence !== undefined) await session.diagnostic(evidence);
-        } else {
-          await session.failActiveTurn(
-            {
-              failureCategory: "runtime_unavailable",
-              retryDisposition: "external_state_change",
-            },
-            evidence,
-          );
-        }
+        markControlUnavailable();
+        if (evidence !== undefined) await session.diagnostic(evidence);
       }
     }
 

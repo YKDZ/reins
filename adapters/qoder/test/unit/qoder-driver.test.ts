@@ -31,6 +31,7 @@ async function setup(
 ): Promise<{
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
+  unavailableSessionIds: SessionId[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
 }> {
@@ -39,6 +40,7 @@ async function setup(
     ...(close === undefined ? {} : { close }),
   });
   const diagnostics: DriverDiagnosticFact[] = [];
+  const unavailableSessionIds: SessionId[] = [];
   const sink: DiagnosticSink = async (input) => {
     diagnostics.push(input);
     return undefined;
@@ -47,6 +49,7 @@ async function setup(
   const events: DomainEvent[] = [];
   const driver = factory({
     emit: (event) => events.push(event),
+    markControlUnavailable: () => unavailableSessionIds.push(sessionId),
     diagnostics: sink,
   });
   await driver.start({
@@ -58,7 +61,7 @@ async function setup(
     ...(messageId === undefined ? {} : { messageId }),
     ...(authorizationMode === "omitted" ? {} : { authorizationMode }),
   });
-  return { events, diagnostics, fake, driver };
+  return { events, diagnostics, unavailableSessionIds, fake, driver };
 }
 
 const textDelta = (uuid: string, text: string): SDKMessage => ({
@@ -1340,6 +1343,167 @@ describe("qoder driver 事件映射", () => {
     );
   });
 
+  test("Agent 子任务以精确 tool_use 归属并在回合结束后保留完成事实", async () => {
+    const { events, fake } = await setup();
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "agent-message",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "agent-tool-use",
+            name: "Agent",
+            input: { description: "只读检查", prompt: "列出文件" },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+      parent_tool_use_id: null,
+      uuid: "agent-message",
+      session_id: "qs",
+    });
+    fake.controls.push({
+      type: "system",
+      subtype: "task_started",
+      task_id: "qoder-task-1",
+      tool_use_id: "agent-tool-use",
+      description: "只读检查",
+      uuid: "task-started",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events.filter((event) => event.type === "background.activity"),
+    ).toEqual([
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "qoder-task-1" },
+        status: "active",
+        causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+      },
+    ]);
+
+    fake.controls.push(assistantEndTurn("agent-reply", "完成"));
+    await flush();
+    fake.controls.push({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "qoder-task-1",
+      tool_use_id: "agent-tool-use",
+      status: "completed",
+      output_file: "/tmp/qoder-output",
+      summary: "已完成",
+      uuid: "task-completed",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events.filter((event) => event.type === "background.activity"),
+    ).toEqual([
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "qoder-task-1" },
+        status: "active",
+        causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+      },
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "qoder-task-1" },
+        status: "completed",
+        causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+      },
+    ]);
+    expect(
+      events.filter((event) => event.type === "turn.completed"),
+    ).toMatchObject([{ turnId: firstTurnId, stopReason: "end_turn" }]);
+  });
+
+  test("未绑定旧 phase 的 task_start 不会绑定到后续回合", async () => {
+    const { events, fake, driver } = await setup();
+    fake.controls.push({
+      type: "system",
+      subtype: "task_started",
+      task_id: "late-qoder-task",
+      tool_use_id: "reused-tool-use",
+      description: "旧 phase 的子任务",
+      uuid: "late-task-started",
+      session_id: "qs",
+    });
+    await flush();
+    expect(
+      events.filter((event) => event.type === "background.activity"),
+    ).toEqual([
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "late-qoder-task" },
+        status: "active",
+      },
+    ]);
+
+    fake.controls.push(assistantEndTurn("first-completed", "第一回合完成"));
+    await flush();
+    await driver.deliver(sessionId, secondTurnId, "下一回合", "new_turn");
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "second-agent-message",
+        role: "assistant",
+        content: [
+          {
+            type: "tool_use",
+            id: "reused-tool-use",
+            name: "Agent",
+            input: { description: "新回合", prompt: "列出文件" },
+          },
+        ],
+        stop_reason: "tool_use",
+      },
+      parent_tool_use_id: null,
+      uuid: "second-agent-message",
+      session_id: "qs",
+    });
+    await flush();
+
+    fake.controls.push({
+      type: "system",
+      subtype: "task_notification",
+      task_id: "late-qoder-task",
+      tool_use_id: "reused-tool-use",
+      status: "completed",
+      output_file: "/tmp/qoder-old-task-output",
+      summary: "旧 phase 的任务完成",
+      uuid: "late-task-completed",
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(
+      events.filter((event) => event.type === "background.activity"),
+    ).toEqual([
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "late-qoder-task" },
+        status: "active",
+      },
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "late-qoder-task" },
+        status: "completed",
+      },
+    ]);
+    await driver.terminate(sessionId);
+  });
+
   test("工具生命周期：tool.requested 与 tool.completed(isError)", async () => {
     const { events, fake } = await setup();
     fake.controls.push({
@@ -1512,10 +1676,17 @@ describe("qoder driver 事件映射", () => {
     });
   });
 
-  test("busy 与 idle 的 clean EOF 都各记录一次 exited_unexpectedly", async () => {
+  test("busy 与 idle 的 clean EOF 只标记控制不可用，不补造失败终态", async () => {
     const busy = await setup();
     busy.fake.controls.end();
     await flush();
+    expect(busy.unavailableSessionIds).toEqual([sessionId]);
+    expect(
+      busy.events.filter(
+        (event) =>
+          event.type === "turn.completed" && event.stopReason === "failed",
+      ),
+    ).toEqual([]);
     expect(
       busy.diagnostics.filter(
         (input) =>
@@ -1539,6 +1710,30 @@ describe("qoder driver 事件映射", () => {
         text: "worker stream ended unexpectedly while idle",
       }),
     });
+    expect(idleWorker.unavailableSessionIds).toEqual([sessionId]);
+    expect(
+      idleWorker.events.filter((event) => event.type === "turn.completed"),
+    ).toMatchObject([{ turnId: firstTurnId, stopReason: "end_turn" }]);
+  });
+
+  test("read_error 不补造回合失败且保留控制不可用事实", async () => {
+    const worker = await setup();
+    worker.fake.controls.fail(new Error("Qoder stdout disconnected"));
+    await flush();
+
+    expect(worker.unavailableSessionIds).toEqual([sessionId]);
+    expect(
+      worker.events.filter((event) => event.type === "turn.completed"),
+    ).toEqual([]);
+    expect(worker.diagnostics).toContainEqual(
+      expect.objectContaining({
+        kind: "stream_failure",
+        operation: "receive_worker_stream",
+        reason: "read_error",
+        sessionId,
+        turnId: firstTurnId,
+      }),
+    );
   });
 });
 
@@ -1604,6 +1799,7 @@ describe("permission 桥", () => {
       sessionId,
       turnId: firstTurnId,
       permissionId: "p1",
+      toolCallId: "c1",
       kind: "tool:Bash",
       input: { command: "ls" },
       options: [
