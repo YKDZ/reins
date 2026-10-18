@@ -27,6 +27,7 @@ import {
 } from "./mapper.ts";
 import {
   CodexRequestError,
+  CodexTransportClosedError,
   type CodexApprovalRequest,
   type CodexInboundItem,
   type CodexTransport,
@@ -562,7 +563,8 @@ export function createCodexDriver(deps: {
           if (closeError !== undefined) {
             const alreadyDiagnosed = isAlreadyDiagnosedError(closeError);
             const transportClosed =
-              closeError instanceof TerminateTransportClosedError;
+              closeError instanceof TerminateTransportClosedError ||
+              closeError instanceof CodexTransportClosedError;
             const diagnosticId = alreadyDiagnosed
               ? closeError.diagnosticId
               : await session?.diagnostic({

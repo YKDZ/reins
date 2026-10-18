@@ -613,14 +613,18 @@ async function connectClient(
           );
         }
       },
-      async getOperation<Kind extends "spawn" | "send">(
+      async getOperation<Kind extends "spawn" | "send" | "kill">(
         operationKey: OperationKey<Kind>,
       ): Promise<OperationRecord<Kind>> {
-        let kind: "spawn" | "send";
+        let kind: "spawn" | "send" | "kill";
         let generation: ProtocolDaemonGeneration;
         try {
           const claims = parseProtocolOperationKey(operationKey);
-          if (claims.kind !== "spawn" && claims.kind !== "send")
+          if (
+            claims.kind !== "spawn" &&
+            claims.kind !== "send" &&
+            claims.kind !== "kill"
+          )
             throw new Error("Operation kind is not recoverable");
           kind = claims.kind;
           generation = claims.generation;
@@ -1130,7 +1134,16 @@ function projectSpawnResult(
   };
 }
 
-function projectOperationRecord<Kind extends "spawn" | "send">(
+function projectKillResult(
+  result: ProtocolResult<"kill">,
+): import("./contracts.ts").KillResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    status: result.status,
+  };
+}
+
+function projectOperationRecord<Kind extends "spawn" | "send" | "kill">(
   record: ProtocolOperationRecord,
   kind: Kind,
   generation: ProtocolDaemonGeneration,
@@ -1160,10 +1173,12 @@ function projectOperationRecord<Kind extends "spawn" | "send">(
         result:
           kind === "spawn"
             ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
-            : projectSendResult(
-                record.result as ProtocolResult<"send">,
-                generation,
-              ),
+            : kind === "send"
+              ? projectSendResult(
+                  record.result as ProtocolResult<"send">,
+                  generation,
+                )
+              : projectKillResult(record.result as ProtocolResult<"kill">),
       } as OperationRecord<Kind>;
     case "failed":
       return {
@@ -1186,10 +1201,12 @@ function projectOperationRecord<Kind extends "spawn" | "send">(
         result:
           kind === "spawn"
             ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
-            : projectSendResult(
-                record.result as ProtocolResult<"send">,
-                generation,
-              ),
+            : kind === "send"
+              ? projectSendResult(
+                  record.result as ProtocolResult<"send">,
+                  generation,
+                )
+              : projectKillResult(record.result as ProtocolResult<"kill">),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
@@ -1202,15 +1219,25 @@ function projectOperationRecord<Kind extends "spawn" | "send">(
         result:
           kind === "spawn"
             ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
-            : projectSendResult(
-                record.result as ProtocolResult<"send">,
-                generation,
-              ),
+            : kind === "send"
+              ? projectSendResult(
+                  record.result as ProtocolResult<"send">,
+                  generation,
+                )
+              : projectKillResult(record.result as ProtocolResult<"kill">),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
       } as OperationRecord<Kind>;
+    case "partial_effect_uncommitted":
+    case "partial_effect_unconfirmed":
+      return {
+        status: record.status,
+        operationKey,
+        error: projectFailure(record.error),
+        cause: record.cause,
+      } as unknown as OperationRecord<Kind>;
   }
 }
 
@@ -1338,14 +1365,24 @@ function projectFailure(
           ...(failure.acceptedResult === undefined
             ? {}
             : {
-                acceptedResult:
-                  "deliveryPoint" in failure.acceptedResult
-                    ? projectSendResult(
-                        failure.acceptedResult,
-                        parseProtocolOperationKey(failure.operationKey)
-                          .generation,
-                      )
-                    : projectSpawnResult(failure.acceptedResult),
+                acceptedResult: (() => {
+                  const kind = parseProtocolOperationKey(
+                    failure.operationKey,
+                  ).kind;
+                  if (kind === "send")
+                    return projectSendResult(
+                      failure.acceptedResult as ProtocolResult<"send">,
+                      parseProtocolOperationKey(failure.operationKey)
+                        .generation,
+                    );
+                  if (kind === "kill")
+                    return projectKillResult(
+                      failure.acceptedResult as ProtocolResult<"kill">,
+                    );
+                  return projectSpawnResult(
+                    failure.acceptedResult as ProtocolResult<"spawn">,
+                  );
+                })(),
               }),
           ...(failure.cleanupCause === undefined
             ? {}

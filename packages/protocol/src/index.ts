@@ -2447,7 +2447,9 @@ export const machineErrorSchema = v.union([
     stage: v.picklist(["register", "dispatch", "commit", "failure"]),
     acceptance: v.picklist(["not_dispatched", "unknown", "accepted"]),
     cause: errorCauseSchema,
-    acceptedResult: v.optional(v.union([spawnAckSchema, sendAckSchema])),
+    acceptedResult: v.optional(
+      v.union([spawnAckSchema, sendAckSchema, killResultSchema]),
+    ),
     cleanupCause: v.optional(errorCauseSchema),
   }),
   v.strictObject({
@@ -2835,9 +2837,13 @@ export const attachResultSchema = v.strictObject({
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 
-export type RecoverableOperationKind = "spawn" | "send";
+export type RecoverableOperationKind = "spawn" | "send" | "kill";
 
-type RecoverableOperationResult = { spawn: SpawnAck; send: SendAck };
+type RecoverableOperationResult = {
+  spawn: SpawnAck;
+  send: SendAck;
+  kill: KillResult;
+};
 
 export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
@@ -2873,7 +2879,19 @@ export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       readonly result: RecoverableOperationResult[Kind];
       readonly cause: ErrorCause;
       readonly cleanupCause?: ErrorCause;
-    };
+    }
+  | (Kind extends "kill"
+      ? {
+          readonly status:
+            | "partial_effect_uncommitted"
+            | "partial_effect_unconfirmed";
+          readonly operationKey: OperationKey<"kill">;
+          readonly error: Extract<MachineError, { code: "internal_error" }> & {
+            readonly effect: SessionCloseEffect;
+          };
+          readonly cause: ErrorCause;
+        }
+      : never);
 
 export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
   kind: Kind,
@@ -2888,8 +2906,13 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       }
     }),
   );
-  const resultSchema = kind === "spawn" ? spawnAckSchema : sendAckSchema;
-  return v.union([
+  const resultSchema =
+    kind === "spawn"
+      ? spawnAckSchema
+      : kind === "send"
+        ? sendAckSchema
+        : killResultSchema;
+  const schemas: v.GenericSchema[] = [
     v.strictObject({
       status: v.literal("unknown"),
       operationKey: keySchema,
@@ -2942,12 +2965,34 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       cause: errorCauseSchema,
       cleanupCause: v.optional(errorCauseSchema),
     }),
-  ]) as unknown as v.GenericSchema<unknown, OperationRecordForKind<Kind>>;
+  ];
+  if (kind === "kill")
+    schemas.push(
+      v.strictObject({
+        status: v.picklist([
+          "partial_effect_uncommitted",
+          "partial_effect_unconfirmed",
+        ]),
+        operationKey: keySchema,
+        error: v.strictObject({
+          code: v.literal("internal_error"),
+          cause: v.optional(errorCauseSchema),
+          diagnosticId: v.optional(diagnosticIdSchema),
+          cleanupCause: v.optional(errorCauseSchema),
+          effect: sessionCloseEffectSchema,
+        }),
+        cause: errorCauseSchema,
+      }),
+    );
+  return v.union(
+    schemas as unknown as [v.GenericSchema, ...v.GenericSchema[]],
+  ) as unknown as v.GenericSchema<unknown, OperationRecordForKind<Kind>>;
 }
 
 export const operationRecordSchema = v.union([
   operationRecordSchemaFor("spawn"),
   operationRecordSchemaFor("send"),
+  operationRecordSchemaFor("kill"),
 ]);
 export type OperationRecord = v.InferOutput<typeof operationRecordSchema>;
 

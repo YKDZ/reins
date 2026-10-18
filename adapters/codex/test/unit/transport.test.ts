@@ -8,7 +8,11 @@ import { fileURLToPath } from "node:url";
 import type { DriverDiagnosticFact, SessionId, TurnId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
-import { createCodexTransport, type CodexChild } from "#/transport";
+import {
+  CodexTransportClosedError,
+  createCodexTransport,
+  type CodexChild,
+} from "#/transport";
 
 function fakeChild(): {
   child: CodexChild;
@@ -1103,7 +1107,9 @@ describe("codex transport", () => {
     const requestPromise = transport.request("initialize", {});
     fake.exit();
     fake.stdout.end();
-    await expect(requestPromise).rejects.toThrow("codex app-server closed");
+    await expect(requestPromise).rejects.toBeInstanceOf(
+      CodexTransportClosedError,
+    );
   });
 
   test("子进程 exit 早于 stdout 尾事件时仍先 drain 消息", async () => {

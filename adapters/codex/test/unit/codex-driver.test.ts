@@ -17,6 +17,7 @@ import { describe, expect, test } from "vitest";
 
 import { createCodexDriver } from "#/codex-driver";
 import {
+  CodexTransportClosedError,
   CodexRequestError,
   createCodexTransport,
   type CodexChild,
@@ -1201,6 +1202,30 @@ describe("codex driver", () => {
         .filter((input) => input.kind === "lifecycle")
         .map((input) => input.reason),
     ).toEqual(["initialized", "closed"]);
+  });
+
+  test("thread/delete 在途 EOF 只证明传输结束，不确认会话关闭", async () => {
+    const { diagnostics, fake, driver } = await setup();
+    await flush();
+    fake.controls.setResponse(
+      "thread/delete",
+      Promise.reject(new CodexTransportClosedError()),
+    );
+
+    await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+      code: "internal_error",
+      cause: { kind: "closed" },
+    });
+
+    expect(fake.controls.closed()).toBe(true);
+    expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual([
+      expect.objectContaining({
+        kind: "request_failure",
+        operation: "kill",
+        stage: "terminate",
+        reason: "closed",
+      }),
+    ]);
   });
 
   test("terminate 的 delete 超时强制关闭资源树但不能确认 kill", async () => {

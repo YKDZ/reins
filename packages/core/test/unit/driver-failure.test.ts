@@ -392,9 +392,16 @@ describe("driver 抛错时动作整体回滚", () => {
       cwd: "/tmp/demo",
     });
 
-    const first = machine.kill({ sessionId: sessionId });
+    const commits: DomainEvent[][] = [];
+    const first = machine.kill({ sessionId }, (_result, batch) => {
+      commits.push([...batch]);
+      return undefined;
+    });
     await vi.waitFor(() => expect(terminateCalls).toBe(1));
-    const second = machine.kill({ sessionId: sessionId });
+    const second = machine.kill({ sessionId }, (_result, batch) => {
+      commits.push([...batch]);
+      return undefined;
+    });
     await expect(
       machine.send({
         placement: "new_turn",
@@ -423,6 +430,19 @@ describe("driver 抛错时动作整体回滚", () => {
       { sessionId, status: "killed" },
     ]);
     expect(terminateCalls).toBe(1);
+    expect(commits).toEqual([
+      [
+        {
+          type: "turn.completed",
+          sessionId,
+          turnId: ids.turn("t1"),
+          stopReason: "killed",
+          finalReply: null,
+        },
+        { type: "session.killed", sessionId },
+      ],
+      [],
+    ]);
     expect(
       events.filter((event) => event.type === "session.killed"),
     ).toHaveLength(1);
@@ -436,6 +456,108 @@ describe("driver 抛错时动作整体回滚", () => {
       { type: "turn.completed", sessionId, stopReason: "killed" },
       { type: "session.killed", sessionId },
     ]);
+  });
+
+  test("kill 提交失败时不发布终态，后续操作可提交同一关闭事实", async () => {
+    let terminateCalls = 0;
+    const fake = createFakeDriver({
+      terminate: async () => {
+        terminateCalls += 1;
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: { record: async () => undefined },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const { sessionId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("kill-commit-retry"),
+      harness: "codex",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+    const uncommitted: DomainEvent[][] = [];
+
+    await expect(
+      machine.kill({ sessionId }, (_result, batch) => {
+        uncommitted.push([...batch]);
+        throw new Error("kill commit unavailable");
+      }),
+    ).rejects.toThrow("kill commit unavailable");
+
+    expect(uncommitted).toHaveLength(1);
+    expect(uncommitted[0]).toEqual([
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: ids.turn("t1"),
+        stopReason: "killed",
+        finalReply: null,
+      },
+      { type: "session.killed", sessionId },
+    ]);
+    expect(events.some((event) => event.type === "session.killed")).toBe(false);
+    expect(machine.list()[0]).toEqual(
+      expect.objectContaining({ sessionId, state: "busy" }),
+    );
+
+    const committed: DomainEvent[][] = [];
+    await expect(
+      machine.kill({ sessionId }, (_result, batch) => {
+        committed.push([...batch]);
+        return undefined;
+      }),
+    ).resolves.toEqual({ sessionId, status: "killed" });
+
+    expect(terminateCalls).toBe(1);
+    expect(committed).toEqual(uncommitted);
+    expect(events.filter((event) => event.type === "session.killed")).toEqual([
+      { type: "session.killed", sessionId },
+    ]);
+    expect(machine.list()[0]).toEqual(
+      expect.objectContaining({ sessionId, state: "killed" }),
+    );
+  });
+
+  test("既有终止已发布后仍能为操作账本补交完整关闭事实", async () => {
+    const fake = createFakeDriver({ terminate: async () => undefined });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: { record: async () => undefined },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const { sessionId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("kill-late-operation-commit"),
+      harness: "codex",
+      message: "start",
+      cwd: "/tmp/demo",
+    });
+    await machine.kill({ sessionId });
+    const publishedTerminal = events.filter(
+      (event) =>
+        event.type === "turn.completed" || event.type === "session.killed",
+    );
+    const committed: DomainEvent[][] = [];
+
+    await expect(
+      machine.kill({ sessionId }, (_result, batch) => {
+        committed.push([...batch]);
+        return undefined;
+      }),
+    ).resolves.toEqual({ sessionId, status: "killed" });
+
+    expect(committed).toEqual([publishedTerminal]);
+    expect(publishedTerminal).toHaveLength(2);
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "turn.completed" || event.type === "session.killed",
+      ),
+    ).toEqual(publishedTerminal);
   });
 
   test("routing 已验证的 diagnosticId 由 core 复用且不重复记录", async () => {

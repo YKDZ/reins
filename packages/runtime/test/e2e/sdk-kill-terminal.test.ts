@@ -265,10 +265,16 @@ test("官方关闭已确认但本地资源释放失败时保留关闭效果且�
   })();
   await nativeReady(callerCwd);
 
-  const failure = await killSession(connection, spawned.sessionHandle).then(
-    () => undefined,
-    (error: unknown) => error,
-  );
+  const failedCloseKey = connection.prepareOperation("kill");
+  const failure = await connection
+    .kill(
+      { sessionHandle: spawned.sessionHandle },
+      { operationKey: failedCloseKey },
+    )
+    .then(
+      () => undefined,
+      (error: unknown) => error,
+    );
   if (!(failure instanceof ReinsSdkError)) throw failure;
   expect(failure.failure).toMatchObject({
     code: "internal_error",
@@ -277,6 +283,19 @@ test("官方关闭已确认但本地资源释放失败时保留关闭效果且�
       effect: {
         kind: "session_closed",
         sessionHandle: spawned.sessionHandle,
+      },
+    },
+  });
+  await expect(connection.getOperation(failedCloseKey)).resolves.toMatchObject({
+    status: "failed",
+    operationKey: failedCloseKey,
+    error: {
+      code: "internal_error",
+      facts: {
+        effect: {
+          kind: "session_closed",
+          sessionHandle: spawned.sessionHandle,
+        },
       },
     },
   });

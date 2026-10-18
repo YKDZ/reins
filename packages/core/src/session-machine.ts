@@ -110,6 +110,16 @@ type PendingDelivery = {
   count: number;
 };
 
+type PendingTermination = {
+  readonly result: Promise<{
+    readonly result: KillResult;
+    readonly events: readonly DomainEvent[];
+  }>;
+  published: boolean;
+  requiresCommit: boolean;
+  committedByCallback: boolean;
+};
+
 function createPendingDelivery(
   projection: IngressProjection,
   creating: boolean,
@@ -299,7 +309,11 @@ export type SessionMachine = {
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): Promise<InterruptAck>;
   resolvePermission(params: ResolvePermissionParams): Promise<void>;
-  kill(params: KillParams): Promise<KillResult>;
+  kill(
+    params: KillParams,
+    // ControlStore 使用同步事务；返回 undefined 可避免异步回调越过事件提交截点。
+    commit?: (result: KillResult, events: readonly DomainEvent[]) => undefined,
+  ): Promise<KillResult>;
   list(filter?: ListFilter): SessionInfo[];
   assertTurnTarget(target: TurnTarget): void;
   subscribe(listener: (event: DomainEvent) => void): () => void;
@@ -414,7 +428,11 @@ export function createSessionMachine(options: {
   let turnSeq = 0;
   let messageSeq = 0;
   const pendingSpawns = new Map<SessionId, PendingSpawn>();
-  const terminations = new Map<SessionId, Promise<void>>();
+  const terminations = new Map<SessionId, PendingTermination>();
+  const completedTerminations = new Map<
+    SessionId,
+    { readonly result: KillResult; readonly events: readonly DomainEvent[] }
+  >();
   const ingressActions: IngressActionFrame[] = [];
   const uncertainDeliveries = new Set<SessionId>();
   // 接受响应与终态通知可能在同一轮到达；只暂存本会话事件，
@@ -1588,7 +1606,7 @@ export function createSessionMachine(options: {
       }
       session.pendingPermissions.delete(permissionId);
     },
-    async kill(params) {
+    async kill(params, commit) {
       const parsed = v.safeParse(killParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -1596,14 +1614,19 @@ export function createSessionMachine(options: {
       const id = parsed.output.sessionId;
       const session = sessions.get(id);
       if (session === undefined) {
-        return { sessionId: id, status: "not_found" };
+        const result: KillResult = { sessionId: id, status: "not_found" };
+        commit?.(result, []);
+        return result;
       }
       if (session.state === "killed") {
-        return { sessionId: id, status: "killed" };
+        const result: KillResult = { sessionId: id, status: "killed" };
+        commit?.(result, completedTerminations.get(id)?.events ?? []);
+        return result;
       }
       let termination = terminations.get(id);
       if (termination === undefined) {
-        termination = (async () => {
+        let pending!: PendingTermination;
+        const result = Promise.resolve().then(async () => {
           try {
             // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
             await driver.terminate(id);
@@ -1622,8 +1645,12 @@ export function createSessionMachine(options: {
               });
             }
             terminalEvents.push({ type: "session.killed", sessionId: id });
-            bus.transaction(terminalEvents, () => {});
+            return {
+              result: { sessionId: id, status: "killed" } as const,
+              events: Object.freeze(terminalEvents),
+            };
           } catch (error) {
+            if (terminations.get(id) === pending) terminations.delete(id);
             throw await unexpectedFailure(options.diagnostics, error, {
               sessionId: id,
               ...(session.currentTurnId === null
@@ -1636,15 +1663,34 @@ export function createSessionMachine(options: {
               message: evidence(error),
             });
           }
-        })();
-        terminations.set(id, termination);
-        const clearTermination = () => {
-          if (terminations.get(id) === termination) terminations.delete(id);
+        });
+        pending = {
+          result,
+          published: false,
+          requiresCommit: commit !== undefined,
+          committedByCallback: false,
         };
-        void termination.then(clearTermination, clearTermination);
+        termination = pending;
+        terminations.set(id, pending);
       }
-      await termination;
-      return { sessionId: id, status: "killed" };
+      if (commit !== undefined) termination.requiresCommit = true;
+      const closed = await termination.result;
+      if (termination.published) {
+        commit?.(
+          closed.result,
+          termination.committedByCallback ? [] : closed.events,
+        );
+      } else {
+        if (!termination.requiresCommit || commit !== undefined) {
+          commit?.(closed.result, closed.events);
+          termination.committedByCallback = commit !== undefined;
+          bus.transaction(closed.events, () => {});
+          termination.published = true;
+          completedTerminations.set(id, closed);
+          if (terminations.get(id) === termination) terminations.delete(id);
+        }
+      }
+      return closed.result;
     },
     pendingSpawnIds() {
       return [...pendingSpawns.keys()];

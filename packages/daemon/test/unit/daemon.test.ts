@@ -2662,6 +2662,10 @@ describe("daemon 空闲退出", () => {
         if (writeUnavailable) throw new Error("injected event commit failure");
         return backingStore.recordEvent(event, session);
       },
+      commitKill(input) {
+        if (writeUnavailable) throw new Error("injected kill commit failure");
+        return backingStore.commitKill(input);
+      },
     };
     const fake = createFakeHarness({
       harness: "codex",
@@ -2705,20 +2709,32 @@ describe("daemon 空闲退出", () => {
     expect(stopped).toMatchObject({
       error: {
         code: "control_store_unavailable",
-        stage: "event_commit",
+        stage: "commit",
         acceptance: "accepted",
-        sessionId: first.sessionId,
-        eventType: "turn.completed",
+        acceptedResult: {
+          sessionId: first.sessionId,
+          status: "killed",
+        },
         operationKey: expect.any(String),
       },
     });
     if (
       !("error" in stopped) ||
       stopped.error.code !== "control_store_unavailable" ||
-      stopped.error.stage !== "event_commit"
+      stopped.error.stage !== "commit"
     )
       throw new Error("预期主动停止提交故障");
     expect(parseOperationKey(stopped.error.operationKey).kind).toBe("kill");
+    expect(
+      resultOf(
+        await requester("getOperation", {
+          operationKey: stopped.error.operationKey,
+        }),
+      ),
+    ).toMatchObject({
+      status: "accepted_uncommitted",
+      result: { sessionId: first.sessionId, status: "killed" },
+    });
     expect(fake.calls.terminated).toContain(first.sessionId);
     expect(await requester("list", {})).toMatchObject({
       result: [
@@ -2731,8 +2747,86 @@ describe("daemon 空闲退出", () => {
       ],
     });
     connection.close();
-    await expect(daemon.stop()).rejects.toThrow();
-    await expect(running).rejects.toThrow();
+    await expect(daemon.stop()).resolves.toBeUndefined();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  test("kill 注册失败仍执行关闭，查询确认结果未入账", async () => {
+    const backingStore = createInMemoryControlStore();
+    const controlStore: ControlStore = {
+      ...backingStore,
+      registerKill() {
+        throw new Error("kill registration failed");
+      },
+      markKillDispatched() {
+        throw new Error("kill dispatch marker failed");
+      },
+      commitKill() {
+        throw new Error("kill result commit failed");
+      },
+    };
+    let terminationAttempts = 0;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async () => {
+        terminationAttempts += 1;
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "kill-registration-failure",
+        message: "启动后注入停止登记失败",
+      }),
+    ) as { sessionId: SessionId };
+    const operationKey = testOperationKey(connection, "kill");
+
+    const stopped = await sendRaw(connection, {
+      kind: "request",
+      requestId: "kill-registration-failure",
+      method: "kill",
+      params: { sessionId: spawned.sessionId },
+      operationKey,
+    });
+
+    expect(stopped).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+        acceptedResult: { sessionId: spawned.sessionId, status: "killed" },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    expect(backingStore.getOperation(operationKey as never)).toBeUndefined();
+    const queried = resultOf(
+      await requester("getOperation", { operationKey }),
+    ) as { status: string };
+    expect(queried.status).toBe("accepted_uncommitted");
+    expect(backingStore.getSession(spawned.sessionId)?.info.state).toBe("busy");
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(({ event }) => event.type === "session.killed"),
+    ).toBe(false);
+
+    connection.close();
+    await daemon.stop();
+    await running;
   });
 
   test("既有事件写故障不覆盖失败的原生停止原因", async () => {
@@ -2884,6 +2978,200 @@ describe("daemon 空闲退出", () => {
     connection.close();
     await expect(daemon.stop()).rejects.toThrow();
     await expect(running).rejects.toThrow();
+  });
+
+  test("自有资源释放失败且故障记录未落盘时查询保留已确认关闭效果", async () => {
+    const backingStore = createInMemoryControlStore();
+    let queryUnavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      failKill() {
+        throw new Error("kill failure write failed");
+      },
+      getOperation(operationKey) {
+        if (queryUnavailable) throw new Error("operation query unavailable");
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    let terminationAttempts = 0;
+    let closedSessionId: SessionId | undefined;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async (sessionId) => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1) {
+          closedSessionId = sessionId;
+          throw {
+            code: "internal_error",
+            cause: { kind: "closed", message: "owned resource release failed" },
+            effect: { kind: "session_closed", sessionId },
+          };
+        }
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        message: "partially closed worker",
+      }),
+    ) as { sessionId: SessionId };
+    await requester("list", {});
+    const operationKey = testOperationKey(connection, "kill");
+    const stopped = await sendRaw(connection, {
+      kind: "request",
+      requestId: "kill-partial-effect",
+      method: "kill",
+      params: { sessionId: spawned.sessionId },
+      operationKey,
+    });
+    expect(stopped).toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { kind: "closed" },
+        cleanupCause: { kind: "io", message: "kill failure write failed" },
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+    });
+    expect(closedSessionId).toBe(spawned.sessionId);
+    const uncommitted = await requester("getOperation", { operationKey });
+    expect(resultOf(uncommitted)).toMatchObject({
+      status: "partial_effect_uncommitted",
+      operationKey,
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+      cause: { kind: "io", message: "kill failure write failed" },
+    });
+
+    queryUnavailable = true;
+    expect(
+      resultOf(await requester("getOperation", { operationKey })),
+    ).toMatchObject({
+      status: "partial_effect_unconfirmed",
+      operationKey,
+      error: {
+        code: "internal_error",
+        effect: {
+          kind: "session_closed",
+          sessionId: spawned.sessionId,
+        },
+      },
+      cause: { kind: "io" },
+    });
+    expect(backingStore.getSession(spawned.sessionId)?.info.state).toBe("busy");
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(({ event }) => event.type === "session.killed"),
+    ).toBe(false);
+    connection.close();
+    await daemon.stop();
+    await expect(running).resolves.toBeUndefined();
+  });
+
+  test("关闭未知时查询保留确认失败与自有资源清理次因", async () => {
+    const backingStore = createInMemoryControlStore();
+    let terminationAttempts = 0;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async () => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1)
+          throw {
+            code: "internal_error",
+            cause: { kind: "timeout", message: "thread/delete timed out" },
+            cleanupCause: {
+              kind: "closed",
+              message: "owned transport cleanup failed",
+            },
+          };
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore: backingStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "kill-close-unknown",
+        message: "等待官方关闭确认",
+      }),
+    ) as { sessionId: SessionId };
+    const operationKey = testOperationKey(connection, "kill");
+    const stopped = await sendRaw(connection, {
+      kind: "request",
+      requestId: "kill-close-unknown",
+      method: "kill",
+      params: { sessionId: spawned.sessionId },
+      operationKey,
+    });
+
+    expect(stopped).toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        operationKey,
+        cause: { kind: "timeout", message: "thread/delete timed out" },
+        cleanupCause: {
+          kind: "closed",
+          message: "owned transport cleanup failed",
+        },
+      },
+    });
+    expect(
+      resultOf(await requester("getOperation", { operationKey })),
+    ).toMatchObject({
+      status: "outcome_unknown",
+      operationKey,
+      cause: { kind: "timeout", message: "thread/delete timed out" },
+      cleanupCause: {
+        kind: "closed",
+        message: "owned transport cleanup failed",
+      },
+    });
+    expect(backingStore.getSession(spawned.sessionId)?.info.state).toBe("busy");
+    expect(
+      backingStore
+        .sessionEvents(spawned.sessionId)
+        .some(({ event }) => event.type === "session.killed"),
+    ).toBe(false);
+    expect(terminationAttempts).toBe(1);
+
+    connection.close();
+    await daemon.stop();
+    await running;
   });
 
   test("普通事件写入失败会停止对应worker并隔离其他会话", async () => {

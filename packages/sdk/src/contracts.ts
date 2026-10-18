@@ -109,8 +109,12 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type RecoverableOperationKind = "spawn" | "send";
-type OperationResultByKind = { spawn: SpawnResult; send: SendResult };
+export type RecoverableOperationKind = "spawn" | "send" | "kill";
+type OperationResultByKind = {
+  spawn: SpawnResult;
+  send: SendResult;
+  kill: KillResult;
+};
 type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
       status: "unknown" | "unavailable" | "pending";
@@ -152,7 +156,17 @@ type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       result: OperationResultByKind[Kind];
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
-    };
+    }
+  | (Kind extends "kill"
+      ? {
+          status: "partial_effect_uncommitted" | "partial_effect_unconfirmed";
+          operationKey: OperationKey<"kill">;
+          error: Extract<ReinsFailure, { code: "internal_error" }> & {
+            facts: { effect: SessionCloseEffect };
+          };
+          cause: ErrorCause;
+        }
+      : never);
 export type OperationRecord<
   Kind extends RecoverableOperationKind = RecoverableOperationKind,
 > = Kind extends RecoverableOperationKind
@@ -917,7 +931,7 @@ type FailureFactsByCode = {
         stage: "register" | "dispatch" | "commit" | "failure";
         acceptance: "not_dispatched" | "unknown" | "accepted";
         cause: ErrorCause;
-        acceptedResult?: SpawnResult | SendResult;
+        acceptedResult?: SpawnResult | SendResult | KillResult;
         cleanupCause?: ErrorCause;
       }
     | {

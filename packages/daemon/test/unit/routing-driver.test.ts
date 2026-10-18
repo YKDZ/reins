@@ -856,9 +856,10 @@ describe("routing driver invariants", () => {
         params: { input: [{ text: "retry message" }] },
       });
       retryWorker.controls.setCloseError(new Error("terminate failed"));
-      await expect(driver.terminate(sessionId)).rejects.toThrow(
-        "terminate failed",
-      );
+      await expect(driver.terminate(sessionId)).rejects.toMatchObject({
+        code: "internal_error",
+        cause: { kind: "closed", message: "Error: terminate failed" },
+      });
       retryWorker.controls.setCloseError(undefined);
       await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
       expect(retryWorker.controls.closed()).toBe(true);
