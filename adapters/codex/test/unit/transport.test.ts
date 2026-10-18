@@ -1083,6 +1083,10 @@ describe("codex transport", () => {
         id: 42,
         method: "item/commandExecution/requestApproval",
         params: {
+          threadId: "native-thread",
+          turnId: "native-turn",
+          itemId: "native-tool-call",
+          command: "ls",
           availableDecisions: [
             "accept",
             {
@@ -1110,14 +1114,61 @@ describe("codex transport", () => {
       })}\n`,
     );
 
-    await expect(iterator.next()).resolves.toMatchObject({
+    const approval = await iterator.next();
+    expect(approval).toMatchObject({
       value: {
         kind: "request",
         id: 42,
         method: "item/commandExecution/requestApproval",
         availableDecisions: ["accept", "cancel"],
+        itemId: "native-tool-call",
+        input: {
+          command: "ls",
+          availableDecisions: [
+            "accept",
+            {
+              acceptWithExecpolicyAmendment: {
+                execpolicy_amendment: ["ls"],
+              },
+            },
+            {
+              applyNetworkPolicyAmendment: {
+                network_policy_amendment: {
+                  host: "example.com",
+                  action: "allow",
+                },
+              },
+            },
+            "cancel",
+          ],
+        },
       },
     });
+    if (approval.value?.kind !== "request")
+      throw new Error("预期获得 Codex 授权请求");
+    expect(approval.value.input).toEqual({
+      command: "ls",
+      availableDecisions: [
+        "accept",
+        {
+          acceptWithExecpolicyAmendment: {
+            execpolicy_amendment: ["ls"],
+          },
+        },
+        {
+          applyNetworkPolicyAmendment: {
+            network_policy_amendment: {
+              host: "example.com",
+              action: "allow",
+            },
+          },
+        },
+        "cancel",
+      ],
+    });
+    expect(approval.value.input).not.toHaveProperty("threadId");
+    expect(approval.value.input).not.toHaveProperty("turnId");
+    expect(approval.value.input).not.toHaveProperty("itemId");
     expect(diagnostics).toEqual([]);
     await transport.close();
   });

@@ -535,6 +535,12 @@ test.skipIf(!live)(
         if (item.value.type === "permission.requested")
           requestedPermission = item.value;
       }
+      const requestedTool = toolFacts.find(
+        (fact) => fact.type === "tool.requested",
+      );
+      if (requestedTool?.type !== "tool.requested")
+        throw new Error("Codex 授权没有关联到已请求工具");
+      expect(requestedPermission.toolKey).toBe(requestedTool.toolKey);
       expect(requestedPermission.options).toContainEqual({
         outcome: "allow",
         scope: "once",
@@ -551,6 +557,24 @@ test.skipIf(!live)(
         { scope: "turn", turnHandle: toolSession.turnHandle },
         { mode: "history" },
       );
+      const authorizationSnapshot = await reconnected.attach(
+        { scope: "turn", turnHandle: toolSession.turnHandle },
+        { mode: "snapshot" },
+      );
+      if (authorizationSnapshot.initial.mode !== "snapshot")
+        throw new Error("Codex 授权快照没有返回基线");
+      expect(
+        authorizationSnapshot.initial.baseline.pendingPermissions,
+      ).toContainEqual(
+        expect.objectContaining({
+          permissionHandle: requestedPermission.permissionHandle,
+          toolKey: requestedTool.toolKey,
+        }),
+      );
+      authorizationSnapshot.close();
+      await expect(authorizationSnapshot.done).resolves.toMatchObject({
+        reason: "closed",
+      });
       let recoveredPermission:
         | Extract<AgentFact, { type: "permission.requested" }>
         | undefined;
@@ -564,6 +588,7 @@ test.skipIf(!live)(
       expect(recoveredPermission.permissionHandle).toBe(
         requestedPermission.permissionHandle,
       );
+      expect(recoveredPermission.toolKey).toBe(requestedTool.toolKey);
       const resolutionKey = reconnected.prepareOperation("resolvePermission");
       const resolution = {
         outcome: "allow",

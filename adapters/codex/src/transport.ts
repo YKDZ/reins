@@ -308,6 +308,7 @@ export type CodexApprovalRequest = {
     | "item/commandExecution/requestApproval"
     | "item/fileChange/requestApproval"
     | "item/permissions/requestApproval";
+  itemId?: string;
   input: unknown;
   availableDecisions: readonly ApprovalDecision[];
   requestedPermissions: RequestedPermissions;
@@ -1361,11 +1362,18 @@ export function createCodexTransport(options: {
     if (permissions !== undefined && !isRecord(permissions)) return null;
     const requestedPermissions = parseRequestedPermissions(permissions);
     if (requestedPermissions === null) return null;
+    const itemId = params.itemId;
+    const input = Object.fromEntries(
+      Object.entries(params).filter(
+        ([key]) => key !== "threadId" && key !== "turnId" && key !== "itemId",
+      ),
+    );
     return {
       kind: "request",
       id,
       method,
-      input: params,
+      ...(typeof itemId === "string" ? { itemId } : {}),
+      input,
       availableDecisions,
       requestedPermissions,
     };

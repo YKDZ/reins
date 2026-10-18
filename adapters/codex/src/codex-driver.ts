@@ -301,6 +301,9 @@ export function createCodexDriver(deps: {
         message.input,
         options,
         message,
+        message.itemId !== undefined && session.toolNames.has(message.itemId)
+          ? session.toolCallId(message.itemId)
+          : undefined,
       );
       pendingByRequest.set(message.id, permissionId);
     }

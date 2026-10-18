@@ -1201,20 +1201,38 @@ describe("codex driver", () => {
     const { events, fake, driver } = await setup();
     await flush();
     fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        item: {
+          type: "commandExecution",
+          id: "e1",
+          command: "ls",
+          status: "inProgress",
+          output: null,
+        },
+        turnId: "turn1",
+      },
+    });
+    await flush();
+    fake.controls.pushInbound({
       kind: "request",
       id: 7,
       method: "item/commandExecution/requestApproval",
-      input: {
-        threadId: "thr1",
-        turnId: "turn1",
-        itemId: "e1",
-        command: "ls",
-      },
+      itemId: "e1",
+      input: { command: "ls" },
       availableDecisions: ["accept", "acceptForSession", "decline"],
       requestedPermissions: {},
     });
     await flush();
 
+    expect(
+      events.find((event) => event.type === "tool.requested"),
+    ).toMatchObject({
+      type: "tool.requested",
+      toolCallId: "c1",
+      name: "commandExecution",
+    });
     const requested = events.find(
       (event) => event.type === "permission.requested",
     );
@@ -1223,8 +1241,9 @@ describe("codex driver", () => {
       sessionId,
       turnId: firstTurnId,
       permissionId: "p1",
+      toolCallId: "c1",
       kind: "tool:commandExecution",
-      input: { threadId: "thr1", turnId: "turn1", itemId: "e1", command: "ls" },
+      input: { command: "ls" },
       options: [
         { outcome: "allow", scope: "once" },
         { outcome: "allow", scope: "session" },
@@ -1337,6 +1356,7 @@ describe("codex driver", () => {
     expect(
       requested?.type === "permission.requested" ? requested.options : [],
     ).toEqual([{ outcome: "allow", scope: "once" }]);
+    expect(requested).not.toHaveProperty("toolCallId");
   });
 
   test("deny 映射 decline", async () => {

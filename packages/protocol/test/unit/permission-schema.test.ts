@@ -114,6 +114,7 @@ describe("权限事件", () => {
       type: "permission.requested",
       ...base,
       input: { command: "npm test" },
+      toolCallId: "tool-call-1",
       options: [{ outcome: "allow", scope: "session" }],
     });
     bad(domainEventSchema, { type: "permission.requested", ...base });
