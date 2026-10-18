@@ -44,7 +44,10 @@ import { afterEach, describe, expect, test, vi } from "vitest";
 import { createDaemonForTest } from "../../src/daemon.testing.ts";
 import type { Daemon } from "../../src/daemon.ts";
 import type { DiagnosticsRuntime } from "../../src/diagnostics-recorder.ts";
-import { daemonGenerationSchema } from "../../src/generation.ts";
+import {
+  createDaemonIdFactory,
+  daemonGenerationSchema,
+} from "../../src/generation.ts";
 import {
   createDaemon,
   createProtocolServer,
@@ -81,12 +84,19 @@ const testRuntimeScopeId: RuntimeScopeId = v.parse(
   runtimeScopeIdSchema,
   "00000000-0000-4000-8000-000000000000",
 );
+const testSessionIdPattern = new RegExp(
+  `^session:${testRuntimeScopeId}:gdaemontest:\\d+$`,
+  "u",
+);
 
 let sessionCounter = 0;
 const testIdentity = {
   session: () => {
     sessionCounter += 1;
-    return v.parse(sessionIdSchema, `session:gdaemontest:${sessionCounter}`);
+    return v.parse(
+      sessionIdSchema,
+      `session:${testRuntimeScopeId}:gdaemontest:${sessionCounter}`,
+    );
   },
 };
 
@@ -118,6 +128,8 @@ function startDaemon(
   options?: {
     idleTimeoutMs?: number;
     eventLogLimit?: number;
+    identity?: { session(): SessionId };
+    runtimeScopeId?: RuntimeScopeId;
     beforeAttachReplay?: (sessionId: SessionId) => void;
     onEvent?: (event: DomainEvent) => void;
     assertWriterLease?: () => Promise<void>;
@@ -130,9 +142,9 @@ function startDaemon(
   const daemon = createDaemonForTest({
     transport: server,
     adapters,
-    identity: testIdentity,
+    identity: options?.identity ?? testIdentity,
     diagnostics: testDiagnostics,
-    runtimeScopeId: testRuntimeScopeId,
+    runtimeScopeId: options?.runtimeScopeId ?? testRuntimeScopeId,
     idleTimeoutMs: options?.idleTimeoutMs ?? 60_000,
     ...(options?.eventLogLimit === undefined
       ? {}
@@ -166,6 +178,7 @@ type Requester = {
 function makeRequester(
   client: TransportConnection<ProtocolMessage>,
   consumerContext = "test-consumer",
+  runtimeScopeId = testRuntimeScopeId,
 ): Requester {
   let seq = 0;
   let handshake: Promise<ProtocolResponse> | undefined;
@@ -201,7 +214,7 @@ function makeRequester(
               : method === "initialize" &&
                   typeof params === "object" &&
                   params !== null
-                ? { runtimeScopeId: testRuntimeScopeId, ...params }
+                ? { runtimeScopeId, ...params }
                 : params,
           ...(isSideEffectMethod(method)
             ? { commandId: v.parse(commandIdSchema, "test:" + randomUUID()) }
@@ -213,7 +226,7 @@ function makeRequester(
     handshake ??= request("initialize", {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext,
-      runtimeScopeId: testRuntimeScopeId,
+      runtimeScopeId,
     });
     return handshake.then(() => send());
   };
@@ -636,6 +649,70 @@ describe("daemon 协议面（缝 C）", () => {
     client.close();
   });
 
+  test("不同运行作用域即使世代和消费者相同也不能互控会话", async () => {
+    const generation = v.parse(daemonGenerationSchema, "test");
+    const scopeA = testRuntimeScopeId;
+    const scopeB = v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000001",
+    );
+    const fakeA = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const fakeB = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const daemonA = startDaemon(new Map([["codex", fakeA.adapter]]), {
+      identity: createDaemonIdFactory(generation, scopeA),
+      runtimeScopeId: scopeA,
+    });
+    const daemonB = startDaemon(new Map([["codex", fakeB.adapter]]), {
+      identity: createDaemonIdFactory(generation, scopeB),
+      runtimeScopeId: scopeB,
+    });
+    const requesterA = makeRequester(
+      daemonA.server.connect(),
+      "same-consumer",
+      scopeA,
+    );
+    const requesterB = makeRequester(
+      daemonB.server.connect(),
+      "same-consumer",
+      scopeB,
+    );
+    const spawnedA = resultOf(
+      await requesterA("spawn", {
+        harness: "codex",
+        cwd: "/tmp",
+        sessionLabel: "scope-a",
+        message: "belongs to scope A",
+      }),
+    ) as { sessionId: SessionId };
+    const spawnedB = resultOf(
+      await requesterB("spawn", {
+        harness: "codex",
+        cwd: "/tmp",
+        sessionLabel: "scope-b",
+        message: "belongs to scope B",
+      }),
+    ) as { sessionId: SessionId };
+    expect(spawnedB.sessionId).not.toBe(spawnedA.sessionId);
+
+    const crossScopeKill = resultOf(
+      await requesterB("kill", { sessionId: spawnedA.sessionId }),
+    );
+
+    expect(crossScopeKill).toEqual({
+      sessionId: spawnedA.sessionId,
+      status: "not_found",
+    });
+    expect(fakeB.calls.terminated).toEqual([]);
+    expect(fakeB.calls.delivered).toEqual([]);
+    expect(fakeB.calls.interrupted).toEqual([]);
+  });
+
   test("initialize 缺少消费者上下文按参数校验拒绝，不采用默认绑定", async () => {
     const { server } = startDaemon(new Map());
     const client = server.connect();
@@ -744,7 +821,7 @@ describe("daemon 协议面（缝 C）", () => {
       message: "hello",
     });
     const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
-    expect(sessionId).toMatch(/^session:gdaemontest:\d+$/u);
+    expect(sessionId).toMatch(testSessionIdPattern);
     fake.controls.completeTurn("end_turn", "ok");
 
     const collector = collectNotifications(client);
@@ -833,7 +910,7 @@ describe("daemon 协议面（缝 C）", () => {
 
     expect(response).toMatchObject({
       result: {
-        sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u),
+        sessionId: expect.stringMatching(testSessionIdPattern),
       },
     });
     expect(fake.calls.starts).toBe(1);
@@ -1097,7 +1174,12 @@ describe("daemon 协议面（缝 C）", () => {
     });
 
     const missing = await requester("wait", {
-      targets: [{ sessionId: "session:missing:1", turnId: "t1" }],
+      targets: [
+        {
+          sessionId: "session:00000000-0000-4000-8000-000000000000:missing:1",
+          turnId: "t1",
+        },
+      ],
       completion: "all",
       timeoutMs: 1000,
     });
@@ -1716,7 +1798,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const response = await makeRequester(client).request("attach", {
       scope: "session",
-      sessionId: "session:missing:1",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:missing:1",
       replay: { mode: "available" },
     });
     expect(response).toMatchObject({
@@ -2624,7 +2706,7 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
   const first = await sendRaw(a, { ...command, requestId: "original" });
   const replay = await sendRaw(b, { ...command, requestId: "recovered" });
   expect(first).toMatchObject({
-    result: { sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u) },
+    result: { sessionId: expect.stringMatching(testSessionIdPattern) },
   });
   expect(replay).toEqual({ ...first, requestId: "recovered" });
   expect(fake.calls.starts).toBe(1);
@@ -3100,7 +3182,7 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
   const created = await sendRaw(connection, accepted);
   const createdSessionId = (resultOf(created) as { sessionId: string })
     .sessionId;
-  expect(createdSessionId).toMatch(/^session:gdaemontest:\d+$/u);
+  expect(createdSessionId).toMatch(testSessionIdPattern);
   expect(fake.calls.starts).toBe(1);
 
   modelCatalog = { harness: "codex", models: [] };
@@ -3129,7 +3211,7 @@ test("模型目录查询失败时不把 harness 误判为未知或拒绝模型",
     message: "continue with explicitly supplied model",
   });
   expect(resultOf(response)).toMatchObject({
-    sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u),
+    sessionId: expect.stringMatching(testSessionIdPattern),
   });
   expect(fake.calls.starts).toBe(1);
   expect(fake.calls.specs[0]).toMatchObject({ model: "live-model" });
@@ -3309,16 +3391,14 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
       await sendRaw(recovery, { ...command, requestId: "accepted-recovered" }),
     ).toMatchObject({
       result: {
-        sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u),
+        sessionId: expect.stringMatching(testSessionIdPattern),
       },
     });
     expect(fake.calls.starts).toBe(1);
     expect(
       await makeRequester(recovery, "original-consumer")("list", {}),
     ).toMatchObject({
-      result: [
-        { sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u) },
-      ],
+      result: [{ sessionId: expect.stringMatching(testSessionIdPattern) }],
     });
   } finally {
     client.close();

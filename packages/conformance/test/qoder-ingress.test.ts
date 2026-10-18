@@ -184,7 +184,9 @@ function assertPublicLifecycle(
 ): void {
   const sessionId = events[0]?.sessionId;
   if (sessionId === undefined) throw new Error("Session event is missing");
-  expect(sessionId).toMatch(/^session:test:\d+$/u);
+  expect(sessionId).toMatch(
+    /^session:[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}:test:\d+$/u,
+  );
   const deltas = events.filter((event) => event.type === "text.delta");
   const snapshots = events.filter((event) => event.type === "message");
   expect(deltas).toHaveLength(facts.textDeltaCount);

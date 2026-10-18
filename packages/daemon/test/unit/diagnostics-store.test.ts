@@ -152,7 +152,8 @@ describe("DiagnosticsStore contract", () => {
         ? {}
         : {
             harness: "codex",
-            sessionId: "session:reviewer:1",
+            sessionId:
+              "session:00000000-0000-4000-8000-000000000000:reviewer:1",
             turnId: "t1",
           }),
       kind: "transport_failure" as const,
@@ -572,7 +573,10 @@ describe("DiagnosticsStore contract", () => {
       directory,
       now: fixtureClock,
     });
-    const sessionId = v.parse(sessionIdSchema, "session:reviewer:1");
+    const sessionId = v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:reviewer:1",
+    );
     const turnId = v.parse(turnIdSchema, "t1");
     const matching = v.parse(diagnosticRecordSchema, {
       source: "adapter",

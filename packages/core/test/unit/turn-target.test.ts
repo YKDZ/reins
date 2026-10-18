@@ -57,7 +57,9 @@ test("turn targets retain their original parent across active and completed turn
   ).toThrow(expect.objectContaining({ code: "invalid_params" }));
   expect(() =>
     machine.assertTurnTarget({
-      sessionId: ids.session("session:absent:1"),
+      sessionId: ids.session(
+        "session:00000000-0000-4000-8000-000000000000:absent:1",
+      ),
       turnId: first.turnId,
     }),
   ).toThrow(expect.objectContaining({ code: "session_not_found" }));

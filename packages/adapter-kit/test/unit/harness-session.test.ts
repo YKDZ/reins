@@ -10,7 +10,8 @@ import { describe, expect, test, vi } from "vitest";
 import { AlreadyDiagnosedError, isAlreadyDiagnosedError } from "#/diagnostic";
 import { HarnessSession } from "#/harness-session";
 
-const sessionId = "session:reviewer:1" as SessionId;
+const sessionId =
+  "session:00000000-0000-4000-8000-000000000000:reviewer:1" as SessionId;
 const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 

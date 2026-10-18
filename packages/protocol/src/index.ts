@@ -11,10 +11,15 @@ const identifier = <T extends string>(name: T, pattern: RegExp) =>
 const opaqueIdentity = <T extends string>(name: T) =>
   v.pipe(v.string(), v.minLength(1), v.brand<string, T>(name));
 
-export const sessionIdSchema = identifier(
-  "SessionId",
-  /^session:[a-z0-9]+:[1-9][0-9]*$/u,
+const runtimeScopeIdSource =
+  "[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}";
+const runtimeScopeIdPattern = new RegExp(`^${runtimeScopeIdSource}$`, "u");
+const sessionIdPattern = new RegExp(
+  `^session:${runtimeScopeIdSource}:[a-z0-9]+:[1-9][0-9]*$`,
+  "u",
 );
+
+export const sessionIdSchema = identifier("SessionId", sessionIdPattern);
 export type SessionId = v.InferOutput<typeof sessionIdSchema>;
 export const turnIdSchema = opaqueIdentity("TurnId");
 export type TurnId = v.InferOutput<typeof turnIdSchema>;
@@ -143,9 +148,7 @@ export type DaemonGeneration = v.InferOutput<typeof daemonGenerationSchema>;
 
 export const runtimeScopeIdSchema = v.pipe(
   v.string(),
-  v.regex(
-    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
-  ),
+  v.regex(runtimeScopeIdPattern),
   v.brand<string, "RuntimeScopeId">("RuntimeScopeId"),
 );
 export type RuntimeScopeId = v.InferOutput<typeof runtimeScopeIdSchema>;

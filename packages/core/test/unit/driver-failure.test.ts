@@ -173,7 +173,9 @@ describe("driver 抛错时动作整体回滚", () => {
       },
     });
     const diagnosticId = makeDiagnosticId("test", "1");
-    const expectedSessionId = ids.session("session:failedstart:1");
+    const expectedSessionId = ids.session(
+      "session:00000000-0000-4000-8000-000000000000:failedstart:1",
+    );
     const record = vi.fn(async () => diagnosticId);
     const diagnostics: DiagnosticEmitter = {
       record,

@@ -24,7 +24,8 @@ const flush = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
-const sessionId = "session:reviewer:1" as SessionId;
+const sessionId =
+  "session:00000000-0000-4000-8000-000000000000:reviewer:1" as SessionId;
 const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;
@@ -259,9 +260,12 @@ describe("codex driver", () => {
     const first = makeDriver(firstFake);
     const second = makeDriver(secondFake);
     const third = makeDriver(thirdFake);
-    const firstSession = "session:coldfirst:1" as SessionId;
-    const secondSession = "session:coldsecond:1" as SessionId;
-    const thirdSession = "session:coldthird:1" as SessionId;
+    const firstSession =
+      "session:00000000-0000-4000-8000-000000000000:coldfirst:1" as SessionId;
+    const secondSession =
+      "session:00000000-0000-4000-8000-000000000000:coldsecond:1" as SessionId;
+    const thirdSession =
+      "session:00000000-0000-4000-8000-000000000000:coldthird:1" as SessionId;
 
     try {
       startTracked(first.driver, firstSession, firstTurnId);
@@ -322,9 +326,12 @@ describe("codex driver", () => {
     const first = makeDriver(firstFake);
     const queued = makeDriver(queuedFake);
     const later = makeDriver(laterFake);
-    const firstSession = "session:failedfirst:1" as SessionId;
-    const queuedSession = "session:failedqueued:1" as SessionId;
-    const laterSession = "session:failedlater:1" as SessionId;
+    const firstSession =
+      "session:00000000-0000-4000-8000-000000000000:failedfirst:1" as SessionId;
+    const queuedSession =
+      "session:00000000-0000-4000-8000-000000000000:failedqueued:1" as SessionId;
+    const laterSession =
+      "session:00000000-0000-4000-8000-000000000000:failedlater:1" as SessionId;
 
     try {
       startTracked(first.driver, firstSession, firstTurnId);
@@ -376,8 +383,10 @@ describe("codex driver", () => {
     };
     const first = makeDriver(firstFake);
     const queued = makeDriver(queuedFake);
-    const firstSession = "session:cancelfirst:1" as SessionId;
-    const queuedSession = "session:cancelqueued:1" as SessionId;
+    const firstSession =
+      "session:00000000-0000-4000-8000-000000000000:cancelfirst:1" as SessionId;
+    const queuedSession =
+      "session:00000000-0000-4000-8000-000000000000:cancelqueued:1" as SessionId;
 
     try {
       startTracked(first.driver, firstSession, firstTurnId);

@@ -8,6 +8,7 @@ import {
   sessionIdSchema,
   type DaemonGeneration,
   type DiagnosticId,
+  type RuntimeScopeId,
   type SessionId,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -183,6 +184,7 @@ export type DaemonIdFactory = {
 
 export function createDaemonIdFactory(
   generation: DaemonGeneration,
+  runtimeScopeId: RuntimeScopeId,
 ): DaemonIdFactory {
   let sessionCounter = 0n;
   let diagnosticCounter = 0n;
@@ -191,7 +193,7 @@ export function createDaemonIdFactory(
       sessionCounter += 1n;
       return v.parse(
         sessionIdSchema,
-        `session:${generation}:${sessionCounter}`,
+        `session:${runtimeScopeId}:${generation}:${sessionCounter}`,
       );
     },
     diagnostic() {

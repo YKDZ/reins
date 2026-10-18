@@ -16,7 +16,8 @@ import { createFakeSdk } from "../helpers/fake-sdk.ts";
 const flush = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
-const sessionId = "session:reviewer:1" as SessionId;
+const sessionId =
+  "session:00000000-0000-4000-8000-000000000000:reviewer:1" as SessionId;
 const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;

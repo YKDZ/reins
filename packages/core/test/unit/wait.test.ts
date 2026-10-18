@@ -143,7 +143,9 @@ describe("wait", () => {
       machine.wait({
         targets: [
           {
-            sessionId: ids.session("session:missing:1"),
+            sessionId: ids.session(
+              "session:00000000-0000-4000-8000-000000000000:missing:1",
+            ),
             turnId: ids.turn("t1"),
           },
         ],
@@ -151,7 +153,9 @@ describe("wait", () => {
       }),
     ).rejects.toEqual({
       code: "session_not_found",
-      sessionId: ids.session("session:missing:1"),
+      sessionId: ids.session(
+        "session:00000000-0000-4000-8000-000000000000:missing:1",
+      ),
     });
   });
 });

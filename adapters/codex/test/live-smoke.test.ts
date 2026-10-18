@@ -45,7 +45,8 @@ live("codex live smoke", () => {
     });
 
     driver.start({
-      sessionId: "session:smoke:1" as SessionId,
+      sessionId:
+        "session:00000000-0000-4000-8000-000000000000:smoke:1" as SessionId,
       turnId: "t1" as TurnId,
       harness: "codex",
       message: "用一条 shell 命令列出当前目录的内容",
@@ -75,6 +76,8 @@ live("codex live smoke", () => {
     expect(
       diagnostics.some((input) => input.kind === "protocol_violation"),
     ).toBe(false);
-    await driver.terminate("session:smoke:1" as SessionId);
+    await driver.terminate(
+      "session:00000000-0000-4000-8000-000000000000:smoke:1" as SessionId,
+    );
   }, 180_000);
 });

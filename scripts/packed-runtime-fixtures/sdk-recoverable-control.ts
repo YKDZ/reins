@@ -1012,9 +1012,14 @@ async function harnessFailureDiagnostics(): Promise<void> {
       throw new Error(
         "The installed SDK did not type an invalid diagnostic turn handle",
       );
+    const sessionScopeId = spawned.sessionHandle.split(":")[1];
+    const otherScopeId =
+      sessionScopeId === "00000000-0000-4000-8000-000000000000"
+        ? "00000000-0000-4000-8000-000000000001"
+        : "00000000-0000-4000-8000-000000000000";
     const mismatchedSession = await expectFailure(() =>
       connection.diagnostics({
-        sessionHandle: "session:different:1" as SessionHandle,
+        sessionHandle: `session:${otherScopeId}:different:1` as SessionHandle,
         turnHandle: spawned.turnHandle,
       }),
     );

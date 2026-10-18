@@ -30,7 +30,7 @@ const bad = (schema: v.GenericSchema, input: unknown): void => {
 
 test("failed 与其他终态严格区分，事件和 wait 共用失败事实", () => {
   const base = {
-    sessionId: "session:failure:1",
+    sessionId: "session:00000000-0000-4000-8000-000000000000:failure:1",
     turnId: "t1",
     finalReply: null,
   };
@@ -115,17 +115,24 @@ describe("协议 envelope", () => {
     ok(protocolResponseSchema, {
       kind: "response",
       requestId: "r1",
-      result: { sessionId: "session:reviewer:7" },
+      result: {
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
     });
     ok(protocolResponseSchema, {
       kind: "response",
       requestId: "r1",
-      error: { code: "session_not_found", sessionId: "session:reviewer:7" },
+      error: {
+        code: "session_not_found",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
     });
     bad(protocolResponseSchema, {
       kind: "response",
       requestId: "r1",
-      result: { sessionId: "session:reviewer:7" },
+      result: {
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
       error: { code: "session_not_found" },
     });
     bad(protocolResponseSchema, {
@@ -148,7 +155,7 @@ describe("协议 envelope", () => {
         eventId: 1,
         event: {
           type: "turn.started",
-          sessionId: "session:reviewer:7",
+          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
           turnId: "t1",
         },
       },
@@ -158,9 +165,12 @@ describe("协议 envelope", () => {
       method: "attach.ended",
       params: {
         subscriptionId: "subscription-1",
-        target: { scope: "session", sessionId: "session:reviewer:7" },
+        target: {
+          scope: "session",
+          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+        },
         lastEventId: null,
-        sessionId: "session:reviewer:7",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
         reason: "end_turn",
       },
     });
@@ -172,7 +182,10 @@ describe("协议 envelope", () => {
     bad(protocolNotificationSchema, {
       kind: "notification",
       method: "event",
-      params: { type: "unknown.event", sessionId: "session:reviewer:7" },
+      params: {
+        type: "unknown.event",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
     });
   });
 
@@ -193,9 +206,12 @@ describe("协议 envelope", () => {
       method: "attach.ended",
       params: {
         subscriptionId: "subscription-1",
-        target: { scope: "session", sessionId: "session:reviewer:7" },
+        target: {
+          scope: "session",
+          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+        },
         lastEventId: null,
-        sessionId: "session:reviewer:7",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
         reason: "cancelled",
       },
     });
@@ -239,36 +255,48 @@ describe("per-method 参数与结果 schema", () => {
     bad(protocolParamsSchemaFor("spawn"), { harness: "qoder" });
     ok(protocolParamsSchemaFor("send"), {
       placement: "new_turn",
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       message: "x",
     });
-    bad(protocolParamsSchemaFor("send"), { sessionId: "session:reviewer:7" });
+    bad(protocolParamsSchemaFor("send"), {
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+    });
     ok(protocolParamsSchemaFor("wait"), {
-      targets: [{ sessionId: "session:reviewer:7", turnId: "t1" }],
+      targets: [
+        {
+          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+          turnId: "t1",
+        },
+      ],
       completion: "all",
       timeoutMs: 100,
     });
     ok(protocolParamsSchemaFor("interrupt"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
     });
     const legacyInterruptParams: ProtocolParams<"interrupt"> = {
-      sessionId: v.parse(sessionIdSchema, "session:reviewer:7"),
+      sessionId: v.parse(
+        sessionIdSchema,
+        "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      ),
       turnId: v.parse(turnIdSchema, "t1"),
       // @ts-expect-error interrupt 的硬迁移必须在编译期拒绝旧 message。
       message: "legacy explanation",
     };
     bad(protocolParamsSchemaFor("interrupt"), legacyInterruptParams);
-    ok(protocolParamsSchemaFor("kill"), { sessionId: "session:reviewer:7" });
+    ok(protocolParamsSchemaFor("kill"), {
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+    });
     ok(protocolParamsSchemaFor("list"), { state: "busy" });
     bad(protocolParamsSchemaFor("list"), { state: "nope" });
     ok(protocolParamsSchemaFor("attach"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       scope: "session",
       replay: { mode: "none" },
     });
     ok(protocolParamsSchemaFor("resolvePermission"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
       permissionId: "p1",
       resolution: { outcome: "allow", scope: "once" },
@@ -278,13 +306,13 @@ describe("per-method 参数与结果 schema", () => {
 
   test("每个方法都有对应的结果 schema 且按契约拒绝非法结果", () => {
     ok(protocolResultSchemaFor("spawn"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
       cwd: "/tmp",
     });
     bad(protocolResultSchemaFor("spawn"), {});
     ok(protocolResultSchemaFor("send"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
       messageId: "m1",
       deliveryPoint: "new_turn",
@@ -296,19 +324,24 @@ describe("per-method 参数与结果 schema", () => {
     ok(protocolResultSchemaFor("wait"), {
       status: "timeout",
       completed: [],
-      pending: [{ sessionId: "session:reviewer:7", turnId: "t1" }],
+      pending: [
+        {
+          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+          turnId: "t1",
+        },
+      ],
     });
     ok(protocolResultSchemaFor("interrupt"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
     });
     ok(protocolResultSchemaFor("kill"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       status: "killed",
     });
     ok(protocolResultSchemaFor("list"), [
       {
-        sessionId: "session:reviewer:7",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
         harness: "codex",
         state: "idle",
         model: null,
@@ -321,7 +354,7 @@ describe("per-method 参数与结果 schema", () => {
       },
     ]);
     const snapshot = {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       harness: "codex",
       model: null,
       reasoning: null,
@@ -347,16 +380,22 @@ describe("per-method 参数与结果 schema", () => {
       { ...snapshot, state: "killed", activeTurnId: "t1" },
     ]);
     ok(protocolResultSchemaFor("attach"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       subscriptionId: "subscription-1",
-      target: { scope: "session", sessionId: "session:reviewer:7" },
+      target: {
+        scope: "session",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
       window: { oldest: null, head: null, truncated: false },
       replayed: 0,
     });
     bad(protocolResultSchemaFor("attach"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       subscriptionId: "subscription-1",
-      target: { scope: "session", sessionId: "session:reviewer:7" },
+      target: {
+        scope: "session",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
       window: { oldest: null, head: null, truncated: false },
       replayed: 0,
       replayPrefixes: [
@@ -364,12 +403,12 @@ describe("per-method 参数与结果 schema", () => {
           turnId: "t1",
           messageId: "m1",
           prefix: "missing",
-          sessionId: "session:reviewer:7",
+          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
         },
       ],
     });
     ok(protocolResultSchemaFor("resolvePermission"), {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
       permissionId: "p1",
     });
@@ -455,20 +494,26 @@ describe("attach.ended 载荷", () => {
   test("reason 只能是终态或 session_killed", () => {
     ok(attachEndedSchema, {
       subscriptionId: "subscription-1",
-      target: { scope: "session", sessionId: "session:reviewer:7" },
+      target: {
+        scope: "session",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
       lastEventId: null,
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       reason: "end_turn",
     });
     ok(attachEndedSchema, {
       subscriptionId: "subscription-1",
-      target: { scope: "session", sessionId: "session:reviewer:7" },
+      target: {
+        scope: "session",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      },
       lastEventId: null,
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       reason: "session_killed",
     });
     bad(attachEndedSchema, {
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       reason: "detached",
     });
     bad(attachEndedSchema, { reason: "end_turn" });
@@ -479,7 +524,7 @@ describe("message 事件 role", () => {
   test("role 只能是 caller 或 worker，旧 driver 值被拒绝", () => {
     const base = {
       type: "message",
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
       messageId: "m1",
       content: "hi",
@@ -493,7 +538,7 @@ describe("message 事件 role", () => {
   test("领域事件拒绝未知 SDK 字段", () => {
     bad(domainEventSchema, {
       type: "message",
-      sessionId: "session:reviewer:7",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       turnId: "t1",
       messageId: "m1",
       role: "worker",

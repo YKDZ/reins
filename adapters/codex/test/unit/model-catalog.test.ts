@@ -46,7 +46,8 @@ describe("Codex 模型目录", () => {
     modelCatalogFake.transport.start = () => {
       modelCatalogStarts += 1;
     };
-    const sessionId = "session:capabilitiesworker:1" as SessionId;
+    const sessionId =
+      "session:00000000-0000-4000-8000-000000000000:capabilitiesworker:1" as SessionId;
     const worker = createCodexDriver({
       transportFactory: () => workerFake.transport,
     })({

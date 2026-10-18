@@ -43,7 +43,7 @@ const ok = (schema: v.GenericSchema, input: unknown): void =>
 const bad = (schema: v.GenericSchema, input: unknown): void =>
   expect(v.safeParse(schema, input).success).toBe(false);
 
-const sessionId = "session:reviewer:7";
+const sessionId = "session:00000000-0000-4000-8000-000000000000:reviewer:7";
 const diagnosticId = makeDiagnosticId("7", "42");
 
 describe("worker event rejection contract", () => {
@@ -333,7 +333,11 @@ describe("typed identifiers", () => {
 
   test("owned identifier schemas reject empty values", () => {
     const cases: Array<[v.GenericSchema, string, string]> = [
-      [sessionIdSchema, "session:g7:1", ""],
+      [
+        sessionIdSchema,
+        "session:00000000-0000-4000-8000-000000000000:g7:1",
+        "",
+      ],
       [turnIdSchema, "turn:1", ""],
       [permissionIdSchema, "permission:1", ""],
       [messageIdSchema, "message:1", ""],
@@ -345,6 +349,11 @@ describe("typed identifiers", () => {
       ok(schema, valid);
       bad(schema, invalid);
     }
+  });
+
+  test("session identities include a runtime scope and positive counter", () => {
+    bad(sessionIdSchema, "session:g7:1");
+    bad(sessionIdSchema, "session:00000000-0000-4000-8000-000000000000:g7:0");
   });
 
   test("session and diagnostic identities reject each other's encoding", () => {

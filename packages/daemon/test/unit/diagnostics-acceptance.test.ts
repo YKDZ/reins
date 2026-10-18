@@ -35,7 +35,11 @@ describe("diagnostics acceptance ordering", () => {
     let ordered: ReturnType<typeof orderDiagnosticsAcceptance>;
     const runtime: DiagnosticsRuntime = {
       generation: v.parse(daemonGenerationSchema, "reentry"),
-      sessionId: () => v.parse(sessionIdSchema, "session:greentry:1"),
+      sessionId: () =>
+        v.parse(
+          sessionIdSchema,
+          "session:00000000-0000-4000-8000-000000000000:greentry:1",
+        ),
       record() {
         trace.push("record-start");
         nestedQuery = ordered.query({});
@@ -79,7 +83,11 @@ describe("diagnostics acceptance ordering", () => {
     let attempt = 0;
     const runtime: DiagnosticsRuntime = {
       generation: v.parse(daemonGenerationSchema, "rejection"),
-      sessionId: () => v.parse(sessionIdSchema, "session:grejection:1"),
+      sessionId: () =>
+        v.parse(
+          sessionIdSchema,
+          "session:00000000-0000-4000-8000-000000000000:grejection:1",
+        ),
       record() {
         attempt += 1;
         trace.push(`record-${attempt}-start`);

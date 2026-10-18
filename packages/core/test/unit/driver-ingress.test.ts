@@ -289,7 +289,9 @@ describe("driver event ingress ownership", () => {
     });
     fake.controls.emit({
       type: "message",
-      sessionId: ids.session("session:unknown:1"),
+      sessionId: ids.session(
+        "session:00000000-0000-4000-8000-000000000000:unknown:1",
+      ),
       turnId: ids.turn("t1"),
       messageId: ids.message("m-unknown"),
       role: "worker",
@@ -760,7 +762,9 @@ describe("driver event ingress ownership", () => {
     });
     fake.controls.emit({
       type: "session.killed",
-      sessionId: ids.session("session:missing:1"),
+      sessionId: ids.session(
+        "session:00000000-0000-4000-8000-000000000000:missing:1",
+      ),
     });
 
     await vi.waitFor(() => expect(diagnostics).toHaveLength(5));
@@ -779,7 +783,10 @@ describe("driver event ingress ownership", () => {
           (event.type === "message" &&
             event.content === "duplicate complete") ||
           (event.type === "message" && event.content === "stale turn") ||
-          event.sessionId === ids.session("session:missing:1"),
+          event.sessionId ===
+            ids.session(
+              "session:00000000-0000-4000-8000-000000000000:missing:1",
+            ),
       ),
     ).toEqual([]);
     expect(diagnostics.map((input) => input.reason)).toEqual([

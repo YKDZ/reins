@@ -55,7 +55,11 @@ test("RuntimeScopeId parser rejects identities with another role", () => {
   expect(serializeRuntimeScopeId(scope)).toBe(
     "00000000-0000-4000-8000-000000000000",
   );
-  expect(() => parseRuntimeScopeId("session:daemon:1")).toThrow();
+  expect(() =>
+    parseRuntimeScopeId(
+      "session:00000000-0000-4000-8000-000000000000:daemon:1",
+    ),
+  ).toThrow();
   expect(() => parseRuntimeScopeId("diagnostic:daemon:1")).toThrow();
 });
 
@@ -657,7 +661,9 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   });
   await expect(
     connection.diagnostics({
-      sessionHandle: parseSessionHandle("session:other:1"),
+      sessionHandle: parseSessionHandle(
+        "session:00000000-0000-4000-8000-000000000000:other:1",
+      ),
       turnHandle: parseTurnHandle(first.turnHandle),
     }),
   ).rejects.toMatchObject({

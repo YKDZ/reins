@@ -3,7 +3,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import { diagnosticIdSchema, sessionIdSchema } from "@reins/protocol";
+import {
+  diagnosticIdSchema,
+  runtimeScopeIdSchema,
+  sessionIdSchema,
+} from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -21,6 +25,10 @@ import {
 } from "../helpers/child-process.ts";
 
 const directories: string[] = [];
+const runtimeScopeId = v.parse(
+  runtimeScopeIdSchema,
+  "00000000-0000-4000-8000-000000000000",
+);
 
 async function durableState() {
   const home = await mkdtemp(join(tmpdir(), "reins-generation-test-"));
@@ -82,12 +90,17 @@ describe("daemon generation", () => {
     const savedState = await readFile(generationFile);
 
     const secondGeneration = await allocateOnce(state);
-    const heldHandle = createDaemonIdFactory(secondGeneration).session();
+    const heldHandle = createDaemonIdFactory(
+      secondGeneration,
+      runtimeScopeId,
+    ).session();
 
     await writeFile(generationFile, savedState);
     const rolledBackGeneration = await allocateOnce(state);
-    const reissuedHandle =
-      createDaemonIdFactory(rolledBackGeneration).session();
+    const reissuedHandle = createDaemonIdFactory(
+      rolledBackGeneration,
+      runtimeScopeId,
+    ).session();
 
     expect(rolledBackGeneration).not.toBe(secondGeneration);
     expect(reissuedHandle).not.toBe(heldHandle);
@@ -186,7 +199,7 @@ describe("daemon generation", () => {
   test("pure ID factory only creates protocol-owned branded IDs for its generation", async () => {
     const state = await durableState();
     const generation = await allocateOnce(state);
-    const ids = createDaemonIdFactory(generation);
+    const ids = createDaemonIdFactory(generation, state.runtimeScopeId);
 
     expect(v.safeParse(sessionIdSchema, ids.session()).success).toBe(true);
     expect(v.safeParse(diagnosticIdSchema, ids.diagnostic()).success).toBe(

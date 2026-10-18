@@ -29,7 +29,9 @@ describe("spawn", () => {
       cwd: "/tmp/demo",
     });
 
-    expect(sessionId).toMatch(/^session:gtest:\d+$/u);
+    expect(sessionId).toMatch(
+      /^session:00000000-0000-4000-8000-000000000000:gtest:\d+$/u,
+    );
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",

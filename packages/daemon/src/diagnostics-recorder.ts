@@ -8,6 +8,7 @@ import {
   type DiagnosticInput,
   type DiagnosticsParams,
   type DiagnosticsResult,
+  type RuntimeScopeId,
   type SessionId,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -85,6 +86,7 @@ export async function openDiagnosticsRuntimeInternal(
     }
     const runtime = new RecorderRuntime({
       generation,
+      runtimeScopeId: state.runtimeScopeId,
       store,
       now: () => dependencies.now(),
       stderr: (message) => dependencies.stderr(message),
@@ -123,6 +125,7 @@ class RecorderRuntime implements DiagnosticsRuntime {
 
   constructor(options: {
     generation: DaemonGeneration;
+    runtimeScopeId: RuntimeScopeId;
     store: DiagnosticsStore;
     now: () => Date;
     stderr: (message: string) => void;
@@ -131,7 +134,10 @@ class RecorderRuntime implements DiagnosticsRuntime {
     this.#store = options.store;
     this.#now = options.now;
     this.#stderr = options.stderr;
-    this.#idFactory = createDaemonIdFactory(options.generation);
+    this.#idFactory = createDaemonIdFactory(
+      options.generation,
+      options.runtimeScopeId,
+    );
   }
 
   sessionId(): SessionId {

@@ -122,7 +122,10 @@ function codexRoutingFixture() {
     },
   })((event) => events.push(event));
   const alpha: WorkerSpec = {
-    sessionId: v.parse(sessionIdSchema, "session:alpha:1"),
+    sessionId: v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:alpha:1",
+    ),
     turnId: v.parse(turnIdSchema, "turn-alpha"),
     harness: "codex",
     message: "caller task for alpha",
@@ -130,7 +133,10 @@ function codexRoutingFixture() {
   };
   const beta: WorkerSpec = {
     ...alpha,
-    sessionId: v.parse(sessionIdSchema, "session:beta:1"),
+    sessionId: v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:beta:1",
+    ),
     turnId: v.parse(turnIdSchema, "turn-beta"),
     message: "caller task for beta",
   };
@@ -295,7 +301,10 @@ describe("routing driver invariants", () => {
   });
 
   test("verified driver diagnostic crosses routing without a duplicate core record", async () => {
-    const sessionId = v.parse(sessionIdSchema, "session:verified:1");
+    const sessionId = v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:verified:1",
+    );
     const diagnosticId = makeDiagnosticId("route", "1");
     const query = vi.fn(async () => ({
       record: {
@@ -404,7 +413,10 @@ describe("routing driver invariants", () => {
   ])(
     "terminate rejects unrelated $name provenance and records one core fallback",
     async ({ record: unrelated }) => {
-      const sessionId = v.parse(sessionIdSchema, "session:unrelated:1");
+      const sessionId = v.parse(
+        sessionIdSchema,
+        "session:00000000-0000-4000-8000-000000000000:unrelated:1",
+      );
       const suppliedId = makeDiagnosticId("route", "2");
       const fallbackId = makeDiagnosticId("route", "3");
       const query = vi.fn(async () => ({
@@ -535,7 +547,10 @@ describe("routing driver invariants", () => {
       },
       query: (params) => runtime.query(params),
     })(() => {});
-    const sessionId = v.parse(sessionIdSchema, "session:stderr:1");
+    const sessionId = v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:stderr:1",
+    );
     driver.start({
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-stderr"),
@@ -609,7 +624,10 @@ describe("routing driver invariants", () => {
       },
     })(() => {});
     driver.start({
-      sessionId: v.parse(sessionIdSchema, "session:owned:1"),
+      sessionId: v.parse(
+        sessionIdSchema,
+        "session:00000000-0000-4000-8000-000000000000:owned:1",
+      ),
       turnId: v.parse(turnIdSchema, "turn-owned"),
       harness: "qoder",
       message: "start",
@@ -679,7 +697,10 @@ describe("routing driver invariants", () => {
       runtime,
     )(() => {});
     const spec: WorkerSpec = {
-      sessionId: v.parse(sessionIdSchema, "session:diagnostic:1"),
+      sessionId: v.parse(
+        sessionIdSchema,
+        "session:00000000-0000-4000-8000-000000000000:diagnostic:1",
+      ),
       turnId: v.parse(turnIdSchema, "turn-diagnostic"),
       harness: "codex",
       message: "start",
@@ -713,12 +734,17 @@ describe("routing driver invariants", () => {
 
     await expect(
       driver.deliver(
-        v.parse(sessionIdSchema, "session:missing:1"),
+        v.parse(
+          sessionIdSchema,
+          "session:00000000-0000-4000-8000-000000000000:missing:1",
+        ),
         v.parse(turnIdSchema, "turn-route"),
         "message",
         "active_turn",
       ),
-    ).rejects.toThrow("No routing entry for session session:missing:1");
+    ).rejects.toThrow(
+      "No routing entry for session session:00000000-0000-4000-8000-000000000000:missing:1",
+    );
   });
 
   test("does not retain failed starts and retains failed termination for retry", async () => {
@@ -752,7 +778,10 @@ describe("routing driver invariants", () => {
         throw new Error("not found");
       },
     })(() => {});
-    const sessionId = v.parse(sessionIdSchema, "session:retry:1");
+    const sessionId = v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:retry:1",
+    );
     const spec: WorkerSpec = {
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-route"),

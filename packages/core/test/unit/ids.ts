@@ -25,7 +25,10 @@ let sessionCounter = 0;
 export const testIdentity: SessionIdentity = {
   session: () => {
     sessionCounter += 1;
-    return v.parse(sessionIdSchema, `session:gtest:${sessionCounter}`);
+    return v.parse(
+      sessionIdSchema,
+      `session:00000000-0000-4000-8000-000000000000:gtest:${sessionCounter}`,
+    );
   },
 };
 
