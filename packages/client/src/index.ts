@@ -10,7 +10,8 @@ import {
   type ReinsClientOptions,
 } from "./control.ts";
 import type {
-  AgentEstablishment,
+  AgentSubscriptionBaseline,
+  AgentSubscriptionInitial,
   AgentTarget,
   AgentFact,
   FactSubscription,
@@ -22,7 +23,8 @@ export type {
   NotificationListener,
   ProtocolResponseFor,
   ReinsClientOptions,
-  AgentEstablishment,
+  AgentSubscriptionBaseline,
+  AgentSubscriptionInitial,
   AgentTarget,
   AgentFact,
   FactSubscription,

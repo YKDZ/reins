@@ -186,11 +186,14 @@ test("kill commits exactly one killed turn before the session terminal", async (
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {
-    for await (const fact of subscription) events.push(fact);
+    for await (const fact of subscription) {
+      events.push(fact);
+      subscription.acknowledge(fact);
+    }
   })();
   await nativeReady(callerCwd);
   const killed = await killSession(connection, spawned.sessionHandle);
@@ -257,7 +260,7 @@ test("官方关闭已确认但本地资源释放失败时保留关闭效果且�
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const facts: AgentFact[] = [];
   const collect = (async () => {
@@ -342,7 +345,7 @@ test("关闭开始后拒绝新发送并等待在途发送再发布终态事实",
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const facts: AgentFact[] = [];
   const collect = (async () => {
@@ -438,7 +441,7 @@ test("kill stops the actual writer and its held FD while another session survive
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   let statesAtTerminal: string[] | undefined;
   let pids: { parent: number; writer: number } | undefined;
@@ -451,6 +454,7 @@ test("kill stops the actual writer and its held FD while another session survive
           processState(pids.parent),
           processState(pids.writer),
         ];
+      subscription.acknowledge(fact);
     }
   })();
   await nativeReady(callerCwd);
@@ -535,11 +539,14 @@ test.each(["complete during kill", "complete naturally"])(
     );
     const subscription = await connection.attach(
       { scope: "session", sessionHandle: spawned.sessionHandle },
-      { mode: "available" },
+      { mode: "history" },
     );
     const events: AgentFact[] = [];
     const collect = (async () => {
-      for await (const fact of subscription) events.push(fact);
+      for await (const fact of subscription) {
+        events.push(fact);
+        subscription.acknowledge(fact);
+      }
     })();
     await nativeReady(callerCwd);
     if (message === "complete naturally")
@@ -591,11 +598,14 @@ test("failed termination leaves the real writer and original turn alive for a fr
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {
-    for await (const fact of subscription) events.push(fact);
+    for await (const fact of subscription) {
+      events.push(fact);
+      subscription.acknowledge(fact);
+    }
   })();
   await nativeReady(callerCwd);
   await expect(

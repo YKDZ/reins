@@ -8,7 +8,7 @@ import {
   type OperationKey,
   type OperationRecord,
   type PermissionHandle,
-  type ReplayPolicy,
+  type SubscriptionStart,
   type ResumeCursor,
   type ReinsFailure,
   type ReinsConnection,
@@ -219,10 +219,25 @@ void unreachableIdleWithoutCompletedTurn;
 void unreachableWaitWithoutTargets;
 const missingCursor = { mode: "after" } as const;
 // @ts-expect-error 续接操作必须提供精确的恢复游标。
-const invalidReplay: ReplayPolicy = missingCursor;
+const invalidAfterStart: SubscriptionStart = missingCursor;
+const conflictingSnapshotStart = {
+  mode: "snapshot",
+  cursor: resumeCursor,
+} as const;
+// @ts-expect-error snapshot 开始方式不能夹带 after 游标变量。
+const invalidSnapshotStart: SubscriptionStart = conflictingSnapshotStart;
 const sessionTarget: AgentTarget = { scope: "session", sessionHandle };
 // @ts-expect-error 目标范围决定可接受的句柄类型。
 const mismatchedTarget: AgentTarget = { scope: "turn", sessionHandle };
+function attachWithStart<Start extends SubscriptionStart>(start: Start) {
+  return connection.attach(sessionTarget, start);
+}
+// @ts-expect-error 泛型入口也必须拒绝互相矛盾的开始方式字段。
+void attachWithStart(conflictingSnapshotStart);
+// @ts-expect-error 公开 attach 不能接受带冲突游标的变量。
+void connection.attach(sessionTarget, conflictingSnapshotStart);
+void invalidAfterStart;
+void invalidSnapshotStart;
 
 const eventFailureWithoutSession: Extract<
   ReinsFailure,
@@ -270,7 +285,8 @@ void wrongSendRecord;
 void inspectSendRecordKind;
 void wrongSpawnOperationKey;
 void invalidSend;
-void invalidReplay;
+void invalidAfterStart;
+void invalidSnapshotStart;
 void sessionTarget;
 void mismatchedTarget;
 void eventFailureWithoutSession;

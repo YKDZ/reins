@@ -145,7 +145,7 @@ async function runFixture(
       scope: "turn",
       sessionId: spawned.result.sessionId,
       turnId: spawned.result.turnId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     if ("error" in attached) throw new Error(JSON.stringify(attached.error));
     const ended = await endedPromise;

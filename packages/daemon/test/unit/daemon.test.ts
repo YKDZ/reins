@@ -32,6 +32,7 @@ import type {
 import {
   isSideEffectMethod,
   encodeResumeCursor,
+  attachResultSchema,
   operationKeyClaimsSchema,
   parseOperationKey,
   serializeOperationKey,
@@ -577,9 +578,9 @@ describe("daemon 公共接口", () => {
         requester.request("attach", {
           scope: "session",
           sessionId,
-          replay: { mode: "none" },
+          start: { mode: "snapshot" },
         }),
-      ).resolves.toMatchObject({ result: { sessionId, replayed: 0 } });
+      ).resolves.toMatchObject({ result: { initial: { mode: "snapshot" } } });
       expect(machine.list({ sessionId })).toHaveLength(1);
       expect(replayHookCalls).toBe(0);
     } finally {
@@ -899,11 +900,11 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId, replayed: 3 },
+      result: { initial: { mode: "history", replayed: 3 } },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "turn.started",
@@ -1470,7 +1471,7 @@ describe("daemon 协议面（缝 C）", () => {
     await requesterA("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     const sent = await requesterB("send", {
       placement: "new_turn",
@@ -1618,7 +1619,7 @@ describe("daemon 协议面（缝 C）", () => {
     await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
     const permissionEvent = collector.events.find(
@@ -1679,9 +1680,11 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t2",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
-    expect(attached).toMatchObject({ result: { sessionId } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", target: { sessionId } } },
+    });
     expect(collector.ended).toEqual([]);
     expect(
       collector.events.some(
@@ -1737,9 +1740,11 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 3 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 3 } },
+    });
     expect(order).toEqual([
       "response",
       "session.created",
@@ -1775,10 +1780,12 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 7 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 7 } },
+    });
     expect(
       collector.events.filter(
         (event) =>
@@ -1836,10 +1843,12 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
-    expect(attached).toMatchObject({ result: { replayed: 5 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 5 } },
+    });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
@@ -1872,10 +1881,10 @@ describe("daemon 协议面（缝 C）", () => {
     const active = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
-    expect(active).toMatchObject({ result: { replayed: 0 } });
+    expect(active).toMatchObject({ result: { initial: { mode: "snapshot" } } });
     expect(activeCollector.events).toEqual([]);
 
     fake.controls.emitSnapshot(messageId, "hello");
@@ -1885,9 +1894,9 @@ describe("daemon 协议面（缝 C）", () => {
     const idle = await makeRequester(idleClient)("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
-    expect(idle).toMatchObject({ result: { replayed: 0 } });
+    expect(idle).toMatchObject({ result: { initial: { mode: "snapshot" } } });
     expect(idleCollector.events).toEqual([]);
   });
 
@@ -1914,10 +1923,16 @@ describe("daemon 协议面（缝 C）", () => {
     const active = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(active).toMatchObject({
-      result: { replayed: 7, window: { truncated: false } },
+      result: {
+        initial: {
+          mode: "history",
+          replayed: 7,
+          window: { truncated: false },
+        },
+      },
     });
     expect(activeCollector.events).toHaveLength(7);
 
@@ -1928,10 +1943,16 @@ describe("daemon 协议面（缝 C）", () => {
     const completed = await makeRequester(idleClient)("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(completed).toMatchObject({
-      result: { replayed: 8, window: { truncated: false } },
+      result: {
+        initial: {
+          mode: "history",
+          replayed: 8,
+          window: { truncated: false },
+        },
+      },
     });
     expect(idleCollector.events.at(-1)).toMatchObject({
       type: "turn.completed",
@@ -1965,9 +1986,11 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
-    expect(attached).toMatchObject({ result: { replayed: 4 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 4 } },
+    });
     expect(
       collector.events.filter((event) => event.type === "text.delta"),
     ).toEqual([
@@ -2007,7 +2030,7 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     await flush();
 
@@ -2043,7 +2066,7 @@ describe("daemon 协议面（缝 C）", () => {
       requester("attach", {
         scope: "session",
         sessionId,
-        replay: { mode: "available" },
+        start: { mode: "history" },
       }),
     ).resolves.toMatchObject({
       error: { code: "internal_error" },
@@ -2056,10 +2079,10 @@ describe("daemon 协议面（缝 C）", () => {
       requester("attach", {
         scope: "session",
         sessionId,
-        replay: { mode: "available" },
+        start: { mode: "history" },
       }),
     ).resolves.toMatchObject({
-      result: { sessionId },
+      result: { initial: { mode: "history", target: { sessionId } } },
     });
   });
 
@@ -2086,10 +2109,16 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 0 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "snapshot", target: { sessionId } } },
+    });
+    const initial = v.parse(attachResultSchema, resultOf(attached)).initial;
+    if (initial.mode !== "snapshot")
+      throw new Error("Expected attach to return a snapshot");
+    expect(initial.baseline.confirmedTerminals).toHaveLength(1);
     expect(collector.events).toEqual([]);
     expect(collector.ended).toEqual([{ sessionId, reason: "end_turn" }]);
   });
@@ -2114,7 +2143,7 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t1",
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
     fake.controls.completeTurn("failed");
@@ -2148,7 +2177,7 @@ describe("daemon 协议面（缝 C）", () => {
     await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     });
 
     fake.controls.completeTurn();
@@ -2192,10 +2221,12 @@ describe("daemon 协议面（缝 C）", () => {
       scope: "turn",
       sessionId,
       turnId: "t2",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
 
-    expect(attached).toMatchObject({ result: { replayed: 2 } });
+    expect(attached).toMatchObject({
+      result: { initial: { mode: "history", replayed: 2 } },
+    });
     expect(collector.ended).toEqual([]);
     fake.controls.completeTurn();
     await waitFor(() => collector.ended.length === 1);
@@ -2209,7 +2240,7 @@ describe("daemon 协议面（缝 C）", () => {
     const response = await makeRequester(client).request("attach", {
       scope: "session",
       sessionId: "session:00000000-0000-4000-8000-000000000000:missing:1",
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(response).toMatchObject({
       kind: "response",
@@ -2239,11 +2270,11 @@ describe("daemon 协议面（缝 C）", () => {
     const attached = await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId, replayed: 5 },
+      result: { initial: { mode: "history", replayed: 5 } },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
@@ -3223,13 +3254,126 @@ describe("daemon 空闲退出", () => {
       }),
     ) as { sessionId: SessionId };
 
+    const observations = collectNotifications(connection);
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: first.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({ initial: { mode: "snapshot" } });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: second.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({ initial: { mode: "snapshot" } });
+    codex.controls.emitWorkerMessage("A 已提交正文");
+    qoder.controls.emitWorkerMessage("B 已提交正文");
+    await vi.waitFor(() =>
+      expect(
+        observations.events.filter(
+          (event) =>
+            event.type === "message" &&
+            (event.sessionId === first.sessionId ||
+              event.sessionId === second.sessionId),
+        ),
+      ).toHaveLength(2),
+    );
+
     failEventWrite = true;
     codex.controls.emitWorkerMessage("正文无法提交");
     await waitFor(() => codex.calls.terminated.includes(first.sessionId));
+    await vi.waitFor(() => expect(observations.ended).toHaveLength(2));
 
     expect(codex.calls.terminated).toEqual([first.sessionId]);
     expect(qoder.calls.terminated).toEqual([]);
     expect(second.sessionId).not.toBe(first.sessionId);
+    expect(observations.events).toMatchObject([
+      {
+        type: "message",
+        sessionId: first.sessionId,
+        content: "A 已提交正文",
+      },
+      {
+        type: "message",
+        sessionId: second.sessionId,
+        content: "B 已提交正文",
+      },
+    ]);
+    expect(observations.events).not.toContainEqual(
+      expect.objectContaining({
+        type: "message",
+        sessionId: first.sessionId,
+        content: "正文无法提交",
+      }),
+    );
+    expect(observations.ended).toEqual([
+      { sessionId: first.sessionId, reason: "control_unavailable" },
+      { sessionId: second.sessionId, reason: "control_unavailable" },
+    ]);
+    expect(
+      resultOf(
+        await requester("wait", {
+          targets: [{ sessionId: first.sessionId, turnId: "t1" }],
+          completion: "all",
+          timeoutMs: 0,
+        }),
+      ),
+    ).toMatchObject({
+      status: "unreachable",
+      unreachable: [
+        { sessionId: first.sessionId, reason: "commit_unavailable" },
+      ],
+    });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: first.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({
+      initial: {
+        mode: "snapshot",
+        baseline: {
+          session: {
+            state: "unreachable",
+            unreachableReason: "commit_unavailable",
+          },
+        },
+      },
+    });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: second.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({
+      initial: {
+        mode: "snapshot",
+        baseline: {
+          session: {
+            state: "unreachable",
+            unreachableReason: "commit_unavailable",
+          },
+        },
+      },
+    });
+    await vi.waitFor(() => expect(observations.ended).toHaveLength(4));
+    expect(observations.ended.slice(2)).toEqual([
+      { sessionId: first.sessionId, reason: "control_unavailable" },
+      { sessionId: second.sessionId, reason: "control_unavailable" },
+    ]);
     connection.close();
     await expect(daemon.stop()).rejects.toThrow();
     await expect(running).rejects.toThrow();
@@ -4064,7 +4208,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const attached = await beta("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     expect(attached).toMatchObject({ error: { code: "session_not_found" } });
 
@@ -4151,7 +4295,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     await alpha("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     });
     const permissionEvent = collector.events.find(
       (event) => event.type === "permission.requested",
@@ -4272,9 +4416,11 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
     await requester("attach", {
       scope: "session",
       sessionId,
-      replay: { mode: "available" },
+      start: { mode: "history" },
     }),
-  ).toMatchObject({ result: { sessionId } });
+  ).toMatchObject({
+    result: { initial: { mode: "history", target: { sessionId } } },
+  });
   expect(resultOf(await requester("diagnostics", { limit: 1 }))).toEqual({
     records: [],
     truncated: false,
@@ -5126,7 +5272,7 @@ test("none turn scope ends from authoritative terminal state while retaining ful
     await request("attach", {
       scope: "turn",
       ...target,
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
     }),
   ).toHaveProperty("result");
   await flush();
@@ -5136,7 +5282,7 @@ test("none turn scope ends from authoritative terminal state while retaining ful
   ]);
 });
 
-test("after freezes its replay prefix and buffers live events before the establishment ACK", async () => {
+test("after 固定历史前缀并在 initial 响应前缓存实时事件", async () => {
   const fake = createFakeHarness({
     harness: "codex",
     modelCatalog: emptyModelCatalog("codex"),
@@ -5169,10 +5315,14 @@ test("after freezes its replay prefix and buffers live events before the establi
     scope: "turn",
     sessionId,
     turnId: "t1",
-    replay: {
+    start: {
       mode: "after",
       cursor: encodeResumeCursor({
         target: { scope: "turn", sessionId, turnId: "t1" as TurnId },
+        runtimeScopeId: v.parse(
+          runtimeScopeIdSchema,
+          "00000000-0000-4000-8000-000000000000",
+        ),
         daemonGeneration: v.parse(daemonGenerationSchema, "test"),
         eventId: 1,
       }),
@@ -5180,7 +5330,13 @@ test("after freezes its replay prefix and buffers live events before the establi
   });
   await flush();
   expect(ack).toMatchObject({
-    result: { replayed: 3, window: { oldest: 1, head: 4, truncated: false } },
+    result: {
+      initial: {
+        mode: "after",
+        replayed: 3,
+        window: { oldest: 1, head: 4, truncated: false },
+      },
+    },
   });
   expect(wire[0]).toMatchObject({
     kind: "response",
@@ -5198,4 +5354,42 @@ test("after freezes its replay prefix and buffers live events before the establi
     method: "attach.ended",
     params: { reason: "end_turn", lastEventId: 7 },
   });
+});
+
+test("after 游标按运行范围绑定，即使会话、世代和序号相同也拒绝串用", async () => {
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
+  });
+  const { server, daemon } = startDaemon(new Map([["codex", fake.adapter]]));
+  const client = server.connect();
+  await flush();
+  const requester = makeRequester(client);
+  const spawned = await requester("spawn", {
+    harness: "codex",
+    message: "scope-bound cursor",
+    cwd: "/tmp",
+  });
+  const { sessionId, turnId } = resultOf(spawned) as {
+    sessionId: SessionId;
+    turnId: TurnId;
+  };
+  const cursor = encodeResumeCursor({
+    target: { scope: "turn", sessionId, turnId },
+    runtimeScopeId: v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000001",
+    ),
+    daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+    eventId: 0,
+  });
+  expect(
+    await requester("attach", {
+      scope: "turn",
+      sessionId,
+      turnId,
+      start: { mode: "after", cursor },
+    }),
+  ).toMatchObject({ error: { code: "invalid_params" } });
+  await daemon.stop();
 });

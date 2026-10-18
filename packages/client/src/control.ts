@@ -1,11 +1,13 @@
 import {
   createAgentFact,
+  projectAgentSubscriptionInitial,
   projectSubscriptionTarget,
   type SubscribeFacts,
   type FactSubscription,
 } from "./subscription.ts";
 export type {
-  AgentEstablishment,
+  AgentSubscriptionBaseline,
+  AgentSubscriptionInitial,
   AgentTarget,
   AgentFact,
   FactSubscription,
@@ -330,9 +332,10 @@ export function createReinsClient(
     lastEventId: EventId | null;
   };
   type RawSubscription = AsyncIterableIterator<RawEvent> & {
-    readonly establishment: NonNullable<ProtocolResult<"attach">>;
+    readonly result: NonNullable<ProtocolResult<"attach">>;
     readonly done: Promise<RawSubscriptionEnd>;
     readonly checkpoint: ResumeCursor;
+    acknowledge(eventId: EventId): void;
     close(): void;
   };
 
@@ -342,10 +345,13 @@ export function createReinsClient(
   ) => {
     const queued: RawEvent[] = [];
     const initial: ProtocolNotification[] = [];
-    let establishment: ProtocolResult<"attach"> | undefined;
+    let result: ProtocolResult<"attach"> | undefined;
     let ended = false;
     let localClose = false;
     let lastDeliveredPosition = 0;
+    let acknowledgedPosition = 0;
+    const deliveredPositions: EventId[] = [];
+    let cursorBase: ReturnType<typeof decodeResumeCursor> | undefined;
     let failure: Error | undefined;
     const waiters: Array<() => void> = [];
     let resolveDone!: (end: RawSubscriptionEnd) => void;
@@ -364,8 +370,7 @@ export function createReinsClient(
     };
     const cursorAt = (position: number): ResumeCursor =>
       encodeResumeCursor({
-        target: establishment!.target,
-        daemonGeneration: generation!,
+        ...cursorBase!,
         eventId: position,
       });
     const disconnect = (reason: MachineError) => {
@@ -374,9 +379,9 @@ export function createReinsClient(
       failure = new AgentSubscriptionError(
         reason,
         reason.code === "daemon_disconnected" &&
-          establishment !== undefined &&
-          generation !== undefined
-          ? cursorAt(lastDeliveredPosition)
+          result !== undefined &&
+          cursorBase !== undefined
+          ? cursorAt(acknowledgedPosition)
           : undefined,
       );
       cleanup();
@@ -384,14 +389,11 @@ export function createReinsClient(
       wake();
     };
     const receive = (notification: ProtocolNotification) => {
-      if (establishment === undefined) {
+      if (result === undefined) {
         initial.push(notification);
         return;
       }
-      if (
-        notification.params.subscriptionId !== establishment.subscriptionId ||
-        ended
-      )
+      if (notification.params.subscriptionId !== result.subscriptionId || ended)
         return;
       if (notification.method === "event") {
         queued.push({
@@ -455,13 +457,10 @@ export function createReinsClient(
         throw createAbortError();
       }
       if ("error" in response) throw new ReinsClientError(response.error);
-      establishment = response.result;
-      lastDeliveredPosition =
-        params.replay.mode === "after"
-          ? decodeResumeCursor(params.replay.cursor).eventId
-          : params.replay.mode === "none"
-            ? (establishment.window.head ?? 0)
-            : (establishment.window.oldest ?? 1) - 1;
+      result = response.result;
+      cursorBase = decodeResumeCursor(result.initial.cursor);
+      acknowledgedPosition = cursorBase.eventId;
+      lastDeliveredPosition = cursorBase.eventId;
       const beforeReady = initial.splice(0);
       for (const notification of beforeReady) receive(notification);
     } catch (error) {
@@ -469,10 +468,10 @@ export function createReinsClient(
       throw error;
     }
     const raw: RawSubscription = {
-      establishment,
+      result,
       done,
       get checkpoint() {
-        return cursorAt(lastDeliveredPosition);
+        return cursorAt(acknowledgedPosition);
       },
       async next() {
         while (queued.length === 0 && !ended && !localClose)
@@ -480,6 +479,7 @@ export function createReinsClient(
         if (queued.length > 0) {
           const value = queued.shift()!;
           lastDeliveredPosition = value.eventId;
+          deliveredPositions.push(value.eventId);
           return { value, done: false };
         }
         if (failure instanceof AgentSubscriptionError) {
@@ -487,7 +487,7 @@ export function createReinsClient(
             failure.failure,
             failure.resumeCursor === undefined
               ? undefined
-              : cursorAt(lastDeliveredPosition),
+              : cursorAt(acknowledgedPosition),
           );
         }
         if (failure !== undefined) throw failure;
@@ -504,6 +504,15 @@ export function createReinsClient(
       [Symbol.asyncIterator]() {
         return raw;
       },
+      acknowledge(eventId) {
+        if (deliveredPositions[0] !== eventId)
+          throw new ReinsClientError({
+            code: "invalid_params",
+            issues: [{ issue: "invalid_value", path: "factId" }],
+          });
+        deliveredPositions.shift();
+        acknowledgedPosition = eventId;
+      },
       close() {
         if (ended || localClose) return;
         localClose = true;
@@ -512,7 +521,7 @@ export function createReinsClient(
           connection.send({
             kind: "control",
             method: "subscription.close",
-            subscriptionId: establishment.subscriptionId,
+            subscriptionId: result.subscriptionId,
           });
         } catch {
           terminate(clientMachineError("daemon_disconnected"));
@@ -521,7 +530,7 @@ export function createReinsClient(
         ended = true;
         cleanup();
         const end = {
-          target: projectSubscriptionTarget(establishment.target),
+          target: projectSubscriptionTarget(result.initial.target),
           reason: "closed" as const,
           lastEventId:
             lastDeliveredPosition === 0
@@ -543,6 +552,7 @@ export function createReinsClient(
       reason,
     }));
     let finished = false;
+    const deliveredFactEventIds = new WeakMap<object, EventId>();
     const abort = () => raw.close();
     if (signal !== undefined) {
       if (signal.aborted) raw.close();
@@ -553,11 +563,7 @@ export function createReinsClient(
       );
     }
     const subscription: FactSubscription = {
-      establishment: {
-        target: projectSubscriptionTarget(raw.establishment.target),
-        window: raw.establishment.window,
-        replayed: raw.establishment.replayed,
-      },
+      initial: projectAgentSubscriptionInitial(raw.result.initial),
       done: factDone,
       get checkpoint() {
         return raw.checkpoint;
@@ -569,18 +575,26 @@ export function createReinsClient(
           finished = true;
           return { value: undefined, done: true };
         }
-        if (generation === undefined)
-          throw new AgentSubscriptionError(
-            clientMachineError("invalid_daemon_response"),
-          );
+        const cursor = decodeResumeCursor(raw.result.initial.cursor);
+        const fact = createAgentFact(
+          result.value.event,
+          result.value.eventId,
+          cursor.daemonGeneration,
+        );
+        deliveredFactEventIds.set(fact, result.value.eventId);
         return {
-          value: createAgentFact(
-            result.value.event,
-            result.value.eventId,
-            generation,
-          ),
+          value: fact,
           done: false,
         };
+      },
+      acknowledge(fact) {
+        const eventId = deliveredFactEventIds.get(fact);
+        if (eventId === undefined)
+          throw new ReinsClientError({
+            code: "invalid_params",
+            issues: [{ issue: "invalid_value", path: "factId" }],
+          });
+        raw.acknowledge(eventId);
       },
       async return() {
         finished = true;

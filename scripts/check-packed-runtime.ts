@@ -1524,10 +1524,11 @@ async function runRuntimeFactsAcceptance(options: {
     );
     assert(
       disconnected.code === "daemon_disconnected" &&
-        disconnected.cursorMatchesDeliveredFact === true &&
+        disconnected.cursorMatchesAcknowledgedFact === true &&
         typeof disconnected.checkpoint === "string" &&
-        typeof disconnected.deliveredFactCount === "number",
-      "消费者断开后未返回最后已交付事实的游标",
+        typeof disconnected.deliveredFactCount === "number" &&
+        typeof disconnected.acknowledgedFactCount === "number",
+      "消费者断开后未返回最后已确认事实的游标",
     );
     const kill = await runSdkMode(
       options.sdkConsumer,
@@ -1555,12 +1556,14 @@ async function runRuntimeFactsAcceptance(options: {
       "replay-facts",
       {
         REINS_TARGET_SESSION: String(factResult.sessionHandle),
-        REINS_RESUME_FACT_COUNT: String(disconnected.deliveredFactCount),
+        REINS_RESUME_ACKNOWLEDGED_FACT_COUNT: String(
+          disconnected.acknowledgedFactCount,
+        ),
         REINS_RESUME_CURSOR: String(disconnected.checkpoint),
       },
     );
     assert(
-      resumed.checkpointWasDelivered === true &&
+      resumed.checkpointWasAcknowledged === true &&
         resumed.resumedAfterDisconnect === true &&
         Array.isArray(resumed.resumedFacts),
       "SDK 未从断连 checkpoint 精确续接事件",

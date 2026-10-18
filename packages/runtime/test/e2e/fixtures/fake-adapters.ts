@@ -8,7 +8,7 @@ import type {
   WorkerDriver,
   AdapterDriverFactory,
 } from "@reins/protocol";
-import { messageIdSchema } from "@reins/protocol";
+import { messageIdSchema, permissionIdSchema } from "@reins/protocol";
 import * as v from "valibot";
 
 function modelCatalog(
@@ -45,6 +45,21 @@ function fakeAdapter(options: {
           spec.captureHarnessStderr === true || !spec.message.startsWith("hold")
             ? "complete"
             : "hang";
+        if (spec.message.startsWith("hold with pending permission"))
+          queueMicrotask(() =>
+            emit({
+              type: "permission.requested",
+              sessionId: spec.sessionId,
+              turnId: spec.turnId,
+              permissionId: v.parse(permissionIdSchema, "approval"),
+              kind: "write",
+              input: { path: "approval.txt" },
+              options: [
+                { outcome: "allow", scope: "once" },
+                { outcome: "deny", feedback: false },
+              ],
+            }),
+          );
         const observationsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
         if (observationsFile !== undefined) {
           appendFileSync(

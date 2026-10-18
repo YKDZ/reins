@@ -280,14 +280,40 @@ export type ModelCatalogResult = {
 export type AgentTarget =
   | { scope: "session"; sessionHandle: SessionHandle }
   | { scope: "turn"; turnHandle: TurnHandle };
-export type ReplayPolicy =
-  | { mode: "none" }
-  | { mode: "available" }
+export type SubscriptionStart =
+  | { mode: "snapshot"; cursor?: never }
+  | { mode: "history"; cursor?: never }
   | { mode: "after"; cursor: ResumeCursor };
-export type AgentSubscriptionEstablishment = {
-  target: AgentTarget;
-  window: { oldest: number | null; head: number | null; truncated: boolean };
-  replayed: number;
+export type AgentSubscriptionInitial =
+  | {
+      mode: "snapshot";
+      target: AgentTarget;
+      cursor: ResumeCursor;
+      window: {
+        oldest: number | null;
+        head: number | null;
+        truncated: boolean;
+      };
+      baseline: AgentSubscriptionBaseline;
+    }
+  | {
+      mode: "history" | "after";
+      target: AgentTarget;
+      cursor: ResumeCursor;
+      window: {
+        oldest: number | null;
+        head: number | null;
+        truncated: boolean;
+      };
+      replayed: number;
+    };
+export type AgentSubscriptionBaseline = {
+  session: SessionInfo;
+  confirmedTerminals: Extract<
+    AgentFact,
+    { type: "turn.completed" | "session.killed" }
+  >[];
+  pendingPermissions: Extract<AgentFact, { type: "permission.requested" }>[];
 };
 export type AgentSubscriptionEnd = {
   target: AgentTarget;
@@ -297,6 +323,7 @@ export type AgentSubscriptionEnd = {
     | "failed"
     | "killed"
     | "session_killed"
+    | "control_unavailable"
     | "closed";
 };
 type FactBase = {
@@ -795,9 +822,10 @@ export type AgentFact =
     })
   | (FactBase & { type: "session.killed" });
 export type FactSubscription = AsyncIterableIterator<AgentFact> & {
-  readonly establishment: AgentSubscriptionEstablishment;
+  readonly initial: AgentSubscriptionInitial;
   readonly done: Promise<AgentSubscriptionEnd>;
   readonly checkpoint: ResumeCursor;
+  acknowledge(fact: AgentFact): void;
   close(): void;
 };
 
@@ -991,6 +1019,7 @@ type FailureFactsByCode = {
   };
   unexpected_failure: { remoteCode?: string };
   event_cursor_expired: { oldest: number | null; head: number | null };
+  event_history_unavailable: { sessionHandle: SessionHandle };
 };
 
 /** 失败事实按 code 区分，并使用 SDK 公开术语表达。 */
@@ -1052,7 +1081,7 @@ export type ReinsConnection = {
   list(filter?: SessionFilter): Promise<SessionInfo[]>;
   attach(
     target: AgentTarget,
-    replay: ReplayPolicy,
+    start: SubscriptionStart,
     signal?: AbortSignal,
   ): Promise<FactSubscription>;
   prepareOperation<Kind extends OperationKind>(kind: Kind): OperationKey<Kind>;

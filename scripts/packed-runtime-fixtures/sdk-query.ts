@@ -66,6 +66,8 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.feature;
     case "event_cursor_expired":
       return `${failure.facts.oldest ?? "empty"}:${failure.facts.head ?? "empty"}`;
+    case "event_history_unavailable":
+      return failure.facts.sessionHandle;
     case "method_not_found":
       return failure.facts.method;
     case "operation_key_conflict":
