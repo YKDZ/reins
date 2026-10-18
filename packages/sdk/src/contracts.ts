@@ -132,11 +132,17 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type RecoverableOperationKind = "spawn" | "send" | "interrupt" | "kill";
+export type RecoverableOperationKind =
+  | "spawn"
+  | "send"
+  | "interrupt"
+  | "resolvePermission"
+  | "kill";
 type OperationResultByKind = {
   spawn: SpawnResult;
   send: SendResult;
   interrupt: InterruptResult;
+  resolvePermission: ResolvePermissionResult;
   kill: KillResult;
 };
 type OperationRecordForKind<Kind extends RecoverableOperationKind> =
@@ -277,6 +283,10 @@ export type InterruptInput = { turnHandle: TurnHandle };
 export type InterruptResult = {
   turnHandle: TurnHandle;
   status: "accepted";
+};
+export type ResolvePermissionResult = {
+  permissionHandle: PermissionHandle;
+  status: "resolved";
 };
 
 export type StopReason = "end_turn" | "cancelled" | "failed" | "killed";
@@ -1029,6 +1039,7 @@ type FailureFactsByCode = {
           | SpawnResult
           | SendResult
           | InterruptResult
+          | ResolvePermissionResult
           | KillResult;
         cleanupCause?: ErrorCause;
         effect?: OperationEffect;
@@ -1171,7 +1182,7 @@ export type ReinsConnection = {
     permissionHandle: PermissionHandle,
     resolution: PermissionResolution,
     options?: OperationOptions<"resolvePermission">,
-  ): Promise<{ permissionHandle: PermissionHandle; status: "resolved" }>;
+  ): Promise<ResolvePermissionResult>;
   diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsResult>;
   send(
     input: SendInput,

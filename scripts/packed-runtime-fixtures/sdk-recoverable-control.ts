@@ -943,10 +943,11 @@ async function resolvePermissionFailureReplay(): Promise<void> {
     );
     const query = await expectFailure(() => connection.diagnostics());
     if (
-      first.failure.code !== "internal_error" ||
+      first.failure.code !== "operation_outcome_unknown" ||
+      first.failure.facts.operationKey !== intent.operationKey ||
       JSON.stringify(first.failure) !== JSON.stringify(replay.failure) ||
-      first.failure.facts.diagnosticId !== undefined ||
       first.failure.facts.cause?.kind !== "exception" ||
+      first.failure.facts.diagnosticId !== undefined ||
       !first.failure.facts.cause.message.includes(
         "Fixture rejected permission delivery",
       ) ||

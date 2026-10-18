@@ -3,6 +3,8 @@ export {
   createSessionMachine,
   InterruptCommitFailure,
   InterruptRequestFailure,
+  PermissionResolutionCommitFailure,
+  PermissionResolutionRequestFailure,
   SendCommitFailure,
   SendDeliveryFailure,
   SpawnCommitFailure,

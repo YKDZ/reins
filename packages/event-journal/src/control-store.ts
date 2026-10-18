@@ -14,7 +14,10 @@ import {
   killResultSchema,
   operationKeySchema,
   parseOperationKey,
+  permissionResolutionSchemaFor,
   runtimeScopeIdSchema,
+  resolvePermissionAckSchema,
+  resolvePermissionParamsSchema,
   sendAckSchema,
   sendParamsSchema,
   sessionIdSchema,
@@ -32,6 +35,8 @@ import {
   type InterruptParams,
   type MachineError,
   type RuntimeScopeId,
+  type ResolvePermissionAck,
+  type ResolvePermissionParams,
   type SendAck,
   type SendParams,
   type SessionInfo,
@@ -63,6 +68,10 @@ export type InterruptControlOperationInput = ControlOperationOwner & {
   readonly request: InterruptParams;
 };
 
+export type ResolvePermissionControlOperationInput = ControlOperationOwner & {
+  readonly request: ResolvePermissionParams;
+};
+
 export type KillControlOperationInput = ControlOperationOwner & {
   readonly request: KillParams;
 };
@@ -87,6 +96,10 @@ export type ControlOperation =
       ControlOperationStatus<SendAck> & { readonly kind: "send" })
   | (InterruptControlOperationInput &
       ControlOperationStatus<InterruptAck> & { readonly kind: "interrupt" })
+  | (ResolvePermissionControlOperationInput &
+      ControlOperationStatus<ResolvePermissionAck> & {
+        readonly kind: "resolvePermission";
+      })
   | (KillControlOperationInput &
       ControlOperationStatus<KillResult> & { readonly kind: "kill" });
 
@@ -167,6 +180,27 @@ export type ControlStore = {
     operationKey: StoredOperationKey,
     error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
   ): void;
+  registerResolvePermission(input: ResolvePermissionControlOperationInput): {
+    readonly created: boolean;
+    readonly operation: Extract<
+      ControlOperation,
+      { kind: "resolvePermission" }
+    >;
+  };
+  markResolvePermissionDispatched(operationKey: StoredOperationKey): void;
+  commitResolvePermission(input: {
+    readonly operationKey: StoredOperationKey;
+    readonly result: ResolvePermissionAck;
+    readonly event: DomainEvent;
+  }): StoredCommittedEvent;
+  failResolvePermission(
+    operationKey: StoredOperationKey,
+    error: MachineError,
+  ): void;
+  recordResolvePermissionOutcomeUnknown(
+    operationKey: StoredOperationKey,
+    error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
+  ): void;
   registerKill(input: KillControlOperationInput): {
     readonly created: boolean;
     readonly operation: Extract<ControlOperation, { kind: "kill" }>;
@@ -239,6 +273,7 @@ function operationFromRow(row: OperationRow): ControlOperation {
     claims.kind !== "spawn" &&
     claims.kind !== "send" &&
     claims.kind !== "interrupt" &&
+    claims.kind !== "resolvePermission" &&
     claims.kind !== "kill"
   )
     throw new Error(
@@ -318,6 +353,13 @@ function operationFromRow(row: OperationRow): ControlOperation {
       kind: "interrupt",
       request: parseJson(interruptParamsSchema, row.request_json),
       ...statusFields<InterruptAck>(interruptAckSchema),
+    };
+  if (claims.kind === "resolvePermission")
+    return {
+      ...owner,
+      kind: "resolvePermission",
+      request: parseJson(resolvePermissionParamsSchema, row.request_json),
+      ...statusFields<ResolvePermissionAck>(resolvePermissionAckSchema),
     };
   return {
     ...owner,
@@ -426,6 +468,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
       (claims.kind !== "spawn" &&
         claims.kind !== "send" &&
         claims.kind !== "interrupt" &&
+        claims.kind !== "resolvePermission" &&
         claims.kind !== "kill") ||
       (expectedKind !== undefined && claims.kind !== expectedKind)
     )
@@ -520,6 +563,82 @@ function createControlStore(database: DatabaseSync): ControlStore {
         throw new Error("Stored operation result and session ownership differ");
     }
     return operation;
+  }
+
+  function permissionStillPending(
+    request: ResolvePermissionParams,
+    runtimeScopeId: RuntimeScopeId,
+    consumer: ConsumerContext,
+    generation: DaemonGeneration,
+  ): MachineError | undefined {
+    const session = readSession(request.sessionId);
+    if (
+      session === undefined ||
+      session.runtimeScopeId !== runtimeScopeId ||
+      session.consumer !== consumer ||
+      session.generation !== generation
+    )
+      return { code: "permission_not_pending", ...requestTarget(request) };
+
+    const rows = database
+      .prepare(
+        "SELECT event_id, event_json FROM session_events WHERE session_id = ? ORDER BY event_id",
+      )
+      .all(request.sessionId) as EventRow[];
+    const entries = rows.map(eventFromRow);
+    let requestIndex = -1;
+    for (let index = entries.length - 1; index >= 0; index -= 1) {
+      const event = entries[index]!.event;
+      if (
+        event.type === "permission.requested" &&
+        event.permissionId === request.permissionId
+      ) {
+        requestIndex = index;
+        break;
+      }
+    }
+    if (requestIndex < 0)
+      return { code: "permission_not_pending", ...requestTarget(request) };
+
+    const requested = entries[requestIndex]!.event;
+    if (requested.type !== "permission.requested")
+      throw new Error("Permission history has an invalid request event");
+    if (requested.turnId !== request.turnId)
+      return {
+        code: "invalid_params",
+        issues: [{ issue: "invalid_value", path: "turnId" }],
+      };
+    if (
+      !v.safeParse(
+        permissionResolutionSchemaFor(requested.options),
+        request.resolution,
+      ).success
+    )
+      return {
+        code: "permission_resolution_mismatch",
+        ...requestTarget(request),
+      };
+
+    const expired = entries.slice(requestIndex + 1).some(({ event }) => {
+      if (event.type === "permission.resolved")
+        return event.permissionId === request.permissionId;
+      if (event.type === "turn.completed")
+        return event.turnId === request.turnId;
+      return event.type === "session.killed";
+    });
+    return expired
+      ? { code: "permission_not_pending", ...requestTarget(request) }
+      : undefined;
+  }
+
+  function requestTarget(request: ResolvePermissionParams): {
+    sessionId: SessionId;
+    permissionId: ResolvePermissionParams["permissionId"];
+  } {
+    return {
+      sessionId: request.sessionId,
+      permissionId: request.permissionId,
+    };
   }
 
   function appendEvent(event: DomainEvent): StoredCommittedEvent {
@@ -807,6 +926,114 @@ function createControlStore(database: DatabaseSync): ControlStore {
         throw new Error("Interrupt registration disappeared");
       return { created: true, operation };
     },
+    registerResolvePermission(input) {
+      const operationKey = validatedOperationKey(
+        input.operationKey,
+        "resolvePermission",
+      );
+      const runtimeScopeId = v.parse(
+        runtimeScopeIdSchema,
+        input.runtimeScopeId,
+      );
+      const consumer = v.parse(consumerContextSchema, input.consumer);
+      const generation = v.parse(daemonGenerationSchema, input.generation);
+      validateOperationOwnership(
+        operationKey,
+        "resolvePermission",
+        runtimeScopeId,
+        consumer,
+        generation,
+      );
+      const request = v.parse(resolvePermissionParamsSchema, input.request);
+      const requestJson = stableJson(request);
+      const registration = transaction(() => {
+        const current = readOperation(operationKey);
+        if (current !== undefined) {
+          const row = database
+            .prepare(
+              "SELECT request_json FROM operations WHERE operation_key = ?",
+            )
+            .get(operationKey) as Record<string, unknown> | undefined;
+          const storedRequestJson =
+            row === undefined
+              ? undefined
+              : v.parse(v.string(), row.request_json);
+          if (
+            current.kind !== "resolvePermission" ||
+            storedRequestJson !== requestJson ||
+            current.runtimeScopeId !== runtimeScopeId ||
+            current.consumer !== consumer ||
+            current.generation !== generation
+          )
+            return {
+              state: "rejected" as const,
+              error: { code: "operation_key_conflict" } as const,
+            };
+          return { state: "existing" as const, operation: current };
+        }
+
+        let registrationError = permissionStillPending(
+          request,
+          runtimeScopeId,
+          consumer,
+          generation,
+        );
+        if (registrationError === undefined) {
+          const rows = database
+            .prepare(
+              "SELECT * FROM operations WHERE runtime_scope_id = ? AND consumer = ? AND generation = ?",
+            )
+            .all(runtimeScopeId, consumer, generation) as OperationRow[];
+          for (const row of rows) {
+            const candidate = operationFromRow(row);
+            if (
+              candidate.kind !== "resolvePermission" ||
+              candidate.request.sessionId !== request.sessionId ||
+              candidate.request.permissionId !== request.permissionId
+            )
+              continue;
+            if (
+              candidate.status === "pending" ||
+              candidate.status === "dispatched"
+            ) {
+              registrationError = {
+                code: "operation_pending",
+                operationKey: candidate.operationKey,
+              };
+              break;
+            }
+            if (candidate.status === "outcome_unknown") {
+              registrationError = candidate.error;
+              break;
+            }
+          }
+        }
+
+        database
+          .prepare(
+            "INSERT INTO operations(operation_key, runtime_scope_id, consumer, generation, request_json, status, error_json) VALUES (?, ?, ?, ?, ?, ?, ?)",
+          )
+          .run(
+            operationKey,
+            runtimeScopeId,
+            consumer,
+            generation,
+            requestJson,
+            registrationError === undefined ? "pending" : "failed",
+            registrationError === undefined
+              ? null
+              : stableJson(registrationError),
+          );
+        return { state: "created" as const };
+      });
+      if (registration.state === "rejected") throw registration.error;
+      if (registration.state === "existing")
+        return { created: false, operation: registration.operation };
+      const operation = readOperation(operationKey);
+      if (operation?.kind !== "resolvePermission")
+        throw new Error("Permission resolution registration disappeared");
+      return { created: true, operation };
+    },
     registerKill(input) {
       const operationKey = validatedOperationKey(input.operationKey, "kill");
       const runtimeScopeId = v.parse(
@@ -954,6 +1181,37 @@ function createControlStore(database: DatabaseSync): ControlStore {
         if (Number(result.changes) !== 1)
           throw new Error("Interrupt operation is not awaiting dispatch");
       });
+    },
+    markResolvePermissionDispatched(operationKey) {
+      operationKey = validatedOperationKey(operationKey, "resolvePermission");
+      const pendingError = transaction(() => {
+        const operation = readOperation(operationKey);
+        if (
+          operation?.kind !== "resolvePermission" ||
+          operation.status !== "pending"
+        )
+          throw new Error(
+            "Permission resolution operation is not awaiting dispatch",
+          );
+        const error = permissionStillPending(
+          operation.request,
+          operation.runtimeScopeId,
+          operation.consumer,
+          operation.generation,
+        );
+        if (error !== undefined) return error;
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'dispatched' WHERE operation_key = ? AND status = 'pending'",
+          )
+          .run(operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error(
+            "Permission resolution operation is not awaiting dispatch",
+          );
+        return undefined;
+      });
+      if (pendingError !== undefined) throw pendingError;
     },
     markKillDispatched(operationKey) {
       operationKey = validatedOperationKey(operationKey, "kill");
@@ -1143,6 +1401,60 @@ function createControlStore(database: DatabaseSync): ControlStore {
           )
           .run(stableJson(parsedResult), operationKey);
       });
+    },
+    commitResolvePermission(input) {
+      const operationKey = validatedOperationKey(
+        input.operationKey,
+        "resolvePermission",
+      );
+      const result = v.parse(resolvePermissionAckSchema, input.result);
+      const event = v.parse(domainEventSchema, input.event);
+      const committed = transaction(() => {
+        const operation = readOperation(operationKey);
+        if (
+          operation?.kind !== "resolvePermission" ||
+          operation.status !== "dispatched"
+        )
+          throw new Error(
+            "Permission resolution operation was not marked dispatched",
+          );
+        if (
+          operation.request.sessionId !== result.sessionId ||
+          operation.request.turnId !== result.turnId ||
+          operation.request.permissionId !== result.permissionId ||
+          event.type !== "permission.resolved" ||
+          event.sessionId !== result.sessionId ||
+          event.turnId !== result.turnId ||
+          event.permissionId !== result.permissionId ||
+          stableJson(event.resolution) !==
+            stableJson(operation.request.resolution)
+        )
+          throw new Error(
+            "Permission resolution result does not match its request",
+          );
+
+        const pendingError = permissionStillPending(
+          operation.request,
+          operation.runtimeScopeId,
+          operation.consumer,
+          operation.generation,
+        );
+        if (pendingError !== undefined) return { pendingError };
+
+        const entry = appendEvent(event);
+        const update = database
+          .prepare(
+            "UPDATE operations SET status = 'succeeded', result_json = ? WHERE operation_key = ? AND status = 'dispatched'",
+          )
+          .run(stableJson(result), operationKey);
+        if (Number(update.changes) !== 1)
+          throw new Error(
+            "Permission resolution operation is not awaiting commit",
+          );
+        return { entry };
+      });
+      if ("pendingError" in committed) throw committed.pendingError;
+      return committed.entry;
     },
     commitKill(input) {
       const operationKey = validatedOperationKey(input.operationKey, "kill");
@@ -1379,6 +1691,45 @@ function createControlStore(database: DatabaseSync): ControlStore {
             return;
           throw new Error(
             "Interrupt operation is not awaiting an unknown outcome",
+          );
+        }
+      });
+    },
+    failResolvePermission(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "resolvePermission");
+      const parsedError = v.parse(machineErrorSchema, error);
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'failed', error_json = ? WHERE operation_key = ? AND status IN ('pending', 'dispatched') AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error("Permission resolution operation is not pending");
+      });
+    },
+    recordResolvePermissionOutcomeUnknown(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "resolvePermission");
+      const parsedError = v.parse(machineErrorSchema, error);
+      if (parsedError.code !== "operation_outcome_unknown")
+        throw new Error(
+          "Permission resolution outcome error has the wrong code",
+        );
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET error_json = ? WHERE operation_key = ? AND status = 'dispatched' AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1) {
+          const operation = readOperation(operationKey);
+          if (
+            operation?.status === "outcome_unknown" &&
+            stableJson(operation.error) === stableJson(parsedError)
+          )
+            return;
+          throw new Error(
+            "Permission resolution operation is not awaiting an unknown outcome",
           );
         }
       });

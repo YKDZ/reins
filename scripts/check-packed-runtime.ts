@@ -1357,8 +1357,9 @@ async function runPermissionDiagnosticFailure(options: {
     );
     assert(
       isRecord(rejected.failure) &&
-        rejected.failure.code === "internal_error" &&
+        rejected.failure.code === "operation_outcome_unknown" &&
         isRecord(rejected.failure.facts) &&
+        typeof rejected.failure.facts.operationKey === "string" &&
         isRecord(rejected.failure.facts.cause) &&
         rejected.failure.facts.cause.kind === "exception" &&
         typeof rejected.failure.facts.cause.message === "string" &&

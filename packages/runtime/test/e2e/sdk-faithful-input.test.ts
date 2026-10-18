@@ -323,14 +323,58 @@ test("Codex permission facts expose only native answers and apply the exact acce
   });
   subscription.acknowledge(requested);
 
+  const operationKey = f.connection.prepareOperation("resolvePermission");
   const resolvedPromise = nextPermissionResolution(subscription);
   expect(
     await f.connection.resolvePermission(
       requested.permissionHandle,
       { outcome: "allow", scope: "once" },
-      { operationKey: f.connection.prepareOperation("resolvePermission") },
+      { operationKey },
     ),
   ).toMatchObject({ status: "resolved" });
+  expect(await f.connection.getOperation(operationKey)).toMatchObject({
+    status: "succeeded",
+    operationKey,
+    result: {
+      permissionHandle: requested.permissionHandle,
+      status: "resolved",
+    },
+  });
+  await expect(
+    f.connection.resolvePermission(
+      requested.permissionHandle,
+      { outcome: "allow", scope: "once" },
+      { operationKey },
+    ),
+  ).resolves.toMatchObject({
+    permissionHandle: requested.permissionHandle,
+    status: "resolved",
+  });
+  await expect(
+    f.connection.resolvePermission(
+      requested.permissionHandle,
+      { outcome: "allow", scope: "session" },
+      { operationKey },
+    ),
+  ).rejects.toMatchObject({
+    failure: { code: "operation_key_conflict" },
+  });
+  await expect(
+    f.connection.resolvePermission(
+      requested.permissionHandle,
+      { outcome: "allow", scope: "once" },
+      { operationKey: f.connection.prepareOperation("resolvePermission") },
+    ),
+  ).rejects.toMatchObject({
+    failure: { code: "permission_not_pending" },
+  });
+  expect(await f.connection.getOperation(operationKey)).toMatchObject({
+    status: "succeeded",
+    result: {
+      permissionHandle: requested.permissionHandle,
+      status: "resolved",
+    },
+  });
   const resolved = await resolvedPromise;
   expect(resolved.permissionHandle).toBe(requested.permissionHandle);
   subscription.acknowledge(resolved);

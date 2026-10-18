@@ -60,6 +60,7 @@ import {
   type OperationKey,
   type OperationKind,
   type OperationOptions,
+  type RecoverableOperationKind,
   type OperationEffect,
   type OperationRecord,
   type ReinsConnection,
@@ -89,6 +90,7 @@ import {
   type WaitResult,
   type InterruptInput,
   type InterruptResult,
+  type ResolvePermissionResult,
 } from "./contracts.ts";
 import { createControlByteTransport } from "./control-channel.ts";
 import { ReinsSdkError } from "./errors.ts";
@@ -182,6 +184,7 @@ export type {
   CompletedTurn,
   InterruptInput,
   InterruptResult,
+  ResolvePermissionResult,
   HarnessId,
   OperationKey,
   OperationKind,
@@ -682,10 +685,10 @@ async function connectClient(
           );
         }
       },
-      async getOperation<Kind extends "spawn" | "send" | "interrupt" | "kill">(
+      async getOperation<Kind extends RecoverableOperationKind>(
         operationKey: OperationKey<Kind>,
       ): Promise<OperationRecord<Kind>> {
-        let kind: "spawn" | "send" | "interrupt" | "kill";
+        let kind: RecoverableOperationKind;
         let generation: ProtocolDaemonGeneration;
         try {
           const claims = parseProtocolOperationKey(operationKey);
@@ -693,6 +696,7 @@ async function connectClient(
             claims.kind !== "spawn" &&
             claims.kind !== "send" &&
             claims.kind !== "interrupt" &&
+            claims.kind !== "resolvePermission" &&
             claims.kind !== "kill"
           )
             throw new Error("Operation kind is not recoverable");
@@ -1254,12 +1258,11 @@ type ProjectedOperationResultByKind = {
   spawn: SpawnResult;
   send: SendResult;
   interrupt: InterruptResult;
+  resolvePermission: ResolvePermissionResult;
   kill: import("./contracts.ts").KillResult;
 };
 
-function projectOperationRecord<
-  Kind extends "spawn" | "send" | "interrupt" | "kill",
->(
+function projectOperationRecord<Kind extends RecoverableOperationKind>(
   record: ProtocolOperationRecord,
   kind: Kind,
   generation: ProtocolDaemonGeneration,
@@ -1356,9 +1359,7 @@ function projectOperationEffect(
   };
 }
 
-function projectOperationResult<
-  Kind extends "spawn" | "send" | "interrupt" | "kill",
->(
+function projectOperationResult<Kind extends RecoverableOperationKind>(
   kind: Kind,
   result: ProtocolResult<Kind>,
   generation: ProtocolDaemonGeneration,
@@ -1372,13 +1373,21 @@ function projectOperationResult<
       result as ProtocolResult<"send">,
       generation,
     ) as ProjectedOperationResultByKind[Kind];
+  if (kind === "interrupt")
+    return projectInterruptResult(
+      result as ProtocolResult<"interrupt">,
+    ) as ProjectedOperationResultByKind[Kind];
   if (kind === "kill")
     return projectKillResult(
       result as ProtocolResult<"kill">,
     ) as ProjectedOperationResultByKind[Kind];
-  return projectInterruptResult(
-    result as ProtocolResult<"interrupt">,
-  ) as ProjectedOperationResultByKind[Kind];
+  const permissionResult = result as ProtocolResult<"resolvePermission">;
+  return {
+    permissionHandle: parsePermissionHandle(
+      encodePermissionHandle(permissionResult),
+    ),
+    status: "resolved",
+  } as ProjectedOperationResultByKind[Kind];
 }
 
 function projectSendResult(
@@ -1545,6 +1554,16 @@ function projectFailure(
                     return projectInterruptResult(
                       failure.acceptedResult as ProtocolResult<"interrupt">,
                     );
+                  if (kind === "resolvePermission") {
+                    const permissionResult =
+                      failure.acceptedResult as ProtocolResult<"resolvePermission">;
+                    return {
+                      permissionHandle: parsePermissionHandle(
+                        encodePermissionHandle(permissionResult),
+                      ),
+                      status: "resolved" as const,
+                    };
+                  }
                   return projectSpawnResult(
                     failure.acceptedResult as ProtocolResult<"spawn">,
                   );
