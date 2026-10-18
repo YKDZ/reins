@@ -1,5 +1,6 @@
 import {
   HarnessSession,
+  acceptDiagnostic,
   isAlreadyDiagnosedError,
   type DiagnosticSink,
 } from "@reins/adapter-kit";
@@ -8,6 +9,7 @@ import {
   type WorkerDriver,
   type AdapterDriverFactory,
   type WorkerSpec,
+  type SessionId,
   type PermissionId,
   type MessageId,
   type MessageContent,
@@ -20,6 +22,7 @@ import {
   makeErrorCause,
 } from "@reins/protocol";
 
+import type { ThreadBackgroundTerminal } from "#/generated/v2/ThreadBackgroundTerminal";
 import type { UserInput } from "#/generated/v2/UserInput";
 
 import { initializeCodexTransport } from "./initialization.ts";
@@ -97,6 +100,7 @@ export function createCodexDriver(deps: {
       {};
     const nativeTurns = new Map<TurnId, Promise<string>>();
     const nativeTurnToReins = new Map<string, TurnId>();
+    const nativeExecItemsByTurn = new Map<string, Map<string, string>>();
     const pendingNativeStartTurnIds = new Set<TurnId>();
     const pendingTurnNotifications: Array<{
       message: Extract<InboundMessage, { kind: "notification" }>;
@@ -152,6 +156,119 @@ export function createCodexDriver(deps: {
       return `${nativeTurnId}\u0000${itemId}`;
     }
 
+    function trackNativeExecItem(
+      message: Extract<InboundMessage, { kind: "notification" }>,
+    ): void {
+      if (
+        (message.method !== "item/started" &&
+          message.method !== "item/completed") ||
+        message.params.turnId === undefined ||
+        message.params.item.type !== "commandExecution" ||
+        (message.params.item.source !== "unifiedExecStartup" &&
+          message.params.item.source !== "unifiedExecInteraction") ||
+        typeof message.params.item.processId !== "string"
+      )
+        return;
+      let items = nativeExecItemsByTurn.get(message.params.turnId);
+      if (items === undefined) {
+        items = new Map();
+        nativeExecItemsByTurn.set(message.params.turnId, items);
+      }
+      items.set(message.params.item.id, message.params.item.processId);
+    }
+
+    async function stopNativeExecItems(
+      sessionId: SessionId,
+      reinsTurnId: TurnId,
+      items: readonly { itemId: string; processId: string }[],
+    ): Promise<void> {
+      if (items.length === 0 || transport === null) return;
+
+      const reportFailure = async (
+        reason: "closed" | "timeout" | "rejected" | "upstream_error",
+        message: string,
+      ) => {
+        await acceptDiagnostic(() =>
+          diagnosticSink({
+            kind: "request_failure",
+            operation: "interrupt",
+            stage: "interrupt",
+            reason,
+            sessionId,
+            turnId: reinsTurnId,
+            message: makeTextEvidence(`[turn ${reinsTurnId}] ${message}`),
+          }),
+        );
+      };
+
+      const terminals: ThreadBackgroundTerminal[] = [];
+      let cursor: string | null | undefined;
+      try {
+        do {
+          const page = await transport.request(
+            "thread/backgroundTerminals/list",
+            {
+              threadId,
+              ...(cursor === undefined ? {} : { cursor }),
+            },
+          );
+          terminals.push(...page.data);
+          cursor = page.nextCursor;
+        } while (cursor !== null);
+      } catch (error) {
+        await reportFailure(
+          error instanceof CodexTransportClosedError
+            ? "closed"
+            : error instanceof Error && /timed out/i.test(error.message)
+              ? "timeout"
+              : error instanceof CodexRequestError
+                ? "rejected"
+                : "upstream_error",
+          `Codex accepted interrupt, but background terminal listing failed: ${errorMessage(error)}`,
+        );
+        return;
+      }
+
+      const processIds = new Set<string>();
+      for (const target of items) {
+        const terminal = terminals.find(
+          (entry) =>
+            entry.itemId === target.itemId &&
+            entry.processId === target.processId,
+        );
+        if (terminal === undefined || processIds.has(terminal.processId))
+          continue;
+        processIds.add(terminal.processId);
+        try {
+          const result = await transport.request(
+            "thread/backgroundTerminals/terminate",
+            { threadId, processId: terminal.processId },
+          );
+          if (!result.terminated)
+            await reportFailure(
+              "rejected",
+              "Codex accepted interrupt, but background terminal terminate returned terminated=false.",
+            );
+        } catch (error) {
+          await reportFailure(
+            error instanceof CodexTransportClosedError
+              ? "closed"
+              : error instanceof Error && /timed out/i.test(error.message)
+                ? "timeout"
+                : error instanceof CodexRequestError
+                  ? "rejected"
+                  : "upstream_error",
+            `Codex accepted interrupt, but background terminal termination failed: ${errorMessage(error)}`,
+          );
+        }
+      }
+      if (processIds.size === 0)
+        await reportFailure(
+          "upstream_error",
+          "Codex accepted interrupt, but no listed background terminal matched the tracked native itemId/processId pairs.",
+        );
+    }
+
     function rejectApprovalRequest(
       message: CodexApprovalRequest,
       reason: string,
@@ -176,6 +293,7 @@ export function createCodexDriver(deps: {
       callerContent?: Promise<MessageContent>,
     ): Promise<void> {
       if (session === null) return;
+      trackNativeExecItem(message);
       if (message.method === "serverRequest/resolved") {
         const requestId = message.params.requestId;
         const permissionId = pendingByRequest.get(requestId);
@@ -193,8 +311,10 @@ export function createCodexDriver(deps: {
       if (
         message.method === "turn/completed" &&
         message.params.turn.id !== activeTurnId
-      )
+      ) {
+        nativeExecItemsByTurn.delete(message.params.turn.id);
         return;
+      }
       const callerMessageId = takeCallerMessage(message);
       const factTurnId =
         message.method === "item/started" || message.method === "item/completed"
@@ -216,6 +336,8 @@ export function createCodexDriver(deps: {
         }
         emit(event);
       }
+      if (message.method === "turn/completed")
+        nativeExecItemsByTurn.delete(message.params.turn.id);
       if (
         message.method === "item/started" &&
         message.params.turnId !== undefined &&
@@ -666,6 +788,9 @@ export function createCodexDriver(deps: {
             sessionId,
             turnId,
           } satisfies MachineError;
+        const nativeExecItems = new Map(
+          nativeExecItemsByTurn.get(nativeTurnId) ?? [],
+        );
         try {
           await transport.request("turn/interrupt", {
             threadId,
@@ -690,6 +815,18 @@ export function createCodexDriver(deps: {
             { cause: error },
           );
         }
+        for (const [itemId, processId] of nativeExecItemsByTurn.get(
+          nativeTurnId,
+        ) ?? [])
+          nativeExecItems.set(itemId, processId);
+        await stopNativeExecItems(
+          sessionId,
+          turnId,
+          [...nativeExecItems].map(([itemId, processId]) => ({
+            itemId,
+            processId,
+          })),
+        );
       },
       resolvePermission(sessionId, permissionId, resolution) {
         if (controlLost)

@@ -16,7 +16,13 @@ import {
 } from "@reins/protocol";
 
 import type { ImageDetail } from "./generated/ImageDetail.ts";
+import type { CommandExecutionSource } from "./generated/v2/CommandExecutionSource.ts";
 import type { TextElement } from "./generated/v2/TextElement.ts";
+import type { ThreadBackgroundTerminal } from "./generated/v2/ThreadBackgroundTerminal.ts";
+import type { ThreadBackgroundTerminalsListParams } from "./generated/v2/ThreadBackgroundTerminalsListParams.ts";
+import type { ThreadBackgroundTerminalsListResponse } from "./generated/v2/ThreadBackgroundTerminalsListResponse.ts";
+import type { ThreadBackgroundTerminalsTerminateParams } from "./generated/v2/ThreadBackgroundTerminalsTerminateParams.ts";
+import type { ThreadBackgroundTerminalsTerminateResponse } from "./generated/v2/ThreadBackgroundTerminalsTerminateResponse.ts";
 import type { UserInput } from "./generated/v2/UserInput.ts";
 
 const DEFAULT_REQUEST_TIMEOUT_MS = 60_000;
@@ -169,6 +175,12 @@ function spawnRealChild(
 }
 
 type ToolItemStatus = "inProgress" | "completed" | "failed" | "declined";
+const commandExecutionSources = [
+  "agent",
+  "userShell",
+  "unifiedExecStartup",
+  "unifiedExecInteraction",
+] as const satisfies readonly CommandExecutionSource[];
 
 export type CodexInboundItem =
   | {
@@ -200,6 +212,8 @@ export type CodexInboundItem =
       id: string;
       status: ToolItemStatus;
       command?: string;
+      processId?: string | null;
+      source?: CommandExecutionSource;
       output: string | null;
     }
   | {
@@ -371,9 +385,22 @@ export type CodexRequestResultMap = {
   "turn/interrupt": Record<string, never>;
   "thread/delete": Record<string, never>;
   "model/list": { data: readonly CodexModel[] };
+  "thread/backgroundTerminals/list": ThreadBackgroundTerminalsListResponse;
+  "thread/backgroundTerminals/terminate": ThreadBackgroundTerminalsTerminateResponse;
 };
 
 export type CodexRequestMethod = keyof CodexRequestResultMap;
+export type CodexRequestParamsMap = {
+  initialize: Record<string, unknown>;
+  "thread/start": Record<string, unknown>;
+  "turn/start": Record<string, unknown>;
+  "turn/steer": Record<string, unknown>;
+  "turn/interrupt": Record<string, unknown>;
+  "thread/delete": Record<string, unknown>;
+  "model/list": Record<string, unknown>;
+  "thread/backgroundTerminals/list": ThreadBackgroundTerminalsListParams;
+  "thread/backgroundTerminals/terminate": ThreadBackgroundTerminalsTerminateParams;
+};
 
 export type CodexDiagnosticContext = {
   sessionId: SessionId;
@@ -386,7 +413,7 @@ export type CodexTransport = {
   isClosed(): boolean;
   request<TMethod extends CodexRequestMethod>(
     method: TMethod,
-    params: unknown,
+    params: CodexRequestParamsMap[TMethod],
   ): Promise<CodexRequestResultMap[TMethod]>;
   notify(method: "initialized", params: Record<string, never>): void;
   respond(id: number, result: unknown): void;
@@ -1104,9 +1131,18 @@ export function createCodexTransport(options: {
     }
     if (value.type === "commandExecution") {
       const status = parseToolStatus(value.status);
+      const source = commandExecutionSources.includes(
+        value.source as CommandExecutionSource,
+      )
+        ? (value.source as CommandExecutionSource)
+        : undefined;
       if (
         status === null ||
         (value.command !== undefined && typeof value.command !== "string") ||
+        (value.processId !== undefined &&
+          value.processId !== null &&
+          typeof value.processId !== "string") ||
+        (value.source !== undefined && source === undefined) ||
         (value.aggregatedOutput !== null &&
           typeof value.aggregatedOutput !== "string")
       )
@@ -1120,6 +1156,10 @@ export function createCodexTransport(options: {
           ...(typeof value.command === "string"
             ? { command: value.command }
             : {}),
+          ...(value.processId === null || typeof value.processId === "string"
+            ? { processId: value.processId }
+            : {}),
+          ...(source === undefined ? {} : { source }),
           output: value.aggregatedOutput,
         },
       };
@@ -1533,6 +1573,38 @@ export function createCodexTransport(options: {
     };
   }
 
+  function parseBackgroundTerminal(
+    value: unknown,
+  ): ThreadBackgroundTerminal | null {
+    if (
+      !isRecord(value) ||
+      typeof value.itemId !== "string" ||
+      typeof value.processId !== "string" ||
+      typeof value.command !== "string" ||
+      typeof value.cwd !== "string" ||
+      (value.osPid !== null &&
+        (typeof value.osPid !== "number" ||
+          !Number.isSafeInteger(value.osPid))) ||
+      (value.cpuPercent !== null &&
+        (typeof value.cpuPercent !== "number" ||
+          !Number.isFinite(value.cpuPercent))) ||
+      (value.rssKb !== null &&
+        (typeof value.rssKb !== "number" ||
+          !Number.isSafeInteger(value.rssKb) ||
+          value.rssKb < 0))
+    )
+      return null;
+    return {
+      itemId: value.itemId,
+      processId: value.processId,
+      command: value.command,
+      cwd: value.cwd,
+      osPid: value.osPid as number | null,
+      cpuPercent: value.cpuPercent as number | null,
+      rssKb: value.rssKb === null ? null : BigInt(value.rssKb as number),
+    };
+  }
+
   function parseResponseResult(
     method: CodexRequestMethod,
     result: unknown,
@@ -1549,6 +1621,24 @@ export function createCodexTransport(options: {
     if (method === "turn/steer")
       return typeof result.turnId === "string" && result.turnId.length > 0
         ? { turnId: result.turnId }
+        : null;
+    if (method === "thread/backgroundTerminals/list") {
+      if (
+        !Array.isArray(result.data) ||
+        (result.nextCursor !== null && typeof result.nextCursor !== "string")
+      )
+        return null;
+      const data: ThreadBackgroundTerminal[] = [];
+      for (const value of result.data) {
+        const terminal = parseBackgroundTerminal(value);
+        if (terminal === null) return null;
+        data.push(terminal);
+      }
+      return { data, nextCursor: result.nextCursor as string | null };
+    }
+    if (method === "thread/backgroundTerminals/terminate")
+      return typeof result.terminated === "boolean"
+        ? { terminated: result.terminated }
         : null;
     if (method === "model/list") {
       if (!Array.isArray(result.data)) return null;
@@ -1773,7 +1863,7 @@ export function createCodexTransport(options: {
     isClosed: () => closed,
     request<TMethod extends CodexRequestMethod>(
       method: TMethod,
-      params: unknown,
+      params: CodexRequestParamsMap[TMethod],
     ): Promise<CodexRequestResultMap[TMethod]> {
       if (closed) {
         return Promise.reject(new CodexTransportClosedError());

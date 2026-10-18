@@ -334,6 +334,7 @@ describe("codex driver", () => {
                 ],
               },
               { type: "localImage", path: imagePath, detail: "high" },
+              { type: "image", fileId: "native-file-1", detail: "low" },
               { type: "localAudio", path: audioPath },
               { type: "skill", name: "review", path: "/private/skill.md" },
             ],
@@ -362,6 +363,12 @@ describe("codex driver", () => {
               source: "bytes",
               data: imageBytes.toString("base64"),
               detail: "high",
+            },
+            {
+              type: "opaque",
+              harness: "codex",
+              nativeType: "image",
+              value: { type: "image", fileId: "native-file-1", detail: "low" },
             },
             {
               type: "audio",
@@ -610,6 +617,9 @@ describe("codex driver", () => {
 
     const methods = fake.controls.requests().map((request) => request.method);
     expect(methods).toEqual(["initialize", "thread/start", "turn/start"]);
+    expect(fake.controls.requests()[0]?.params).toMatchObject({
+      capabilities: { experimentalApi: true, requestAttestation: false },
+    });
     const threadStart = fake.controls.requests()[1];
     expect(threadStart?.params).toEqual({
       ephemeral: false,
@@ -1578,6 +1588,143 @@ describe("codex driver", () => {
       stopReason: "cancelled",
       finalReply: null,
     });
+  });
+
+  test("interrupt 后只终止原生当前回合精确关联的 unified exec", async () => {
+    const { fake, driver } = await setup();
+    await flush();
+    fake.controls.setResponse("thread/backgroundTerminals/list", {
+      data: [
+        {
+          itemId: "old-turn-exec",
+          processId: "native-old",
+          command: "old",
+          cwd: "/tmp/demo",
+          osPid: 101,
+          cpuPercent: 0,
+          rssKb: null,
+        },
+        {
+          itemId: "exec-current",
+          processId: "native-current",
+          command: "current",
+          cwd: "/tmp/demo",
+          osPid: 202,
+          cpuPercent: 0,
+          rssKb: null,
+        },
+      ],
+      nextCursor: null,
+    });
+    fake.controls.setResponse("thread/backgroundTerminals/terminate", {
+      terminated: true,
+    });
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        turnId: "turn1",
+        item: {
+          type: "commandExecution",
+          id: "exec-current",
+          status: "inProgress",
+          processId: "native-current",
+          source: "unifiedExecStartup",
+          output: null,
+        },
+      },
+    });
+    await flush();
+
+    await driver.interrupt(sessionId, firstTurnId);
+
+    expect(
+      fake.controls
+        .requests()
+        .filter(({ method }) =>
+          method.startsWith("thread/backgroundTerminals/"),
+        ),
+    ).toEqual([
+      {
+        method: "thread/backgroundTerminals/list",
+        params: { threadId: "thr1" },
+      },
+      {
+        method: "thread/backgroundTerminals/terminate",
+        params: { threadId: "thr1", processId: "native-current" },
+      },
+    ]);
+  });
+
+  test("interrupt 已接受后终端列表失败仍保留 ACK 并归因原回合", async () => {
+    const { diagnostics, events, fake, driver } = await setup();
+    await flush();
+    const listing = deferred<{ data: []; nextCursor: null }>();
+    fake.controls.setResponse(
+      "thread/backgroundTerminals/list",
+      listing.promise,
+    );
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        turnId: "turn1",
+        item: {
+          type: "commandExecution",
+          id: "exec-current",
+          status: "inProgress",
+          processId: "native-current",
+          source: "unifiedExecInteraction",
+          output: null,
+        },
+      },
+    });
+    await flush();
+
+    const interrupt = driver.interrupt(sessionId, firstTurnId);
+    await flush();
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "turn/completed",
+      params: { turn: { id: "turn1", status: "interrupted", error: null } },
+    });
+    await flush();
+    await driver.deliver(sessionId, secondTurnId, "next task", "new_turn");
+    listing.reject(new CodexRequestError("terminal list unavailable"));
+    await expect(interrupt).resolves.toBeUndefined();
+
+    expect(
+      fake.controls
+        .requests()
+        .filter(({ method }) =>
+          method.startsWith("thread/backgroundTerminals/"),
+        ),
+    ).toEqual([
+      {
+        method: "thread/backgroundTerminals/list",
+        params: { threadId: "thr1" },
+      },
+    ]);
+    expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        kind: "request_failure",
+        operation: "interrupt",
+        stage: "interrupt",
+        reason: "rejected",
+        sessionId,
+        turnId: firstTurnId,
+      }),
+    );
+    expect(events).toContainEqual(
+      expect.objectContaining({
+        type: "turn.completed",
+        turnId: firstTurnId,
+        stopReason: "cancelled",
+      }),
+    );
+    expect(events.filter((event) => event.type === "tool.completed")).toEqual(
+      [],
+    );
   });
 
   test("terminate 走 thread/delete 并关闭传输，不补发 failed", async () => {

@@ -1,6 +1,7 @@
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
+import type { InitializeCapabilities } from "./generated/InitializeCapabilities.ts";
 import type { CodexTransport } from "./transport.ts";
 
 type HomeInitialization = {
@@ -19,7 +20,10 @@ async function startAndInitialize(transport: CodexTransport): Promise<void> {
   transport.start();
   await transport.request("initialize", {
     clientInfo: { name: "reins", title: null, version: "0.0.0" },
-    capabilities: null,
+    capabilities: {
+      experimentalApi: true,
+      requestAttestation: false,
+    } satisfies InitializeCapabilities,
   });
   transport.notify("initialized", {});
 }

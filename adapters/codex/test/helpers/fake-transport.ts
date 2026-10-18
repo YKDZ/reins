@@ -50,6 +50,8 @@ export function createFakeTransport(): {
     "turn/interrupt": {},
     "thread/delete": {},
     "model/list": { data: [] },
+    "thread/backgroundTerminals/list": { data: [], nextCursor: null },
+    "thread/backgroundTerminals/terminate": { terminated: false },
   };
 
   const transport: CodexTransport = {

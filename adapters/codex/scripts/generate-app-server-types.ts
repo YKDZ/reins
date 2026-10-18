@@ -24,12 +24,27 @@ const roots = [
   "v2/UserInput.ts",
   "v2/ModelListResponse.ts",
 ];
+const experimentalRoots = [
+  "InitializeCapabilities.ts",
+  "v2/ThreadBackgroundTerminalsListParams.ts",
+  "v2/ThreadBackgroundTerminalsListResponse.ts",
+  "v2/ThreadBackgroundTerminalsTerminateParams.ts",
+  "v2/ThreadBackgroundTerminalsTerminateResponse.ts",
+];
 
 const output = fileURLToPath(new URL("../src/generated/", import.meta.url));
 const tmp = mkdtempSync(join(tmpdir(), "codex-app-server-types-"));
+const experimentalTmp = mkdtempSync(
+  join(tmpdir(), "codex-app-server-types-experimental-"),
+);
 execFileSync("codex", ["app-server", "generate-ts", "--out", tmp], {
   stdio: "inherit",
 });
+execFileSync(
+  "codex",
+  ["app-server", "generate-ts", "--experimental", "--out", experimentalTmp],
+  { stdio: "inherit" },
+);
 const version = execFileSync("codex", ["--version"], {
   encoding: "utf8",
 }).trim();
@@ -44,19 +59,20 @@ function resolveImport(fromFile: string, spec: string): string {
   return normalized.join("/");
 }
 
-const copied = new Set<string>();
+const copied = new Map<string, string>();
 
-function collect(file: string): void {
+function collect(file: string, sourceRoot: string): void {
   if (copied.has(file)) return;
-  copied.add(file);
-  const text = readFileSync(join(tmp, file), "utf8");
+  copied.set(file, sourceRoot);
+  const text = readFileSync(join(sourceRoot, file), "utf8");
   for (const match of text.matchAll(/from "(\.[^"]+)"/g)) {
     const spec = match[1];
     if (spec === undefined) continue;
     const resolved = resolveImport(file, spec);
-    if (existsSync(join(tmp, `${resolved}.ts`))) collect(`${resolved}.ts`);
-    else if (existsSync(join(tmp, resolved, "index.ts"))) {
-      collect(join(resolved, "index.ts"));
+    if (existsSync(join(sourceRoot, `${resolved}.ts`)))
+      collect(`${resolved}.ts`, sourceRoot);
+    else if (existsSync(join(sourceRoot, resolved, "index.ts"))) {
+      collect(join(resolved, "index.ts"), sourceRoot);
     }
   }
 }
@@ -71,17 +87,20 @@ function rewriteImports(text: string, sourceDir: string): string {
   });
 }
 
-for (const root of roots) collect(root);
+for (const root of roots) collect(root, tmp);
+for (const root of experimentalRoots) collect(root, experimentalTmp);
 rmSync(output, { recursive: true, force: true });
-for (const file of copied) {
-  const sourceDir = join(tmp, file.split("/").slice(0, -1).join("/"));
+for (const [file, sourceRoot] of copied) {
+  const sourceDir = join(sourceRoot, file.split("/").slice(0, -1).join("/"));
   const dest = join(output, file);
   mkdirSync(join(dest, ".."), { recursive: true });
   writeFileSync(
     dest,
-    rewriteImports(readFileSync(join(tmp, file), "utf8"), sourceDir),
+    rewriteImports(readFileSync(join(sourceRoot, file), "utf8"), sourceDir),
   );
 }
+rmSync(tmp, { recursive: true, force: true });
+rmSync(experimentalTmp, { recursive: true, force: true });
 console.log(
   `Generated ${copied.size} file(s) from ${version} into src/generated/`,
 );

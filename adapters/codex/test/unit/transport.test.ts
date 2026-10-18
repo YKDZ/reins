@@ -586,6 +586,52 @@ describe("codex transport", () => {
     await transport.close();
   });
 
+  test("commandExecution 保留原生 source 与 processId 供精确终端关联", async () => {
+    const fake = fakeChild();
+    const transport = createCodexTransport({ spawnChild: () => fake.child });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: "item/started",
+        params: {
+          turnId: "native-turn",
+          item: {
+            type: "commandExecution",
+            id: "exec-interaction",
+            status: "inProgress",
+            command: "write_stdin",
+            processId: "native-process",
+            source: "unifiedExecInteraction",
+            aggregatedOutput: null,
+          },
+        },
+      })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: {
+        kind: "notification",
+        method: "item/started",
+        params: {
+          turnId: "native-turn",
+          item: {
+            type: "commandExecution",
+            id: "exec-interaction",
+            status: "inProgress",
+            command: "write_stdin",
+            processId: "native-process",
+            source: "unifiedExecInteraction",
+            output: null,
+          },
+        },
+      },
+    });
+    await transport.close();
+  });
+
   test("userMessage 保留结构化输入、路径引用与原生 turn 关联", async () => {
     const fake = fakeChild();
     const transport = createCodexTransport({ spawnChild: () => fake.child });
@@ -1221,6 +1267,105 @@ describe("codex transport", () => {
       operation: "validate_worker_response",
       reason: "invalid_shape",
     });
+    await transport.close();
+  });
+
+  test("解析官方后台终端 list 与 terminate 响应", async () => {
+    const fake = fakeChild();
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const transport = createCodexTransport({
+      diagnostics: async (input) => {
+        diagnostics.push(input);
+        return undefined;
+      },
+      spawnChild: () => fake.child,
+    });
+    transport.start();
+    const listing = transport.request("thread/backgroundTerminals/list", {
+      threadId: "thread-1",
+    });
+    const terminating = transport.request(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-1" },
+    );
+    await tick(1);
+    fake.stdout.write(
+      `${JSON.stringify({
+        id: 1,
+        result: {
+          data: [
+            {
+              itemId: "item-1",
+              processId: "process-1",
+              command: "node app.js",
+              cwd: "/tmp/work",
+              osPid: 42,
+              cpuPercent: 1.5,
+              rssKb: 96,
+            },
+          ],
+          nextCursor: null,
+        },
+      })}\n${JSON.stringify({ id: 2, result: { terminated: true } })}\n`,
+    );
+
+    await expect(listing).resolves.toEqual({
+      data: [
+        {
+          itemId: "item-1",
+          processId: "process-1",
+          command: "node app.js",
+          cwd: "/tmp/work",
+          osPid: 42,
+          cpuPercent: 1.5,
+          rssKb: 96n,
+        },
+      ],
+      nextCursor: null,
+    });
+    await expect(terminating).resolves.toEqual({ terminated: true });
+    expect(diagnostics).toEqual([]);
+    await transport.close();
+  });
+
+  test("拒绝畸形后台终端 list 与 terminate 响应", async () => {
+    const fake = fakeChild();
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const transport = createCodexTransport({
+      diagnostics: async (input) => {
+        diagnostics.push(input);
+        return undefined;
+      },
+      spawnChild: () => fake.child,
+    });
+    transport.start();
+    const listing = transport.request("thread/backgroundTerminals/list", {
+      threadId: "thread-1",
+    });
+    const terminating = transport.request(
+      "thread/backgroundTerminals/terminate",
+      { threadId: "thread-1", processId: "process-1" },
+    );
+    await tick(1);
+    fake.stdout.write(
+      `${JSON.stringify({
+        id: 1,
+        result: { data: [{ itemId: "item-1" }], nextCursor: 3 },
+      })}\n${JSON.stringify({ id: 2, result: { terminated: "true" } })}\n`,
+    );
+
+    await expect(listing).rejects.toThrow("invalid shape");
+    await expect(terminating).rejects.toThrow("invalid shape");
+    expect(diagnostics).toHaveLength(2);
+    expect(diagnostics).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          kind: "protocol_violation",
+          operation: "validate_worker_response",
+          reason: "invalid_shape",
+        }),
+      ]),
+    );
     await transport.close();
   });
 

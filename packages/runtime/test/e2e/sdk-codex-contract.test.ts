@@ -840,6 +840,127 @@ test.skipIf(!live)(
         reason: "cancelled",
       });
 
+      const interruptToolRequestIndex = providerRequests.length + 1;
+      const interruptToolSession = await activeConnection.spawn({
+        harness: "codex",
+        cwd: directory,
+        message: "INTERRUPT_RUNNING_BUILTIN_TOOL",
+        authorizationMode: "allowAll",
+      });
+      const interruptToolHistory = await activeConnection.attach(
+        { scope: "turn", turnHandle: interruptToolSession.turnHandle },
+        { mode: "history" },
+      );
+      const interruptToolRequest = await waitForProviderRequest(
+        providerRequests,
+        interruptToolRequestIndex,
+      );
+      const interruptToolCommand = `node -e 'const fs=require("node:fs");fs.writeFileSync("interrupt-tool-started",String(process.pid));const timer=setInterval(()=>{if(fs.existsSync("release-interrupt-tool")){clearInterval(timer);fs.writeFileSync("interrupt-tool-late","late")}},25)'`;
+      completeToolCall(
+        interruptToolRequest,
+        interruptToolRequestIndex,
+        "exec_command",
+        { cmd: interruptToolCommand, workdir: directory },
+      );
+      const interruptToolFacts: AgentFact[] = [];
+      let interruptedTool:
+        | Extract<AgentFact, { type: "tool.requested" }>
+        | undefined;
+      while (interruptedTool === undefined) {
+        const item = await interruptToolHistory.next();
+        if (item.done) throw new Error("待中断回合未启动内置工具");
+        interruptToolFacts.push(item.value);
+        interruptToolHistory.acknowledge(item.value);
+        if (
+          item.value.type === "tool.requested" &&
+          item.value.name === "commandExecution"
+        )
+          interruptedTool = item.value;
+      }
+      expect(interruptedTool.input).toContain("interrupt-tool-started");
+      const interruptToolPid = Number(
+        await waitForFile(join(directory, "interrupt-tool-started")),
+      );
+      expect(Number.isInteger(interruptToolPid)).toBe(true);
+      await expect(
+        activeConnection.interrupt(
+          { turnHandle: interruptToolSession.turnHandle },
+          { operationKey: activeConnection.prepareOperation("interrupt") },
+        ),
+      ).resolves.toMatchObject({ status: "accepted" });
+      await expect(
+        activeConnection.wait({
+          targets: [interruptToolSession.turnHandle],
+          completion: "all",
+          timeoutMs: 20_000,
+        }),
+      ).resolves.toMatchObject({
+        status: "satisfied",
+        completed: [
+          {
+            turnHandle: interruptToolSession.turnHandle,
+            stopReason: "cancelled",
+          },
+        ],
+      });
+      await waitForProcessExit(interruptToolPid);
+      await writeFile(join(directory, "release-interrupt-tool"), "release");
+      await new Promise((resolve) => setTimeout(resolve, 100));
+      await expect(
+        readFile(join(directory, "interrupt-tool-late"), "utf8"),
+      ).rejects.toMatchObject({ code: "ENOENT" });
+      for (;;) {
+        const item = await interruptToolHistory.next();
+        if (item.done) break;
+        interruptToolFacts.push(item.value);
+        interruptToolHistory.acknowledge(item.value);
+      }
+      await expect(interruptToolHistory.done).resolves.toMatchObject({
+        reason: "cancelled",
+      });
+      expect(
+        interruptToolFacts.filter(
+          (fact) =>
+            fact.type === "tool.completed" &&
+            fact.toolKey === interruptedTool.toolKey,
+        ),
+      ).toHaveLength(0);
+
+      const afterInterruptedToolRequestIndex = providerRequests.length + 1;
+      const afterInterruptedTool = await activeConnection.send(
+        {
+          placement: "new_turn",
+          sessionHandle: interruptToolSession.sessionHandle,
+          ifLastCompletedTurn: interruptToolSession.turnHandle,
+          message: "CONTINUE_AFTER_TOOL_INTERRUPT",
+        },
+        { operationKey: activeConnection.prepareOperation("send") },
+      );
+      const afterInterruptedToolRequest = await waitForProviderRequest(
+        providerRequests,
+        afterInterruptedToolRequestIndex,
+      );
+      completeResponse(
+        afterInterruptedToolRequest,
+        afterInterruptedToolRequestIndex,
+        "INTERRUPTED_TOOL_SESSION_CONTINUED",
+      );
+      await expect(
+        activeConnection.wait({
+          targets: [afterInterruptedTool.turnHandle],
+          completion: "all",
+          timeoutMs: 20_000,
+        }),
+      ).resolves.toMatchObject({
+        status: "satisfied",
+        completed: [
+          {
+            turnHandle: afterInterruptedTool.turnHandle,
+            stopReason: "end_turn",
+          },
+        ],
+      });
+
       const history = await activeConnection.attach(
         { scope: "session", sessionHandle: spawned.sessionHandle },
         { mode: "history" },

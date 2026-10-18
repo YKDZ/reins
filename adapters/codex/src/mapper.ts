@@ -379,12 +379,21 @@ export async function codexMessageBody(
         });
         break;
       case "image":
-        parts.push({
-          type: "image",
-          source: "url",
-          url: input.url,
-          ...(input.detail === undefined ? {} : { detail: input.detail }),
-        });
+        if ("url" in input) {
+          parts.push({
+            type: "image",
+            source: "url",
+            url: input.url,
+            ...(input.detail === undefined ? {} : { detail: input.detail }),
+          });
+        } else {
+          parts.push({
+            type: "opaque",
+            harness: "codex",
+            nativeType: "image",
+            value: input,
+          });
+        }
         break;
       case "localImage":
         try {
