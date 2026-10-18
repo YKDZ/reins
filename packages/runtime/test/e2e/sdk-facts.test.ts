@@ -254,9 +254,9 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
     ])
       expect(fact).not.toHaveProperty(key);
   const operationKey = control.prepareOperation("spawn");
-  expect(
-    parseOperationKey(serializeOperationKey(operationKey), "spawn"),
-  ).toMatchObject({ kind: "spawn", consumer: expect.any(String) });
+  expect(parseOperationKey(serializeOperationKey(operationKey), "spawn")).toBe(
+    operationKey,
+  );
   expect(() =>
     parseOperationKey(serializeOperationKey(operationKey), "send"),
   ).toThrow();

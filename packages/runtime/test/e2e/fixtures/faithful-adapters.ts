@@ -1,3 +1,4 @@
+import { randomUUID } from "node:crypto";
 import { appendFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
@@ -23,11 +24,22 @@ const qoderFactory: ReturnType<typeof createQoderDriver> = (options) => {
         const endReplies = () => replies.end();
         abortSignal?.addEventListener("abort", endReplies, { once: true });
         const prompt = (async function* () {
+          let acceptedInitialInput = false;
           for await (const message of params.prompt) {
             appendFileSync(
               process.env.REINS_W05_NATIVE_LOG!,
               JSON.stringify({ method: "sdk.message", message }) + "\n",
             );
+            if (!acceptedInitialInput) {
+              acceptedInitialInput = true;
+              replies.push({
+                type: "command_lifecycle",
+                command_uuid: message.uuid,
+                state: "queued",
+                uuid: randomUUID(),
+                session_id: "00000000-0000-4000-8000-000000000001",
+              });
+            }
             if (
               typeof message.message.content === "string" &&
               ["permission", "session-permission"].includes(
