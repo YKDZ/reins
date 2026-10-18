@@ -10,6 +10,7 @@ const output = (value: unknown): void => {
 async function run(input: {
   sessionId: string;
   turnId: string;
+  messageId: string;
   message: string;
 }): Promise<void> {
   const { sessionId, turnId } = input;
@@ -17,10 +18,10 @@ async function run(input: {
     gate: string;
     completionGate?: string;
     reply: string;
-    callerMessage?: string;
     permission?: boolean;
     messages?: number;
     deltas?: number;
+    nativeCallerSnapshot?: boolean;
     replacement?: { draft: string; corrected: string };
     resolutionFile?: string;
     stopReason?: string;
@@ -35,12 +36,15 @@ async function run(input: {
     await new Promise<void>((resolve) => setTimeout(resolve, 10));
   const emit = (event: object): void =>
     output({ kind: "event", event: { sessionId, turnId, ...event } });
-  if (task.callerMessage !== undefined)
+  if (task.nativeCallerSnapshot)
     emit({
       type: "message",
-      messageId: "caller-message",
+      messageId: input.messageId,
       role: "caller",
-      content: task.callerMessage,
+      content: [
+        { type: "text", text: input.message },
+        { type: "image", source: "bytes", data: "AAEC" },
+      ],
     });
   for (let index = 0; index < (task.deltas ?? 0); index += 1)
     emit({ type: "text.delta", messageId: "unclosed", delta: "x" });
@@ -71,14 +75,20 @@ async function run(input: {
       messageId: "reply",
       role: "worker",
       content: "hello world",
+      nativeTruncated: true,
     });
   }
-  emit({ type: "tool.requested", toolCallId: "read-1", name: "read-file" });
+  emit({
+    type: "tool.requested",
+    toolCallId: "read-1",
+    name: "read-file",
+    input: { path: "report.json", options: { raw: true } },
+  });
   emit({
     type: "tool.completed",
     toolCallId: "read-1",
     name: "native-result-name",
-    result: "file contents",
+    result: { content: "file contents", metadata: { bytes: 13 } },
     isError: false,
   });
   if (task.permission) {

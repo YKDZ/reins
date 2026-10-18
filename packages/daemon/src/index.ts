@@ -1,7 +1,6 @@
 export { createDaemon, type Daemon } from "./daemon.ts";
 export {
   createProtocolServer,
-  DEFAULT_EVENT_LOG_LIMIT,
   DEFAULT_IDLE_TIMEOUT_MS,
   type ProtocolServer,
 } from "./server.ts";

@@ -44,8 +44,11 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.availableHarnesses.join(",");
     case "operation_pending":
     case "operation_outcome_unknown":
-    case "control_store_unavailable":
       return failure.facts.operationKey;
+    case "control_store_unavailable":
+      return failure.facts.stage === "event"
+        ? failure.facts.sessionHandle
+        : failure.facts.operationKey;
     case "session_busy":
       return failure.facts.sessionHandle;
     case "permission_not_pending":
@@ -57,6 +60,8 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.code;
     case "turn_not_active":
       return failure.facts.turnHandle;
+    case "turn_precondition_failed":
+      return `${failure.facts.expected}:${failure.facts.actual}`;
     case "unsupported_feature":
       return failure.facts.feature;
     case "event_cursor_expired":

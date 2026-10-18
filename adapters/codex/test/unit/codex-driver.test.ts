@@ -1,9 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 import { WorkerStartFailure } from "@reins/protocol";
 import type {
   DriverDiagnosticFact,
   DomainEvent,
+  MessageId,
   PermissionId,
   SessionId,
   TurnId,
@@ -137,7 +141,9 @@ test("结构化额度失败不从正文猜测限流，停止等待在途失败�
 async function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
   terminateTimeoutMs?: number,
-  workerOverrides: Partial<Pick<WorkerSpec, "model" | "reasoning">> = {},
+  workerOverrides: Partial<
+    Pick<WorkerSpec, "model" | "reasoning" | "messageId">
+  > = {},
 ): Promise<{
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
@@ -240,6 +246,96 @@ async function setupWithMalformedResponse(
 }
 
 describe("codex driver", () => {
+  test("caller 原生正文复用核心消息 ID 并在事件提交前读取本地附件", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-codex-body-"));
+    const imagePath = join(directory, "image.bin");
+    const audioPath = join(directory, "audio.bin");
+    const imageBytes = Buffer.from([0, 1, 2, 255]);
+    const audioBytes = Buffer.from([9, 8, 7]);
+    await writeFile(imagePath, imageBytes);
+    await writeFile(audioPath, audioBytes);
+    const messageId = "m-core-first" as MessageId;
+    try {
+      const { events, fake } = await setup("interactive", undefined, {
+        messageId,
+      });
+      fake.controls.pushInbound({
+        kind: "notification",
+        method: "item/started",
+        params: {
+          item: {
+            type: "userMessage",
+            id: "native-user-1",
+            clientId: null,
+            content: [{ type: "text", text: "检查", text_elements: [] }],
+          },
+        },
+      });
+      fake.controls.pushInbound({
+        kind: "notification",
+        method: "item/completed",
+        params: {
+          turnId: "turn1",
+          item: {
+            type: "userMessage",
+            id: "native-user-1",
+            clientId: null,
+            content: [
+              {
+                type: "text",
+                text: "检查",
+                text_elements: [
+                  {
+                    byteRange: { start: 0, end: 6 },
+                    placeholder: null,
+                  },
+                ],
+              },
+              { type: "localImage", path: imagePath, detail: "high" },
+              { type: "localAudio", path: audioPath },
+              { type: "skill", name: "review", path: "/private/skill.md" },
+            ],
+          },
+        },
+      });
+      await flush();
+
+      expect(events).toEqual([
+        {
+          type: "message",
+          sessionId,
+          turnId: firstTurnId,
+          messageId,
+          role: "caller",
+          content: [
+            {
+              type: "text",
+              text: "检查",
+              textElements: [
+                { byteRange: { start: 0, end: 6 }, placeholder: null },
+              ],
+            },
+            {
+              type: "image",
+              source: "bytes",
+              data: imageBytes.toString("base64"),
+              detail: "high",
+            },
+            {
+              type: "audio",
+              source: "bytes",
+              data: audioBytes.toString("base64"),
+            },
+            { type: "reference", referenceType: "skill", name: "review" },
+          ],
+        },
+      ]);
+      expect(JSON.stringify(events)).not.toContain(directory);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   test("冷 HOME 首次 initialize 成功前排队，之后 worker 可并发初始化", async () => {
     const previousHome = process.env.CODEX_HOME;
     process.env.CODEX_HOME = `/tmp/reins-codex-cold-${randomUUID()}`;
@@ -699,6 +795,7 @@ describe("codex driver", () => {
           type: "commandExecution",
           id: "e1",
           status: "inProgress",
+          command: "ls --all",
           output: null,
         },
       },
@@ -711,6 +808,7 @@ describe("codex driver", () => {
           type: "commandExecution",
           id: "e1",
           status: "failed",
+          command: "ls --all",
           output: "not found",
         },
       },
@@ -729,6 +827,7 @@ describe("codex driver", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "commandExecution",
+        input: "ls --all",
       },
       {
         type: "tool.completed",
@@ -738,6 +837,74 @@ describe("codex driver", () => {
         name: "commandExecution",
         result: "not found",
         isError: true,
+      },
+    ]);
+  });
+
+  test("动态工具关联保留参数、输出与 Reins 工具调用身份", async () => {
+    const { events, fake } = await setup();
+    await flush();
+    const argumentsValue = { query: "全文", options: ["raw"] };
+    const contentItems = [
+      { type: "inputText", text: "完整输出" },
+      { type: "inputImage", imageUrl: "data:image/png;base64,AAAA" },
+    ];
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/started",
+      params: {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-1",
+          namespace: "search",
+          tool: "query",
+          status: "inProgress",
+          arguments: argumentsValue,
+          contentItems: null,
+          success: null,
+        },
+      },
+    });
+    fake.controls.pushInbound({
+      kind: "notification",
+      method: "item/completed",
+      params: {
+        item: {
+          type: "dynamicToolCall",
+          id: "dynamic-1",
+          namespace: "search",
+          tool: "query",
+          status: "completed",
+          arguments: argumentsValue,
+          contentItems,
+          success: true,
+        },
+      },
+    });
+    await flush();
+
+    expect(
+      events.filter(
+        (event) =>
+          event.type === "tool.requested" || event.type === "tool.completed",
+      ),
+    ).toEqual([
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "search.query",
+        input: argumentsValue,
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: firstTurnId,
+        toolCallId: "c1",
+        name: "search.query",
+        result: contentItems,
+        isError: false,
       },
     ]);
   });

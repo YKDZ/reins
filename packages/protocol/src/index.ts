@@ -427,12 +427,16 @@ export const spawnAckSchema = v.strictObject({
 });
 export type SpawnAck = v.InferOutput<typeof spawnAckSchema>;
 
+export const newTurnSendParamsSchema = v.strictObject({
+  placement: v.literal("new_turn"),
+  sessionId: sessionIdSchema,
+  ifLastCompletedTurn: v.optional(turnTargetSchema),
+  message: v.string(),
+});
+export type NewTurnSendParams = v.InferOutput<typeof newTurnSendParamsSchema>;
+
 export const sendParamsSchema = v.variant("placement", [
-  v.strictObject({
-    placement: v.literal("new_turn"),
-    sessionId: sessionIdSchema,
-    message: v.string(),
-  }),
+  newTurnSendParamsSchema,
   v.strictObject({
     placement: v.literal("active_turn"),
     sessionId: sessionIdSchema,
@@ -650,6 +654,91 @@ export const eventWindowSchema = v.strictObject({
   head: v.nullable(eventIdSchema),
 });
 
+const messageByteRangeSchema = v.pipe(
+  v.strictObject({
+    start: v.pipe(v.number(), v.integer(), v.minValue(0)),
+    end: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  }),
+  v.check((range) => range.end >= range.start),
+);
+export const messageTextElementSchema = v.strictObject({
+  byteRange: messageByteRangeSchema,
+  placeholder: v.nullable(v.string()),
+});
+export const messageContentPartSchema = v.union([
+  v.strictObject({
+    type: v.literal("text"),
+    text: v.string(),
+    textElements: v.optional(v.array(messageTextElementSchema)),
+    annotations: v.optional(v.unknown()),
+  }),
+  v.strictObject({
+    type: v.literal("thinking"),
+    text: v.string(),
+    signature: v.optional(v.string()),
+  }),
+  v.strictObject({ type: v.literal("redacted_thinking"), data: v.string() }),
+  v.strictObject({
+    type: v.literal("image"),
+    source: v.literal("url"),
+    url: v.string(),
+    detail: v.optional(v.picklist(["auto", "low", "high", "original"])),
+  }),
+  v.strictObject({
+    type: v.literal("image"),
+    source: v.literal("bytes"),
+    data: v.string(),
+    mediaType: v.optional(v.string()),
+    detail: v.optional(v.picklist(["auto", "low", "high", "original"])),
+  }),
+  v.strictObject({
+    type: v.literal("audio"),
+    source: v.literal("url"),
+    url: v.string(),
+  }),
+  v.strictObject({
+    type: v.literal("audio"),
+    source: v.literal("bytes"),
+    data: v.string(),
+    mediaType: v.optional(v.string()),
+  }),
+  v.strictObject({
+    type: v.literal("image"),
+    source: v.literal("unavailable"),
+    reason: v.literal("read_failed"),
+  }),
+  v.strictObject({
+    type: v.literal("audio"),
+    source: v.literal("unavailable"),
+    reason: v.literal("read_failed"),
+  }),
+  v.strictObject({
+    type: v.literal("reference"),
+    referenceType: v.picklist(["skill", "mention"]),
+    name: v.string(),
+  }),
+  v.strictObject({
+    type: v.literal("tool_call"),
+    toolCallId: toolCallIdSchema,
+  }),
+  v.strictObject({
+    type: v.literal("tool_result"),
+    toolCallId: toolCallIdSchema,
+  }),
+  v.strictObject({
+    type: v.literal("opaque"),
+    harness: harnessIdSchema,
+    nativeType: v.string(),
+    value: v.unknown(),
+  }),
+]);
+export type MessageContentPart = v.InferOutput<typeof messageContentPartSchema>;
+export const messageContentSchema = v.union([
+  v.string(),
+  v.array(messageContentPartSchema),
+]);
+export type MessageContent = v.InferOutput<typeof messageContentSchema>;
+
 export const killResultSchema = v.strictObject({
   sessionId: sessionIdSchema,
   status: v.union([v.literal("killed"), v.literal("not_found")]),
@@ -744,7 +833,9 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     messageId: messageIdSchema,
     role: v.union([v.literal("caller"), v.literal("worker")]),
-    content: v.string(),
+    content: messageContentSchema,
+    // 仅上游明确报告截断时标记；缺省不表示 Reins 历史存在缺口。
+    nativeTruncated: v.optional(v.literal(true)),
   }),
   v.strictObject({
     type: v.literal("tool.requested"),
@@ -752,6 +843,7 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     toolCallId: toolCallIdSchema,
     name: v.string(),
+    input: v.optional(v.unknown()),
   }),
   v.strictObject({
     type: v.literal("tool.completed"),
@@ -759,7 +851,8 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     toolCallId: toolCallIdSchema,
     name: v.string(),
-    result: v.nullable(v.string()),
+    result: v.unknown(),
+    error: v.optional(v.unknown()),
     isError: v.boolean(),
   }),
   v.strictObject({
@@ -2195,6 +2288,7 @@ export type DiagnosticsResult = v.InferOutput<typeof diagnosticsResultSchema>;
 
 export const errorCodeSchema = v.union([
   v.literal("session_busy"),
+  v.literal("turn_precondition_failed"),
   v.literal("turn_not_active"),
   v.literal("session_not_found"),
   v.literal("session_killed"),
@@ -2324,6 +2418,12 @@ export const machineErrorSchema = v.union([
     sessionId: sessionIdSchema,
   }),
   v.strictObject({
+    code: v.literal("turn_precondition_failed"),
+    sessionId: sessionIdSchema,
+    expected: turnIdSchema,
+    actual: turnIdSchema,
+  }),
+  v.strictObject({
     code: v.literal("turn_not_active"),
     ...turnTargetSchema.entries,
   }),
@@ -2347,8 +2447,55 @@ export const machineErrorSchema = v.union([
     stage: v.picklist(["register", "dispatch", "commit", "failure"]),
     acceptance: v.picklist(["not_dispatched", "unknown", "accepted"]),
     cause: errorCauseSchema,
-    acceptedResult: v.optional(spawnAckSchema),
+    acceptedResult: v.optional(v.union([spawnAckSchema, sendAckSchema])),
     cleanupCause: v.optional(errorCauseSchema),
+  }),
+  v.strictObject({
+    code: v.literal("control_store_unavailable"),
+    stage: v.literal("event"),
+    sessionId: sessionIdSchema,
+    eventType: v.picklist([
+      "session.created",
+      "turn.started",
+      "text.delta",
+      "message",
+      "tool.requested",
+      "tool.completed",
+      "permission.requested",
+      "permission.resolved",
+      "turn.completed",
+      "session.killed",
+    ]),
+    turnId: v.optional(turnIdSchema),
+    cause: errorCauseSchema,
+    cleanupCause: v.optional(errorCauseSchema),
+    cleanupSessionId: v.optional(sessionIdSchema),
+  }),
+  v.strictObject({
+    code: v.literal("control_store_unavailable"),
+    stage: v.literal("event_commit"),
+    operationKey: v.pipe(
+      operationKeySchema,
+      v.check((value) => parseOperationKey(value).kind === "kill"),
+    ),
+    acceptance: v.literal("accepted"),
+    sessionId: sessionIdSchema,
+    eventType: v.picklist([
+      "session.created",
+      "turn.started",
+      "text.delta",
+      "message",
+      "tool.requested",
+      "tool.completed",
+      "permission.requested",
+      "permission.resolved",
+      "turn.completed",
+      "session.killed",
+    ]),
+    turnId: v.optional(turnIdSchema),
+    cause: errorCauseSchema,
+    cleanupCause: v.optional(errorCauseSchema),
+    cleanupSessionId: v.optional(sessionIdSchema),
   }),
   v.strictObject({
     code: v.literal("session_not_found"),
@@ -2461,6 +2608,20 @@ export class WorkerStartFailure extends Error {
   }
 }
 
+export class WorkerDeliveryFailure extends Error {
+  readonly acceptance: "not_accepted" | "unknown";
+
+  constructor(
+    message: string,
+    acceptance: "not_accepted" | "unknown",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "WorkerDeliveryFailure";
+    this.acceptance = acceptance;
+  }
+}
+
 export function isDriverFailure(error: unknown): error is DriverFailure {
   return (
     error instanceof DriverFailure &&
@@ -2471,6 +2632,7 @@ export function isDriverFailure(error: unknown): error is DriverFailure {
 export type WorkerSpec = {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
+  readonly messageId?: MessageId;
   readonly harness: HarnessId;
   readonly message: string;
   readonly agent?: string;
@@ -2485,12 +2647,14 @@ export type WorkerSpec = {
 export interface WorkerDriver {
   // 等到原生确认创建请求已接受后才完成；内容事件通过 emit 流入 core。
   start(spec: WorkerSpec): Promise<void>;
-  // 把消息交给 worker；turnId 标识它所属的回合。
+  // resolve 表示 worker 已确认接受消息；拒绝时用 WorkerDeliveryFailure
+  // 区分明确未接受与接受结果未知。
   deliver(
     sessionId: SessionId,
     turnId: TurnId,
     message: string,
     placement: SendParams["placement"],
+    messageId?: MessageId,
   ): Promise<void>;
   // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
   interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;
@@ -2671,50 +2835,119 @@ export const attachResultSchema = v.strictObject({
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 
+export type RecoverableOperationKind = "spawn" | "send";
+
+type RecoverableOperationResult = { spawn: SpawnAck; send: SendAck };
+
+export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
+  | {
+      readonly status: "unknown" | "unavailable" | "pending";
+      readonly operationKey: OperationKey<Kind>;
+    }
+  | {
+      readonly status: "outcome_unknown";
+      readonly operationKey: OperationKey<Kind>;
+      readonly cause?: ErrorCause;
+      readonly cleanupCause?: ErrorCause;
+      readonly diagnosticId?: DiagnosticId;
+    }
+  | {
+      readonly status: "succeeded";
+      readonly operationKey: OperationKey<Kind>;
+      readonly result: RecoverableOperationResult[Kind];
+    }
+  | {
+      readonly status: "failed";
+      readonly operationKey: OperationKey<Kind>;
+      readonly error: MachineError;
+    }
+  | {
+      readonly status: "not_accepted_uncommitted" | "not_accepted_unconfirmed";
+      readonly operationKey: OperationKey<Kind>;
+      readonly error: MachineError;
+      readonly cause: ErrorCause;
+    }
+  | {
+      readonly status: "accepted_uncommitted" | "accepted_unconfirmed";
+      readonly operationKey: OperationKey<Kind>;
+      readonly result: RecoverableOperationResult[Kind];
+      readonly cause: ErrorCause;
+      readonly cleanupCause?: ErrorCause;
+    };
+
+export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
+  kind: Kind,
+): v.GenericSchema<unknown, OperationRecordForKind<Kind>> {
+  const keySchema = v.pipe(
+    operationKeySchema,
+    v.check((operationKey) => {
+      try {
+        return parseOperationKey(operationKey).kind === kind;
+      } catch {
+        return false;
+      }
+    }),
+  );
+  const resultSchema = kind === "spawn" ? spawnAckSchema : sendAckSchema;
+  return v.union([
+    v.strictObject({
+      status: v.literal("unknown"),
+      operationKey: keySchema,
+    }),
+    v.strictObject({
+      status: v.literal("unavailable"),
+      operationKey: keySchema,
+    }),
+    v.strictObject({
+      status: v.literal("pending"),
+      operationKey: keySchema,
+    }),
+    v.strictObject({
+      status: v.literal("outcome_unknown"),
+      operationKey: keySchema,
+      cause: v.optional(errorCauseSchema),
+      cleanupCause: v.optional(errorCauseSchema),
+      diagnosticId: v.optional(diagnosticIdSchema),
+    }),
+    v.strictObject({
+      status: v.literal("succeeded"),
+      operationKey: keySchema,
+      result: resultSchema,
+    }),
+    v.strictObject({
+      status: v.literal("failed"),
+      operationKey: keySchema,
+      error: machineErrorSchema,
+    }),
+    v.strictObject({
+      status: v.picklist([
+        "not_accepted_uncommitted",
+        "not_accepted_unconfirmed",
+      ]),
+      operationKey: keySchema,
+      error: machineErrorSchema,
+      cause: errorCauseSchema,
+    }),
+    v.strictObject({
+      status: v.literal("accepted_uncommitted"),
+      operationKey: keySchema,
+      result: resultSchema,
+      cause: errorCauseSchema,
+      cleanupCause: v.optional(errorCauseSchema),
+    }),
+    v.strictObject({
+      status: v.literal("accepted_unconfirmed"),
+      operationKey: keySchema,
+      result: resultSchema,
+      cause: errorCauseSchema,
+      cleanupCause: v.optional(errorCauseSchema),
+    }),
+  ]) as unknown as v.GenericSchema<unknown, OperationRecordForKind<Kind>>;
+}
+
 export const operationRecordSchema = v.union([
-  v.strictObject({
-    status: v.literal("unknown"),
-    operationKey: operationKeySchema,
-  }),
-  v.strictObject({
-    status: v.literal("unavailable"),
-    operationKey: operationKeySchema,
-  }),
-  v.strictObject({
-    status: v.literal("pending"),
-    operationKey: operationKeySchema,
-  }),
-  v.strictObject({
-    status: v.literal("outcome_unknown"),
-    operationKey: operationKeySchema,
-    cause: v.optional(errorCauseSchema),
-    cleanupCause: v.optional(errorCauseSchema),
-    diagnosticId: v.optional(diagnosticIdSchema),
-  }),
-  v.strictObject({
-    status: v.literal("succeeded"),
-    operationKey: operationKeySchema,
-    result: spawnAckSchema,
-  }),
-  v.strictObject({
-    status: v.literal("failed"),
-    operationKey: operationKeySchema,
-    error: machineErrorSchema,
-  }),
-  v.strictObject({
-    status: v.literal("accepted_uncommitted"),
-    operationKey: operationKeySchema,
-    result: spawnAckSchema,
-    cause: errorCauseSchema,
-    cleanupCause: v.optional(errorCauseSchema),
-  }),
-  v.strictObject({
-    status: v.literal("accepted_unconfirmed"),
-    operationKey: operationKeySchema,
-    result: spawnAckSchema,
-    cause: errorCauseSchema,
-    cleanupCause: v.optional(errorCauseSchema),
-  }),
+  operationRecordSchemaFor("spawn"),
+  operationRecordSchemaFor("send"),
 ]);
 export type OperationRecord = v.InferOutput<typeof operationRecordSchema>;
 

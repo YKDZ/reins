@@ -1,6 +1,8 @@
 // 接口层核心：七动作状态机与事件总线。
 export {
   createSessionMachine,
+  SendCommitFailure,
+  SendDeliveryFailure,
   SpawnCommitFailure,
   SpawnStartFailure,
   type SessionMachine,

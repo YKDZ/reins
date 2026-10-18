@@ -127,7 +127,7 @@ describe("send", () => {
     ).resolves.toEqual({
       sessionId: id,
       turnId: ids.turn("t2"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m2"),
       deliveryPoint: "new_turn",
     });
     expect(fake.controls.delivered).toEqual([
@@ -136,6 +136,7 @@ describe("send", () => {
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "turn.completed",
       "turn.started",
       "message",

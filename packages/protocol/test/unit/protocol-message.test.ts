@@ -535,6 +535,59 @@ describe("message 事件 role", () => {
     bad(domainEventSchema, { ...base, role: "user" });
   });
 
+  test("message 正文接受规范文本与多模态部分并校验文本字节范围", () => {
+    const base = {
+      type: "message",
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      turnId: "t1",
+      messageId: "m1",
+      role: "caller",
+    } as const;
+    ok(domainEventSchema, { ...base, content: "纯文本" });
+    ok(domainEventSchema, {
+      ...base,
+      content: [
+        {
+          type: "text",
+          text: "检查",
+          textElements: [
+            { byteRange: { start: 0, end: 6 }, placeholder: null },
+          ],
+        },
+        {
+          type: "image",
+          source: "bytes",
+          data: "AAEC",
+          mediaType: "image/png",
+          detail: "high",
+        },
+        { type: "audio", source: "url", url: "https://example.test/a.wav" },
+        {
+          type: "thinking",
+          text: "保留的正文部分",
+          signature: "原生公开签名",
+        },
+        { type: "redacted_thinking", data: "opaque-redacted-body" },
+      ],
+    });
+    bad(domainEventSchema, {
+      ...base,
+      content: [
+        {
+          type: "text",
+          text: "检查",
+          textElements: [
+            { byteRange: { start: 6, end: 2 }, placeholder: null },
+          ],
+        },
+      ],
+    });
+    bad(domainEventSchema, {
+      ...base,
+      content: [{ type: "image", source: "local", path: "/tmp/image.png" }],
+    });
+  });
+
   test("领域事件拒绝未知 SDK 字段", () => {
     bad(domainEventSchema, {
       type: "message",

@@ -3,6 +3,7 @@ import type { DiagnosticSink } from "@reins/adapter-kit";
 import type {
   DriverDiagnosticFact,
   DomainEvent,
+  MessageId,
   PermissionId,
   SessionId,
   TurnId,
@@ -25,13 +26,18 @@ const permissionId = "p1" as PermissionId;
 async function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
   close?: () => Promise<void>,
+  behavior: { autoQueueAcceptance?: boolean } = {},
+  messageId?: MessageId,
 ): Promise<{
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
 }> {
-  const fake = createFakeSdk(close === undefined ? {} : { close });
+  const fake = createFakeSdk({
+    ...behavior,
+    ...(close === undefined ? {} : { close }),
+  });
   const diagnostics: DriverDiagnosticFact[] = [];
   const sink: DiagnosticSink = async (input) => {
     diagnostics.push(input);
@@ -49,6 +55,7 @@ async function setup(
     harness: "qoder",
     message: "检查",
     cwd: "/tmp/demo",
+    ...(messageId === undefined ? {} : { messageId }),
     ...(authorizationMode === "omitted" ? {} : { authorizationMode }),
   });
   return { events, diagnostics, fake, driver };
@@ -165,7 +172,13 @@ const assistantThinking = (uuid: string): SDKMessage => ({
   message: {
     id: uuid,
     role: "assistant",
-    content: [{ type: "thinking", thinking: "思考中" }],
+    content: [
+      {
+        type: "thinking",
+        thinking: "思考中",
+        signature: "原生公开签名",
+      },
+    ],
   },
   parent_tool_use_id: null,
   uuid,
@@ -173,6 +186,82 @@ const assistantThinking = (uuid: string): SDKMessage => ({
 });
 
 describe("qoder driver 事件映射", () => {
+  test("caller 正文按受理 UUID 关联并保留原生结构化内容", async () => {
+    const messageId = "m-core-first" as MessageId;
+    const { events, fake, driver } = await setup(
+      "interactive",
+      undefined,
+      {},
+      messageId,
+    );
+    const submitted = fake.controls.delivered()[0];
+    if (submitted?.uuid === undefined)
+      throw new Error("Qoder did not retain the accepted input UUID");
+    fake.controls.push({
+      type: "user",
+      message: {
+        role: "user",
+        content: [
+          {
+            type: "text",
+            text: "检查",
+            citations: [{ source: "native", offset: 2 }],
+          },
+          {
+            type: "image",
+            source: { type: "base64", media_type: "image/png", data: "AAEC" },
+          },
+          {
+            type: "audio",
+            source: { type: "url", url: "https://example.test/audio.wav" },
+          },
+          { type: "thinking", thinking: "公开消息正文" },
+          { type: "custom_annotation", value: { label: "visible" } },
+        ],
+      },
+      parent_tool_use_id: null,
+      uuid: submitted.uuid,
+      session_id: "qs",
+    });
+    await flush();
+
+    expect(events.filter((event) => event.type === "message")).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId,
+        role: "caller",
+        content: [
+          {
+            type: "text",
+            text: "检查",
+            annotations: [{ source: "native", offset: 2 }],
+          },
+          {
+            type: "image",
+            source: "bytes",
+            data: "AAEC",
+            mediaType: "image/png",
+          },
+          {
+            type: "audio",
+            source: "url",
+            url: "https://example.test/audio.wav",
+          },
+          { type: "thinking", text: "公开消息正文" },
+          {
+            type: "opaque",
+            harness: "qoder",
+            nativeType: "custom_annotation",
+            value: { type: "custom_annotation", value: { label: "visible" } },
+          },
+        ],
+      },
+    ]);
+    await driver.terminate(sessionId);
+  });
+
   test("先启动reader并等待官方初始化后才提交首条输入", async () => {
     let resolveInitialization!: () => void;
     const initialization = new Promise<void>((resolve) => {
@@ -223,6 +312,37 @@ describe("qoder driver 事件映射", () => {
       acceptance: "not_accepted",
     });
     expect(fake.controls.delivered()).toEqual([]);
+    await driver.terminate(sessionId);
+  });
+
+  test("新回合等待与输入 UUID 精确匹配的 command_lifecycle queued", async () => {
+    const { fake, driver } = await setup("interactive", undefined, {
+      autoQueueAcceptance: false,
+    });
+    const delivery = driver.deliver(
+      sessionId,
+      secondTurnId,
+      "等原生入队回执",
+      "new_turn",
+    );
+    await flush();
+    const input = fake.controls.delivered().at(-1);
+    expect(input?.message.content).toBe("等原生入队回执");
+    const commandUuid = input?.uuid;
+    expect(commandUuid).toBeDefined();
+    if (commandUuid === undefined) throw new Error("Expected command UUID");
+
+    let accepted = false;
+    void delivery.then(() => {
+      accepted = true;
+    });
+    fake.controls.acknowledge("00000000-0000-4000-8000-000000000099");
+    await flush();
+    expect(accepted).toBe(false);
+
+    fake.controls.acknowledge(commandUuid);
+    await expect(delivery).resolves.toBeUndefined();
+    expect(accepted).toBe(true);
     await driver.terminate(sessionId);
   });
 
@@ -326,10 +446,21 @@ describe("qoder driver 事件映射", () => {
         )
         .map((event) => ({ type: event.type, messageId: event.messageId })),
     ).toEqual([
-      { type: "text.delta", messageId: "m1" },
-      { type: "text.delta", messageId: "m1" },
-      { type: "message", messageId: "m1" },
+      { type: "text.delta", messageId: "w1" },
+      { type: "text.delta", messageId: "w1" },
+      { type: "message", messageId: "w1" },
+      { type: "message", messageId: "w2" },
     ]);
+    expect(
+      events.find(
+        (event) => event.type === "message" && event.messageId === "w2",
+      ),
+    ).toMatchObject({
+      content: [
+        { type: "tool_call", toolCallId: "c1" },
+        { type: "tool_call", toolCallId: "c2" },
+      ],
+    });
     expect(
       events.filter(
         (event) =>
@@ -342,6 +473,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: {},
       },
       {
         type: "tool.requested",
@@ -349,6 +481,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c2",
         name: "Read",
+        input: {},
       },
       {
         type: "tool.completed",
@@ -431,6 +564,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.requested",
@@ -438,6 +572,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c2",
         name: "Read",
+        input: {},
       },
       {
         type: "tool.completed",
@@ -568,7 +703,7 @@ describe("qoder driver 事件映射", () => {
         type: "text.delta",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         delta: "可关联",
       },
     ]);
@@ -590,7 +725,7 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "AB",
       },
@@ -621,7 +756,7 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "A",
       },
@@ -670,7 +805,7 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "AB",
       },
@@ -709,14 +844,14 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "A",
       },
     ]);
   });
 
-  test("message_stop 后同 id 的不同文本保持已发布事实", async () => {
+  test("message_stop 后保持已发布的完整快照", async () => {
     const { events, fake } = await setup();
     fake.controls.push(assistantText("outer-a", "A", "native-flushed"));
     fake.controls.push({
@@ -750,7 +885,7 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "A",
       },
@@ -803,14 +938,14 @@ describe("qoder driver 事件映射", () => {
         type: "text.delta",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         delta: "A",
       },
       {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "A",
       },
@@ -839,7 +974,7 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "first",
       },
@@ -847,7 +982,7 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m2",
+        messageId: "w2",
         role: "worker",
         content: "second",
       },
@@ -880,6 +1015,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.completed",
@@ -918,7 +1054,7 @@ describe("qoder driver 事件映射", () => {
         type: "message",
         sessionId,
         turnId: firstTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "pending",
       },
@@ -972,6 +1108,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.requested",
@@ -979,6 +1116,7 @@ describe("qoder driver 事件映射", () => {
         turnId: secondTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.completed",
@@ -1016,14 +1154,14 @@ describe("qoder driver 事件映射", () => {
         type: "text.delta",
         sessionId,
         turnId: secondTurnId,
-        messageId: "m1",
+        messageId: "w1",
         delta: "two",
       },
       {
         type: "message",
         sessionId,
         turnId: secondTurnId,
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
         content: "two",
       },
@@ -1155,12 +1293,31 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
-  test("thinking 块不进入消息或诊断", async () => {
+  test("thinking 正文保留在消息事实且不生成诊断", async () => {
     const { events, fake, diagnostics } = await setup();
     fake.controls.push(assistantThinking("a4"));
+    fake.controls.push({
+      type: "stream_event",
+      event: { type: "message_stop" },
+      parent_tool_use_id: null,
+      uuid: "thinking-stop",
+      session_id: "qs",
+    });
     await flush();
 
-    expect(events.filter((event) => event.type === "message")).toEqual([]);
+    expect(events.filter((event) => event.type === "message")).toMatchObject([
+      {
+        type: "message",
+        role: "worker",
+        content: [
+          {
+            type: "thinking",
+            text: "思考中",
+            signature: "原生公开签名",
+          },
+        ],
+      },
+    ]);
     expect(diagnostics.filter((input) => input.kind !== "lifecycle")).toEqual(
       [],
     );
@@ -1187,13 +1344,20 @@ describe("qoder driver 事件映射", () => {
     fake.controls.push({
       type: "assistant",
       message: {
+        id: "a3",
         role: "assistant",
         content: [
           {
+            type: "tool_use",
+            id: "tc1",
+            name: "Bash",
+            input: { command: "printf body", options: ["--raw"] },
+          },
+          {
             type: "tool_result",
             tool_use_id: "tc1",
-            content: "ok",
-            is_error: false,
+            content: [{ type: "text", text: "完整返回正文" }],
+            is_error: true,
           },
         ],
       },
@@ -1216,6 +1380,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "printf body", options: ["--raw"] },
       },
       {
         type: "tool.completed",
@@ -1223,8 +1388,37 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
-        result: "ok",
-        isError: false,
+        result: [{ type: "text", text: "完整返回正文" }],
+        isError: true,
+      },
+    ]);
+  });
+
+  test("原生中断标记的消息正文保留截断事实", async () => {
+    const { events, fake } = await setup();
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "partial-message",
+        role: "assistant",
+        content: [{ type: "text", text: "响应在字词中" }],
+      },
+      parent_tool_use_id: null,
+      uuid: "partial-message",
+      session_id: "qs",
+      aborted: true,
+    });
+    await flush();
+
+    expect(events.filter((event) => event.type === "message")).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "w1",
+        role: "worker",
+        content: "响应在字词中",
+        nativeTruncated: true,
       },
     ]);
   });
@@ -1258,6 +1452,47 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
       }),
     ]);
+  });
+
+  test("API 失败消息在失败终态前仍保留原生公开正文", async () => {
+    const { events, fake } = await setup();
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "native-api-error",
+        role: "assistant",
+        content: [
+          { type: "thinking", thinking: "公开的思考正文" },
+          { type: "text", text: "请求失败" },
+        ],
+      },
+      parent_tool_use_id: null,
+      uuid: "api-error",
+      session_id: "qs",
+      isApiErrorMessage: true,
+      error: "invalid_request",
+    });
+    await flush();
+
+    expect(events.filter((event) => event.type === "message")).toMatchObject([
+      {
+        type: "message",
+        role: "worker",
+        content: [
+          { type: "thinking", text: "公开的思考正文" },
+          { type: "text", text: "请求失败" },
+        ],
+      },
+    ]);
+    expect(
+      events.find((event) => event.type === "turn.completed"),
+    ).toMatchObject({
+      stopReason: "failed",
+      failure: {
+        failureCategory: "request_rejected",
+        retryDisposition: "input_change",
+      },
+    });
   });
 
   test("busy 与 idle 的 clean EOF 都各记录一次 exited_unexpectedly", async () => {

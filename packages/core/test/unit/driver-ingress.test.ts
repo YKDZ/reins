@@ -107,11 +107,75 @@ describe("driver event ingress ownership", () => {
     expect(events.map(({ type }) => type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "turn.completed",
     ]);
     expect(machine.list()).toEqual([
       expect.objectContaining({ sessionId, state: "idle", turns: 1 }),
     ]);
+  });
+
+  test("accepts one late native caller snapshot for the core-assigned message", async () => {
+    const diagnostics: CoreDiagnosticFact[] = [];
+    const fake = createFakeDriver();
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: {
+        async record(input) {
+          diagnostics.push(input);
+          return undefined;
+        },
+      },
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const { sessionId, turnId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("late-caller-snapshot"),
+      harness: "codex",
+      message: "caller input",
+      cwd: "/tmp/demo",
+    });
+    const fallback = events.find(
+      (event) => event.type === "message" && event.role === "caller",
+    );
+    if (fallback?.type !== "message")
+      throw new Error("Expected the accepted caller message");
+    const complete = {
+      type: "message",
+      sessionId,
+      turnId,
+      messageId: fallback.messageId,
+      role: "caller",
+      content: [
+        { type: "text", text: "caller input" },
+        { type: "image", source: "bytes", data: "AAEC" },
+      ],
+    } satisfies DomainEvent;
+
+    fake.controls.emit(complete);
+    fake.controls.emit({
+      ...complete,
+      content: "duplicate caller snapshot",
+    });
+
+    await vi.waitFor(() => expect(diagnostics).toHaveLength(1));
+    const callerSnapshots = events.filter(
+      (event): event is Extract<DomainEvent, { type: "message" }> =>
+        event.type === "message" && event.role === "caller",
+    );
+    expect(callerSnapshots).toHaveLength(2);
+    expect(callerSnapshots.map((event) => event.messageId)).toEqual([
+      fallback.messageId,
+      fallback.messageId,
+    ]);
+    expect(callerSnapshots.at(-1)).toEqual(complete);
+    expect(diagnostics[0]).toMatchObject({
+      kind: "protocol_violation",
+      operation: "validate_worker_event",
+      reason: "message_already_completed",
+      messageId: fallback.messageId,
+    });
   });
 
   test("reports each worker lifecycle rejection from its causal event sequence", async () => {
@@ -168,7 +232,7 @@ describe("driver event ingress ownership", () => {
       type: "message",
       sessionId: active,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m4"),
       role: "worker",
       content: "secret-message",
     });
@@ -176,7 +240,7 @@ describe("driver event ingress ownership", () => {
       type: "message",
       sessionId: active,
       turnId: ids.turn("t1"),
-      messageId: ids.message("m1"),
+      messageId: ids.message("m4"),
       role: "worker",
       content: "secret-duplicate",
     });
@@ -345,7 +409,7 @@ describe("driver event ingress ownership", () => {
         eventTurnId: ids.turn("t99"),
         activeTurnId: ids.turn("t1"),
       },
-      { reason: "message_already_completed", messageId: ids.message("m1") },
+      { reason: "message_already_completed", messageId: ids.message("m4") },
       { reason: "tool_already_requested", toolCallId: ids.toolCall("c1") },
       { reason: "tool_already_completed", toolCallId: ids.toolCall("c2") },
       {
@@ -383,12 +447,16 @@ describe("driver event ingress ownership", () => {
         sessionState: "unknown",
       },
     ]);
+    const messageContents = events.flatMap((event) => {
+      if (event.type !== "message") return [];
+      return typeof event.content === "string"
+        ? [event.content]
+        : event.content.flatMap((part) => ("text" in part ? [part.text] : []));
+    });
     expect(
-      events.some(
-        (event) =>
-          "content" in event &&
-          event.content.startsWith("secret-") &&
-          event.content !== "secret-message",
+      messageContents.some(
+        (content) =>
+          content.startsWith("secret-") && content !== "secret-message",
       ),
     ).toBe(false);
     const serialized = JSON.stringify(violations);
@@ -521,7 +589,9 @@ describe("driver event ingress ownership", () => {
     await expect(
       machine.send({ placement: "new_turn", sessionId, message: "fails" }),
     ).rejects.toMatchObject({
-      code: "internal_error",
+      name: "SendDeliveryFailure",
+      acceptance: "unknown",
+      failure: { code: "internal_error" },
     });
     await vi.waitFor(() =>
       expect(
@@ -532,13 +602,14 @@ describe("driver event ingress ownership", () => {
         ),
       ).toBe(true),
     );
-    expect(events).toEqual([]);
+    expect(events).toEqual([{ type: "session.killed", sessionId }]);
     expect(machine.list()).toEqual([
-      expect.objectContaining({ sessionId, state: "idle", turns: 1 }),
+      expect.objectContaining({ sessionId, state: "killed", turns: 1 }),
     ]);
 
-    await machine.send({ placement: "new_turn", sessionId, message: "retry" });
-    expect(events.some((event) => event.type === "text.delta")).toBe(true);
+    await expect(
+      machine.send({ placement: "new_turn", sessionId, message: "retry" }),
+    ).rejects.toMatchObject({ code: "session_killed" });
   });
 
   test("prioritizes completed-turn ownership over permission lifecycle checks", async () => {

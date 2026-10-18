@@ -6,8 +6,13 @@ import type {
   AdapterDriverFactory,
   WorkerSpec,
   MachineError,
+  MessageId,
 } from "@reins/protocol";
-import { makeTextEvidence, WorkerStartFailure } from "@reins/protocol";
+import {
+  makeTextEvidence,
+  WorkerDeliveryFailure,
+  WorkerStartFailure,
+} from "@reins/protocol";
 
 import {
   createQoderMappingState,
@@ -31,6 +36,20 @@ type PendingEntry = {
   toolUseID?: string;
   suggestions: PermissionUpdate[] | undefined;
 };
+
+type PendingDelivery = {
+  readonly resolve: () => void;
+  readonly reject: (error: unknown) => void;
+};
+type CallerMessage = { messageId: MessageId; content: string };
+
+function inputText(content: SDKUserMessage["message"]["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((block) => block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text ?? "")
+    .join("");
+}
 
 function userMessage(
   content: string,
@@ -138,11 +157,26 @@ export function createQoderDriver(deps: {
     let queryClosePromise: Promise<void> | null = null;
     let closedDiagnosticEmitted = false;
     let initialInputUuid: string | null = null;
+    const callerMessagesByUuid = new Map<string, CallerMessage>();
     let initialInputSent = false;
     let nativeSessionId: string | null = null;
     let startSettled = false;
     let resolveStart: (() => void) | undefined;
     let rejectStart: ((error: unknown) => void) | undefined;
+    const pendingDeliveries = new Map<string, PendingDelivery>();
+
+    function rejectPendingDeliveries(error: unknown): void {
+      for (const [uuid, pending] of pendingDeliveries) {
+        pendingDeliveries.delete(uuid);
+        pending.reject(
+          new WorkerDeliveryFailure(
+            "Qoder stream ended before confirming the queued command",
+            "unknown",
+            { cause: error },
+          ),
+        );
+      }
+    }
 
     function settleStart(error?: unknown): void {
       if (startSettled) return;
@@ -203,6 +237,24 @@ export function createQoderDriver(deps: {
               lifecycle.state === "queued"
             )
               settleStart();
+            if (lifecycle.state === "queued") {
+              const pending = pendingDeliveries.get(lifecycle.command_uuid);
+              if (pending !== undefined) {
+                pendingDeliveries.delete(lifecycle.command_uuid);
+                pending.resolve();
+              }
+            } else if (lifecycle.state === "cancelled") {
+              const pending = pendingDeliveries.get(lifecycle.command_uuid);
+              if (pending !== undefined) {
+                pendingDeliveries.delete(lifecycle.command_uuid);
+                pending.reject(
+                  new WorkerDeliveryFailure(
+                    "Qoder cancelled the command before queue acceptance",
+                    "not_accepted",
+                  ),
+                );
+              }
+            }
             continue;
           }
           const version = systemInit(rawMessage);
@@ -218,12 +270,33 @@ export function createQoderDriver(deps: {
           }
           if (!sdkMessage(rawMessage))
             throw new Error("Qoder SDK returned an unrecognized message");
-          const events = await mapSdkMessage(session, mappingState, rawMessage);
+          let callerMessageId: MessageId | undefined;
+          if (rawMessage.type === "user" && rawMessage.uuid !== undefined) {
+            const callerMessage = callerMessagesByUuid.get(rawMessage.uuid);
+            if (
+              callerMessage !== undefined &&
+              inputText(rawMessage.message.content) === callerMessage.content
+            )
+              callerMessageId = callerMessage.messageId;
+          }
+          const events = await mapSdkMessage(
+            session,
+            mappingState,
+            rawMessage,
+            callerMessageId,
+          );
+          if (
+            callerMessageId !== undefined &&
+            rawMessage.type === "user" &&
+            rawMessage.uuid !== undefined
+          )
+            callerMessagesByUuid.delete(rawMessage.uuid);
           for (const event of events) {
             emit(event);
           }
         }
       } catch (error) {
+        rejectPendingDeliveries(error);
         if (!startSettled)
           settleStart(
             error instanceof WorkerStartFailure
@@ -245,6 +318,9 @@ export function createQoderDriver(deps: {
         }
       }
       if (!readFailed && !terminating) {
+        rejectPendingDeliveries(
+          new Error("Qoder stream ended before queue acceptance"),
+        );
         if (!startSettled)
           settleStart(
             new WorkerStartFailure(
@@ -299,6 +375,13 @@ export function createQoderDriver(deps: {
         queryClosePromise = null;
         closedDiagnosticEmitted = false;
         initialInputUuid = randomUUID();
+        pendingDeliveries.clear();
+        callerMessagesByUuid.clear();
+        if (spec.messageId !== undefined)
+          callerMessagesByUuid.set(initialInputUuid, {
+            messageId: spec.messageId,
+            content: spec.message,
+          });
         initialInputSent = false;
         nativeSessionId = null;
         startSettled = false;
@@ -375,16 +458,40 @@ export function createQoderDriver(deps: {
           });
         return accepted;
       },
-      async deliver(sessionId, turnId, message, placement) {
+      async deliver(sessionId, turnId, message, placement, messageId) {
         if (placement === "active_turn") {
           throw { code: "unsupported_feature", feature: "active_turn" };
         }
+        if (
+          session === null ||
+          session.sessionId !== sessionId ||
+          stream === null
+        )
+          throw new WorkerDeliveryFailure(
+            "Qoder session is unavailable before command dispatch",
+            "not_accepted",
+          );
         if (session?.turnId !== turnId) {
           mappingState = createQoderMappingState();
         }
-        void sessionId;
         session?.setTurnId(turnId);
-        stream?.push(userMessage(message, "next", true, randomUUID()));
+        const uuid = randomUUID();
+        const queued = new Promise<void>((resolve, reject) => {
+          pendingDeliveries.set(uuid, { resolve, reject });
+        });
+        if (messageId !== undefined)
+          callerMessagesByUuid.set(uuid, { messageId, content: message });
+        try {
+          stream.push(userMessage(message, "next", true, uuid));
+        } catch (error) {
+          pendingDeliveries.delete(uuid);
+          throw new WorkerDeliveryFailure(
+            "Qoder did not receive the command input",
+            "not_accepted",
+            { cause: error },
+          );
+        }
+        await queued;
       },
       async interrupt() {
         throw { code: "unsupported_feature", feature: "interrupt" };
@@ -449,6 +556,9 @@ export function createQoderDriver(deps: {
 
         const pending = (async () => {
           terminating = true;
+          rejectPendingDeliveries(
+            new Error("Qoder worker was terminated before queue acceptance"),
+          );
           // 先结束 Reins 提供的 prompt，再主动调用并保存 SDK 的首次 close。
           // SDK 的 AbortSignal listener 会 fire-and-forget close；一旦它先置
           // closed，后续 close() 会直接返回，无法等待首次关闭完成。

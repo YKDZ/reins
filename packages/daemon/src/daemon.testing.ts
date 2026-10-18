@@ -20,7 +20,6 @@ export function createDaemonForTest(options: {
   diagnostics: DiagnosticsRuntime;
   runtimeScopeId?: RuntimeScopeId;
   idleTimeoutMs?: number;
-  eventLogLimit?: number;
   beforeAttachReplay?: (sessionId: SessionId) => void;
   onDiagnosticsQueryAccepted?: () => void;
   onEvent?: (event: DomainEvent) => void;

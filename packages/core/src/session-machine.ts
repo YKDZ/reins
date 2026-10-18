@@ -12,9 +12,9 @@ import {
   killParamsSchema,
   type ListFilter,
   type MachineError,
+  type MessageId,
   machineErrorSchema,
   makeErrorCause,
-  type MessageId,
   messageIdSchema,
   type PermissionId,
   type PermissionOption,
@@ -41,6 +41,7 @@ import {
   type WorkerDriverFactory,
   type WorkerEventRejection,
   WorkerStartFailure,
+  WorkerDeliveryFailure,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -69,6 +70,7 @@ type SessionRecord = {
 type TurnScope = {
   readonly turnId: TurnId;
   readonly messages: Map<MessageId, "streaming" | "complete">;
+  readonly nativeCallerCompletions: Set<MessageId>;
   readonly tools: Map<ToolCallId, "requested" | "complete">;
 };
 
@@ -100,7 +102,9 @@ type IngressActionFrame = {
 type PendingDelivery = {
   readonly projection: IngressProjection;
   readonly events: DomainEvent[];
+  readonly lateEvents: DomainEvent[];
   readonly creating: boolean;
+  phase: "accepting" | "committing";
   readonly settled: Promise<void>;
   readonly settle: () => void;
   count: number;
@@ -114,7 +118,16 @@ function createPendingDelivery(
   const settled = new Promise<void>((resolve) => {
     settle = resolve;
   });
-  return { projection, creating, events: [], count: 0, settled, settle };
+  return {
+    projection,
+    creating,
+    phase: "accepting",
+    events: [],
+    lateEvents: [],
+    count: 0,
+    settled,
+    settle,
+  };
 }
 
 type WorkerEventIngressDecision =
@@ -122,7 +135,12 @@ type WorkerEventIngressDecision =
   | { status: "rejected"; rejection: WorkerEventRejection };
 
 function createTurnScope(turnId: TurnId): TurnScope {
-  return { turnId, messages: new Map(), tools: new Map() };
+  return {
+    turnId,
+    messages: new Map(),
+    nativeCallerCompletions: new Set(),
+    tools: new Map(),
+  };
 }
 
 function machineError(error: MachineError): MachineError {
@@ -268,7 +286,16 @@ export type SessionMachine = {
       events: readonly DomainEvent[],
     ) => void | Promise<void>,
   ): Promise<SpawnAck>;
-  send(params: SendParams): Promise<SendAck>;
+  send(
+    params: SendParams,
+    hooks?: {
+      readonly beforeDispatch?: () => void | Promise<void>;
+      readonly commit?: (
+        result: SendAck,
+        events: readonly DomainEvent[],
+      ) => void | Promise<void>;
+    },
+  ): Promise<SendAck>;
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): Promise<InterruptAck>;
   resolvePermission(params: ResolvePermissionParams): Promise<void>;
@@ -322,6 +349,51 @@ export class SpawnStartFailure extends Error {
   }
 }
 
+export class SendCommitFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly result: SendAck;
+  readonly commitError: unknown;
+  readonly terminationError: unknown;
+
+  constructor(
+    sessionId: SessionId,
+    result: SendAck,
+    commitError: unknown,
+    terminationError: unknown,
+  ) {
+    super("Send was accepted but its control record could not be committed");
+    this.name = "SendCommitFailure";
+    this.sessionId = sessionId;
+    this.result = result;
+    this.commitError = commitError;
+    this.terminationError = terminationError;
+  }
+}
+
+export class SendDeliveryFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly turnId: TurnId;
+  readonly acceptance: "not_accepted" | "unknown";
+  readonly failure: MachineError;
+  readonly terminationError: unknown;
+
+  constructor(
+    sessionId: SessionId,
+    turnId: TurnId,
+    acceptance: "not_accepted" | "unknown",
+    failure: MachineError,
+    terminationError: unknown,
+  ) {
+    super("New turn delivery did not produce a confirmed receipt");
+    this.name = "SendDeliveryFailure";
+    this.sessionId = sessionId;
+    this.turnId = turnId;
+    this.acceptance = acceptance;
+    this.failure = failure;
+    this.terminationError = terminationError;
+  }
+}
+
 export type SessionIdentity = {
   session(): SessionId;
 };
@@ -344,6 +416,7 @@ export function createSessionMachine(options: {
   const pendingSpawns = new Map<SessionId, PendingSpawn>();
   const terminations = new Map<SessionId, Promise<void>>();
   const ingressActions: IngressActionFrame[] = [];
+  const uncertainDeliveries = new Set<SessionId>();
   // 接受响应与终态通知可能在同一轮到达；只暂存本会话事件，
   // 保证已接受 caller 事实先于该回合终态，拒绝后仍释放真实终态。
   const pendingDeliveries = new Map<SessionId, PendingDelivery>();
@@ -473,6 +546,9 @@ export function createSessionMachine(options: {
           : {
               turnId: activeTurn.turnId,
               messages: new Map(activeTurn.messages),
+              nativeCallerCompletions: new Set(
+                activeTurn.nativeCallerCompletions,
+              ),
               tools: new Map(activeTurn.tools),
             },
       completedTurnIds:
@@ -740,7 +816,13 @@ export function createSessionMachine(options: {
         };
     }
     if (event.type === "message") {
-      if (turnScope?.messages.get(event.messageId) === "complete")
+      const isNativeCallerCompletion =
+        event.role === "caller" &&
+        turnScope?.nativeCallerCompletions.has(event.messageId) === true;
+      if (
+        turnScope?.messages.get(event.messageId) === "complete" &&
+        !isNativeCallerCompletion
+      )
         return {
           status: "rejected",
           rejection: {
@@ -824,6 +906,16 @@ export function createSessionMachine(options: {
     }
     const projection = activeProjection(event.sessionId);
     const spawning = pendingSpawns.get(event.sessionId);
+    if (event.type === "message" && event.role === "caller") {
+      const turnScope =
+        projection !== undefined
+          ? projection.activeTurn
+          : spawning !== undefined && spawning.phase !== "closing"
+            ? spawning.turn
+            : sessions.get(event.sessionId)?.activeTurn;
+      if (turnScope?.turnId === event.turnId)
+        turnScope.nativeCallerCompletions.delete(event.messageId);
+    }
     if (projection !== undefined) projectEvent(projection, event);
     else {
       if (spawning !== undefined && spawning.phase !== "closing") {
@@ -856,7 +948,8 @@ export function createSessionMachine(options: {
     }
     const delivering = pendingDeliveries.get(event.sessionId);
     if (delivering === undefined) bus.publish(event);
-    else delivering.events.push(event);
+    else if (delivering.phase === "accepting") delivering.events.push(event);
+    else delivering.lateEvents.push(event);
   };
 
   function assertTurnTarget(target: TurnTarget): void {
@@ -926,6 +1019,37 @@ export function createSessionMachine(options: {
     return v.parse(turnIdSchema, `t${turnSeq}`);
   }
 
+  function nextMessageId(): MessageId {
+    messageSeq += 1;
+    return v.parse(messageIdSchema, `m${messageSeq}`);
+  }
+
+  function selectCallerMessage(
+    events: readonly DomainEvent[],
+    fallback: Extract<DomainEvent, { type: "message" }>,
+  ): {
+    caller: Extract<DomainEvent, { type: "message" }>;
+    remainder: DomainEvent[];
+  } {
+    const caller = events.find(
+      (event) =>
+        event.type === "message" &&
+        event.role === "caller" &&
+        event.messageId === fallback.messageId,
+    );
+    return {
+      caller: caller?.type === "message" ? caller : fallback,
+      remainder: events.filter(
+        (event) =>
+          !(
+            event.type === "message" &&
+            event.role === "caller" &&
+            event.messageId === fallback.messageId
+          ),
+      ),
+    };
+  }
+
   return {
     async spawn(params, commit) {
       const parsed = v.safeParse(spawnParamsSchema, params);
@@ -935,6 +1059,7 @@ export function createSessionMachine(options: {
       const spec = parsed.output;
       const sessionId = options.identity.session();
       const turnId = nextTurnId(sessionId);
+      const messageId = nextMessageId();
       const cwd = spec.cwd;
       const spawnScope: PendingSpawn = {
         token: Symbol(sessionId),
@@ -951,6 +1076,7 @@ export function createSessionMachine(options: {
         await driver.start({
           sessionId,
           turnId,
+          messageId,
           harness: spec.harness,
           message: spec.message,
           cwd,
@@ -998,6 +1124,23 @@ export function createSessionMachine(options: {
         );
       }
       const result = { sessionId, turnId, cwd };
+      const callerMessage: DomainEvent = {
+        type: "message",
+        sessionId,
+        turnId,
+        messageId,
+        role: "caller",
+        content: spec.message,
+      };
+      spawnScope.turn.messages.set(messageId, "complete");
+      const nativeCallerMessage = spawnScope.events.find(
+        (event) =>
+          event.type === "message" &&
+          event.role === "caller" &&
+          event.messageId === messageId,
+      );
+      if (nativeCallerMessage === undefined)
+        spawnScope.turn.nativeCallerCompletions.add(messageId);
       const events: DomainEvent[] = [
         {
           type: "session.created",
@@ -1012,7 +1155,15 @@ export function createSessionMachine(options: {
           spawnedAt: new Date().toISOString(),
         },
         { type: "turn.started", sessionId, turnId },
-        ...spawnScope.events,
+        nativeCallerMessage ?? callerMessage,
+        ...spawnScope.events.filter(
+          (event) =>
+            !(
+              event.type === "message" &&
+              event.role === "caller" &&
+              event.messageId === messageId
+            ),
+        ),
       ];
       // 固定创建提交的截点。原生在异步提交期间产生的事件只进入 lateEvents，
       // 会在创建事实提交并发布后逐批走普通记录路径。
@@ -1036,6 +1187,11 @@ export function createSessionMachine(options: {
         throw new SpawnCommitFailure(sessionId, result, error, stopError);
       }
       bus.publish(initialBatch);
+      const activeTurn = sessions.get(sessionId)?.activeTurn;
+      if (activeTurn?.turnId === turnId) {
+        for (const nativeMessageId of spawnScope.turn.nativeCallerCompletions)
+          activeTurn.nativeCallerCompletions.add(nativeMessageId);
+      }
       while (spawnScope.lateEvents.length > 0) {
         const batch = spawnScope.lateEvents.splice(0);
         bus.publish(batch);
@@ -1045,7 +1201,7 @@ export function createSessionMachine(options: {
         pendingSpawns.delete(sessionId);
       return result;
     },
-    async send(params) {
+    async send(params, hooks) {
       const parsed = v.safeParse(sendParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -1061,14 +1217,52 @@ export function createSessionMachine(options: {
       assertNotTerminating(sessionId);
       if (
         parsed.output.placement === "new_turn" &&
-        (session.state !== "idle" || pendingDeliveries.has(sessionId))
+        (session.state !== "idle" ||
+          pendingDeliveries.has(sessionId) ||
+          uncertainDeliveries.has(sessionId))
       ) {
         throw machineError({ code: "session_busy", sessionId });
       }
-      messageSeq += 1;
-      const messageId = v.parse(messageIdSchema, `m${messageSeq}`);
       if (parsed.output.placement === "new_turn") {
-        const turnId = nextTurnId(sessionId);
+        const condition = parsed.output.ifLastCompletedTurn;
+        if (condition !== undefined) {
+          if (condition.sessionId !== sessionId)
+            throw machineError({
+              code: "invalid_params",
+              issues: [{ issue: "invalid_value", path: "ifLastCompletedTurn" }],
+            });
+          const actual = session.turns.at(-1)?.turnId;
+          if (actual === undefined)
+            throw machineError({
+              code: "internal_error",
+              cause: makeErrorCause(
+                "exception",
+                "An idle session has no completed turn",
+              ),
+            });
+          if (actual !== condition.turnId)
+            throw machineError({
+              code: "turn_precondition_failed",
+              sessionId,
+              expected: condition.turnId,
+              actual,
+            });
+        }
+      }
+      const messageId = nextMessageId();
+      const callerMessage: Extract<DomainEvent, { type: "message" }> = {
+        type: "message",
+        sessionId,
+        turnId:
+          parsed.output.placement === "new_turn"
+            ? nextTurnId(sessionId)
+            : parsed.output.turnId,
+        messageId,
+        role: "caller",
+        content: message,
+      };
+      if (parsed.output.placement === "new_turn") {
+        const turnId = callerMessage.turnId;
         const started: DomainEvent = {
           type: "turn.started",
           sessionId,
@@ -1079,34 +1273,108 @@ export function createSessionMachine(options: {
         const delivery = createPendingDelivery(projection, true);
         pendingDeliveries.set(sessionId, delivery);
         try {
-          await driver.deliver(sessionId, turnId, message, "new_turn");
-          bus.publish([
-            started,
-            {
-              type: "message",
-              sessionId,
-              turnId,
-              messageId,
-              role: "caller",
-              content: message,
-            },
-            ...delivery.events,
-          ]);
-        } catch (error) {
-          throw await unexpectedFailure(options.diagnostics, error, {
+          await hooks?.beforeDispatch?.();
+          const ack: SendAck = {
             sessionId,
             turnId,
-            kind: "request_failure",
-            operation: "send",
-            stage: "deliver",
-            reason: "upstream_error",
-            message: evidence(error),
-          });
-        } finally {
+            messageId,
+            deliveryPoint: "new_turn",
+          };
+          try {
+            await driver.deliver(
+              sessionId,
+              turnId,
+              message,
+              "new_turn",
+              messageId,
+            );
+          } catch (error) {
+            const acceptance =
+              error instanceof WorkerDeliveryFailure
+                ? error.acceptance
+                : "unknown";
+            const failure = await unexpectedFailure(
+              options.diagnostics,
+              error,
+              {
+                sessionId,
+                turnId,
+                kind: "request_failure",
+                operation: "send",
+                stage: "deliver",
+                reason: "upstream_error",
+                message: evidence(error),
+              },
+            );
+            let terminationError: unknown;
+            let terminated = false;
+            if (acceptance === "unknown") {
+              try {
+                await driver.terminate(sessionId);
+                terminated = true;
+              } catch (stopError) {
+                terminationError = stopError;
+                uncertainDeliveries.add(sessionId);
+              }
+            }
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+            if (terminated) bus.publish({ type: "session.killed", sessionId });
+            throw new SendDeliveryFailure(
+              sessionId,
+              turnId,
+              acceptance,
+              failure,
+              terminationError,
+            );
+          }
+          const selected = selectCallerMessage(delivery.events, callerMessage);
+          delivery.phase = "committing";
+          const batch = Object.freeze([
+            started,
+            selected.caller,
+            ...selected.remainder,
+          ]);
+          try {
+            await hooks?.commit?.(ack, batch);
+          } catch (commitError) {
+            let terminationError: unknown;
+            let terminated = false;
+            try {
+              await driver.terminate(sessionId);
+              terminated = true;
+            } catch (stopError) {
+              terminationError = stopError;
+              uncertainDeliveries.add(sessionId);
+            }
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+            if (terminated) bus.publish({ type: "session.killed", sessionId });
+            throw new SendCommitFailure(
+              sessionId,
+              ack,
+              commitError,
+              terminationError,
+            );
+          }
+          bus.publish(batch);
+          if (selected.caller === callerMessage)
+            sessions
+              .get(sessionId)
+              ?.activeTurn?.nativeCallerCompletions.add(messageId);
+          while (delivery.lateEvents.length > 0) {
+            const lateBatch = delivery.lateEvents.splice(0);
+            bus.publish(lateBatch);
+          }
           pendingDeliveries.delete(sessionId);
           delivery.settle();
+          return ack;
+        } finally {
+          if (pendingDeliveries.get(sessionId) === delivery) {
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+          }
         }
-        return { sessionId, turnId, messageId, deliveryPoint: "new_turn" };
       }
       const turnId = parsed.output.turnId;
       if (pendingDeliveries.get(sessionId)?.creating)
@@ -1129,15 +1397,24 @@ export function createSessionMachine(options: {
       delivery.count += 1;
       pendingDeliveries.set(sessionId, delivery);
       try {
-        await driver.deliver(sessionId, turnId, message, "active_turn");
-        bus.publish({
-          type: "message",
+        await driver.deliver(
           sessionId,
           turnId,
+          message,
+          "active_turn",
           messageId,
-          role: "caller",
-          content: message,
-        });
+        );
+        const selected = selectCallerMessage(delivery.events, callerMessage);
+        delivery.events.splice(
+          0,
+          delivery.events.length,
+          ...selected.remainder,
+        );
+        bus.publish(selected.caller);
+        if (selected.caller === callerMessage)
+          sessions
+            .get(sessionId)
+            ?.activeTurn?.nativeCallerCompletions.add(messageId);
       } catch (error) {
         throw await unexpectedFailure(options.diagnostics, error, {
           sessionId,
@@ -1159,7 +1436,12 @@ export function createSessionMachine(options: {
           }
         }
       }
-      return { sessionId, turnId, messageId, deliveryPoint: "active_turn" };
+      return {
+        sessionId,
+        turnId: callerMessage.turnId,
+        messageId,
+        deliveryPoint: "active_turn",
+      };
     },
     async wait(params) {
       const parsed = v.safeParse(waitParamsSchema, params);
@@ -1325,6 +1607,7 @@ export function createSessionMachine(options: {
           try {
             // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
             await driver.terminate(id);
+            uncertainDeliveries.delete(id);
             // 停止后先结算原生已接受或拒绝的消息，避免 kill 越过其事实。
             await pendingDeliveries.get(id)?.settled;
             // 停止期间自然终态可能已提交；只补仍活动的回合，且先于会话终态。

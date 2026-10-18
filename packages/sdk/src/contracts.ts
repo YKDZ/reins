@@ -45,6 +45,51 @@ export type OperationOptions<Kind extends OperationKind> = {
   operationKey?: OperationKey<Kind>;
 };
 
+export type MessageContentPart =
+  | {
+      type: "text";
+      text: string;
+      textElements?: {
+        byteRange: { start: number; end: number };
+        placeholder: string | null;
+      }[];
+      annotations?: unknown;
+    }
+  | { type: "thinking"; text: string; signature?: string }
+  | { type: "redacted_thinking"; data: string }
+  | {
+      type: "image";
+      source: "url";
+      url: string;
+      detail?: "auto" | "low" | "high" | "original";
+    }
+  | {
+      type: "image";
+      source: "bytes";
+      data: string;
+      mediaType?: string;
+      detail?: "auto" | "low" | "high" | "original";
+    }
+  | { type: "image"; source: "unavailable"; reason: "read_failed" }
+  | { type: "audio"; source: "url"; url: string }
+  | {
+      type: "audio";
+      source: "bytes";
+      data: string;
+      mediaType?: string;
+    }
+  | { type: "audio"; source: "unavailable"; reason: "read_failed" }
+  | { type: "reference"; referenceType: "skill" | "mention"; name: string }
+  | { type: "tool_call"; toolKey: ToolKey }
+  | { type: "tool_result"; toolKey: ToolKey }
+  | {
+      type: "opaque";
+      harness: HarnessId;
+      nativeType: string;
+      value: unknown;
+    };
+export type MessageContent = string | MessageContentPart[];
+
 export type HarnessId = "codex" | "qoder";
 
 export type SpawnInput = {
@@ -64,42 +109,55 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type OperationRecord =
+export type RecoverableOperationKind = "spawn" | "send";
+type OperationResultByKind = { spawn: SpawnResult; send: SendResult };
+type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
       status: "unknown" | "unavailable" | "pending";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
     }
   | {
       status: "outcome_unknown";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
       cause?: ErrorCause;
       cleanupCause?: ErrorCause;
       diagnosticId?: DiagnosticId;
     }
   | {
       status: "succeeded";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
     }
   | {
       status: "failed";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
       error: ReinsFailure;
     }
   | {
+      status: "not_accepted_uncommitted" | "not_accepted_unconfirmed";
+      operationKey: OperationKey<Kind>;
+      error: ReinsFailure;
+      cause: ErrorCause;
+    }
+  | {
       status: "accepted_uncommitted";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
     }
   | {
       status: "accepted_unconfirmed";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
     };
+export type OperationRecord<
+  Kind extends RecoverableOperationKind = RecoverableOperationKind,
+> = Kind extends RecoverableOperationKind
+  ? OperationRecordForKind<Kind>
+  : never;
 export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
@@ -113,11 +171,13 @@ export type SendInput =
   | {
       placement: "new_turn";
       sessionHandle: SessionHandle;
+      ifLastCompletedTurn?: TurnHandle;
       message: string;
     }
   | {
       placement: "active_turn";
       turnHandle: TurnHandle;
+      ifLastCompletedTurn?: never;
       message: string;
     };
 export type SendResult = {
@@ -674,14 +734,22 @@ export type AgentFact =
       type: "message";
       messageKey: MessageKey;
       role: "caller" | "worker";
-      content: string;
+      content: MessageContent;
+      /** 仅上游明确报告正文截断时出现。 */
+      nativeTruncated?: true;
     })
-  | (TurnFactBase & { type: "tool.requested"; toolKey: ToolKey; name: string })
+  | (TurnFactBase & {
+      type: "tool.requested";
+      toolKey: ToolKey;
+      name: string;
+      input?: unknown;
+    })
   | (TurnFactBase & {
       type: "tool.completed";
       toolKey: ToolKey;
       name: string;
-      result: string | null;
+      result: unknown;
+      error?: unknown;
       isError: boolean;
     })
   | (TurnFactBase & {
@@ -799,6 +867,18 @@ export type ErrorCause = {
   message: string;
 };
 
+type ControlEventType =
+  | "session.created"
+  | "turn.started"
+  | "text.delta"
+  | "message"
+  | "tool.requested"
+  | "tool.completed"
+  | "permission.requested"
+  | "permission.resolved"
+  | "turn.completed"
+  | "session.killed";
+
 type FailureFactsByCode = {
   consumer_context_required: Record<never, never>;
   runtime_scope_invalid: Record<never, never>;
@@ -831,14 +911,35 @@ type FailureFactsByCode = {
     cleanupCause?: ErrorCause;
     diagnosticId?: DiagnosticId;
   };
-  control_store_unavailable: {
-    operationKey: OperationKey<OperationKind>;
-    stage: "register" | "dispatch" | "commit" | "failure";
-    acceptance: "not_dispatched" | "unknown" | "accepted";
-    cause: ErrorCause;
-    acceptedResult?: SpawnResult;
-    cleanupCause?: ErrorCause;
-  };
+  control_store_unavailable:
+    | {
+        operationKey: OperationKey<OperationKind>;
+        stage: "register" | "dispatch" | "commit" | "failure";
+        acceptance: "not_dispatched" | "unknown" | "accepted";
+        cause: ErrorCause;
+        acceptedResult?: SpawnResult | SendResult;
+        cleanupCause?: ErrorCause;
+      }
+    | {
+        stage: "event";
+        sessionHandle: SessionHandle;
+        eventType: ControlEventType;
+        turnHandle?: TurnHandle;
+        cause: ErrorCause;
+        cleanupCause?: ErrorCause;
+        cleanupSessionHandle?: SessionHandle;
+      }
+    | {
+        stage: "event_commit";
+        operationKey: OperationKey<"kill">;
+        acceptance: "accepted";
+        sessionHandle: SessionHandle;
+        eventType: ControlEventType;
+        turnHandle?: TurnHandle;
+        cause: ErrorCause;
+        cleanupCause?: ErrorCause;
+        cleanupSessionHandle?: SessionHandle;
+      };
   permission_not_pending: { permissionHandle: PermissionHandle };
   permission_resolution_mismatch: { permissionHandle: PermissionHandle };
   diagnostic_not_found: { diagnosticId: DiagnosticId };
@@ -846,6 +947,11 @@ type FailureFactsByCode = {
   unknown_harness: { harness: HarnessId; availableHarnesses: HarnessId[] };
   unsupported_feature: { feature: string };
   session_busy: { sessionHandle: SessionHandle };
+  turn_precondition_failed: {
+    sessionHandle: SessionHandle;
+    expected: TurnHandle;
+    actual: TurnHandle;
+  };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
@@ -936,7 +1042,9 @@ export type ReinsConnection = {
     signal?: AbortSignal,
   ): Promise<FactSubscription>;
   prepareOperation<Kind extends OperationKind>(kind: Kind): OperationKey<Kind>;
-  getOperation(operationKey: OperationKey<"spawn">): Promise<OperationRecord>;
+  getOperation<Kind extends RecoverableOperationKind>(
+    operationKey: OperationKey<Kind>,
+  ): Promise<OperationRecord<Kind>>;
   spawn(
     input: SpawnInput,
     options?: OperationOptions<"spawn">,

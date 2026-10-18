@@ -107,9 +107,9 @@ export function createRoutingDriverFactory(
         sessionTurn.set(spec.sessionId, spec.turnId);
         await driver.start(spec);
       },
-      async deliver(sessionId, turnId, message, placement) {
+      async deliver(sessionId, turnId, message, placement, messageId) {
         const driver = driverFor(sessionId);
-        await driver.deliver(sessionId, turnId, message, placement);
+        await driver.deliver(sessionId, turnId, message, placement, messageId);
         if (drivers.get(sessionId) === driver)
           sessionTurn.set(sessionId, turnId);
       },

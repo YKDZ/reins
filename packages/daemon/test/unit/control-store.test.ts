@@ -14,6 +14,7 @@ import {
   serializeOperationKey,
   sessionIdSchema,
   type DomainEvent,
+  type SendAck,
   type SpawnAck,
   type SpawnParams,
 } from "@reins/protocol";
@@ -37,12 +38,12 @@ const request: SpawnParams = {
   cwd: "/tmp",
 };
 
-function operationKey() {
+function operationKey(kind: "spawn" | "send" = "spawn") {
   return serializeOperationKey(
     v.parse(operationKeyClaimsSchema, {
       runtimeScopeId,
       consumer,
-      kind: "spawn",
+      kind,
       generation,
       nonce: randomUUID(),
     }),
@@ -97,6 +98,31 @@ describe("SQLite控制存储", () => {
         spawnedAt: session.info.spawnedAt,
       },
       { type: "turn.started", sessionId, turnId: result.turnId },
+      {
+        type: "message",
+        sessionId,
+        turnId: result.turnId,
+        messageId: "caller-1" as never,
+        role: "caller",
+        content: "完整首条输入",
+      },
+      {
+        type: "tool.requested",
+        sessionId,
+        turnId: result.turnId,
+        toolCallId: "tool-1" as never,
+        name: "read-file",
+        input: { path: "report.json", options: { raw: true } },
+      },
+      {
+        type: "tool.completed",
+        sessionId,
+        turnId: result.turnId,
+        toolCallId: "tool-1" as never,
+        name: "read-file",
+        result: { content: "完整工具输出", metadata: { bytes: 18 } },
+        isError: false,
+      },
     ];
     store.markSpawnDispatched(key);
     expect(
@@ -111,8 +137,49 @@ describe("SQLite控制存储", () => {
       result,
     });
     expect(store.getSession(sessionId)).toEqual(session);
-    expect(store.sessionEvents(sessionId)).toHaveLength(2);
-    expect(store.eventWindow(sessionId)).toEqual({ head: 2, oldest: 1 });
+    expect(store.sessionEvents(sessionId)).toHaveLength(5);
+    expect(store.eventWindow(sessionId)).toEqual({ head: 5, oldest: 1 });
+    const firstPage = store.sessionEventsPage({
+      sessionId,
+      afterEventId: 0,
+      limit: 2,
+      turnId: result.turnId,
+    });
+    expect(firstPage).toEqual({
+      entries: events.slice(1, 3).map((event, index) => ({
+        event,
+        eventId: index + 2,
+      })),
+      nextAfter: 3,
+      throughEventId: 5,
+      head: 5,
+      oldest: 1,
+      total: 4,
+      hasMore: true,
+    });
+    const secondPage = store.sessionEventsPage({
+      sessionId,
+      afterEventId: firstPage.nextAfter,
+      throughEventId: firstPage.throughEventId,
+      limit: 2,
+      turnId: result.turnId,
+    });
+    expect(secondPage).toEqual({
+      entries: events.slice(3).map((event, index) => ({
+        event,
+        eventId: index + 4,
+      })),
+      nextAfter: 5,
+      throughEventId: 5,
+      head: 5,
+      oldest: 1,
+      total: 2,
+      hasMore: false,
+    });
+    expect(secondPage.entries[1]?.event).toMatchObject({
+      type: "tool.completed",
+      result: { content: "完整工具输出", metadata: { bytes: 18 } },
+    });
     expect(store.registerSpawn(identity)).toMatchObject({
       created: false,
       operation: { status: "succeeded", result },
@@ -129,6 +196,215 @@ describe("SQLite控制存储", () => {
       "Stored session ownership does not match its identity",
     );
     corrupted.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  test("新回合的已接受结果、会话投影和事实批次原子重开", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
+    let store = await openControlStore({ directory });
+    const spawnKey = operationKey();
+    const spawnResult: SpawnAck = {
+      sessionId,
+      turnId: "t1" as never,
+      cwd: "/tmp",
+    };
+    const spawnSession = {
+      info: {
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: "2026-10-18T00:00:00.000Z",
+        turns: 0,
+        state: "busy" as const,
+        activeTurnId: spawnResult.turnId,
+      },
+      runtimeScopeId,
+      consumer,
+      generation,
+    };
+    const spawnEvents: DomainEvent[] = [
+      {
+        type: "session.created",
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: spawnSession.info.spawnedAt,
+      },
+      { type: "turn.started", sessionId, turnId: spawnResult.turnId },
+    ];
+    store.registerSpawn({
+      operationKey: spawnKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request,
+    });
+    store.markSpawnDispatched(spawnKey);
+    store.commitSpawn({
+      operationKey: spawnKey,
+      result: spawnResult,
+      session: spawnSession,
+      events: spawnEvents,
+    });
+
+    const { activeTurnId: _activeTurnId, ...completedFields } =
+      spawnSession.info;
+    const firstCompleted = {
+      ...completedFields,
+      state: "idle" as const,
+      turns: 1,
+      lastCompletedTurn: {
+        turnId: spawnResult.turnId,
+        stopReason: "end_turn" as const,
+      },
+    };
+    store.recordEvent(
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: spawnResult.turnId,
+        stopReason: "end_turn",
+        finalReply: null,
+      },
+      firstCompleted,
+    );
+
+    const sendKey = operationKey("send");
+    const sendRequest = {
+      placement: "new_turn" as const,
+      sessionId,
+      ifLastCompletedTurn: { sessionId, turnId: spawnResult.turnId },
+      message: "second caller fact",
+    };
+    store.registerSend({
+      operationKey: sendKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request: sendRequest,
+    });
+    store.markSendDispatched(sendKey);
+    const sendResult: SendAck = {
+      sessionId,
+      turnId: "t2" as never,
+      messageId: "m2" as never,
+      deliveryPoint: "new_turn",
+    };
+    const sendEvents: DomainEvent[] = [
+      { type: "turn.started", sessionId, turnId: sendResult.turnId },
+      {
+        type: "message",
+        sessionId,
+        turnId: sendResult.turnId,
+        messageId: sendResult.messageId,
+        role: "caller",
+        content: [
+          { type: "text", text: sendRequest.message, textElements: [] },
+          {
+            type: "image",
+            source: "url",
+            url: "https://example.invalid/accepted.png",
+            detail: "high",
+          },
+        ],
+      },
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: sendResult.turnId,
+        stopReason: "end_turn",
+        finalReply: "done",
+      },
+    ];
+    const sendSession = {
+      ...spawnSession,
+      info: {
+        ...firstCompleted,
+        turns: 2,
+        lastCompletedTurn: {
+          turnId: sendResult.turnId,
+          stopReason: "end_turn" as const,
+        },
+      },
+    };
+    const caller = sendEvents[1];
+    const terminal = sendEvents[2];
+    if (caller?.type !== "message" || terminal?.type !== "turn.completed")
+      throw new Error("Expected the accepted caller and turn completion");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [
+          sendEvents[0]!,
+          { ...caller, messageId: "wrong-message" as never },
+          terminal,
+        ],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [sendEvents[0]!, caller, caller, terminal],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [
+          sendEvents[0]!,
+          caller,
+          { ...terminal, turnId: "other-turn" as never },
+        ],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [
+          sendEvents[0]!,
+          { ...caller, content: "different caller" },
+          terminal,
+        ],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
+    expect(
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: sendEvents,
+      }),
+    ).toEqual(
+      sendEvents.map((event, index) => ({ event, eventId: index + 4 })),
+    );
+    store.close();
+
+    store = await openControlStore({ directory });
+    expect(store.getOperation(sendKey)).toMatchObject({
+      kind: "send",
+      status: "succeeded",
+      request: sendRequest,
+      result: sendResult,
+    });
+    expect(store.getSession(sessionId)).toEqual(sendSession);
+    expect(store.sessionEvents(sessionId).slice(-3)).toEqual(
+      sendEvents.map((event, index) => ({ event, eventId: index + 4 })),
+    );
+    store.close();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -220,7 +496,7 @@ describe("SQLite控制存储", () => {
 
     const reopened = await openControlStore({ directory });
     expect(() => reopened.getOperation(key)).toThrow(
-      "Stored spawn operation ownership does not match its key",
+      "Stored operation ownership does not match its key",
     );
     reopened.close();
 

@@ -576,6 +576,7 @@ async function runRecoveryAcceptance(options: {
       harness: "codex",
       message: "  exact task\nkeep spacing  ",
       model: "fixture-model",
+      messageId: spec.messageId,
       reasoning: "high",
       sandbox: "workspace-write",
       sessionId: spawnAcknowledgement.result.sessionId,
@@ -584,6 +585,8 @@ async function runRecoveryAcceptance(options: {
     assert(
       JSON.stringify(Object.keys(spec).sort()) ===
         JSON.stringify(Object.keys(expectedSpec).sort()) &&
+        typeof spec.messageId === "string" &&
+        /^m\d+$/u.test(spec.messageId) &&
         Object.entries(expectedSpec).every(
           ([key, value]) => spec[key] === value,
         ),
@@ -1632,19 +1635,16 @@ async function runEventHistoryAcceptance(options: {
       typeof history.sessionHandle === "string" &&
         typeof history.turnHandle === "string" &&
         typeof history.staleCursor === "string" &&
-        history.retainedMessages === 999 &&
-        history.factCount === 1000 &&
+        history.retainedMessages === 1006 &&
+        history.factCount === 1008 &&
+        history.resumedFactCount === 1006 &&
         isRecord(history.window) &&
-        history.window.truncated === true &&
+        history.window.truncated === false &&
         typeof history.window.oldest === "number" &&
-        history.window.oldest > 1 &&
+        history.window.oldest === 1 &&
         typeof history.window.head === "number" &&
-        isRecord(history.expired) &&
-        history.expired.code === "event_cursor_expired" &&
-        isRecord(history.expired.facts) &&
-        history.expired.facts.oldest === history.window.oldest &&
-        history.expired.facts.head === history.window.head,
-      "SDK 未返回精确的事件保留窗口与过期游标事实",
+        history.window.head === history.factCount + 1,
+      "SDK 未返回完整事件历史及旧游标续接事实",
     );
     const prepared = await runSdkMode(
       options.sdkConsumer,

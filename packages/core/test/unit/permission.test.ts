@@ -324,7 +324,7 @@ describe("resolvePermission", () => {
           type: "text.delta",
           sessionId: workerSessionId,
           turnId: ids.turn("t1"),
-          messageId: ids.message("m1"),
+          messageId: ids.message("m2"),
           delta: "收到",
         });
       },
@@ -355,6 +355,7 @@ describe("resolvePermission", () => {
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "permission.requested",
       "permission.resolved",
       "text.delta",
