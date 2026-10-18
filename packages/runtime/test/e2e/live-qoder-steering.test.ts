@@ -315,6 +315,8 @@ test("固定 CLI 的后台 Agent 事实关联到产生它的工具调用", async
   );
   if (activityStarted.type !== "background.activity")
     throw new Error("Qoder task start was not a background activity fact");
+  expect(typeof activityStarted.description).toBe("string");
+  expect(activityStarted.description?.length).toBeGreaterThan(0);
   expect(activityStarted.source.kind).toBe("qoder_task");
   expect(activityStarted.causedBy).toEqual({
     turnHandle: spawned.turnHandle,
@@ -325,8 +327,10 @@ test("固定 CLI 的后台 Agent 事实关联到产生它的工具调用", async
     (fact) =>
       fact.type === "background.activity" &&
       fact.source.id === activityStarted.source.id &&
-      fact.status === "completed",
-    "Fixed Qoder did not expose its Agent task_notification fact",
+      fact.status === "completed" &&
+      typeof fact.summary === "string" &&
+      fact.summary.length > 0,
+    "Fixed Qoder did not expose its Agent task_notification summary",
   );
   expect(activityCompleted).toMatchObject({
     type: "background.activity",
@@ -334,6 +338,9 @@ test("固定 CLI 的后台 Agent 事实关联到产生它的工具调用", async
     status: "completed",
     causedBy: activityStarted.causedBy,
   });
+  if (activityCompleted.type !== "background.activity")
+    throw new Error("Qoder task completion was not a background activity fact");
+  expect(activityCompleted.summary).toMatch(/\S/u);
   await expect(
     connection.wait({
       targets: [spawned.turnHandle],

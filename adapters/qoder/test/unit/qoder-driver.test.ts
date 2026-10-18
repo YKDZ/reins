@@ -1373,6 +1373,15 @@ describe("qoder driver 事件映射", () => {
       uuid: "task-started",
       session_id: "qs",
     });
+    fake.controls.push({
+      type: "system",
+      subtype: "task_progress",
+      task_id: "qoder-task-1",
+      tool_use_id: "agent-tool-use",
+      description: "列出文件",
+      uuid: "task-progress",
+      session_id: "qs",
+    });
     await flush();
 
     expect(
@@ -1384,6 +1393,15 @@ describe("qoder driver 事件映射", () => {
         source: { kind: "qoder_task", id: "qoder-task-1" },
         status: "active",
         causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+        description: "只读检查",
+      },
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "qoder-task-1" },
+        status: "active",
+        causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+        description: "列出文件",
       },
     ]);
 
@@ -1411,6 +1429,15 @@ describe("qoder driver 事件映射", () => {
         source: { kind: "qoder_task", id: "qoder-task-1" },
         status: "active",
         causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+        description: "只读检查",
+      },
+      {
+        type: "background.activity",
+        sessionId,
+        source: { kind: "qoder_task", id: "qoder-task-1" },
+        status: "active",
+        causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+        description: "列出文件",
       },
       {
         type: "background.activity",
@@ -1418,6 +1445,7 @@ describe("qoder driver 事件映射", () => {
         source: { kind: "qoder_task", id: "qoder-task-1" },
         status: "completed",
         causedBy: { turnId: firstTurnId, toolCallId: "c1" },
+        summary: "已完成",
       },
     ]);
     expect(
@@ -1445,6 +1473,7 @@ describe("qoder driver 事件映射", () => {
         sessionId,
         source: { kind: "qoder_task", id: "late-qoder-task" },
         status: "active",
+        description: "旧 phase 的子任务",
       },
     ]);
 
@@ -1493,12 +1522,14 @@ describe("qoder driver 事件映射", () => {
         sessionId,
         source: { kind: "qoder_task", id: "late-qoder-task" },
         status: "active",
+        description: "旧 phase 的子任务",
       },
       {
         type: "background.activity",
         sessionId,
         source: { kind: "qoder_task", id: "late-qoder-task" },
         status: "completed",
+        summary: "旧 phase 的任务完成",
       },
     ]);
     await driver.terminate(sessionId);

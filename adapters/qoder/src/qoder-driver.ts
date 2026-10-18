@@ -353,6 +353,7 @@ export function createQoderDriver(deps: {
       status: Extract<DomainEvent, { type: "background.activity" }>["status"],
       toolUseId?: string,
       sealUnknown = false,
+      body: { description?: string; summary?: string } = {},
     ): DomainEvent {
       const owner = qoderTaskCause(taskId, toolUseId, sealUnknown);
       return {
@@ -360,6 +361,10 @@ export function createQoderDriver(deps: {
         sessionId: session!.sessionId,
         source: { kind: "qoder_task", id: taskId },
         status,
+        ...(body.description === undefined
+          ? {}
+          : { description: body.description }),
+        ...(body.summary === undefined ? {} : { summary: body.summary }),
         ...(owner === undefined
           ? {}
           : {
@@ -390,6 +395,7 @@ export function createQoderDriver(deps: {
                 ? message.tool_use_id
                 : undefined,
               message.subtype === "task_started",
+              { description: message.description },
             ),
           ];
         }
@@ -416,6 +422,8 @@ export function createQoderDriver(deps: {
               typeof message.tool_use_id === "string"
                 ? message.tool_use_id
                 : undefined,
+              false,
+              { summary: message.summary },
             ),
           ];
         }
