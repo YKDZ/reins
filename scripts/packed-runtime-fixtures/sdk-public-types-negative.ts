@@ -144,7 +144,7 @@ const activeTurnVariableWithPrecondition = {
 // @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
 const invalidActiveTurnSend: SendInput = activeTurnVariableWithPrecondition;
 // @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
-connection.send(activeTurnVariableWithPrecondition);
+void connection.send(activeTurnVariableWithPrecondition);
 void invalidActiveTurnSend;
 declare const sendRecord: OperationRecord<"send">;
 // @ts-expect-error send 查询记录不能伪装成 spawn 查询记录。
