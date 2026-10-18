@@ -203,7 +203,7 @@ export function parseOperationCredential<Kind extends OperationKind>(
 }
 export function serializeOperationCredential<Kind extends OperationKind>(
   kind: Kind,
-  credential: OperationCredential<Kind>,
+  credential: OperationCredential<NoInfer<Kind>>,
 ): string {
   return parseOperationCredential(kind, credential);
 }
@@ -332,9 +332,10 @@ export async function connect(
           ...(sessionHandle === undefined
             ? {}
             : {
-                sessionId: v.parse(
-                  sessionIdSchema,
-                  serializeSessionHandle(sessionHandle),
+                sessionId: sessionIdFromHandle(
+                  sessionHandle,
+                  "sessionHandle",
+                  "query",
                 ),
               }),
         } as ProtocolParams<"list">;
@@ -444,9 +445,9 @@ export async function connect(
           client!,
           "kill",
           {
-            sessionId: v.parse(
-              sessionIdSchema,
-              serializeSessionHandle(input.sessionHandle),
+            sessionId: sessionIdFromHandle(
+              input.sessionHandle,
+              "sessionHandle",
             ),
           },
           credential,
@@ -503,13 +504,11 @@ export async function connect(
             message: input.message,
           };
         } else {
-          if (!v.safeParse(sessionIdSchema, input.sessionHandle).success)
-            throw invalidInput("sessionHandle", "operation");
           params = {
             placement: "new_turn",
-            sessionId: v.parse(
-              sessionIdSchema,
-              serializeSessionHandle(input.sessionHandle),
+            sessionId: sessionIdFromHandle(
+              input.sessionHandle,
+              "sessionHandle",
             ),
             message: input.message,
           };
@@ -620,9 +619,10 @@ function projectAttachParams(
   if (target.scope === "session")
     return {
       scope: "session",
-      sessionId: v.parse(
-        sessionIdSchema,
-        serializeSessionHandle(target.sessionHandle),
+      sessionId: sessionIdFromHandle(
+        target.sessionHandle,
+        "sessionHandle",
+        "query",
       ),
       replay: protocolReplay,
     };
@@ -723,7 +723,8 @@ function projectDiagnosticsParams(
     const target = targetFromHandle(turnHandle, "turnHandle", "query");
     if (
       sessionHandle !== undefined &&
-      serializeSessionHandle(sessionHandle) !== target.sessionId
+      sessionIdFromHandle(sessionHandle, "sessionHandle", "query") !==
+        target.sessionId
     )
       throw new ReinsSdkError({
         code: "invalid_params",
@@ -743,9 +744,10 @@ function projectDiagnosticsParams(
     ...(sessionHandle === undefined
       ? {}
       : {
-          sessionId: v.parse(
-            sessionIdSchema,
-            serializeSessionHandle(sessionHandle),
+          sessionId: sessionIdFromHandle(
+            sessionHandle,
+            "sessionHandle",
+            "query",
           ),
         }),
   });
@@ -798,6 +800,22 @@ function targetFromHandle(
   )
     throw invalidInput(path, stage);
   return decodeTurnHandle(serializeTurnHandle(parseTurnHandle(handle)));
+}
+
+function sessionIdFromHandle(
+  handle: unknown,
+  path: string,
+  stage: "query" | "operation" = "operation",
+): SessionId {
+  if (
+    typeof handle !== "string" ||
+    !v.safeParse(sessionIdSchema, handle).success
+  )
+    throw invalidInput(path, stage);
+  return v.parse(
+    sessionIdSchema,
+    serializeSessionHandle(parseSessionHandle(handle)),
+  );
 }
 
 function invalidInput(

@@ -28,7 +28,6 @@ import {
   serializeRuntimeScopeId,
   serializeSessionHandle,
   serializeTurnHandle,
-  type DiagnosticId,
   type DiagnosticsQuery,
   type ReinsConnection,
   type SendInput,
@@ -658,7 +657,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   });
   await expect(
     connection.diagnostics({
-      sessionHandle: parseSessionHandle("session:other:g1"),
+      sessionHandle: parseSessionHandle("session:other:1"),
       turnHandle: parseTurnHandle(first.turnHandle),
     }),
   ).rejects.toMatchObject({
@@ -698,6 +697,12 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   expect(parseDiagnosticId(serializeDiagnosticId(first.diagnosticId))).toBe(
     first.diagnosticId,
   );
+  expect(() =>
+    parseSessionHandle(serializeDiagnosticId(first.diagnosticId)),
+  ).toThrow();
+  expect(() =>
+    parseDiagnosticId(serializeSessionHandle(captured.sessionHandle)),
+  ).toThrow();
   expect(
     await connection.diagnostics({
       sessionHandle: captured.sessionHandle,
@@ -718,7 +723,9 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     truncated: false,
   });
   await expect(
-    connection.diagnostics({ diagnosticId: "d1-098" as DiagnosticId }),
+    connection.diagnostics({
+      diagnosticId: parseDiagnosticId("diagnostic:missing:1"),
+    }),
   ).rejects.toMatchObject({
     failure: { code: "diagnostic_not_found" },
   });

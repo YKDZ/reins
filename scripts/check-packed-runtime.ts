@@ -507,14 +507,15 @@ async function runRecoveryAcceptance(options: {
       { REINS_OPERATION_INTENT_JSON: spawnIntent },
     );
     const spawnResult = recoveredSpawn.result;
+    const listedSession = recoveredSpawn.listed;
     assert(
       isRecord(spawnResult) &&
+        isRecord(listedSession) &&
         spawnResult.sessionHandle === spawnAcknowledgement.result.sessionId &&
         spawnResult.cwd === workerCwd &&
         typeof spawnResult.turnHandle === "string" &&
-        spawnResult.turnHandle.startsWith(
-          `${spawnAcknowledgement.result.sessionId}/${spawnAcknowledgement.result.turnId}.`,
-        ),
+        listedSession.sessionHandle === spawnAcknowledgement.result.sessionId &&
+        listedSession.activeTurn === spawnResult.turnHandle,
       "SDK 未恢复 daemon 已接受的原 spawn 结果",
     );
     assert(

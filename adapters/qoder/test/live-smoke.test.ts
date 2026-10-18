@@ -33,7 +33,7 @@ live("qoder live smoke", () => {
     });
 
     driver.start({
-      sessionId: "session:smoke:g1" as SessionId,
+      sessionId: "session:smoke:1" as SessionId,
       turnId: "t1" as TurnId,
       harness: "qoder",
       message: "用一条 shell 命令列出当前目录的内容",
@@ -46,6 +46,6 @@ live("qoder live smoke", () => {
     expect(completed.stopReason).toBe("end_turn");
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
     expect(events.some((event) => event.type === "tool.completed")).toBe(true);
-    await driver.terminate("session:smoke:g1" as SessionId);
+    await driver.terminate("session:smoke:1" as SessionId);
   }, 120_000);
 });

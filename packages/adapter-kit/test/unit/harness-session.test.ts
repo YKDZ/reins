@@ -4,12 +4,13 @@ import type {
   SessionId,
   TurnId,
 } from "@reins/protocol";
+import { makeDiagnosticId } from "@reins/protocol";
 import { describe, expect, test, vi } from "vitest";
 
 import { AlreadyDiagnosedError, isAlreadyDiagnosedError } from "#/diagnostic";
 import { HarnessSession } from "#/harness-session";
 
-const sessionId = "session:reviewer:g1" as SessionId;
+const sessionId = "session:reviewer:1" as SessionId;
 const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 
@@ -78,10 +79,13 @@ describe("HarnessSession", () => {
       vi.useRealTimers();
     }
   });
-  test("AlreadyDiagnosed guard 只接受本模块实例与非空诊断 ID", () => {
+  test("AlreadyDiagnosed guard 只接受本模块实例与有效诊断 ID", () => {
     expect(
       isAlreadyDiagnosedError(
-        new AlreadyDiagnosedError("accepted", "d1-098" as never),
+        new AlreadyDiagnosedError(
+          "accepted",
+          makeDiagnosticId("adapterkit", "98"),
+        ),
       ),
     ).toBe(true);
     expect(

@@ -184,18 +184,18 @@ export type DaemonIdFactory = {
 export function createDaemonIdFactory(
   generation: DaemonGeneration,
 ): DaemonIdFactory {
-  let sessionCounter = 0;
-  let diagnosticCounter = 0;
+  let sessionCounter = 0n;
+  let diagnosticCounter = 0n;
   return {
     session() {
-      sessionCounter += 1;
+      sessionCounter += 1n;
       return v.parse(
         sessionIdSchema,
         `session:${generation}:${sessionCounter}`,
       );
     },
     diagnostic() {
-      diagnosticCounter += 1;
+      diagnosticCounter += 1n;
       return makeDiagnosticId(generation, diagnosticCounter.toString(36));
     },
   };

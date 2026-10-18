@@ -43,7 +43,7 @@ const ok = (schema: v.GenericSchema, input: unknown): void =>
 const bad = (schema: v.GenericSchema, input: unknown): void =>
   expect(v.safeParse(schema, input).success).toBe(false);
 
-const sessionId = "session:reviewer:g7";
+const sessionId = "session:reviewer:7";
 const diagnosticId = makeDiagnosticId("7", "42");
 
 describe("worker event rejection contract", () => {
@@ -345,6 +345,13 @@ describe("typed identifiers", () => {
       ok(schema, valid);
       bad(schema, invalid);
     }
+  });
+
+  test("session and diagnostic identities reject each other's encoding", () => {
+    bad(sessionIdSchema, diagnosticId);
+    bad(diagnosticIdSchema, sessionId);
+    ok(sessionIdSchema, sessionId);
+    ok(diagnosticIdSchema, diagnosticId);
   });
 });
 

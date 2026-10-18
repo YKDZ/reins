@@ -71,7 +71,7 @@ describe("录制 fixture 回放", () => {
       diagnostics: async () => undefined,
     });
     driver.start({
-      sessionId: "session:reviewer:g1" as SessionId,
+      sessionId: "session:reviewer:1" as SessionId,
       turnId: "t1" as TurnId,
       harness: "codex",
       message: "列出当前目录的内容",

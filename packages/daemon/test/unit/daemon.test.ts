@@ -1097,7 +1097,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
 
     const missing = await requester("wait", {
-      targets: [{ sessionId: "session:missing:gdaemontest", turnId: "t1" }],
+      targets: [{ sessionId: "session:missing:1", turnId: "t1" }],
       completion: "all",
       timeoutMs: 1000,
     });
@@ -1716,7 +1716,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const response = await makeRequester(client).request("attach", {
       scope: "session",
-      sessionId: "session:missing:gdaemontest",
+      sessionId: "session:missing:1",
       replay: { mode: "available" },
     });
     expect(response).toMatchObject({
