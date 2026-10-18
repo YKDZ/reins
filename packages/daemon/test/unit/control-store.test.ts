@@ -16,6 +16,7 @@ import {
   sessionIdSchema,
   type DomainEvent,
   type KillResult,
+  type InterruptAck,
   type SendAck,
   type SpawnAck,
   type SpawnParams,
@@ -40,7 +41,7 @@ const request: SpawnParams = {
   cwd: "/tmp",
 };
 
-function operationKey(kind: "spawn" | "send" | "kill" = "spawn") {
+function operationKey(kind: "spawn" | "send" | "interrupt" | "kill" = "spawn") {
   return serializeOperationKey(
     v.parse(operationKeyClaimsSchema, {
       runtimeScopeId,
@@ -590,6 +591,174 @@ describe("SQLite控制存储", () => {
     expect(store.sessionEvents(sessionId).slice(-2)).toEqual(
       killEvents.map((event, index) => ({ event, eventId: index + 3 })),
     );
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
+  test("活动回合发送和中断结果复用同一持久操作台账", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
+    let store = await openControlStore({ directory });
+    const spawnKey = operationKey();
+    const turnId = "t1" as never;
+    const spawnResult: SpawnAck = { sessionId, turnId, cwd: "/tmp" };
+    const session = {
+      info: {
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: "2026-10-18T00:00:00.000Z",
+        turns: 0,
+        state: "busy" as const,
+        activeTurnId: turnId,
+      },
+      runtimeScopeId,
+      consumer,
+      generation,
+    };
+    store.registerSpawn({
+      operationKey: spawnKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request,
+    });
+    store.markSpawnDispatched(spawnKey);
+    store.commitSpawn({
+      operationKey: spawnKey,
+      result: spawnResult,
+      session,
+      events: [
+        {
+          type: "session.created",
+          sessionId,
+          sessionLabel: request.sessionLabel,
+          harness: request.harness,
+          model: null,
+          reasoning: null,
+          cwd: request.cwd,
+          spawnedAt: session.info.spawnedAt,
+        },
+        { type: "turn.started", sessionId, turnId },
+      ],
+    });
+
+    const sendKey = operationKey("send");
+    const sendRequest = {
+      placement: "active_turn" as const,
+      sessionId,
+      turnId,
+      message: "precise active input",
+    };
+    expect(
+      store.registerSend({
+        operationKey: sendKey,
+        runtimeScopeId,
+        consumer,
+        generation,
+        request: sendRequest,
+      }),
+    ).toMatchObject({ created: true, operation: { status: "pending" } });
+    store.markSendDispatched(sendKey);
+    const sendResult: SendAck = {
+      sessionId,
+      turnId,
+      messageId: "m2" as never,
+      deliveryPoint: "active_turn",
+    };
+    const caller: DomainEvent = {
+      type: "message",
+      sessionId,
+      turnId,
+      messageId: sendResult.messageId,
+      role: "caller",
+      content: sendRequest.message,
+    };
+    store.commitSend({
+      operationKey: sendKey,
+      result: sendResult,
+      session,
+      events: [caller],
+    });
+    expect(store.getSession(sessionId)).toEqual(session);
+    expect(
+      store.registerSend({
+        operationKey: sendKey,
+        runtimeScopeId,
+        consumer,
+        generation,
+        request: sendRequest,
+      }),
+    ).toMatchObject({
+      created: false,
+      operation: {
+        status: "succeeded",
+        request: sendRequest,
+        result: sendResult,
+      },
+    });
+    expect(() =>
+      store.registerSend({
+        operationKey: sendKey,
+        runtimeScopeId,
+        consumer,
+        generation,
+        request: {
+          placement: "new_turn",
+          sessionId,
+          message: sendRequest.message,
+        },
+      }),
+    ).toThrow(expect.objectContaining({ code: "operation_key_conflict" }));
+
+    const interruptKey = operationKey("interrupt");
+    const interruptRequest = { sessionId, turnId };
+    store.registerInterrupt({
+      operationKey: interruptKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request: interruptRequest,
+    });
+    store.markInterruptDispatched(interruptKey);
+    const interruptResult: InterruptAck = { sessionId, turnId };
+    store.commitInterrupt({
+      operationKey: interruptKey,
+      result: interruptResult,
+    });
+    expect(store.getSession(sessionId)).toEqual(session);
+    expect(store.sessionEvents(sessionId).map(({ event }) => event)).toEqual([
+      {
+        type: "session.created",
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: session.info.spawnedAt,
+      },
+      { type: "turn.started", sessionId, turnId },
+      caller,
+    ]);
+    store.close();
+
+    store = await openControlStore({ directory });
+    expect(store.getOperation(sendKey)).toMatchObject({
+      kind: "send",
+      status: "succeeded",
+      request: sendRequest,
+      result: sendResult,
+    });
+    expect(store.getOperation(interruptKey)).toMatchObject({
+      kind: "interrupt",
+      status: "succeeded",
+      request: interruptRequest,
+      result: interruptResult,
+    });
+    expect(store.getSession(sessionId)).toEqual(session);
     store.close();
     await rm(directory, { recursive: true, force: true });
   });

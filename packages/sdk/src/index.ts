@@ -17,6 +17,7 @@ import type {
   ProtocolResult,
   OperationKey as ProtocolOperationKey,
   OperationRecord as ProtocolOperationRecord,
+  OperationEffect as ProtocolOperationEffect,
   DaemonGeneration as ProtocolDaemonGeneration,
   RuntimeScopeId as ProtocolRuntimeScopeId,
   SideEffectMethod,
@@ -59,6 +60,7 @@ import {
   type OperationKey,
   type OperationKind,
   type OperationOptions,
+  type OperationEffect,
   type OperationRecord,
   type ReinsConnection,
   type ReinsFailure,
@@ -80,6 +82,7 @@ import {
   type TurnHandle,
   type SendInput,
   type SendResult,
+  type SpawnResult,
   type WaitInput,
   type WaitResult,
   type InterruptInput,
@@ -177,6 +180,7 @@ export type {
   OperationKey,
   OperationKind,
   OperationOptions,
+  OperationEffect,
   OperationRecord,
   HarnessModelCatalog,
   HarnessFailure,
@@ -636,16 +640,17 @@ async function connectClient(
           );
         }
       },
-      async getOperation<Kind extends "spawn" | "send" | "kill">(
+      async getOperation<Kind extends "spawn" | "send" | "interrupt" | "kill">(
         operationKey: OperationKey<Kind>,
       ): Promise<OperationRecord<Kind>> {
-        let kind: "spawn" | "send" | "kill";
+        let kind: "spawn" | "send" | "interrupt" | "kill";
         let generation: ProtocolDaemonGeneration;
         try {
           const claims = parseProtocolOperationKey(operationKey);
           if (
             claims.kind !== "spawn" &&
             claims.kind !== "send" &&
+            claims.kind !== "interrupt" &&
             claims.kind !== "kill"
           )
             throw new Error("Operation kind is not recoverable");
@@ -852,16 +857,13 @@ async function connectClient(
       },
       async interrupt(input: InterruptInput, options) {
         const target = targetFromHandle(input.turnHandle, "turnHandle");
-        await perform(
+        const result = await perform(
           client!,
           "interrupt",
           target,
           operationKeyFor(client!, "interrupt", options),
         );
-        return {
-          turnHandle: input.turnHandle,
-          status: "accepted",
-        } satisfies InterruptResult;
+        return projectInterruptResult(result);
       },
       close() {
         client?.close();
@@ -1196,7 +1198,16 @@ function projectKillResult(
   };
 }
 
-function projectOperationRecord<Kind extends "spawn" | "send" | "kill">(
+type ProjectedOperationResultByKind = {
+  spawn: SpawnResult;
+  send: SendResult;
+  interrupt: InterruptResult;
+  kill: import("./contracts.ts").KillResult;
+};
+
+function projectOperationRecord<
+  Kind extends "spawn" | "send" | "interrupt" | "kill",
+>(
   record: ProtocolOperationRecord,
   kind: Kind,
   generation: ProtocolDaemonGeneration,
@@ -1218,20 +1229,15 @@ function projectOperationRecord<Kind extends "spawn" | "send" | "kill">(
         ...(record.diagnosticId === undefined
           ? {}
           : { diagnosticId: parseDiagnosticId(record.diagnosticId) }),
+        ...(record.effect === undefined
+          ? {}
+          : { effect: projectOperationEffect(record.effect) }),
       } as OperationRecord<Kind>;
     case "succeeded":
       return {
         status: "succeeded",
         operationKey,
-        result:
-          kind === "spawn"
-            ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
-            : kind === "send"
-              ? projectSendResult(
-                  record.result as ProtocolResult<"send">,
-                  generation,
-                )
-              : projectKillResult(record.result as ProtocolResult<"kill">),
+        result: projectOperationResult(kind, record.result, generation),
       } as OperationRecord<Kind>;
     case "failed":
       return {
@@ -1251,15 +1257,7 @@ function projectOperationRecord<Kind extends "spawn" | "send" | "kill">(
       return {
         status: "accepted_uncommitted",
         operationKey,
-        result:
-          kind === "spawn"
-            ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
-            : kind === "send"
-              ? projectSendResult(
-                  record.result as ProtocolResult<"send">,
-                  generation,
-                )
-              : projectKillResult(record.result as ProtocolResult<"kill">),
+        result: projectOperationResult(kind, record.result, generation),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
@@ -1269,15 +1267,7 @@ function projectOperationRecord<Kind extends "spawn" | "send" | "kill">(
       return {
         status: "accepted_unconfirmed",
         operationKey,
-        result:
-          kind === "spawn"
-            ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
-            : kind === "send"
-              ? projectSendResult(
-                  record.result as ProtocolResult<"send">,
-                  generation,
-                )
-              : projectKillResult(record.result as ProtocolResult<"kill">),
+        result: projectOperationResult(kind, record.result, generation),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
@@ -1290,8 +1280,53 @@ function projectOperationRecord<Kind extends "spawn" | "send" | "kill">(
         operationKey,
         error: projectFailure(record.error),
         cause: record.cause,
-      } as unknown as OperationRecord<Kind>;
+      } as OperationRecord<Kind>;
   }
+}
+
+function projectOperationEffect(
+  effect: ProtocolOperationEffect,
+): OperationEffect {
+  if (effect.kind === "session_closed")
+    return {
+      kind: effect.kind,
+      sessionHandle: parseSessionHandle(effect.sessionId),
+    };
+  return {
+    kind: effect.kind,
+    sessionHandle: parseSessionHandle(effect.sessionId),
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: effect.sessionId,
+        turnId: effect.turnId,
+      }),
+    ),
+  };
+}
+
+function projectOperationResult<
+  Kind extends "spawn" | "send" | "interrupt" | "kill",
+>(
+  kind: Kind,
+  result: ProtocolResult<Kind>,
+  generation: ProtocolDaemonGeneration,
+): ProjectedOperationResultByKind[Kind] {
+  if (kind === "spawn")
+    return projectSpawnResult(
+      result as ProtocolResult<"spawn">,
+    ) as ProjectedOperationResultByKind[Kind];
+  if (kind === "send")
+    return projectSendResult(
+      result as ProtocolResult<"send">,
+      generation,
+    ) as ProjectedOperationResultByKind[Kind];
+  if (kind === "kill")
+    return projectKillResult(
+      result as ProtocolResult<"kill">,
+    ) as ProjectedOperationResultByKind[Kind];
+  return projectInterruptResult(
+    result as ProtocolResult<"interrupt">,
+  ) as ProjectedOperationResultByKind[Kind];
 }
 
 function projectSendResult(
@@ -1315,6 +1350,20 @@ function projectSendResult(
       }),
     ),
     deliveryPoint: result.deliveryPoint,
+  };
+}
+
+function projectInterruptResult(
+  result: ProtocolResult<"interrupt">,
+): InterruptResult {
+  return {
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+      }),
+    ),
+    status: "accepted",
   };
 }
 
@@ -1369,6 +1418,9 @@ function projectFailure(
           ...(failure.diagnosticId === undefined
             ? {}
             : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+          ...(failure.effect === undefined
+            ? {}
+            : { effect: projectOperationEffect(failure.effect) }),
         },
       };
     case "control_store_unavailable":
@@ -1437,6 +1489,10 @@ function projectFailure(
                     return projectKillResult(
                       failure.acceptedResult as ProtocolResult<"kill">,
                     );
+                  if (kind === "interrupt")
+                    return projectInterruptResult(
+                      failure.acceptedResult as ProtocolResult<"interrupt">,
+                    );
                   return projectSpawnResult(
                     failure.acceptedResult as ProtocolResult<"spawn">,
                   );
@@ -1445,6 +1501,9 @@ function projectFailure(
           ...(failure.cleanupCause === undefined
             ? {}
             : { cleanupCause: failure.cleanupCause }),
+          ...(failure.effect === undefined
+            ? {}
+            : { effect: projectOperationEffect(failure.effect) }),
         },
       };
     case "protocol_version_mismatch":
@@ -1576,12 +1635,7 @@ function projectFailure(
             : { cleanupCause: failure.cleanupCause }),
           ...(failure.effect === undefined
             ? {}
-            : {
-                effect: {
-                  kind: "session_closed",
-                  sessionHandle: parseSessionHandle(failure.effect.sessionId),
-                },
-              }),
+            : { effect: projectOperationEffect(failure.effect) }),
         },
       };
     case "daemon_start_failed":

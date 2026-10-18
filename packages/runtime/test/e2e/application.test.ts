@@ -1262,6 +1262,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     await connection.list({ sessionHandle: active.sessionHandle }),
   ).toMatchObject([{ state: "busy", activeTurn: active.turnHandle }]);
   const activeMessage = "  exact active input\nkeep spacing  ";
+  const activeSendKey = connection.prepareOperation("send");
   const subscription = await connection.attach(
     { scope: "turn", turnHandle: active.turnHandle },
     { mode: "history" },
@@ -1283,7 +1284,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       turnHandle: active.turnHandle,
       message: activeMessage,
     },
-    { operationKey: connection.prepareOperation("send") },
+    { operationKey: activeSendKey },
   );
   expect(activeSend).toMatchObject({
     sessionHandle: active.sessionHandle,
@@ -1295,6 +1296,33 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   expect(parseMessageKey(serializeMessageKey(activeSend.messageKey))).toBe(
     callerFact.messageKey,
   );
+  expect(await connection.getOperation(activeSendKey)).toMatchObject({
+    status: "succeeded",
+    result: activeSend,
+  });
+  await expect(
+    connection.send(
+      {
+        placement: "active_turn",
+        turnHandle: active.turnHandle,
+        message: activeMessage,
+      },
+      { operationKey: activeSendKey },
+    ),
+  ).resolves.toEqual(activeSend);
+  await expect(
+    connection.send(
+      {
+        placement: "active_turn",
+        turnHandle: active.turnHandle,
+        message: `${activeMessage} changed`,
+      },
+      { operationKey: activeSendKey },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: { code: "operation_key_conflict" },
+  });
   const cursor = subscription.checkpoint;
   expect(parseResumeCursor(serializeResumeCursor(cursor))).toBe(cursor);
   subscription.close();
@@ -1337,6 +1365,64 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     }),
   ).toMatchObject({ status: "satisfied" });
 
+  const partiallyCancelled = await connection.spawn(
+    {
+      harness: "codex",
+      message: "hold before continuation",
+      sessionLabel: "partial-steer",
+      cwd: process.cwd(),
+    },
+    { operationKey: connection.prepareOperation("spawn") },
+  );
+  const partialSendKey = connection.prepareOperation("send");
+  await expect(
+    connection.send(
+      {
+        placement: "active_turn",
+        turnHandle: partiallyCancelled.turnHandle,
+        message: "partial-cancel then continue",
+      },
+      { operationKey: partialSendKey },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: {
+      code: "internal_error",
+      facts: {
+        effect: {
+          kind: "execution_phase_cancelled",
+          sessionHandle: partiallyCancelled.sessionHandle,
+          turnHandle: partiallyCancelled.turnHandle,
+        },
+      },
+    },
+  });
+  expect(await connection.getOperation(partialSendKey)).toMatchObject({
+    status: "failed",
+    error: {
+      code: "internal_error",
+      facts: {
+        effect: {
+          kind: "execution_phase_cancelled",
+          sessionHandle: partiallyCancelled.sessionHandle,
+          turnHandle: partiallyCancelled.turnHandle,
+        },
+      },
+    },
+  });
+  expect(
+    await connection.wait({
+      targets: [partiallyCancelled.turnHandle],
+      completion: "all",
+      timeoutMs: 5_000,
+    }),
+  ).toMatchObject({
+    status: "satisfied",
+    completed: [
+      { turnHandle: partiallyCancelled.turnHandle, stopReason: "cancelled" },
+    ],
+  });
+
   const held = await connection.spawn(
     {
       harness: "codex",
@@ -1346,12 +1432,19 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     },
     { operationKey: connection.prepareOperation("spawn") },
   );
-  expect(
-    await connection.interrupt(
-      { turnHandle: held.turnHandle },
-      { operationKey: connection.prepareOperation("interrupt") },
-    ),
-  ).toEqual({ turnHandle: held.turnHandle, status: "accepted" });
+  const interruptOperationKey = connection.prepareOperation("interrupt");
+  const interruptResult = await connection.interrupt(
+    { turnHandle: held.turnHandle },
+    { operationKey: interruptOperationKey },
+  );
+  expect(interruptResult).toEqual({
+    turnHandle: held.turnHandle,
+    status: "accepted",
+  });
+  expect(await connection.getOperation(interruptOperationKey)).toMatchObject({
+    status: "succeeded",
+    result: interruptResult,
+  });
   expect(
     await connection.wait({
       targets: [held.turnHandle],
@@ -1387,9 +1480,12 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   const delivered = observed.filter(
     (record) => record.type === "message_delivered",
   );
-  expect(delivered).toHaveLength(2);
+  expect(delivered).toHaveLength(3);
   expect(delivered[0]).toMatchObject({ message: activeMessage });
   expect(delivered[1]).toMatchObject({ message: nextMessage });
+  expect(delivered[2]).toMatchObject({
+    message: "partial-cancel then continue",
+  });
 });
 
 test("SDK new-turn preconditions are exact, persisted, and checked before delivery", async () => {

@@ -109,10 +109,11 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type RecoverableOperationKind = "spawn" | "send" | "kill";
+export type RecoverableOperationKind = "spawn" | "send" | "interrupt" | "kill";
 type OperationResultByKind = {
   spawn: SpawnResult;
   send: SendResult;
+  interrupt: InterruptResult;
   kill: KillResult;
 };
 type OperationRecordForKind<Kind extends RecoverableOperationKind> =
@@ -126,6 +127,7 @@ type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       cause?: ErrorCause;
       cleanupCause?: ErrorCause;
       diagnosticId?: DiagnosticId;
+      effect?: OperationEffect;
     }
   | {
       status: "succeeded";
@@ -157,6 +159,21 @@ type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
     }
+  | (Kind extends "send"
+      ? {
+          status: "partial_effect_uncommitted" | "partial_effect_unconfirmed";
+          operationKey: OperationKey<Kind>;
+          error: Extract<ReinsFailure, { code: "internal_error" }> & {
+            facts: {
+              effect: Extract<
+                OperationEffect,
+                { kind: "execution_phase_cancelled" }
+              >;
+            };
+          };
+          cause: ErrorCause;
+        }
+      : never)
   | (Kind extends "kill"
       ? {
           status: "partial_effect_uncommitted" | "partial_effect_unconfirmed";
@@ -909,6 +926,14 @@ export type ErrorCause = {
   message: string;
 };
 
+export type OperationEffect =
+  | { kind: "session_closed"; sessionHandle: SessionHandle }
+  | {
+      kind: "execution_phase_cancelled";
+      sessionHandle: SessionHandle;
+      turnHandle: TurnHandle;
+    };
+
 type ControlEventType =
   | "session.created"
   | "turn.started"
@@ -952,6 +977,7 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     cleanupCause?: ErrorCause;
     diagnosticId?: DiagnosticId;
+    effect?: OperationEffect;
   };
   control_store_unavailable:
     | {
@@ -959,8 +985,13 @@ type FailureFactsByCode = {
         stage: "register" | "dispatch" | "commit" | "failure";
         acceptance: "not_dispatched" | "unknown" | "accepted";
         cause: ErrorCause;
-        acceptedResult?: SpawnResult | SendResult | KillResult;
+        acceptedResult?:
+          | SpawnResult
+          | SendResult
+          | InterruptResult
+          | KillResult;
         cleanupCause?: ErrorCause;
+        effect?: OperationEffect;
       }
     | {
         stage: "event";
@@ -1006,7 +1037,7 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     diagnosticId?: DiagnosticId;
     cleanupCause?: ErrorCause;
-    effect?: SessionCloseEffect;
+    effect?: OperationEffect;
   };
   diagnostics_store_corrupt: {
     cause?: ErrorCause;

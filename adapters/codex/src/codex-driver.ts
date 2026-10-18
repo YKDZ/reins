@@ -13,6 +13,7 @@ import {
   type TurnId,
   type MachineError,
   WorkerDeliveryFailure,
+  WorkerInterruptFailure,
   WorkerStartFailure,
   makeErrorCause,
 } from "@reins/protocol";
@@ -446,12 +447,19 @@ export function createCodexDriver(deps: {
             throw new Error("Codex accepted a different turn");
         } catch (error) {
           if (messageId !== undefined) removePendingCallerMessage(messageId);
-          if (error instanceof CodexRequestError && session.turnId !== turnId)
-            throw {
-              code: "turn_not_active",
-              sessionId,
-              turnId,
-            } satisfies MachineError;
+          if (error instanceof CodexRequestError) {
+            if (session.turnId !== turnId)
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
+            throw new WorkerDeliveryFailure(
+              `Codex rejected the active-turn continuation: ${errorMessage(error)}`,
+              "not_accepted",
+              { cause: error },
+            );
+          }
           throw error;
         }
       },
@@ -487,7 +495,17 @@ export function createCodexDriver(deps: {
               sessionId,
               turnId,
             } satisfies MachineError;
-          throw error;
+          if (error instanceof CodexRequestError)
+            throw new WorkerInterruptFailure(
+              "Codex rejected the interrupt request",
+              "not_accepted",
+              { cause: error },
+            );
+          throw new WorkerInterruptFailure(
+            "Codex interrupt acceptance is unknown",
+            "unknown",
+            { cause: error },
+          );
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {

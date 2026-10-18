@@ -7,6 +7,7 @@ import type {
   WorkerDriver,
   WorkerSpec,
 } from "@reins/protocol";
+import { WorkerInterruptFailure } from "@reins/protocol";
 import { afterEach, expect, test } from "vitest";
 
 const daemons: Awaited<ReturnType<typeof openEphemeralDaemonForTest>>[] = [];
@@ -171,7 +172,10 @@ test("interrupt 结束先赢的拒绝保留原目标，不停止显式后继回�
 
 test("interrupt 错误父级在原生调用前拒绝，停止失败不伪造取消", async () => {
   const { client, calls } = await fixture(async () => {
-    throw new Error("native interrupt rejected");
+    throw new WorkerInterruptFailure(
+      "native interrupt rejected before acceptance",
+      "not_accepted",
+    );
   });
   const spawn = async (name: string) => {
     const response = await client.request("spawn", {

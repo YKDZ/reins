@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import { WorkerStartFailure } from "@reins/protocol";
+import { WorkerDeliveryFailure, WorkerStartFailure } from "@reins/protocol";
 import type {
   DriverDiagnosticFact,
   DomainEvent,
@@ -1583,7 +1583,21 @@ test("原生拒绝的精确分类依据已观察终态，不依据自由文本",
       "rejected while target is unclassified",
       "active_turn",
     ),
-  ).rejects.toBe(noActiveText);
+  ).rejects.toMatchObject({
+    name: "WorkerDeliveryFailure",
+    acceptance: "not_accepted",
+    cause: noActiveText,
+  } satisfies Partial<WorkerDeliveryFailure>);
+  const transportDropped = new Error("Codex transport closed before receipt");
+  fake.controls.setResponse("turn/steer", Promise.reject(transportDropped));
+  await expect(
+    driver.deliver(
+      sessionId,
+      firstTurnId,
+      "rejected by lost transport receipt",
+      "active_turn",
+    ),
+  ).rejects.toBe(transportDropped);
   let reject!: (error: unknown) => void;
   fake.controls.setResponse(
     "turn/steer",

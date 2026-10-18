@@ -8,7 +8,11 @@ import type {
   WorkerDriver,
   AdapterDriverFactory,
 } from "@reins/protocol";
-import { messageIdSchema, permissionIdSchema } from "@reins/protocol";
+import {
+  messageIdSchema,
+  permissionIdSchema,
+  WorkerDeliveryFailure,
+} from "@reins/protocol";
 import * as v from "valibot";
 
 function modelCatalog(
@@ -111,6 +115,25 @@ function fakeAdapter(options: {
           appendFileSync(
             requestsFile,
             `${JSON.stringify({ type: "message_delivered", sessionId, turnId, message })}\n`,
+          );
+        }
+        if (message.startsWith("partial-cancel ")) {
+          emit({
+            type: "turn.completed",
+            sessionId,
+            turnId,
+            stopReason: "cancelled",
+            finalReply: "",
+          });
+          throw new WorkerDeliveryFailure(
+            "活跃执行阶段取消后，原生拒绝了续接请求",
+            "not_accepted",
+            undefined,
+            {
+              kind: "execution_phase_cancelled",
+              sessionId,
+              turnId,
+            },
           );
         }
         queueMicrotask(() => {

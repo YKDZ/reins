@@ -7,6 +7,73 @@ import { createFakeDriver } from "./fake-driver.ts";
 import { ids, testDiagnostics, testIdentity } from "./ids.ts";
 
 describe("interrupt", () => {
+  test("中断等待已登记的 active_turn 收束后再对精确回合派发", async () => {
+    let releaseDelivery!: () => void;
+    let reportDeliveryStarted!: () => void;
+    const deliveryStarted = new Promise<void>((resolve) => {
+      reportDeliveryStarted = resolve;
+    });
+    const deliveryGate = new Promise<void>((resolve) => {
+      releaseDelivery = resolve;
+    });
+    const order: string[] = [];
+    const fake = createFakeDriver({
+      async deliver() {
+        reportDeliveryStarted();
+        await deliveryGate;
+      },
+      interrupt() {
+        order.push("interrupt");
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
+    const { sessionId: id } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("interrupt-waits-for-send"),
+      harness: "codex",
+      message: "work",
+      cwd: "/tmp/demo",
+    });
+    const target = { sessionId: id, turnId: ids.turn("t1") };
+    const sending = machine.send(
+      { placement: "active_turn", ...target, message: "steer" },
+      {
+        commit() {
+          order.push("send-commit");
+        },
+      },
+    );
+    await deliveryStarted;
+    const interrupting = machine.interrupt(target, {
+      beforeDispatch() {
+        order.push("interrupt-dispatch");
+      },
+      commit() {
+        order.push("interrupt-commit");
+      },
+    });
+
+    await expect(
+      machine.send({ placement: "active_turn", ...target, message: "late" }),
+    ).rejects.toMatchObject({ code: "session_busy" });
+    expect(order).toEqual([]);
+    releaseDelivery();
+    await expect(sending).resolves.toMatchObject({
+      deliveryPoint: "active_turn",
+      turnId: target.turnId,
+    });
+    await expect(interrupting).resolves.toEqual(target);
+    expect(order).toEqual([
+      "send-commit",
+      "interrupt-dispatch",
+      "interrupt",
+      "interrupt-commit",
+    ]);
+  });
+
   test("driver interrupt failure records its nearest request failure", async () => {
     const fake = createFakeDriver({
       interrupt: () => {

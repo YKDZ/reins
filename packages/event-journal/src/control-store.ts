@@ -5,6 +5,8 @@ import { DatabaseSync } from "node:sqlite";
 import {
   domainEventSchema,
   eventIdSchema,
+  interruptAckSchema,
+  interruptParamsSchema,
   machineErrorSchema,
   consumerContextSchema,
   daemonGenerationSchema,
@@ -14,7 +16,7 @@ import {
   parseOperationKey,
   runtimeScopeIdSchema,
   sendAckSchema,
-  newTurnSendParamsSchema,
+  sendParamsSchema,
   sessionIdSchema,
   sessionInfoSchema,
   spawnAckSchema,
@@ -26,10 +28,12 @@ import {
   type EventId,
   type KillParams,
   type KillResult,
+  type InterruptAck,
+  type InterruptParams,
   type MachineError,
   type RuntimeScopeId,
   type SendAck,
-  type NewTurnSendParams,
+  type SendParams,
   type SessionInfo,
   type SessionId,
   type SpawnAck,
@@ -52,7 +56,11 @@ export type ControlOperationInput = ControlOperationOwner & {
 };
 
 export type SendControlOperationInput = ControlOperationOwner & {
-  readonly request: NewTurnSendParams;
+  readonly request: SendParams;
+};
+
+export type InterruptControlOperationInput = ControlOperationOwner & {
+  readonly request: InterruptParams;
 };
 
 export type KillControlOperationInput = ControlOperationOwner & {
@@ -77,6 +85,8 @@ export type ControlOperation =
       ControlOperationStatus<SpawnAck> & { readonly kind: "spawn" })
   | (SendControlOperationInput &
       ControlOperationStatus<SendAck> & { readonly kind: "send" })
+  | (InterruptControlOperationInput &
+      ControlOperationStatus<InterruptAck> & { readonly kind: "interrupt" })
   | (KillControlOperationInput &
       ControlOperationStatus<KillResult> & { readonly kind: "kill" });
 
@@ -140,6 +150,20 @@ export type ControlStore = {
   }): readonly StoredCommittedEvent[];
   failSend(operationKey: StoredOperationKey, error: MachineError): void;
   recordSendOutcomeUnknown(
+    operationKey: StoredOperationKey,
+    error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
+  ): void;
+  registerInterrupt(input: InterruptControlOperationInput): {
+    readonly created: boolean;
+    readonly operation: Extract<ControlOperation, { kind: "interrupt" }>;
+  };
+  markInterruptDispatched(operationKey: StoredOperationKey): void;
+  commitInterrupt(input: {
+    readonly operationKey: StoredOperationKey;
+    readonly result: InterruptAck;
+  }): void;
+  failInterrupt(operationKey: StoredOperationKey, error: MachineError): void;
+  recordInterruptOutcomeUnknown(
     operationKey: StoredOperationKey,
     error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
   ): void;
@@ -214,6 +238,7 @@ function operationFromRow(row: OperationRow): ControlOperation {
   if (
     claims.kind !== "spawn" &&
     claims.kind !== "send" &&
+    claims.kind !== "interrupt" &&
     claims.kind !== "kill"
   )
     throw new Error(
@@ -284,8 +309,15 @@ function operationFromRow(row: OperationRow): ControlOperation {
     return {
       ...owner,
       kind: "send",
-      request: parseJson(newTurnSendParamsSchema, row.request_json),
+      request: parseJson(sendParamsSchema, row.request_json),
       ...statusFields<SendAck>(sendAckSchema),
+    };
+  if (claims.kind === "interrupt")
+    return {
+      ...owner,
+      kind: "interrupt",
+      request: parseJson(interruptParamsSchema, row.request_json),
+      ...statusFields<InterruptAck>(interruptAckSchema),
     };
   return {
     ...owner,
@@ -393,6 +425,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
     if (
       (claims.kind !== "spawn" &&
         claims.kind !== "send" &&
+        claims.kind !== "interrupt" &&
         claims.kind !== "kill") ||
       (expectedKind !== undefined && claims.kind !== expectedKind)
     )
@@ -688,7 +721,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
         consumer,
         generation,
       );
-      const parsedRequest = v.parse(newTurnSendParamsSchema, input.request);
+      const parsedRequest = v.parse(sendParamsSchema, input.request);
       const requestJson = stableJson(parsedRequest);
       const current = readOperation(operationKey);
       if (current !== undefined) {
@@ -720,6 +753,58 @@ function createControlStore(database: DatabaseSync): ControlStore {
       const operation = readOperation(operationKey);
       if (operation === undefined || operation.kind !== "send")
         throw new Error("Send registration disappeared");
+      return { created: true, operation };
+    },
+    registerInterrupt(input) {
+      const operationKey = validatedOperationKey(
+        input.operationKey,
+        "interrupt",
+      );
+      const runtimeScopeId = v.parse(
+        runtimeScopeIdSchema,
+        input.runtimeScopeId,
+      );
+      const consumer = v.parse(consumerContextSchema, input.consumer);
+      const generation = v.parse(daemonGenerationSchema, input.generation);
+      validateOperationOwnership(
+        operationKey,
+        "interrupt",
+        runtimeScopeId,
+        consumer,
+        generation,
+      );
+      const parsedRequest = v.parse(interruptParamsSchema, input.request);
+      const requestJson = stableJson(parsedRequest);
+      const current = readOperation(operationKey);
+      if (current !== undefined) {
+        const row = database
+          .prepare(
+            "SELECT request_json FROM operations WHERE operation_key = ?",
+          )
+          .get(operationKey) as Record<string, unknown> | undefined;
+        const storedRequestJson =
+          row === undefined ? undefined : v.parse(v.string(), row.request_json);
+        if (
+          current.kind !== "interrupt" ||
+          storedRequestJson === undefined ||
+          current.runtimeScopeId !== runtimeScopeId ||
+          current.consumer !== consumer ||
+          current.generation !== generation ||
+          storedRequestJson !== requestJson
+        )
+          throw { code: "operation_key_conflict" };
+        return { created: false, operation: current };
+      }
+      transaction(() => {
+        database
+          .prepare(
+            "INSERT INTO operations(operation_key, runtime_scope_id, consumer, generation, request_json, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+          )
+          .run(operationKey, runtimeScopeId, consumer, generation, requestJson);
+      });
+      const operation = readOperation(operationKey);
+      if (operation === undefined || operation.kind !== "interrupt")
+        throw new Error("Interrupt registration disappeared");
       return { created: true, operation };
     },
     registerKill(input) {
@@ -858,6 +943,18 @@ function createControlStore(database: DatabaseSync): ControlStore {
           throw new Error("Send operation is not awaiting dispatch");
       });
     },
+    markInterruptDispatched(operationKey) {
+      operationKey = validatedOperationKey(operationKey, "interrupt");
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'dispatched' WHERE operation_key = ? AND status = 'pending'",
+          )
+          .run(operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error("Interrupt operation is not awaiting dispatch");
+      });
+    },
     markKillDispatched(operationKey) {
       operationKey = validatedOperationKey(operationKey, "kill");
       transaction(() => {
@@ -888,39 +985,60 @@ function createControlStore(database: DatabaseSync): ControlStore {
       const operation = readOperation(operationKey);
       if (operation?.kind !== "send")
         throw new Error("Send operation record is missing");
-      const caller = events[1];
+      const request = operation.request;
       if (
-        operation.request.placement !== "new_turn" ||
-        parsedResult.deliveryPoint !== "new_turn" ||
-        parsedResult.sessionId !== operation.request.sessionId ||
-        parsedSession.sessionId !== parsedResult.sessionId ||
-        events.length < 2 ||
-        events[0]?.type !== "turn.started" ||
-        events[0].sessionId !== parsedResult.sessionId ||
-        events[0].turnId !== parsedResult.turnId ||
-        caller?.type !== "message" ||
-        caller.sessionId !== parsedResult.sessionId ||
-        caller.turnId !== parsedResult.turnId ||
-        caller.messageId !== parsedResult.messageId ||
-        caller.role !== "caller" ||
-        (typeof caller.content === "string" &&
-          caller.content !== operation.request.message) ||
-        events.some(
-          (event, index) =>
-            event.sessionId !== parsedResult.sessionId ||
-            (index > 1 &&
-              (event.type === "turn.started" ||
-                event.type === "session.created" ||
-                event.type === "session.killed" ||
-                !("turnId" in event) ||
-                event.turnId !== parsedResult.turnId ||
-                (event.type === "message" && event.role === "caller"))),
-        )
+        parsedResult.deliveryPoint !== request.placement ||
+        parsedResult.sessionId !== request.sessionId ||
+        parsedSession.sessionId !== parsedResult.sessionId
       )
-        throw new Error("Send events do not match the accepted new turn");
-      const terminalEvents = events.filter(
-        (event) => event.type === "turn.completed",
-      );
+        throw new Error("Send result does not match its request");
+
+      if (request.placement === "new_turn") {
+        const caller = events[1];
+        if (
+          events.length < 2 ||
+          events[0]?.type !== "turn.started" ||
+          events[0].sessionId !== parsedResult.sessionId ||
+          events[0].turnId !== parsedResult.turnId ||
+          caller?.type !== "message" ||
+          caller.sessionId !== parsedResult.sessionId ||
+          caller.turnId !== parsedResult.turnId ||
+          caller.messageId !== parsedResult.messageId ||
+          caller.role !== "caller" ||
+          (typeof caller.content === "string" &&
+            caller.content !== request.message) ||
+          events.some(
+            (event, index) =>
+              event.sessionId !== parsedResult.sessionId ||
+              (index > 1 &&
+                (event.type === "turn.started" ||
+                  event.type === "session.created" ||
+                  event.type === "session.killed" ||
+                  !("turnId" in event) ||
+                  event.turnId !== parsedResult.turnId ||
+                  (event.type === "message" && event.role === "caller"))),
+          )
+        )
+          throw new Error("Send events do not match the accepted new turn");
+      } else {
+        const caller = events[0];
+        if (
+          parsedResult.turnId !== request.turnId ||
+          events.length !== 1 ||
+          caller?.type !== "message" ||
+          caller.sessionId !== parsedResult.sessionId ||
+          caller.turnId !== parsedResult.turnId ||
+          caller.messageId !== parsedResult.messageId ||
+          caller.role !== "caller" ||
+          (typeof caller.content === "string" &&
+            caller.content !== request.message)
+        )
+          throw new Error("Send events do not match the accepted active turn");
+      }
+      const terminalEvents =
+        request.placement === "new_turn"
+          ? events.filter((event) => event.type === "turn.completed")
+          : [];
       if (
         terminalEvents.length > 1 ||
         (terminalEvents.length === 1 && events.at(-1) !== terminalEvents[0])
@@ -947,34 +1065,43 @@ function createControlStore(database: DatabaseSync): ControlStore {
           existingSession === undefined ||
           existingSession.runtimeScopeId !== sessionInput.runtimeScopeId ||
           existingSession.consumer !== sessionInput.consumer ||
-          existingSession.generation !== sessionInput.generation ||
-          existingSession.info.state !== "idle"
+          existingSession.generation !== sessionInput.generation
         )
-          throw new Error("Send target is not the recorded idle session");
-        const lastCompletedTurn = existingSession.info.lastCompletedTurn;
-        if (
-          currentOperation.request.ifLastCompletedTurn !== undefined &&
-          (currentOperation.request.ifLastCompletedTurn.sessionId !==
-            parsedResult.sessionId ||
-            currentOperation.request.ifLastCompletedTurn.turnId !==
-              lastCompletedTurn?.turnId)
-        )
-          throw new Error("Send precondition no longer matches the session");
-        const terminal = terminalEvents[0];
-        if (
-          parsedSession.turns !==
-            existingSession.info.turns + (terminal === undefined ? 0 : 1) ||
-          (terminal === undefined &&
-            (parsedSession.state !== "busy" ||
-              parsedSession.activeTurnId !== parsedResult.turnId)) ||
-          (terminal !== undefined &&
-            (parsedSession.state !== "idle" ||
-              parsedSession.lastCompletedTurn?.turnId !== terminal.turnId ||
-              parsedSession.lastCompletedTurn.stopReason !==
-                terminal.stopReason))
-        )
-          throw new Error("Send session projection does not match its events");
-        commitSessionProjection(parsedResult.sessionId, parsedSession);
+          throw new Error("Send target is not the recorded session");
+        if (request.placement === "new_turn") {
+          if (existingSession.info.state !== "idle")
+            throw new Error("Send target is not the recorded idle session");
+          const lastCompletedTurn = existingSession.info.lastCompletedTurn;
+          if (
+            request.ifLastCompletedTurn !== undefined &&
+            (request.ifLastCompletedTurn.sessionId !== parsedResult.sessionId ||
+              request.ifLastCompletedTurn.turnId !== lastCompletedTurn?.turnId)
+          )
+            throw new Error("Send precondition no longer matches the session");
+          const terminal = terminalEvents[0];
+          if (
+            parsedSession.turns !==
+              existingSession.info.turns + (terminal === undefined ? 0 : 1) ||
+            (terminal === undefined &&
+              (parsedSession.state !== "busy" ||
+                parsedSession.activeTurnId !== parsedResult.turnId)) ||
+            (terminal !== undefined &&
+              (parsedSession.state !== "idle" ||
+                parsedSession.lastCompletedTurn?.turnId !== terminal.turnId ||
+                parsedSession.lastCompletedTurn.stopReason !==
+                  terminal.stopReason))
+          )
+            throw new Error(
+              "Send session projection does not match its events",
+            );
+          commitSessionProjection(parsedResult.sessionId, parsedSession);
+        } else if (
+          existingSession.info.state !== "busy" ||
+          existingSession.info.activeTurnId !== request.turnId ||
+          stableJson(parsedSession) !== stableJson(existingSession.info)
+        ) {
+          throw new Error("Active send target is not the recorded active turn");
+        }
         const entries = events.map(appendEvent);
         database
           .prepare(
@@ -982,6 +1109,39 @@ function createControlStore(database: DatabaseSync): ControlStore {
           )
           .run(stableJson(parsedResult), operationKey);
         return entries;
+      });
+    },
+    commitInterrupt(input) {
+      const operationKey = validatedOperationKey(
+        input.operationKey,
+        "interrupt",
+      );
+      const parsedResult = v.parse(interruptAckSchema, input.result);
+      return transaction(() => {
+        const operation = readOperation(operationKey);
+        if (
+          operation?.kind !== "interrupt" ||
+          operation.status !== "dispatched"
+        )
+          throw new Error("Interrupt operation was not marked dispatched");
+        if (
+          operation.request.sessionId !== parsedResult.sessionId ||
+          operation.request.turnId !== parsedResult.turnId
+        )
+          throw new Error("Interrupt result does not match its target");
+        const session = readSession(parsedResult.sessionId);
+        if (
+          session === undefined ||
+          session.runtimeScopeId !== operation.runtimeScopeId ||
+          session.consumer !== operation.consumer ||
+          session.generation !== operation.generation
+        )
+          throw new Error("Interrupt target is not the recorded session");
+        database
+          .prepare(
+            "UPDATE operations SET status = 'succeeded', result_json = ? WHERE operation_key = ? AND status = 'dispatched'",
+          )
+          .run(stableJson(parsedResult), operationKey);
       });
     },
     commitKill(input) {
@@ -1183,6 +1343,43 @@ function createControlStore(database: DatabaseSync): ControlStore {
           )
             return;
           throw new Error("Send operation is not awaiting an unknown outcome");
+        }
+      });
+    },
+    failInterrupt(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "interrupt");
+      const parsedError = v.parse(machineErrorSchema, error);
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'failed', error_json = ? WHERE operation_key = ? AND status IN ('pending', 'dispatched') AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error("Interrupt operation is not pending");
+      });
+    },
+    recordInterruptOutcomeUnknown(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "interrupt");
+      const parsedError = v.parse(machineErrorSchema, error);
+      if (parsedError.code !== "operation_outcome_unknown")
+        throw new Error("Interrupt outcome error has the wrong code");
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET error_json = ? WHERE operation_key = ? AND status = 'dispatched' AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1) {
+          const operation = readOperation(operationKey);
+          if (
+            operation?.status === "outcome_unknown" &&
+            stableJson(operation.error) === stableJson(parsedError)
+          )
+            return;
+          throw new Error(
+            "Interrupt operation is not awaiting an unknown outcome",
+          );
         }
       });
     },
