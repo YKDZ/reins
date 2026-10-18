@@ -2226,12 +2226,15 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             if (verification.status === "committed") {
               committed = verification.event;
             } else {
+              const verificationError =
+                verification.status === "unconfirmed"
+                  ? verification.error
+                  : undefined;
+              if (verificationError !== undefined) notifyControlUnavailable();
               throw new PermissionResolutionCommitFailure(
                 result,
                 commitError,
-                verification.status === "unconfirmed"
-                  ? verification.error
-                  : undefined,
+                verificationError,
               );
             }
           }
@@ -2240,7 +2243,6 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       });
     } catch (error) {
       if (error instanceof PermissionResolutionCommitFailure) {
-        if (error.verificationError !== undefined) notifyControlUnavailable();
         rememberUncommittedPermissionAcceptance(
           key,
           error.result,
