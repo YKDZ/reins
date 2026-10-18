@@ -77,7 +77,7 @@ export function orderDiagnosticsAcceptance(
 
   return {
     generation: runtime.generation,
-    sessionId: (name) => runtime.sessionId(name),
+    sessionId: () => runtime.sessionId(),
     record(input) {
       const acceptedInput = structuredClone(input);
       // 归属在接纳点按请求因果确定，队列把 operation 延后也不改变所有权。

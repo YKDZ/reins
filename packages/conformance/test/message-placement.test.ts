@@ -3,7 +3,6 @@ import type { HarnessAdapter } from "@reins/daemon";
 import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
 import {
   type ConsumerContext,
-  type SessionLabel,
   type DomainEvent,
   type WorkerSpec,
   type WorkerDriver,

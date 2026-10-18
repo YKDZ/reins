@@ -29,6 +29,7 @@ import {
   machineErrorSchema,
   makeDiagnosticId,
   REINS_PROTOCOL_MAJOR_VERSION,
+  protocolResultSchemaFor,
   sessionIdSchema,
 } from "@reins/protocol";
 import {
@@ -75,9 +76,12 @@ async function waitFor(
 
 const daemons: Daemon[] = [];
 
+let sessionCounter = 0;
 const testIdentity = {
-  session: (sessionLabel: string) =>
-    v.parse(sessionIdSchema, `${sessionLabel}@gdaemontest`),
+  session: () => {
+    sessionCounter += 1;
+    return v.parse(sessionIdSchema, `session:gdaemontest:${sessionCounter}`);
+  },
 };
 
 const testDiagnostics: DiagnosticsRuntime = {
@@ -679,27 +683,31 @@ describe("daemon 协议面（缝 C）", () => {
     });
     expect(spawned).toMatchObject({
       kind: "response",
-      result: { sessionId: "reviewer@gdaemontest" },
+      result: { sessionId: expect.any(String) },
     });
+    const spawnedResult = v.parse(
+      protocolResultSchemaFor("spawn"),
+      resultOf(spawned),
+    );
     fake.controls.completeTurn("end_turn", "ok");
 
     const collector = collectNotifications(client);
     const attached = await requester("attach", {
       scope: "turn",
-      sessionId: "reviewer@gdaemontest",
-      turnId: "t1",
+      sessionId: spawnedResult.sessionId,
+      turnId: spawnedResult.turnId,
       replay: { mode: "available" },
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId: "reviewer@gdaemontest", replayed: 2 },
+      result: { sessionId: spawnedResult.sessionId, replayed: 2 },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "turn.started",
       "turn.completed",
     ]);
     expect(collector.ended).toEqual([
-      { sessionId: "reviewer@gdaemontest", reason: "end_turn" },
+      { sessionId: spawnedResult.sessionId, reason: "end_turn" },
     ]);
   });
 
@@ -770,7 +778,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
 
     expect(response).toMatchObject({
-      result: { sessionId: "capture-supported@gdaemontest" },
+      result: { sessionId: expect.any(String) },
     });
     expect(fake.calls.starts).toBe(1);
     expect(fake.calls.specs[0]?.captureHarnessStderr).toBe(true);
@@ -1033,7 +1041,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
 
     const missing = await requester("wait", {
-      targets: [{ sessionId: "missing@gdaemontest", turnId: "t1" }],
+      targets: [{ sessionId: "session:missing:test", turnId: "t1" }],
       completion: "all",
       timeoutMs: 1000,
     });
@@ -1652,7 +1660,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const response = await makeRequester(client).request("attach", {
       scope: "session",
-      sessionId: "missing@gdaemontest",
+      sessionId: "session:missing:test",
       replay: { mode: "available" },
     });
     expect(response).toMatchObject({
@@ -2552,7 +2560,7 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
   const first = await sendRaw(a, { ...command, requestId: "original" });
   const replay = await sendRaw(b, { ...command, requestId: "recovered" });
   expect(first).toMatchObject({
-    result: { sessionId: "recoverable@gdaemontest" },
+    result: { sessionId: expect.any(String) },
   });
   expect(replay).toEqual({ ...first, requestId: "recovered" });
   expect(fake.calls.starts).toBe(1);
@@ -2789,7 +2797,7 @@ test("操作账本只在首次 spawn 时校验动态能力", async () => {
   };
   const created = await sendRaw(connection, accepted);
   expect(created).toMatchObject({
-    result: { sessionId: "capability-ledger@gdaemontest" },
+    result: { sessionId: expect.any(String) },
   });
   expect(fake.calls.starts).toBe(1);
 
@@ -2819,7 +2827,7 @@ test("能力查询失败时不把 harness 误判为未知或拒绝模型", async
     message: "continue with explicitly supplied model",
   });
   expect(resultOf(response)).toMatchObject({
-    sessionId: "capability-query-failed@gdaemontest",
+    sessionId: expect.any(String),
   });
   expect(fake.calls.starts).toBe(1);
   expect(fake.calls.specs[0]).toMatchObject({ model: "live-model" });
@@ -2994,13 +3002,25 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext: "original-consumer",
     });
-    expect(
-      await sendRaw(recovery, { ...command, requestId: "accepted-recovered" }),
-    ).toMatchObject({ result: { sessionId: "accepted@gdaemontest" } });
+    const recovered = await sendRaw(recovery, {
+      ...command,
+      requestId: "accepted-recovered",
+    });
+    expect(recovered).toMatchObject({
+      result: { sessionId: expect.any(String) },
+    });
     expect(fake.calls.starts).toBe(1);
-    expect(
-      await makeRequester(recovery, "original-consumer")("list", {}),
-    ).toMatchObject({ result: [{ sessionId: "accepted@gdaemontest" }] });
+    const listed = await makeRequester(recovery, "original-consumer")(
+      "list",
+      {},
+    );
+    const recoveredResult = v.parse(
+      protocolResultSchemaFor("spawn"),
+      resultOf(recovered),
+    );
+    expect(resultOf(listed)).toMatchObject([
+      { sessionId: recoveredResult.sessionId },
+    ]);
   } finally {
     client.close();
     recovery.close();

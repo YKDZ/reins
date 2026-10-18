@@ -173,13 +173,14 @@ describe("driver 抛错时动作整体回滚", () => {
       },
     });
     const diagnosticId = makeDiagnosticId("test", "1");
+    const expectedSessionId = ids.session("session:failed-start:gtest");
     const record = vi.fn(async () => diagnosticId);
     const diagnostics: DiagnosticEmitter = {
       record,
     };
     const machine = createSessionMachine({
       driverFactory: fake.factory,
-      identity: testIdentity,
+      identity: { session: () => expectedSessionId },
       diagnostics,
     });
     const events: DomainEvent[] = [];
@@ -204,7 +205,7 @@ describe("driver 抛错时动作整体回滚", () => {
     expect(machine.list()).toEqual([]);
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionId: ids.session("fixture-1@gtest"),
+        sessionId: expectedSessionId,
         turnId: ids.turn("t1"),
         kind: "request_failure",
         operation: "spawn",

@@ -11,7 +11,6 @@ import {
   DriverFailure,
   makeDiagnosticId,
   sessionIdSchema,
-  sessionLabelSchema,
   turnIdSchema,
   type DomainEvent,
   type WorkerSpec,
@@ -117,18 +116,16 @@ function codexRoutingFixture() {
     },
   })((event) => events.push(event));
   const alpha: WorkerSpec = {
-    sessionId: v.parse(sessionIdSchema, "alpha@groute"),
+    sessionId: v.parse(sessionIdSchema, "session:alpha:groute"),
     turnId: v.parse(turnIdSchema, "turn-alpha"),
-    sessionLabel: v.parse(sessionLabelSchema, "alpha"),
     harness: "codex",
     message: "caller task for alpha",
     cwd: "/tmp",
   };
   const beta: WorkerSpec = {
     ...alpha,
-    sessionId: v.parse(sessionIdSchema, "beta@groute"),
+    sessionId: v.parse(sessionIdSchema, "session:beta:groute"),
     turnId: v.parse(turnIdSchema, "turn-beta"),
-    sessionLabel: v.parse(sessionLabelSchema, "beta"),
     message: "caller task for beta",
   };
   return { driver, workers, events, alpha, beta };
@@ -292,7 +289,7 @@ describe("routing driver invariants", () => {
   });
 
   test("verified driver diagnostic crosses routing without a duplicate core record", async () => {
-    const sessionId = v.parse(sessionIdSchema, "verified@groute");
+    const sessionId = v.parse(sessionIdSchema, "session:verified:groute");
     const diagnosticId = makeDiagnosticId("route", "1");
     const query = vi.fn(async () => ({
       record: {
@@ -338,7 +335,6 @@ describe("routing driver invariants", () => {
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionLabel: v.parse(sessionLabelSchema, "verified"),
     });
 
     await expect(driver.terminate(sessionId)).rejects.toMatchObject({
@@ -402,7 +398,7 @@ describe("routing driver invariants", () => {
   ])(
     "terminate rejects unrelated $name provenance and records one core fallback",
     async ({ record: unrelated }) => {
-      const sessionId = v.parse(sessionIdSchema, "unrelated@groute");
+      const sessionId = v.parse(sessionIdSchema, "session:unrelated:groute");
       const suppliedId = makeDiagnosticId("route", "2");
       const fallbackId = makeDiagnosticId("route", "3");
       const query = vi.fn(async () => ({
@@ -438,7 +434,7 @@ describe("routing driver invariants", () => {
       });
       await machine.spawn({
         cwd: "/tmp",
-        sessionLabel: v.parse(sessionLabelSchema, "unrelated"),
+        sessionLabel: "unrelated",
         harness: "unrelated",
         message: "start",
       });
@@ -533,7 +529,7 @@ describe("routing driver invariants", () => {
       },
       query: (params) => runtime.query(params),
     })(() => {});
-    const sessionId = v.parse(sessionIdSchema, "stderr@groute");
+    const sessionId = v.parse(sessionIdSchema, "session:stderr:groute");
     driver.start({
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-stderr"),
@@ -542,7 +538,6 @@ describe("routing driver invariants", () => {
       cwd: "/tmp",
       authorizationMode: "allowAll",
       captureHarnessStderr: true,
-      sessionLabel: v.parse(sessionLabelSchema, "stderr"),
     });
     const invalidVectors = [
       Buffer.from([0xff]),
@@ -608,13 +603,12 @@ describe("routing driver invariants", () => {
       },
     })(() => {});
     driver.start({
-      sessionId: v.parse(sessionIdSchema, "owned@groute"),
+      sessionId: v.parse(sessionIdSchema, "session:owned:groute"),
       turnId: v.parse(turnIdSchema, "turn-owned"),
       harness: "owned",
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionLabel: v.parse(sessionLabelSchema, "owned"),
     });
 
     await sink({
@@ -679,13 +673,12 @@ describe("routing driver invariants", () => {
       runtime,
     )(() => {});
     const spec: WorkerSpec = {
-      sessionId: v.parse(sessionIdSchema, "diagnostic@groute"),
+      sessionId: v.parse(sessionIdSchema, "session:diagnostic:groute"),
       turnId: v.parse(turnIdSchema, "turn-diagnostic"),
       harness: "diagnostic-fake",
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionLabel: v.parse(sessionLabelSchema, "diagnostic"),
     };
 
     driver.start(spec);
@@ -714,12 +707,12 @@ describe("routing driver invariants", () => {
 
     await expect(
       driver.deliver(
-        v.parse(sessionIdSchema, "missing@groute"),
+        v.parse(sessionIdSchema, "session:missing:groute"),
         v.parse(turnIdSchema, "turn-route"),
         "message",
         "active_turn",
       ),
-    ).rejects.toThrow("No routing entry for session missing@groute");
+    ).rejects.toThrow("No routing entry for session session:missing:groute");
   });
 
   test("does not retain failed starts and retains failed termination for retry", async () => {
@@ -753,7 +746,7 @@ describe("routing driver invariants", () => {
         throw new Error("not found");
       },
     })(() => {});
-    const sessionId = v.parse(sessionIdSchema, "retry@groute");
+    const sessionId = v.parse(sessionIdSchema, "session:retry:groute");
     const spec: WorkerSpec = {
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-route"),
@@ -761,7 +754,6 @@ describe("routing driver invariants", () => {
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
-      sessionLabel: v.parse(sessionLabelSchema, "retry"),
     };
     try {
       expect(() => driver.start(spec)).toThrow("start failed");

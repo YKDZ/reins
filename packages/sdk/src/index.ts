@@ -11,7 +11,6 @@ import {
 } from "@reins/client/control";
 import type {
   AttachParams,
-  DiagnosticId as ProtocolDiagnosticId,
   DiagnosticRecord as ProtocolDiagnosticRecord,
   DiagnosticsResult as ProtocolDiagnosticsResult,
   MachineError,
@@ -206,7 +205,10 @@ export function serializeAgentFactId(id: AgentFactId): string {
 
 function projectAgentTarget(target: ClientAgentTarget): AgentTarget {
   return target.scope === "session"
-    ? { scope: "session", sessionHandle: parseSessionHandle(target.sessionHandle) }
+    ? {
+        scope: "session",
+        sessionHandle: parseSessionHandle(target.sessionHandle),
+      }
     : { scope: "turn", turnHandle: parseTurnHandle(target.turnHandle) };
 }
 
@@ -393,18 +395,15 @@ export async function connect(
         }
       },
       async spawn(input, credential) {
-        const result = await perform(
-          client!,
-          "spawn",
-          input,
-          credential,
-        );
+        const result = await perform(client!, "spawn", input, credential);
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
-          turnHandle: parseTurnHandle(encodeTurnHandle({
-            sessionId: result.sessionId,
-            turnId: result.turnId,
-          })),
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: result.sessionId,
+              turnId: result.turnId,
+            }),
+          ),
           cwd: result.cwd,
         };
       },
@@ -429,9 +428,7 @@ export async function connect(
         let target: ReturnType<typeof decodePermissionHandle>;
         try {
           target = decodePermissionHandle(
-            serializePermissionHandle(
-              parsePermissionHandle(permissionHandle),
-            ),
+            serializePermissionHandle(parsePermissionHandle(permissionHandle)),
           );
         } catch {
           throw new ReinsSdkError(
@@ -488,10 +485,12 @@ export async function connect(
         const result = await perform(client!, "send", params, credential);
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
-          turnHandle: parseTurnHandle(encodeTurnHandle({
-            sessionId: result.sessionId,
-            turnId: result.turnId,
-          })),
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: result.sessionId,
+              turnId: result.turnId,
+            }),
+          ),
           messageKey: parseMessageKey(
             encodeMessageKey({
               generation: handshake.daemonGeneration,
@@ -907,10 +906,12 @@ function projectFailure(
       return {
         code: failure.code,
         facts: {
-          turnHandle: parseTurnHandle(encodeTurnHandle({
-            sessionId: failure.sessionId,
-            turnId: failure.turnId,
-          })),
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.turnId,
+            }),
+          ),
         },
       };
     case "capability_query_failed":
@@ -920,9 +921,9 @@ function projectFailure(
         code: failure.code,
         facts: {
           ...(failure.cause === undefined ? {} : { cause: failure.cause }),
-            ...(failure.diagnosticId === undefined
-              ? {}
-              : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+          ...(failure.diagnosticId === undefined
+            ? {}
+            : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
         },
       };
     case "daemon_start_failed":
@@ -960,10 +961,12 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
     session.lastCompletedTurn === undefined
       ? undefined
       : {
-          turnHandle: parseTurnHandle(encodeTurnHandle({
-            sessionId: session.sessionId,
-            turnId: session.lastCompletedTurn.turnId,
-          })),
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: session.sessionId,
+              turnId: session.lastCompletedTurn.turnId,
+            }),
+          ),
           stopReason: session.lastCompletedTurn.stopReason,
         };
 
@@ -971,10 +974,12 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
     return {
       ...common,
       state: "busy",
-      activeTurn: parseTurnHandle(encodeTurnHandle({
-        sessionId: session.sessionId,
-        turnId: session.activeTurnId,
-      })),
+      activeTurn: parseTurnHandle(
+        encodeTurnHandle({
+          sessionId: session.sessionId,
+          turnId: session.activeTurnId,
+        }),
+      ),
       ...(lastCompletedTurn === undefined ? {} : { lastCompletedTurn }),
     };
   }

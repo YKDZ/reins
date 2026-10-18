@@ -44,8 +44,6 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.availableHarnesses.join(",");
     case "command_outcome_unknown":
       return failure.facts.operation;
-    case "session_name_conflict":
-      return failure.facts.sessionLabel;
     case "session_busy":
       return failure.facts.sessionHandle;
     case "permission_not_pending":

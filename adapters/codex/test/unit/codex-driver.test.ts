@@ -5,7 +5,6 @@ import type {
   DomainEvent,
   PermissionId,
   SessionId,
-  SessionName,
   TurnId,
   WorkerSpec,
 } from "@reins/protocol";
@@ -25,11 +24,10 @@ const flush = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
-const sessionId = "reviewer@g1" as SessionId;
+const sessionId = "session:reviewer:g1" as SessionId;
 const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;
-const sessionName = "reviewer" as SessionName;
 
 function deferred<T>(): {
   promise: Promise<T>;
@@ -64,7 +62,6 @@ function startTracked(
   driver.start({
     sessionId,
     turnId,
-    sessionName: sessionId.split("@")[0] as SessionName,
     harness: "codex",
     message: "caller task",
     cwd: "/tmp/demo",
@@ -95,7 +92,6 @@ test("结构化额度失败不从正文猜测限流，停止等待在途失败�
   driver.start({
     sessionId,
     turnId: firstTurnId,
-    sessionName,
     harness: "codex",
     cwd: "/tmp",
     message: "caller task",
@@ -163,7 +159,6 @@ function setup(
   driver.start({
     sessionId,
     turnId: firstTurnId,
-    sessionName,
     harness: "codex",
     message: "检查",
     cwd: "/tmp/demo",
@@ -228,7 +223,6 @@ function setupWithMalformedResponse(method: "turn/steer" | "thread/delete") {
   driver.start({
     sessionId,
     turnId: firstTurnId,
-    sessionName,
     harness: "codex",
     message: "检查",
     cwd: "/tmp/demo",
@@ -265,9 +259,9 @@ describe("codex driver", () => {
     const first = makeDriver(firstFake);
     const second = makeDriver(secondFake);
     const third = makeDriver(thirdFake);
-    const firstSession = "cold-first@g1" as SessionId;
-    const secondSession = "cold-second@g1" as SessionId;
-    const thirdSession = "cold-third@g1" as SessionId;
+    const firstSession = "session:cold-first:g1" as SessionId;
+    const secondSession = "session:cold-second:g1" as SessionId;
+    const thirdSession = "session:cold-third:g1" as SessionId;
 
     try {
       startTracked(first.driver, firstSession, firstTurnId);
@@ -328,9 +322,9 @@ describe("codex driver", () => {
     const first = makeDriver(firstFake);
     const queued = makeDriver(queuedFake);
     const later = makeDriver(laterFake);
-    const firstSession = "failed-first@g1" as SessionId;
-    const queuedSession = "failed-queued@g1" as SessionId;
-    const laterSession = "failed-later@g1" as SessionId;
+    const firstSession = "session:failed-first:g1" as SessionId;
+    const queuedSession = "session:failed-queued:g1" as SessionId;
+    const laterSession = "session:failed-later:g1" as SessionId;
 
     try {
       startTracked(first.driver, firstSession, firstTurnId);
@@ -382,8 +376,8 @@ describe("codex driver", () => {
     };
     const first = makeDriver(firstFake);
     const queued = makeDriver(queuedFake);
-    const firstSession = "cancel-first@g1" as SessionId;
-    const queuedSession = "cancel-queued@g1" as SessionId;
+    const firstSession = "session:cancel-first:g1" as SessionId;
+    const queuedSession = "session:cancel-queued:g1" as SessionId;
 
     try {
       startTracked(first.driver, firstSession, firstTurnId);

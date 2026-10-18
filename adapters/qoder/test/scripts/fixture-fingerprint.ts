@@ -2,12 +2,7 @@ import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
-import type {
-  DomainEvent,
-  SessionId,
-  SessionName,
-  TurnId,
-} from "@reins/protocol";
+import type { DomainEvent, SessionId, TurnId } from "@reins/protocol";
 
 import {
   projectRecordedQoderMessages,
@@ -39,7 +34,7 @@ function fingerprintEvent(event: DomainEvent): unknown {
         model: event.model,
         reasoning: event.reasoning,
         cwd: event.cwd,
-        sessionName: event.sessionName,
+        sessionLabel: event.sessionLabel,
       };
     case "turn.started":
       return event;
@@ -97,9 +92,8 @@ export async function qoderPublicEventFingerprint(
     diagnostics: async () => undefined,
   });
   driver.start({
-    sessionId: "fixture@g1" as SessionId,
+    sessionId: "session:fixture:g1" as SessionId,
     turnId: "t1" as TurnId,
-    sessionName: "fixture" as SessionName,
     harness: "qoder",
     message: "fixture replay",
     cwd: "/tmp",
@@ -109,7 +103,7 @@ export async function qoderPublicEventFingerprint(
   for (const message of messages) fake.controls.push(message);
   fake.controls.end();
   await terminal;
-  await driver.terminate("fixture@g1" as SessionId);
+  await driver.terminate("session:fixture:g1" as SessionId);
   return events.map(fingerprintEvent);
 }
 

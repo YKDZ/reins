@@ -15,8 +15,14 @@ import { fileURLToPath } from "node:url";
 import { consumerContextSchema } from "@reins/protocol";
 import {
   connect,
+  parseDiagnosticId,
+  parseMessageKey,
+  parseResumeCursor,
   parseSessionHandle,
   parseTurnHandle,
+  serializeDiagnosticId,
+  serializeMessageKey,
+  serializeResumeCursor,
   serializeSessionHandle,
   serializeTurnHandle,
   type DiagnosticId,
@@ -453,11 +459,11 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   if (first === undefined) throw new Error("missing stderr diagnostic record");
   expect(
     await connection.diagnostics({
-      diagnosticId: first.diagnosticId as DiagnosticId,
+      diagnosticId: parseDiagnosticId(first.diagnosticId),
     }),
   ).toMatchObject({ record: { diagnosticId: first.diagnosticId } });
   const byTurn = await connection.diagnostics({
-    turnHandle: first.turnHandle as TurnHandle,
+    turnHandle: parseTurnHandle(first.turnHandle),
     kinds: ["harness_stderr"],
   });
   expect("records" in byTurn ? byTurn.records.length : 0).toBe(3);
@@ -472,8 +478,8 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   });
   await expect(
     connection.diagnostics({
-      sessionHandle: "other@g1" as SessionHandle,
-      turnHandle: first.turnHandle as TurnHandle,
+      sessionHandle: parseSessionHandle("session:other:g1"),
+      turnHandle: parseTurnHandle(first.turnHandle),
     }),
   ).rejects.toMatchObject({
     failure: {
@@ -509,6 +515,9 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
       0,
     );
   }
+  expect(parseDiagnosticId(serializeDiagnosticId(first.diagnosticId))).toBe(
+    first.diagnosticId,
+  );
   expect(
     await connection.diagnostics({
       sessionHandle: captured.sessionHandle,
@@ -699,19 +708,31 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
   expect(await connection.list({ sessionLabel: longLabel })).toMatchObject([
     { sessionHandle: longLabelled.sessionHandle, sessionLabel: longLabel },
   ]);
-  expect(await connection.list({ sessionHandle: unlabelled.sessionHandle })).toMatchObject([
-    { sessionHandle: unlabelled.sessionHandle },
-  ]);
+  expect(
+    await connection.list({ sessionHandle: unlabelled.sessionHandle }),
+  ).toMatchObject([{ sessionHandle: unlabelled.sessionHandle }]);
   expect(
     (await connection.list({ sessionHandle: unlabelled.sessionHandle }))[0],
   ).not.toHaveProperty("sessionLabel");
 
-  expect(
-    parseSessionHandle(serializeSessionHandle(first.sessionHandle)),
-  ).toBe(first.sessionHandle);
+  expect(parseSessionHandle(serializeSessionHandle(first.sessionHandle))).toBe(
+    first.sessionHandle,
+  );
   expect(parseTurnHandle(serializeTurnHandle(first.turnHandle))).toBe(
     first.turnHandle,
   );
+  const emptyLabel = await connection.spawn(
+    {
+      harness: "fake",
+      message: "empty label",
+      sessionLabel: "",
+      cwd: process.cwd(),
+    },
+    connection.prepareOperation("spawn"),
+  );
+  expect(await connection.list({ sessionLabel: "" })).toMatchObject([
+    { sessionHandle: emptyLabel.sessionHandle, sessionLabel: "" },
+  ]);
   expect(
     await connection.kill(
       { sessionHandle: first.sessionHandle },
@@ -784,6 +805,21 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     await connection.list({ sessionHandle: active.sessionHandle }),
   ).toMatchObject([{ state: "busy", activeTurn: active.turnHandle }]);
   const activeMessage = "  exact active input\nkeep spacing  ";
+  const subscription = await connection.attach(
+    { scope: "turn", turnHandle: active.turnHandle },
+    { mode: "available" },
+  );
+  const callerFactPromise = (async () => {
+    for await (const fact of subscription) {
+      if (
+        fact.type === "message" &&
+        fact.role === "caller" &&
+        fact.content === activeMessage
+      )
+        return fact;
+    }
+    throw new Error("The active caller message was not published as a fact");
+  })();
   const activeSend = await connection.send(
     {
       placement: "active_turn",
@@ -797,7 +833,14 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     turnHandle: active.turnHandle,
     deliveryPoint: "active_turn",
   });
-  expect(activeSend.messageId).toEqual(expect.any(String));
+  const callerFact = await callerFactPromise;
+  expect(callerFact.messageKey).toBe(activeSend.messageKey);
+  expect(parseMessageKey(serializeMessageKey(activeSend.messageKey))).toBe(
+    callerFact.messageKey,
+  );
+  const cursor = subscription.checkpoint;
+  expect(parseResumeCursor(serializeResumeCursor(cursor))).toBe(cursor);
+  subscription.close();
   expect(
     await connection.wait({
       targets: [active.turnHandle],

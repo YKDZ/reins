@@ -116,17 +116,18 @@ async function expectFailure<T>(
 async function prepareSpawn(): Promise<void> {
   const connection = await connectSdk();
   try {
+    const sessionsBefore = await connection.list();
     const credential = connection.prepareOperation("spawn");
     const input = spawnInput();
     const serialized = publishIntent({ credential, input });
-    const sessions = await connection.list();
-    if (sessions.some((session) => session.sessionLabel === input.sessionLabel))
+    const sessionsAfter = await connection.list();
+    if (sessionsAfter.length !== sessionsBefore.length)
       throw new Error("Preparing an operation created a session");
     process.stdout.write(
       `${JSON.stringify({
         prepared: true,
         serialized: true,
-        sessionCount: sessions.length,
+        sessionCount: sessionsAfter.length,
         daemonGeneration: connection.handshake.daemonGeneration,
         intent: serialized,
       })}\n`,
@@ -739,7 +740,7 @@ async function spawnPermission(): Promise<void> {
   try {
     const result = await connection.spawn(
       {
-        sessionLabel: required("REINS_PERMISSION_SESSION_NAME"),
+        sessionLabel: required("REINS_PERMISSION_SESSION_LABEL"),
         harness: "fixture",
         message: "packed-permission",
         cwd: required("REINS_WORKER_CWD"),
@@ -1007,7 +1008,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
       );
     const mismatchedSession = await expectFailure(() =>
       connection.diagnostics({
-        sessionHandle: "different@g1" as SessionHandle,
+        sessionHandle: "session:different:g1" as SessionHandle,
         turnHandle: spawned.turnHandle,
       }),
     );

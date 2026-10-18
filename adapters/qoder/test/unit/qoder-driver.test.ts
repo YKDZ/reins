@@ -5,7 +5,6 @@ import type {
   DomainEvent,
   PermissionId,
   SessionId,
-  SessionName,
   TurnId,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
@@ -17,11 +16,10 @@ import { createFakeSdk } from "../helpers/fake-sdk.ts";
 const flush = async (): Promise<void> => {
   await new Promise((resolve) => setTimeout(resolve, 0));
 };
-const sessionId = "reviewer@g1" as SessionId;
+const sessionId = "session:reviewer:g1" as SessionId;
 const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;
-const sessionName = "reviewer" as SessionName;
 
 function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
@@ -47,7 +45,6 @@ function setup(
   driver.start({
     sessionId,
     turnId: firstTurnId,
-    sessionName,
     harness: "qoder",
     message: "检查",
     cwd: "/tmp/demo",

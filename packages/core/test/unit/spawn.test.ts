@@ -122,11 +122,14 @@ describe("spawn", () => {
       cwd: "/tmp/demo",
     });
     const inner = await nestedSpawn;
+    if (inner === undefined) throw new Error("nested spawn did not start");
 
-    expect(machine.list().map((session) => session.sessionId)).toEqual([
-      inner,
-      outer,
-    ]);
+    expect(
+      machine
+        .list()
+        .map((session) => session.sessionId)
+        .sort(),
+    ).toEqual([inner, outer].sort());
     expect(events).toContainEqual(
       expect.objectContaining({
         type: "text.delta",

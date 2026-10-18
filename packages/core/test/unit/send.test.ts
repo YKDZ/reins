@@ -155,7 +155,7 @@ describe("send", () => {
     await expect(
       machine.send({
         placement: "new_turn",
-        sessionId: ids.session("missing@gtest"),
+        sessionId: ids.session("session:missing:gtest"),
         message: "hi",
       }),
     ).rejects.toEqual(expect.objectContaining({ code: "session_not_found" }));

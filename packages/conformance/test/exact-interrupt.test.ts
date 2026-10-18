@@ -4,7 +4,6 @@ import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
 import type {
   ConsumerContext,
   DomainEvent,
-  SessionLabel,
   WorkerDriver,
   WorkerSpec,
 } from "@reins/protocol";

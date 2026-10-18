@@ -30,7 +30,6 @@ import {
   diagnosticIdSchema,
   requestIdSchema,
   sessionIdSchema,
-  sessionLabelSchema,
   turnIdSchema,
   REINS_PROTOCOL_MAJOR_VERSION,
   type WorkerEventRejection,
@@ -163,7 +162,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemon({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -404,7 +403,7 @@ describe("daemon diagnostic error dispatch", () => {
           async terminate() {},
         };
       },
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: {
         async record(input) {
           return await runtime.record({ source: "core", ...input });
@@ -412,7 +411,7 @@ describe("daemon diagnostic error dispatch", () => {
       },
     });
     const { sessionId } = await machine.spawn({
-      sessionLabel: v.parse(sessionLabelSchema, "immediate-query"),
+      sessionLabel: "immediate-query",
       harness: "fake",
       message: "start",
       cwd: "/tmp",
@@ -468,7 +467,7 @@ describe("daemon diagnostic error dispatch", () => {
     };
     const machine = createSessionMachine({
       driverFactory,
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: {
         async record(input) {
           return await runtime.record({ source: "core", ...input });
@@ -476,7 +475,7 @@ describe("daemon diagnostic error dispatch", () => {
       },
     });
     const { sessionId } = await machine.spawn({
-      sessionLabel: v.parse(sessionLabelSchema, "immediate-close"),
+      sessionLabel: "immediate-close",
       harness: "fake",
       message: "start",
       cwd: "/tmp",
@@ -548,7 +547,7 @@ describe("daemon diagnostic error dispatch", () => {
           },
         ],
       ]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -594,7 +593,7 @@ describe("daemon diagnostic error dispatch", () => {
         model: null,
         reasoning: null,
         cwd: "/sentinel-cwd",
-        sessionLabel: v.parse(sessionLabelSchema, "forged"),
+        sessionLabel: "forged",
         spawnedAt: "sentinel-time",
       });
       emit({
@@ -736,7 +735,7 @@ describe("daemon diagnostic error dispatch", () => {
       });
       emit({
         type: "message",
-        sessionId: runtime.sessionId(v.parse(sessionLabelSchema, "unknown")),
+        sessionId: runtime.sessionId(),
         turnId: v.parse(turnIdSchema, "t1"),
         messageId: "m-unknown" as never,
         role: "worker",
@@ -908,7 +907,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemonForTest({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -991,7 +990,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemonForTest({
       transport,
       adapters: new Map([["fake", adapter]]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
       idleTimeoutMs: 60_000,
     });
@@ -1087,7 +1086,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemon({
       transport,
       adapters: new Map([["fake", adapter]]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -1153,7 +1152,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemon({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -1244,7 +1243,7 @@ describe("daemon diagnostic error dispatch", () => {
           },
         ],
       ]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -1376,7 +1375,7 @@ describe("daemon diagnostic error dispatch", () => {
           },
         ],
       ]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -1496,7 +1495,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemon({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -1599,7 +1598,7 @@ describe("daemon diagnostic error dispatch", () => {
     let postRecordEntered = false;
     const diagnostics: DiagnosticsRuntime = {
       generation: runtime.generation,
-      sessionId: (name) => runtime.sessionId(name),
+      sessionId: () => runtime.sessionId(),
       async record(input) {
         if (input.kind !== "protocol_violation") {
           return await runtime.record(input);
@@ -1632,7 +1631,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemonForTest({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics,
       onDiagnosticsQueryAccepted: queryAccepted,
     });
@@ -1788,7 +1787,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemon({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -1938,7 +1937,7 @@ describe("daemon diagnostic error dispatch", () => {
         async close() {},
       },
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
 
@@ -2027,7 +2026,7 @@ describe("daemon diagnostic error dispatch", () => {
     let diagnosticsQueryCalls = 0;
     const diagnostics: DiagnosticsRuntime = {
       generation: runtime.generation,
-      sessionId: (name) => runtime.sessionId(name),
+      sessionId: () => runtime.sessionId(),
       async record(input) {
         if (input.kind === "transport_failure" && rejectFirstTransport) {
           rejectFirstTransport = false;
@@ -2087,7 +2086,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemonForTest({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics,
       onDiagnosticsQueryAccepted: queryAccepted,
     });
@@ -2207,7 +2206,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemonForTest({
       transport,
       adapters: new Map([["fake", adapter]]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
       onEvent: () => {
         if (!failed) {
@@ -2277,7 +2276,7 @@ describe("daemon diagnostic error dispatch", () => {
         v.parse(daemonGenerationSchema, "filters"),
       now: () => now,
     });
-    const sessionId = runtime.sessionId(v.parse(sessionLabelSchema, "filters"));
+    const sessionId = runtime.sessionId();
     const turnId = v.parse(turnIdSchema, "turn-filter");
     await runtime.record({
       source: "daemon",
@@ -2310,7 +2309,7 @@ describe("daemon diagnostic error dispatch", () => {
     const daemon = createDaemon({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
@@ -2431,7 +2430,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
     const daemon = createDaemonForTest({
       transport,
       adapters: new Map(),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     return { daemon, running: daemon.start() };
@@ -2665,14 +2664,14 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
           },
         ],
       ]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
     const alpha = await boundClient(transport, "alpha");
     try {
       const spawned = await request(alpha, "alpha-spawn", "spawn", {
-        sessionLabel: v.parse(sessionLabelSchema, "scoped-session"),
+        sessionLabel: "scoped-session",
         harness: "fake",
         message: "start",
         cwd: root,
@@ -2750,14 +2749,14 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
           },
         ],
       ]),
-      identity: { session: (name) => runtime.sessionId(name) },
+      identity: { session: () => runtime.sessionId() },
       diagnostics: runtime,
     });
     const running = daemon.start();
     const alpha = await boundClient(transport, "alpha");
     try {
       const spawned = await request(alpha, "alpha-failing-spawn", "spawn", {
-        sessionLabel: v.parse(sessionLabelSchema, "failing-session"),
+        sessionLabel: "failing-session",
         harness: "fake",
         message: "start",
         cwd: root,

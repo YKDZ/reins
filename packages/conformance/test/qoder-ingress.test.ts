@@ -7,7 +7,6 @@ import type {
   DiagnosticsResult,
   DomainEvent,
   ProtocolNotification,
-  SpawnParams,
   WaitResult,
 } from "@reins/protocol";
 import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
@@ -134,7 +133,7 @@ async function runFixture(
     const handshake = await client.initialize();
     if ("error" in handshake) throw new Error(JSON.stringify(handshake.error));
     const spawned = await client.request("spawn", {
-      sessionLabel: "conformance" as SpawnParams["sessionLabel"],
+      sessionLabel: "conformance",
       harness: "qoder",
       message: "fixture replay",
       cwd: "/tmp",
@@ -213,7 +212,7 @@ function assertPublicLifecycle(
     const toolCallId = `c${index + 1}`;
     expect(toolEvents[index * 2]).toEqual({
       type: "tool.requested",
-      sessionId: "conformance@gtest",
+      sessionId: "session:conformance:gtest",
       turnId: "t1",
       toolCallId,
       name: fact.name,
@@ -233,7 +232,7 @@ function assertPublicLifecycle(
         : completed,
     ).toEqual({
       type: "tool.completed",
-      sessionId: "conformance@gtest",
+      sessionId: "session:conformance:gtest",
       turnId: "t1",
       toolCallId,
       name: fact.name,
@@ -295,7 +294,7 @@ describe("Qoder ingress conformance", () => {
       stopReason: terminal.stopReason,
     }).toEqual({
       type: "turn.completed",
-      sessionId: "conformance@gtest",
+      sessionId: "session:conformance:gtest",
       turnId: "t1",
       stopReason: fixture.facts.terminal.stopReason,
     });

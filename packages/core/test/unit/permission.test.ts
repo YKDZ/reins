@@ -208,7 +208,7 @@ describe("resolvePermission", () => {
     await expect(
       machine.resolvePermission({
         turnId: ids.turn("t1"),
-        sessionId: ids.session("missing@gtest"),
+        sessionId: ids.session("session:missing:gtest"),
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       }),
@@ -310,11 +310,17 @@ describe("resolvePermission", () => {
   });
 
   test("driver 同步发出的内容事件排在 resolved 之后", async () => {
+    let workerSessionId: SessionId | undefined;
     const fake = createFakeDriver({
+      start(spec) {
+        workerSessionId = spec.sessionId;
+      },
       resolvePermission: () => {
+        if (workerSessionId === undefined)
+          throw new Error("worker session was not started");
         fake.controls.emit({
           type: "text.delta",
-          sessionId: ids.session("fixture-16@gtest"),
+          sessionId: workerSessionId,
           turnId: ids.turn("t1"),
           messageId: ids.message("m1"),
           delta: "收到",

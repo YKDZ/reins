@@ -142,13 +142,16 @@ describe("wait", () => {
     await expect(
       machine.wait({
         targets: [
-          { sessionId: ids.session("missing@gtest"), turnId: ids.turn("t1") },
+          {
+            sessionId: ids.session("session:missing:gtest"),
+            turnId: ids.turn("t1"),
+          },
         ],
         completion: "any",
       }),
     ).rejects.toEqual({
       code: "session_not_found",
-      sessionId: ids.session("missing@gtest"),
+      sessionId: ids.session("session:missing:gtest"),
     });
   });
 });

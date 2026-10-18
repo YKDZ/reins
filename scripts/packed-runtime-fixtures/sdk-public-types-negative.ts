@@ -1,13 +1,23 @@
 import {
   type AgentTarget,
   type CompletedTurn,
+  type DiagnosticId,
+  type MessageKey,
   type OperationCredential,
+  type PermissionHandle,
   type ReplayPolicy,
   type ResumeCursor,
   type ReinsConnection,
   type SendInput,
   type SessionHandle,
+  type ToolKey,
   type TurnHandle,
+  serializeDiagnosticId,
+  serializeMessageKey,
+  serializePermissionHandle,
+  serializeResumeCursor,
+  serializeToolKey,
+  serializeTurnHandle,
 } from "@ykdz/reins-sdk";
 
 declare const connection: ReinsConnection;
@@ -16,9 +26,27 @@ declare const turnHandle: TurnHandle;
 declare const spawnCredential: OperationCredential<"spawn">;
 declare const resumeCursor: ResumeCursor;
 declare const completed: CompletedTurn;
+declare const diagnosticId: DiagnosticId;
+declare const messageKey: MessageKey;
+declare const permissionHandle: PermissionHandle;
+declare const toolKey: ToolKey;
 
 // @ts-expect-error 会话句柄与回合句柄具有不同的公开身份。
 const wrongTurn: TurnHandle = sessionHandle;
+// @ts-expect-error 回合句柄序列化器不能接收会话句柄。
+serializeTurnHandle(sessionHandle);
+// @ts-expect-error 消息身份与工具身份不能互换。
+const wrongToolKey: ToolKey = messageKey;
+// @ts-expect-error 授权身份不能序列化为诊断身份。
+serializeDiagnosticId(permissionHandle);
+// @ts-expect-error 游标和工具身份不能互换。
+serializeResumeCursor(toolKey);
+// @ts-expect-error 工具身份不能序列化为消息身份。
+serializeMessageKey(toolKey);
+// @ts-expect-error 授权句柄不能序列化为工具身份。
+serializeToolKey(permissionHandle);
+// @ts-expect-error 诊断身份不能序列化为授权句柄。
+serializePermissionHandle(diagnosticId);
 // @ts-expect-error spawn 操作不能使用 send 凭据。
 const wrongSpawnCredential: OperationCredential<"spawn"> =
   connection.prepareOperation("send");
@@ -45,6 +73,7 @@ if (completed.stopReason === "end_turn") {
 }
 
 void wrongTurn;
+void wrongToolKey;
 void wrongOperation;
 void wrongSpawnCredential;
 void invalidSend;

@@ -57,7 +57,7 @@ test("turn targets retain their original parent across active and completed turn
   ).toThrow(expect.objectContaining({ code: "invalid_params" }));
   expect(() =>
     machine.assertTurnTarget({
-      sessionId: ids.session("absent@gtest"),
+      sessionId: ids.session("session:absent:gtest"),
       turnId: first.turnId,
     }),
   ).toThrow(expect.objectContaining({ code: "session_not_found" }));
@@ -87,8 +87,8 @@ test("spawn returns its accepted first turn even when the driver completes it sy
     cwd: "/tmp",
     message: "finish",
   });
-  expect(accepted).toEqual({
-    sessionId: "instant@gtest",
+  expect(accepted).toMatchObject({
+    sessionId: accepted.sessionId,
     turnId: "t1",
     cwd: "/tmp",
   });

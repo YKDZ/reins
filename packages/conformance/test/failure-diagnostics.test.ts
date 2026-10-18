@@ -1,6 +1,6 @@
 import { createReinsClient, type AgentFact } from "@reins/client";
 import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
-import type { ConsumerContext, SessionLabel } from "@reins/protocol";
+import type { ConsumerContext } from "@reins/protocol";
 import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
 import {
   createQoderFixtureSdk,
@@ -157,7 +157,7 @@ test.each(["rejected", "hung", "late"] as const)(
       const spawn = await client.request("spawn", {
         harness: "qoder",
         cwd: "/tmp",
-        sessionLabel: ("reins-wrr19-" + mode),
+        sessionLabel: "reins-wrr19-" + mode,
         message: "caller supplied task",
       });
       if ("error" in spawn) throw new Error(JSON.stringify(spawn.error));

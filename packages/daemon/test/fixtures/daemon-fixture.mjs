@@ -86,10 +86,11 @@ if (mode === "append-failure") {
       },
     ],
   ]);
+  let sessionCounter = 0;
   const daemon = createDaemonForTest({
     transport: createUnixSocketServer({ path: socketPath }),
     adapters,
-    identity: { session: (name) => `${name}@g1` },
+    identity: { session: () => `session:daemon-fixture:${++sessionCounter}` },
     diagnostics,
     idleTimeoutMs: 100,
   });

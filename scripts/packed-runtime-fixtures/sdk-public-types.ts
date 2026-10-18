@@ -1,5 +1,11 @@
 import {
   connect,
+  parseOperationCredential,
+  parseSessionHandle,
+  parseTurnHandle,
+  serializeOperationCredential,
+  serializeSessionHandle,
+  serializeTurnHandle,
   type AgentTarget,
   type ReinsConnection,
   type ResumeCursor,
@@ -44,6 +50,14 @@ const resumed = connection.attach(target, {
   mode: "after",
   cursor: resumeCursor,
 });
+const restoredSessionHandle = parseSessionHandle(
+  serializeSessionHandle(sessionHandle),
+);
+const restoredTurnHandle = parseTurnHandle(serializeTurnHandle(turnHandle));
+const restoredCredential = parseOperationCredential(
+  "spawn",
+  serializeOperationCredential("spawn", spawnCredential),
+);
 
 void connect;
 void started;
@@ -51,3 +65,6 @@ void activeTurnSend;
 void newTurnSend;
 void waitInput;
 void resumed;
+void restoredSessionHandle;
+void restoredTurnHandle;
+void restoredCredential;

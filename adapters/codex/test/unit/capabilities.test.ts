@@ -6,7 +6,6 @@ import type {
   DiagnosticId,
   DriverDiagnosticFact,
   SessionId,
-  SessionName,
   TurnId,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
@@ -51,7 +50,7 @@ describe("codex capabilities", () => {
     capabilitiesFake.transport.start = () => {
       capabilitiesStarts += 1;
     };
-    const sessionId = "capabilities-worker@g1" as SessionId;
+    const sessionId = "session:capabilities-worker:g1" as SessionId;
     const worker = createCodexDriver({
       transportFactory: () => workerFake.transport,
     })({
@@ -64,7 +63,6 @@ describe("codex capabilities", () => {
       worker.start({
         sessionId,
         turnId: "t1" as TurnId,
-        sessionName: "capabilities-worker" as SessionName,
         harness: "codex",
         message: "caller task",
         cwd: "/tmp/demo",

@@ -22,7 +22,7 @@ export type TurnTarget = v.InferOutput<typeof turnTargetSchema>;
 
 function encodeIdentity<T>(
   prefix: string,
-  schema: v.GenericSchema<T>,
+  schema: v.GenericSchema<unknown, T>,
   value: unknown,
 ): string {
   const parsed = v.parse(schema, value);
@@ -31,7 +31,7 @@ function encodeIdentity<T>(
 
 function decodeIdentity<T>(
   prefix: string,
-  schema: v.GenericSchema<T>,
+  schema: v.GenericSchema<unknown, T>,
   value: string,
 ): T {
   if (!value.startsWith(prefix)) throw new Error("Invalid serialized identity");

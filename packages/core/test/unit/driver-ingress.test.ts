@@ -289,7 +289,7 @@ describe("driver event ingress ownership", () => {
     });
     fake.controls.emit({
       type: "message",
-      sessionId: ids.session("unknown@gtest"),
+      sessionId: ids.session("session:unknown:gtest"),
       turnId: ids.turn("t1"),
       messageId: ids.message("m-unknown"),
       role: "worker",
@@ -760,7 +760,7 @@ describe("driver event ingress ownership", () => {
     });
     fake.controls.emit({
       type: "session.killed",
-      sessionId: ids.session("missing@gtest"),
+      sessionId: ids.session("session:missing:gtest"),
     });
 
     await vi.waitFor(() => expect(diagnostics).toHaveLength(5));
@@ -779,7 +779,7 @@ describe("driver event ingress ownership", () => {
           (event.type === "message" &&
             event.content === "duplicate complete") ||
           (event.type === "message" && event.content === "stale turn") ||
-          event.sessionId === ids.session("missing@gtest"),
+          event.sessionId === ids.session("session:missing:gtest"),
       ),
     ).toEqual([]);
     expect(diagnostics.map((input) => input.reason)).toEqual([
@@ -808,10 +808,12 @@ describe("driver event ingress ownership", () => {
       permissionId: ids.permission("p9"),
       resolution: { outcome: "allow", scope: "once" },
     });
-    expect(machine.list()).toEqual([
-      expect.objectContaining({ sessionId: first, state: "busy", turns: 0 }),
-      expect.objectContaining({ sessionId: second, state: "busy", turns: 0 }),
-    ]);
+    expect(machine.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: first, state: "busy", turns: 0 }),
+        expect.objectContaining({ sessionId: second, state: "busy", turns: 0 }),
+      ]),
+    );
   });
 
   test("releases turn-local message and tool ids when each turn terminates", async () => {

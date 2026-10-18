@@ -229,7 +229,7 @@ describe("list 过滤与参数校验", () => {
       message: "a",
       cwd: "/tmp/demo",
     });
-    await machine.spawn({
+    const qoder = await machine.spawn({
       sessionLabel: ids.sessionLabel("fixture-inline-2"),
       harness: "qoder",
       message: "b",
@@ -244,7 +244,7 @@ describe("list 过滤与参数校验", () => {
 
     expect(machine.list({ harness: "qoder" })).toEqual([
       expect.objectContaining({
-        sessionId: ids.session("fixture-inline-2@gtest"),
+        sessionId: qoder.sessionId,
         harness: "qoder",
       }),
     ]);
