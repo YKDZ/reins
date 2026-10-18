@@ -493,6 +493,88 @@ test.each([false, true])(
   },
 );
 
+test.each([false, true])(
+  "natural completion wins a false exact-queue cancellation (lifecycleFirst=%s)",
+  async (lifecycleFirst) => {
+    let rootUuid: string | undefined;
+    let interruptCalls = 0;
+    let fake!: ReturnType<typeof createFakeSdk>;
+    fake = createFakeSdk({
+      interrupt: async () => {
+        interruptCalls += 1;
+        return { still_queued: [rootUuid!] };
+      },
+      cancelAsyncMessage: async (uuid) => {
+        if (uuid !== rootUuid) return false;
+        fake.controls.finish(
+          uuid,
+          {
+            type: "result",
+            subtype: "success",
+            is_error: false,
+            stop_reason: "end_turn",
+            result: "NATURAL_DONE",
+            uuid: `natural-result-${lifecycleFirst}`,
+            session_id: nativeSessionId,
+          } as unknown as SDKMessage,
+          lifecycleFirst,
+        );
+        await flush();
+        await flush();
+        return false;
+      },
+      cancelAsyncLifecycle: false,
+    });
+    const events: DomainEvent[] = [];
+    const driver = createQoderDriver({ sdk: fake.sdk })({
+      emit(event) {
+        events.push(event);
+      },
+      diagnostics: async () => undefined,
+    });
+
+    try {
+      await driver.start({
+        sessionId,
+        turnId,
+        harness: "qoder",
+        message: "initial request",
+        cwd: "/tmp/qoder-steering",
+      });
+      const initial = fake.controls.delivered()[0];
+      if (initial?.uuid === undefined)
+        throw new Error("Qoder did not receive the initial input UUID");
+      rootUuid = initial.uuid;
+
+      await expect(
+        driver.deliver(
+          sessionId,
+          turnId,
+          "do not send after natural completion",
+          "active_turn",
+        ),
+      ).rejects.toMatchObject({ code: "turn_not_active", turnId });
+
+      expect(interruptCalls).toBe(1);
+      expect(fake.controls.cancelAsyncCount()).toBe(1);
+      expect(fake.controls.delivered()).toHaveLength(1);
+      expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+        [
+          {
+            type: "turn.completed",
+            sessionId,
+            turnId,
+            stopReason: "end_turn",
+            finalReply: null,
+          },
+        ],
+      );
+    } finally {
+      await driver.terminate(sessionId);
+    }
+  },
+);
+
 test("active steering cancels only the exact queued root before continuation", async () => {
   let queuedUuid: string | undefined;
   const fake = createFakeSdk({
@@ -538,6 +620,231 @@ test("active steering cancels only the exact queued root before continuation", a
     expect(events.filter((event) => event.type === "turn.completed")).toEqual(
       [],
     );
+  } finally {
+    await driver.terminate(sessionId);
+  }
+});
+
+test("active steering stops a root that starts before exact queue cancellation", async () => {
+  let queuedUuid: string | undefined;
+  let interruptCalls = 0;
+  let fake!: ReturnType<typeof createFakeSdk>;
+  fake = createFakeSdk({
+    interrupt: async () => {
+      interruptCalls += 1;
+      return interruptCalls === 1
+        ? { still_queued: [queuedUuid!] }
+        : { still_queued: [] };
+    },
+    cancelAsyncMessage: async (uuid) => {
+      if (uuid !== queuedUuid) return false;
+      fake.controls.acknowledge(uuid, "started");
+      await flush();
+      return false;
+    },
+    cancelAsyncLifecycle: false,
+  });
+  const events: DomainEvent[] = [];
+  const driver = createQoderDriver({ sdk: fake.sdk })({
+    emit(event) {
+      events.push(event);
+    },
+    diagnostics: async () => undefined,
+  });
+
+  try {
+    await driver.start({
+      sessionId,
+      turnId,
+      harness: "qoder",
+      message: "initial request",
+      cwd: "/tmp/qoder-steering",
+    });
+    const initial = fake.controls.delivered()[0];
+    if (initial?.uuid === undefined)
+      throw new Error("Qoder did not receive the initial input UUID");
+    queuedUuid = initial.uuid;
+
+    const continuation = driver
+      .deliver(
+        sessionId,
+        turnId,
+        "continue only after stopping the exact root",
+        "active_turn",
+      )
+      .then(
+        () => ({ accepted: true as const }),
+        (error: unknown) => ({ accepted: false as const, error }),
+      );
+    for (let attempt = 0; attempt < 5 && interruptCalls < 2; attempt += 1)
+      await flush();
+
+    expect(interruptCalls).toBe(2);
+    expect(fake.controls.cancelAsyncCount()).toBe(1);
+    expect(fake.controls.delivered()).toHaveLength(1);
+
+    fake.controls.acknowledge(initial.uuid, "cancelled");
+    fake.controls.pushRaw({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      errors: ["Operation aborted"],
+      uuid: "cancelled-after-start-result",
+      session_id: nativeSessionId,
+    } as unknown as SDKMessage);
+    expect(await continuation).toEqual({ accepted: true });
+
+    expect(fake.controls.delivered()).toHaveLength(2);
+    expect(fake.controls.delivered()[1]?.message.content).toBe(
+      "continue only after stopping the exact root",
+    );
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+  } finally {
+    await driver.terminate(sessionId);
+  }
+});
+
+test("interrupt retries stop against the exact root after queue cancellation loses the race", async () => {
+  let rootUuid: string | undefined;
+  let interruptCalls = 0;
+  let fake!: ReturnType<typeof createFakeSdk>;
+  fake = createFakeSdk({
+    interrupt: async () => {
+      interruptCalls += 1;
+      return interruptCalls === 1
+        ? { still_queued: [rootUuid!] }
+        : { still_queued: [] };
+    },
+    cancelAsyncMessage: async (uuid) => {
+      if (uuid !== rootUuid) return false;
+      fake.controls.acknowledge(uuid, "started");
+      await flush();
+      return false;
+    },
+    cancelAsyncLifecycle: false,
+  });
+  const events: DomainEvent[] = [];
+  const driver = createQoderDriver({ sdk: fake.sdk })({
+    emit(event) {
+      events.push(event);
+    },
+    diagnostics: async () => undefined,
+  });
+
+  try {
+    await driver.start({
+      sessionId,
+      turnId,
+      harness: "qoder",
+      message: "initial request",
+      cwd: "/tmp/qoder-steering",
+    });
+    const initial = fake.controls.delivered()[0];
+    if (initial?.uuid === undefined)
+      throw new Error("Qoder did not receive the initial input UUID");
+    rootUuid = initial.uuid;
+
+    const interrupt = driver.interrupt(sessionId, turnId).then(
+      () => ({ accepted: true as const }),
+      (error: unknown) => ({ accepted: false as const, error }),
+    );
+    for (let attempt = 0; attempt < 5 && interruptCalls < 2; attempt += 1)
+      await flush();
+
+    expect(interruptCalls).toBe(2);
+    expect(fake.controls.cancelAsyncCount()).toBe(1);
+    expect(await interrupt).toEqual({ accepted: true });
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+
+    fake.controls.acknowledge(initial.uuid, "cancelled");
+    fake.controls.pushRaw({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      errors: ["Operation aborted"],
+      uuid: "interrupt-cancelled-after-start-result",
+      session_id: nativeSessionId,
+    } as unknown as SDKMessage);
+    await flush();
+
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual([
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId,
+        stopReason: "cancelled",
+        finalReply: null,
+      },
+    ]);
+  } finally {
+    await driver.terminate(sessionId);
+  }
+});
+
+test("interrupt keeps acceptance unknown when stopping a started root cannot be confirmed", async () => {
+  let rootUuid: string | undefined;
+  let interruptCalls = 0;
+  let fake!: ReturnType<typeof createFakeSdk>;
+  fake = createFakeSdk({
+    interrupt: async () => {
+      interruptCalls += 1;
+      if (interruptCalls === 1) return { still_queued: [rootUuid!] };
+      throw new Error("control stream closed");
+    },
+    cancelAsyncMessage: async (uuid) => {
+      if (uuid !== rootUuid) return false;
+      fake.controls.acknowledge(uuid, "started");
+      await flush();
+      return false;
+    },
+    cancelAsyncLifecycle: false,
+  });
+  const events: DomainEvent[] = [];
+  const driver = createQoderDriver({ sdk: fake.sdk })({
+    emit(event) {
+      events.push(event);
+    },
+    diagnostics: async () => undefined,
+  });
+
+  try {
+    await driver.start({
+      sessionId,
+      turnId,
+      harness: "qoder",
+      message: "initial request",
+      cwd: "/tmp/qoder-steering",
+    });
+    const initial = fake.controls.delivered()[0];
+    if (initial?.uuid === undefined)
+      throw new Error("Qoder did not receive the initial input UUID");
+    rootUuid = initial.uuid;
+
+    const interrupt = driver.interrupt(sessionId, turnId).then(
+      () => ({ accepted: true as const }),
+      (error: unknown) => ({ accepted: false as const, error }),
+    );
+    for (let attempt = 0; attempt < 5 && interruptCalls < 2; attempt += 1)
+      await flush();
+
+    expect(interruptCalls).toBe(2);
+    expect(await interrupt).toMatchObject({
+      accepted: false,
+      error: { name: "WorkerInterruptFailure", acceptance: "unknown" },
+    });
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+
+    fake.controls.finish(initial.uuid);
+    await flush();
+    expect(
+      events.filter((event) => event.type === "turn.completed"),
+    ).toMatchObject([{ turnId, stopReason: "end_turn" }]);
   } finally {
     await driver.terminate(sessionId);
   }

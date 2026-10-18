@@ -46,6 +46,7 @@ type NativePhaseOutcome =
   | { readonly kind: "completed" }
   | { readonly kind: "cancelled" }
   | { readonly kind: "unknown"; readonly error: unknown };
+type PhaseStopDisposition = "accepted" | "completed" | "unknown";
 type NativePhase = {
   readonly uuid: string;
   readonly turnId: WorkerSpec["turnId"];
@@ -292,6 +293,25 @@ export function createQoderDriver(deps: {
       );
     }
 
+    function phaseStopDisposition(
+      phase: NativePhase,
+    ): PhaseStopDisposition | undefined {
+      if (phase.outcomeValue?.kind === "unknown") return "unknown";
+      if (
+        phase.outcomeValue?.kind === "completed" ||
+        phase.state === "completed" ||
+        (phase.result !== undefined && !phaseIsFailed(phase))
+      )
+        return "completed";
+      if (
+        phase.outcomeValue?.kind === "cancelled" ||
+        phase.state === "cancelled"
+      )
+        return "accepted";
+      if (phase.closed) return "unknown";
+      return undefined;
+    }
+
     function stopPhasePermissions(phase: NativePhase): void {
       phase.permissionsOpen = false;
       session?.clearPending();
@@ -479,8 +499,9 @@ export function createQoderDriver(deps: {
     async function confirmQueuedCancellation(
       phase: NativePhase,
       stillQueued: readonly string[],
-    ): Promise<void> {
-      if (phase.closed) return;
+    ): Promise<boolean> {
+      if (phase.closed) return true;
+      let allRemoved = true;
       for (const uuid of stillQueued) {
         const queuedPhase = phasesByUuid.get(uuid);
         if (queuedPhase === undefined || queuedPhase !== phase)
@@ -496,8 +517,42 @@ export function createQoderDriver(deps: {
           phase.queueRemovalConfirmed = true;
           phase.state = "cancelled";
           await settlePhase(phase);
-        }
+        } else allRemoved = false;
       }
+      return allRemoved;
+    }
+
+    async function confirmPhaseStop(
+      phase: NativePhase,
+      stillQueued: readonly string[],
+    ): Promise<PhaseStopDisposition> {
+      let disposition = phaseStopDisposition(phase);
+      if (disposition !== undefined) return disposition;
+
+      const removed = await confirmQueuedCancellation(phase, stillQueued);
+      disposition = phaseStopDisposition(phase);
+      if (disposition !== undefined) return disposition;
+      if (removed) return "accepted";
+
+      // false means the exact queued UUID was not removed. If its lifecycle
+      // now proves the root started, interrupt that active root and check the
+      // queue once more before treating the stop request as accepted.
+      if (phase.state !== "started" || phase.result !== undefined)
+        return "unknown";
+      const retry = interruptedReply(await query!.interrupt());
+      disposition = phaseStopDisposition(phase);
+      if (disposition !== undefined) return disposition;
+
+      const retryRemoved = await confirmQueuedCancellation(
+        phase,
+        retry.stillQueued,
+      );
+      disposition = phaseStopDisposition(phase);
+      if (disposition !== undefined) return disposition;
+      if (!retryRemoved || retry.stillQueued.includes(phase.uuid))
+        return "unknown";
+      if (phase.state !== "started") return "unknown";
+      return "accepted";
     }
 
     function settleStart(error?: unknown): void {
@@ -951,7 +1006,20 @@ export function createQoderDriver(deps: {
                 sessionId,
                 turnId,
               } satisfies MachineError;
-            await confirmQueuedCancellation(phase, acknowledgement.stillQueued);
+            const disposition = await confirmPhaseStop(
+              phase,
+              acknowledgement.stillQueued,
+            );
+            if (disposition === "completed")
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
+            if (disposition === "unknown")
+              throw new Error(
+                "Qoder could not confirm stopping the exact active input",
+              );
           } catch (error) {
             if (error instanceof UnownedQueuedInputError) {
               phase.steering = false;
@@ -965,7 +1033,24 @@ export function createQoderDriver(deps: {
                   : undefined,
               );
             }
-            if (phase.outcomeValue?.kind === "cancelled") {
+            if (
+              phase.outcomeValue?.kind === "cancelled" ||
+              phase.state === "cancelled"
+            ) {
+              const outcome = phase.outcomeValue ?? (await phase.outcome);
+              if (outcome.kind === "unknown")
+                throw new WorkerDeliveryFailure(
+                  "Qoder stopped the execution but its terminal result is unknown",
+                  "not_accepted",
+                  { cause: outcome.error ?? error },
+                  executionPhaseEffect(phase),
+                );
+              if (outcome.kind === "completed")
+                throw {
+                  code: "turn_not_active",
+                  sessionId,
+                  turnId,
+                } satisfies MachineError;
               if (session.turnId !== turnId) session.beginTurn(turnId);
               const cancelled = session.endTurn("cancelled");
               emit(cancelled);
@@ -976,12 +1061,27 @@ export function createQoderDriver(deps: {
                 executionPhaseEffect(phase),
               );
             }
-            if (phase.outcomeValue?.kind === "completed")
+            if (phaseStopDisposition(phase) === "completed") {
+              const outcome = phase.outcomeValue ?? (await phase.outcome);
+              if (outcome.kind === "unknown")
+                throw new WorkerDeliveryFailure(
+                  "Qoder completed the execution but its terminal result is unknown",
+                  "unknown",
+                  { cause: outcome.error ?? error },
+                );
+              if (outcome.kind === "cancelled")
+                throw new WorkerDeliveryFailure(
+                  "Qoder stopped the execution but did not confirm the continuation request",
+                  "not_accepted",
+                  { cause: error },
+                  executionPhaseEffect(phase),
+                );
               throw {
                 code: "turn_not_active",
                 sessionId,
                 turnId,
               } satisfies MachineError;
+            }
             phase.steering = false;
             session.cancelling = false;
             throw new WorkerDeliveryFailure(
@@ -1078,10 +1178,28 @@ export function createQoderDriver(deps: {
           session.cancelling = true;
           try {
             const acknowledgement = interruptedReply(await query.interrupt());
-            if (phase.closed && phase.outcomeValue?.kind === "completed")
-              return;
-            await confirmQueuedCancellation(phase, acknowledgement.stillQueued);
+            const disposition = await confirmPhaseStop(
+              phase,
+              acknowledgement.stillQueued,
+            );
+            if (disposition === "completed")
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
+            if (disposition === "unknown")
+              throw new Error(
+                "Qoder could not confirm stopping the exact active input",
+              );
           } catch (error) {
+            const disposition = phaseStopDisposition(phase);
+            if (disposition === "completed")
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
             throw new WorkerInterruptFailure(
               "Qoder interrupt acceptance is unknown",
               "unknown",
