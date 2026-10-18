@@ -622,6 +622,19 @@ export const killParamsSchema = v.strictObject({
   sessionId: sessionIdSchema,
 });
 export type KillParams = v.InferOutput<typeof killParamsSchema>;
+export const deleteRecordsParamsSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+});
+export type DeleteRecordsParams = v.InferOutput<
+  typeof deleteRecordsParamsSchema
+>;
+export const deleteRecordsResultSchema = v.strictObject({
+  sessionId: sessionIdSchema,
+  status: v.literal("deleted"),
+});
+export type DeleteRecordsResult = v.InferOutput<
+  typeof deleteRecordsResultSchema
+>;
 
 export const listFilterSchema = v.strictObject({
   sessionId: v.optional(sessionIdSchema),
@@ -2374,6 +2387,7 @@ export type DiagnosticsResult = v.InferOutput<typeof diagnosticsResultSchema>;
 
 export const errorCodeSchema = v.union([
   v.literal("session_busy"),
+  v.literal("session_records_live"),
   v.literal("turn_precondition_failed"),
   v.literal("turn_not_active"),
   v.literal("session_not_found"),
@@ -2520,6 +2534,10 @@ export const machineErrorSchema = v.union([
     sessionId: sessionIdSchema,
   }),
   v.strictObject({
+    code: v.literal("session_records_live"),
+    sessionId: sessionIdSchema,
+  }),
+  v.strictObject({
     code: v.literal("turn_precondition_failed"),
     sessionId: sessionIdSchema,
     expected: turnIdSchema,
@@ -2610,6 +2628,12 @@ export const machineErrorSchema = v.union([
     cause: errorCauseSchema,
     cleanupCause: v.optional(errorCauseSchema),
     cleanupSessionId: v.optional(sessionIdSchema),
+  }),
+  v.strictObject({
+    code: v.literal("control_store_unavailable"),
+    stage: v.literal("record_deletion"),
+    sessionId: sessionIdSchema,
+    cause: errorCauseSchema,
   }),
   v.strictObject({
     code: v.literal("session_not_found"),
@@ -2882,6 +2906,7 @@ export const protocolMethodSchema = v.union([
   v.literal("attach"),
   v.literal("resolvePermission"),
   v.literal("getOperation"),
+  v.literal("deleteRecords"),
   v.literal("modelCatalog"),
   v.literal("diagnostics"),
 ]);
@@ -2918,6 +2943,7 @@ export const attachEndedSchema = v.strictObject({
   reason: v.union([
     stopReasonSchema,
     v.literal("session_killed"),
+    v.literal("session_deleted"),
     v.literal("control_unavailable"),
     v.literal("closed"),
   ]),
@@ -3077,6 +3103,10 @@ export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       readonly operationKey: OperationKey<Kind>;
     }
   | {
+      readonly status: "deleted";
+      readonly operationKey: OperationKey<Kind>;
+    }
+  | {
       readonly status: "outcome_unknown";
       readonly operationKey: OperationKey<Kind>;
       readonly cause?: ErrorCause;
@@ -3171,6 +3201,10 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
   const schemas: v.GenericSchema[] = [
     v.strictObject({
       status: v.literal("unknown"),
+      operationKey: keySchema,
+    }),
+    v.strictObject({
+      status: v.literal("deleted"),
       operationKey: keySchema,
     }),
   ];
@@ -3283,6 +3317,7 @@ const protocolParamsSchemas = {
   attach: attachParamsSchema,
   resolvePermission: resolvePermissionParamsSchema,
   getOperation: v.strictObject({ operationKey: operationKeySchema }),
+  deleteRecords: deleteRecordsParamsSchema,
   modelCatalog: v.strictObject({}),
   diagnostics: diagnosticsParamsSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;
@@ -3308,6 +3343,7 @@ const protocolResultSchemas = {
   attach: attachResultSchema,
   resolvePermission: resolvePermissionAckSchema,
   getOperation: operationRecordSchema,
+  deleteRecords: deleteRecordsResultSchema,
   modelCatalog: modelCatalogResultSchema,
   diagnostics: diagnosticsResultSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;
