@@ -29,6 +29,7 @@ export type {
 export type QoderQuery = AsyncIterable<unknown> & {
   initializationResult(): Promise<unknown>;
   interrupt(): Promise<unknown>;
+  cancelAsyncMessage(messageUuid: string): Promise<boolean>;
   close(): Promise<void>;
 };
 

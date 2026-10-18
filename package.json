@@ -17,7 +17,8 @@
     "check:heavy": "node --conditions=source scripts/task-gates.ts check:heavy",
     "check:full": "node --conditions=source scripts/task-gates.ts check:full",
     "test": "node --test --conditions=source scripts/test/*.test.ts",
-    "test:e2e": "REINS_DAEMON_TEST_FIXTURE=\"$(pnpm --filter @reins/daemon exec node -p \"require.resolve('@reins/daemon/testing/fixture')\")\" pnpm --filter @ykdz/reins exec vitest run test/e2e --reporter=agent --no-file-parallelism"
+    "test:e2e": "REINS_DAEMON_TEST_FIXTURE=\"$(pnpm --filter @reins/daemon exec node -p \"require.resolve('@reins/daemon/testing/fixture')\")\" pnpm --filter @ykdz/reins exec vitest run test/e2e --reporter=agent --no-file-parallelism",
+    "test:e2e:qoder-live": "REINS_LIVE_QODER_STEERING=1 pnpm --filter @ykdz/reins exec vitest run test/e2e/live-qoder-steering.test.ts --reporter=verbose --testTimeout=240000"
   },
   "devDependencies": {
     "@types/node": "catalog:",
