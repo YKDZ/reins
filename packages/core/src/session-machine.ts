@@ -269,6 +269,27 @@ async function unexpectedFailure(
   };
 }
 
+function addPermissionTargetToFailure(
+  error: unknown,
+  target: {
+    readonly sessionId: SessionId;
+    readonly turnId: TurnId;
+    readonly permissionId: PermissionId;
+  },
+): unknown {
+  const known = v.safeParse(machineErrorSchema, error);
+  if (
+    !known.success ||
+    (known.output.code !== "permission_not_pending" &&
+      known.output.code !== "permission_resolution_mismatch") ||
+    known.output.sessionId !== target.sessionId ||
+    known.output.permissionId !== target.permissionId ||
+    known.output.turnId !== undefined
+  )
+    return error;
+  return { ...known.output, turnId: target.turnId };
+}
+
 function recordBestEffort(
   diagnostics: DiagnosticEmitter,
   input: CoreDiagnosticFact,
@@ -2056,25 +2077,34 @@ export function createSessionMachine(options: {
           phase.value = "native";
           await driver.resolvePermission(sessionId, permissionId, resolution);
         } catch (error) {
+          const targetedError = addPermissionTargetToFailure(error, {
+            sessionId,
+            turnId: pending.turnId,
+            permissionId,
+          });
           const acceptance =
             phase.value === "beforeDispatch"
               ? "not_accepted"
               : error instanceof WorkerPermissionFailure
                 ? error.acceptance
-                : v.safeParse(machineErrorSchema, error).success
+                : v.safeParse(machineErrorSchema, targetedError).success
                   ? "not_accepted"
                   : "unknown";
           if (acceptance === "unknown" && hooks !== undefined)
             uncertainDeliveries.add(sessionId);
-          const failure = await unexpectedFailure(options.diagnostics, error, {
-            sessionId,
-            turnId: pending.turnId,
-            kind: "authorization_failure",
-            operation: "resolve_permission",
-            stage: "deliver",
-            reason: "upstream_rejected",
-            permissionId,
-          });
+          const failure = await unexpectedFailure(
+            options.diagnostics,
+            targetedError,
+            {
+              sessionId,
+              turnId: pending.turnId,
+              kind: "authorization_failure",
+              operation: "resolve_permission",
+              stage: "deliver",
+              reason: "upstream_rejected",
+              permissionId,
+            },
+          );
           flushBuffered(false);
           if (hooks === undefined) throw failure;
           throw new PermissionResolutionRequestFailure(
@@ -2090,6 +2120,8 @@ export function createSessionMachine(options: {
           hooks?.commit?.(result, event);
         } catch (commitError) {
           flushBuffered(false);
+          if (commitError instanceof PermissionResolutionCommitFailure)
+            throw commitError;
           throw new PermissionResolutionCommitFailure(result, commitError);
         }
         flushBuffered(true);

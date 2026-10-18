@@ -1,18 +1,13 @@
 import { access, readFile } from "node:fs/promises";
 
 import { openLocal } from "@ykdz/reins";
-import type {
-  AgentFact,
-  MessageContent,
-  ReinsConnection,
-  TurnHandle,
+import {
+  ReinsSdkError,
+  type AgentFact,
+  type MessageContent,
+  type ReinsConnection,
+  type TurnHandle,
 } from "@ykdz/reins-sdk";
-
-declare const process: {
-  env: Record<string, string | undefined>;
-  stdout: { write(value: string): void };
-  kill(pid: number, signal?: number): boolean;
-};
 
 function required(name: string): string {
   const value = process.env[name];
@@ -757,7 +752,6 @@ try {
 
   const permissionAllowPath = required("REINS_DSH_PERMISSION_ALLOW_PATH");
   const permissionCancelPath = required("REINS_DSH_PERMISSION_CANCEL_PATH");
-  const closeJobGatePath = required("REINS_DSH_CLOSE_JOB_GATE_PATH");
   const closeJobPidPath = required("REINS_DSH_CLOSE_JOB_PID_PATH");
   const closeJobResultPath = required("REINS_DSH_CLOSE_JOB_RESULT_PATH");
   const authorized = await connection.spawn(
@@ -784,6 +778,37 @@ try {
       permissionRequested.options[1].feedback === false &&
       containsValueText(permissionRequested.input, "bash"),
     "官方 DSH 原生问询未按其一次性授权能力完整呈现",
+  );
+  const mismatchedPermissionOperationKey =
+    connection.prepareOperation("resolvePermission");
+  let mismatchedPermissionFailure: unknown;
+  try {
+    await connection.resolvePermission(
+      permissionRequested.permissionHandle,
+      { outcome: "allow", scope: "session" },
+      { operationKey: mismatchedPermissionOperationKey },
+    );
+  } catch (error) {
+    mismatchedPermissionFailure = error;
+  }
+  const mismatchedPermissionOperation = await connection.getOperation(
+    mismatchedPermissionOperationKey,
+  );
+  const mismatchFailureFacts =
+    mismatchedPermissionFailure instanceof ReinsSdkError &&
+    mismatchedPermissionFailure.failure.code ===
+      "permission_resolution_mismatch"
+      ? mismatchedPermissionFailure.failure.facts
+      : undefined;
+  assert(
+    mismatchFailureFacts?.permissionHandle ===
+      permissionRequested.permissionHandle &&
+      mismatchedPermissionOperation.status === "failed" &&
+      mismatchedPermissionOperation.error.code ===
+        "permission_resolution_mismatch" &&
+      mismatchedPermissionOperation.error.facts.permissionHandle ===
+        permissionRequested.permissionHandle,
+    "授权菜单不匹配的直接错误与同 key 查询未保留精确 PermissionHandle",
   );
   const permissionOperationKey =
     connection.prepareOperation("resolvePermission");
@@ -832,6 +857,7 @@ try {
       authorizedToolResult?.type === "tool.completed" &&
       authorizedTool.toolKey === authorizedToolResult.toolKey &&
       containsValueText(authorizedTool.input, permissionAllowPath) &&
+      containsValueText(authorizedTool.input, "danger-full-access") &&
       containsValueText(
         authorizedToolResult.result,
         "DSH_PERMISSION_ALLOWED",
@@ -867,14 +893,16 @@ try {
   const latePermissionOperationKey =
     connection.prepareOperation("resolvePermission");
   let latePermissionRejected = false;
+  let latePermissionFailure: unknown;
   try {
     await connection.resolvePermission(
       cancelledPermission.permissionHandle,
       permissionResolution,
       { operationKey: latePermissionOperationKey },
     );
-  } catch {
+  } catch (error) {
     latePermissionRejected = true;
+    latePermissionFailure = error;
   }
   const latePermissionOperation = await connection.getOperation(
     latePermissionOperationKey,
@@ -885,16 +913,48 @@ try {
       { mode: "history" },
     ),
   );
-  assert(
+  const cancelledToolRequested = cancelledFacts.some(
+    (fact) =>
+      fact.type === "tool.requested" &&
+      fact.name === "bash" &&
+      containsValueText(fact.input, "danger-full-access"),
+  );
+  const cancelMarkerExists = await fileExists(permissionCancelPath);
+  const latePermissionErrorCode =
+    latePermissionFailure instanceof ReinsSdkError
+      ? latePermissionFailure.failure.code
+      : undefined;
+  const latePermissionHandle =
+    latePermissionFailure instanceof ReinsSdkError &&
+    latePermissionFailure.failure.code === "permission_not_pending"
+      ? latePermissionFailure.failure.facts.permissionHandle
+      : undefined;
+  const storedLatePermissionErrorCode =
+    latePermissionOperation.status === "failed" &&
+    latePermissionOperation.error.code === "permission_not_pending"
+      ? latePermissionOperation.error.code
+      : undefined;
+  const storedLatePermissionHandle =
+    latePermissionOperation.status === "failed" &&
+    latePermissionOperation.error.code === "permission_not_pending"
+      ? latePermissionOperation.error.facts.permissionHandle
+      : undefined;
+  const cancellationPassed =
     cancellation.status === "accepted" &&
-      cancellationWait.status === "satisfied" &&
-      cancellationWait.completed[0]?.stopReason === "cancelled" &&
-      latePermissionRejected &&
-      latePermissionOperation.status === "failed" &&
-      latePermissionOperation.error.code === "permission_not_pending" &&
-      cancelledFacts.some((fact) => fact.type === "permission.requested") &&
-      !cancelledFacts.some((fact) => fact.type === "permission.resolved") &&
-      !(await fileExists(permissionCancelPath)),
+    cancellationWait.status === "satisfied" &&
+    cancellationWait.completed[0]?.stopReason === "cancelled" &&
+    latePermissionRejected &&
+    latePermissionErrorCode === "permission_not_pending" &&
+    latePermissionHandle === cancelledPermission.permissionHandle &&
+    latePermissionOperation.status === "failed" &&
+    storedLatePermissionErrorCode === "permission_not_pending" &&
+    storedLatePermissionHandle === cancelledPermission.permissionHandle &&
+    cancelledFacts.some((fact) => fact.type === "permission.requested") &&
+    cancelledToolRequested &&
+    !cancelledFacts.some((fact) => fact.type === "permission.resolved") &&
+    !cancelMarkerExists;
+  assert(
+    cancellationPassed,
     "取消后的 DSH 授权迟到决议仍被接受或执行了工具正文",
   );
 
@@ -911,12 +971,11 @@ try {
     targets: [closeJobStart.turnHandle],
     completion: "all",
   });
-  assert(
+  const closeJobAccepted =
     closeJobWait.status === "satisfied" &&
-      closeJobWait.completed[0]?.finalReply ===
-        "DSH_CLOSE_BACKGROUND_TOOL_STARTED",
-    "官方 DSH 未接受用于关闭验收的后台工具",
-  );
+    closeJobWait.completed[0]?.finalReply ===
+      "DSH_CLOSE_BACKGROUND_TOOL_STARTED";
+  assert(closeJobAccepted, "官方 DSH 未接受用于关闭验收的后台工具");
   await waitForFile(closeJobPidPath);
   const closeJobPid = Number((await readFile(closeJobPidPath, "utf8")).trim());
   assert(

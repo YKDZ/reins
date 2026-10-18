@@ -22,6 +22,7 @@ live("codex live smoke", () => {
     });
     const events: DomainEvent[] = [];
     const diagnostics: DriverDiagnosticFact[] = [];
+    const permissionResolutions: Promise<void>[] = [];
     const factory = createCodexDriver({
       transportFactory: () => createCodexTransport({}),
     });
@@ -29,10 +30,14 @@ live("codex live smoke", () => {
       emit: (event) => {
         events.push(event);
         if (event.type === "permission.requested") {
-          driver.resolvePermission(event.sessionId, event.permissionId, {
-            outcome: "allow",
-            scope: "once",
-          });
+          permissionResolutions.push(
+            Promise.resolve(
+              driver.resolvePermission(event.sessionId, event.permissionId, {
+                outcome: "allow",
+                scope: "once",
+              }),
+            ),
+          );
         }
         if (event.type === "turn.completed" && resolveTurn !== null) {
           resolveTurn(event);
@@ -57,6 +62,7 @@ live("codex live smoke", () => {
     });
 
     const completed = await turnDone;
+    await Promise.all(permissionResolutions);
     if (completed.stopReason === "failed") {
       expect(diagnostics).toEqual(
         expect.arrayContaining([

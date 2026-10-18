@@ -2627,11 +2627,13 @@ export const machineErrorSchema = v.union([
   v.strictObject({
     code: v.literal("permission_not_pending"),
     sessionId: sessionIdSchema,
+    turnId: v.optional(turnIdSchema),
     permissionId: permissionIdSchema,
   }),
   v.strictObject({
     code: v.literal("permission_resolution_mismatch"),
     sessionId: sessionIdSchema,
+    turnId: v.optional(turnIdSchema),
     permissionId: permissionIdSchema,
   }),
   v.strictObject({

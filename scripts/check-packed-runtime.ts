@@ -123,6 +123,7 @@ function createConsumer(
   dependencies: Record<string, string>,
   packageManager: string,
   localSdkTarball?: string,
+  devDependencies?: Record<string, string>,
 ): void {
   mkdirSync(directory, { recursive: true });
   writeFileSync(
@@ -135,6 +136,7 @@ function createConsumer(
         type: "module",
         packageManager,
         dependencies,
+        ...(devDependencies === undefined ? {} : { devDependencies }),
       },
       null,
       2,
@@ -182,6 +184,7 @@ async function typecheckConsumer(
   sources: readonly string[],
   logsDirectory: string,
   label: string,
+  types: readonly string[] = [],
 ): Promise<void> {
   await runCommand({
     command: join(repository, "node_modules", ".bin", "tsc"),
@@ -198,6 +201,7 @@ async function typecheckConsumer(
       "NodeNext",
       "--skipLibCheck",
       "false",
+      ...(types.length === 0 ? [] : ["--types", types.join(",")]),
       ...sources,
     ],
     cwd: directory,
@@ -2248,17 +2252,17 @@ async function startDshProviderFixture(options: {
         ) {
           scenario = "session-title";
         } else if (
-          afterAutonomousInterruptIndex > interruptJobStartIndex &&
-          afterAutonomousInterruptIndex !== -1
-        ) {
-          scenario = "after-autonomous-interrupt";
-        } else if (
           closeJobStartIndex !== -1 &&
           closeJobResultIndex > closeJobStartIndex
         ) {
           scenario = "close-background-result";
         } else if (closeJobStartIndex !== -1) {
           scenario = "close-background-start";
+        } else if (
+          afterAutonomousInterruptIndex > interruptJobStartIndex &&
+          afterAutonomousInterruptIndex !== -1
+        ) {
+          scenario = "after-autonomous-interrupt";
         } else if (messages.includes("DSH_ISOLATION_KEEPALIVE")) {
           scenario = "isolation-keepalive";
         } else if (messages.includes("DSH_PERMISSION_CANCEL_TOOL")) {
@@ -2386,6 +2390,9 @@ async function startDshProviderFixture(options: {
                           command: `printf 'DSH_PERMISSION_ALLOWED' > ${shellQuote(options.permissionAllowPath)}; printf 'DSH_PERMISSION_ALLOWED'`,
                           description:
                             "Write the packed DSH permission approval marker outside the workspace",
+                          sandbox_permissions: "danger-full-access",
+                          justification:
+                            "Write the isolated approval marker outside the workspace",
                           run_in_background: false,
                         },
                       }
@@ -2398,6 +2405,9 @@ async function startDshProviderFixture(options: {
                             command: `printf 'DSH_PERMISSION_CANCELLED' > ${shellQuote(options.permissionCancelPath)}; printf 'DSH_PERMISSION_CANCELLED'`,
                             description:
                               "Write the packed DSH permission cancellation marker outside the workspace",
+                            sandbox_permissions: "danger-full-access",
+                            justification:
+                              "Write the isolated cancellation marker outside the workspace",
                             run_in_background: false,
                           },
                         }
@@ -2622,15 +2632,6 @@ async function runDshRuntimeAcceptance(options: {
         serializedRequest("after-autonomous-interrupt").includes(
           "DSH_AUTONOMOUS_OLD_TARGET_NEW_TURN",
         ) &&
-        serializedRequest("permission-allow-request").includes(
-          '"name":"bash"',
-        ) &&
-        serializedRequest("permission-allow-request").includes(
-          permissionAllowPath,
-        ) &&
-        serializedRequest("permission-cancel-request").includes(
-          '"name":"bash"',
-        ) &&
         serializedRequest("close-background-start").includes('"name":"bash"') &&
         serializedRequest("close-background-result").includes(
           "started background job bash-",
@@ -2730,6 +2731,7 @@ async function main(): Promise<void> {
       },
       packageManager,
       sdkArtifact.path,
+      { "@types/node": "^24.13.3" },
     );
     copyFixtures(join(runtimeConsumer, "fixtures"));
     await installConsumer(
@@ -2794,6 +2796,7 @@ async function main(): Promise<void> {
       ],
       logsDirectory,
       "runtime-application-types",
+      ["node"],
     );
 
     await runInstalledApplicationAcceptance({
