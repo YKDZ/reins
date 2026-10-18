@@ -544,21 +544,19 @@ describe("部分原生效果的 send 查询", () => {
         };
         const key = operationKey("interrupt");
 
-        expect(await execute("interrupt", interruptRequest, key)).toMatchObject({
-          error: {
-            code: "control_store_unavailable",
-            stage: "commit",
-            acceptance: "accepted",
-            acceptedResult: interruptRequest,
+        expect(await execute("interrupt", interruptRequest, key)).toMatchObject(
+          {
+            error: {
+              code: "control_store_unavailable",
+              stage: "commit",
+              acceptance: "accepted",
+              acceptedResult: interruptRequest,
+            },
           },
-        });
+        );
         expect(interruptCalls).toBe(1);
         expect(
-          await plane.dispatch(
-            "getOperation",
-            { operationKey: key },
-            consumer,
-          ),
+          await plane.dispatch("getOperation", { operationKey: key }, consumer),
         ).toMatchObject({
           status:
             failedWrite === "register"
@@ -567,15 +565,15 @@ describe("部分原生效果的 send 查询", () => {
           operationKey: key,
           result: interruptRequest,
         });
-        expect(
-          await execute("interrupt", interruptRequest, key),
-        ).toMatchObject({
-          error: {
-            code: "control_store_unavailable",
-            acceptance: "accepted",
-            acceptedResult: interruptRequest,
+        expect(await execute("interrupt", interruptRequest, key)).toMatchObject(
+          {
+            error: {
+              code: "control_store_unavailable",
+              acceptance: "accepted",
+              acceptedResult: interruptRequest,
+            },
           },
-        });
+        );
         expect(interruptCalls).toBe(1);
       } finally {
         await plane.terminateLiveSessions();

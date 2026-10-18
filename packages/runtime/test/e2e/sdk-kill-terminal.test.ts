@@ -185,11 +185,14 @@ test("kill commits exactly one killed turn before the session terminal", async (
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {
-    for await (const fact of subscription) events.push(fact);
+    for await (const fact of subscription) {
+      events.push(fact);
+      subscription.acknowledge(fact);
+    }
   })();
   await nativeReady(callerCwd);
   const killed = await killSession(connection, spawned.sessionHandle);
@@ -235,7 +238,7 @@ test("kill stops the actual writer and its held FD while another session survive
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   let statesAtTerminal: string[] | undefined;
   let pids: { parent: number; writer: number } | undefined;
@@ -248,6 +251,7 @@ test("kill stops the actual writer and its held FD while another session survive
           processState(pids.parent),
           processState(pids.writer),
         ];
+      subscription.acknowledge(fact);
     }
   })();
   await nativeReady(callerCwd);
@@ -332,11 +336,14 @@ test.each(["complete during kill", "complete naturally"])(
     );
     const subscription = await connection.attach(
       { scope: "session", sessionHandle: spawned.sessionHandle },
-      { mode: "available" },
+      { mode: "history" },
     );
     const events: AgentFact[] = [];
     const collect = (async () => {
-      for await (const fact of subscription) events.push(fact);
+      for await (const fact of subscription) {
+        events.push(fact);
+        subscription.acknowledge(fact);
+      }
     })();
     await nativeReady(callerCwd);
     if (message === "complete naturally")
@@ -388,11 +395,14 @@ test("failed termination leaves the real writer and original turn alive for a fr
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {
-    for await (const fact of subscription) events.push(fact);
+    for await (const fact of subscription) {
+      events.push(fact);
+      subscription.acknowledge(fact);
+    }
   })();
   await nativeReady(callerCwd);
   await expect(

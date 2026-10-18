@@ -454,11 +454,49 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   await expect(
     original.wait({ targets: [sent.turnHandle], completion: "all" }),
   ).resolves.toMatchObject({ status: "satisfied" });
+  const previousHistory = await original.attach(
+    { scope: "session", sessionHandle: completed.sessionHandle },
+    { mode: "history" },
+  );
+  const previousCursor = previousHistory.initial.cursor;
+  previousHistory.close();
+  await expect(previousHistory.done).resolves.toMatchObject({
+    reason: "closed",
+  });
 
   const active = await original.spawn({
     harness: "codex",
-    message: "hold across daemon restart",
+    message: "hold with pending permission across daemon restart",
     cwd: process.cwd(),
+  });
+  const activeTarget = {
+    scope: "session" as const,
+    sessionHandle: active.sessionHandle,
+  };
+  const activeHistory = await original.attach(activeTarget, {
+    mode: "history",
+  });
+  const activeCursor = activeHistory.initial.cursor;
+  let observedPendingPermission = false;
+  for await (const fact of activeHistory) {
+    activeHistory.acknowledge(fact);
+    if (fact.type === "permission.requested") {
+      observedPendingPermission = true;
+      break;
+    }
+  }
+  activeHistory.close();
+  await expect(activeHistory.done).resolves.toMatchObject({ reason: "closed" });
+  expect(observedPendingPermission).toBe(true);
+  const liveAuthorization = await original.attach(activeTarget, {
+    mode: "snapshot",
+  });
+  if (liveAuthorization.initial.mode !== "snapshot")
+    throw new Error("Expected a snapshot initial state");
+  expect(liveAuthorization.initial.baseline.pendingPermissions).toHaveLength(1);
+  liveAuthorization.close();
+  await expect(liveAuthorization.done).resolves.toMatchObject({
+    reason: "closed",
   });
   const killed = await original.spawn({
     harness: "codex",
@@ -475,6 +513,45 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   const reconnected = await openLocal(options);
   clients.push(reconnected);
   expect(reconnected.handshake.daemonGeneration).not.toBe(originalGeneration);
+  const resumedHistory = await reconnected.attach(
+    { scope: "session", sessionHandle: completed.sessionHandle },
+    { mode: "after", cursor: previousCursor },
+  );
+  const resumedFactTypes: string[] = [];
+  for await (const fact of resumedHistory) {
+    resumedFactTypes.push(fact.type);
+    resumedHistory.acknowledge(fact);
+  }
+  expect(resumedFactTypes).toContain("turn.completed");
+  await expect(resumedHistory.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
+  const oldAuthorization = await reconnected.attach(activeTarget, {
+    mode: "snapshot",
+  });
+  if (oldAuthorization.initial.mode !== "snapshot")
+    throw new Error("Expected a snapshot initial state");
+  expect(oldAuthorization.initial.baseline.session).toMatchObject({
+    state: "unreachable",
+    unreachableReason: "previous_generation",
+  });
+  expect(oldAuthorization.initial.baseline.pendingPermissions).toEqual([]);
+  await expect(oldAuthorization.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
+  const oldAuthorizationHistory = await reconnected.attach(activeTarget, {
+    mode: "after",
+    cursor: activeCursor,
+  });
+  let replayedOldPermission = false;
+  for await (const fact of oldAuthorizationHistory) {
+    if (fact.type === "permission.requested") replayedOldPermission = true;
+    oldAuthorizationHistory.acknowledge(fact);
+  }
+  expect(replayedOldPermission).toBe(true);
+  await expect(oldAuthorizationHistory.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
   expect(await reconnected.list()).toEqual([]);
   await expect(reconnected.getOperation(sendKey)).resolves.toEqual({
     status: "succeeded",
@@ -1188,16 +1265,16 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   const activeSendKey = connection.prepareOperation("send");
   const subscription = await connection.attach(
     { scope: "turn", turnHandle: active.turnHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const callerFactPromise = (async () => {
     for await (const fact of subscription) {
-      if (
+      const isCallerFact =
         fact.type === "message" &&
         fact.role === "caller" &&
-        fact.content === activeMessage
-      )
-        return fact;
+        fact.content === activeMessage;
+      subscription.acknowledge(fact);
+      if (isCallerFact) return fact;
     }
     throw new Error("The active caller message was not published as a fact");
   })();

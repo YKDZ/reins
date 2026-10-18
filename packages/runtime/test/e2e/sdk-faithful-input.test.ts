@@ -133,13 +133,14 @@ async function permissionFact(
 }> {
   const subscription = await connection.attach(
     { scope: "turn", turnHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   for (;;) {
     const item = await subscription.next();
     if (item.done) break;
     if (item.value.type === "permission.requested")
       return { fact: item.value, subscription };
+    subscription.acknowledge(item.value);
   }
   subscription.close();
   throw new Error("The SDK did not expose a permission request fact");
@@ -153,6 +154,7 @@ async function nextPermissionResolution(
     if (item.done)
       throw new Error("Permission observation ended before resolution");
     if (item.value.type === "permission.resolved") return item.value;
+    subscription.acknowledge(item.value);
   }
 }
 
@@ -319,6 +321,7 @@ test("Codex permission facts expose only native answers and apply the exact acce
   ).rejects.toMatchObject({
     failure: { code: "permission_resolution_mismatch" },
   });
+  subscription.acknowledge(requested);
 
   const resolvedPromise = nextPermissionResolution(subscription);
   expect(
@@ -329,8 +332,9 @@ test("Codex permission facts expose only native answers and apply the exact acce
     ),
   ).toMatchObject({ status: "resolved" });
   const resolved = await resolvedPromise;
-  subscription.close();
   expect(resolved.permissionHandle).toBe(requested.permissionHandle);
+  subscription.acknowledge(resolved);
+  subscription.close();
   await vi.waitFor(async () =>
     expect(
       (await readFile(f.env.REINS_W05_NATIVE_LOG, "utf8")).includes(
@@ -405,6 +409,7 @@ test.each(["permission", "session-permission"] as const)(
         scope: "session",
       });
     }
+    subscription.acknowledge(requested);
 
     const resolution =
       message === "permission"
@@ -422,11 +427,12 @@ test.each(["permission", "session-permission"] as const)(
       ),
     ).toMatchObject({ status: "resolved" });
     const resolved = await resolvedPromise;
-    subscription.close();
     expect(resolved).toMatchObject({
       permissionHandle: requested.permissionHandle,
       resolution,
     });
+    subscription.acknowledge(resolved);
+    subscription.close();
 
     await vi.waitFor(async () =>
       expect(
@@ -488,13 +494,16 @@ test("a natively resolved Codex approval cannot claim a caller resolution", asyn
       { operationKey: f.connection.prepareOperation("resolvePermission") },
     ),
   ).rejects.toMatchObject({ failure: { code: "permission_not_pending" } });
+  subscription.acknowledge(requested);
   const later = await Promise.race([
     subscription.next(),
     new Promise<undefined>((resolve) =>
       setTimeout(() => resolve(undefined), 100),
     ),
   ]);
+  if (later !== undefined && !later.done) {
+    expect(later.value.type).not.toBe("permission.resolved");
+    subscription.acknowledge(later.value);
+  }
   subscription.close();
-  if (later === undefined) return;
-  if (!later.done) expect(later.value.type).not.toBe("permission.resolved");
 });

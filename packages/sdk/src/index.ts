@@ -5,6 +5,7 @@ import {
   type ReinsClient as ControlClient,
   type AgentFact as ClientAgentFact,
   type AgentTarget as ClientAgentTarget,
+  type AgentSubscriptionInitial as ClientAgentSubscriptionInitial,
 } from "@reins/client/control";
 import type {
   AttachParams,
@@ -41,6 +42,7 @@ import {
   resumeCursorSchema,
   sessionIdSchema,
   runtimeScopeIdSchema,
+  subscriptionStartSchema,
   toolKeySchema,
   turnHandleSchema,
 } from "@reins/protocol";
@@ -66,8 +68,10 @@ import {
   type AgentFact,
   type AgentFactId,
   type AgentSubscriptionEnd,
+  type AgentSubscriptionBaseline,
+  type AgentSubscriptionInitial,
   type AgentTarget,
-  type ReplayPolicy,
+  type SubscriptionStart,
   type ResumeCursor,
   type FactSubscription,
   type SessionHandle,
@@ -198,14 +202,15 @@ export type {
   MessageContent,
   MessageContentPart,
   AgentSubscriptionEnd,
-  AgentSubscriptionEstablishment,
+  AgentSubscriptionBaseline,
+  AgentSubscriptionInitial,
   AgentTarget,
   FactSubscription,
   MessageKey,
   PermissionOption,
   PermissionHandle,
   PermissionResolution,
-  ReplayPolicy,
+  SubscriptionStart,
   ResumeCursor,
   ToolKey,
 } from "./contracts.ts";
@@ -538,11 +543,11 @@ async function connectClient(
         );
         return projectDiagnosticsResult(result);
       },
-      async attach(target, replay, signal) {
+      async attach(target, start, signal) {
         let source: Awaited<ReturnType<ControlClient["subscribeFacts"]>>;
         try {
           source = await client!.subscribeFacts(
-            projectAttachParams(target, replay),
+            projectAttachParams(target, start),
             signal,
           );
         } catch (error) {
@@ -557,14 +562,30 @@ async function connectClient(
         }));
         void projectedDone.catch(() => undefined);
         let finished = false;
+        const sourceFacts = new WeakMap<object, ClientAgentFact>();
         const subscription: FactSubscription = {
-          establishment: {
-            ...source.establishment,
-            target: projectAgentTarget(source.establishment.target),
-          },
+          initial: projectAgentSubscriptionInitial(source.initial),
           done: projectedDone as Promise<AgentSubscriptionEnd>,
           get checkpoint() {
             return parseResumeCursor(source.checkpoint);
+          },
+          acknowledge(fact) {
+            const sourceFact =
+              typeof fact === "object" && fact !== null
+                ? sourceFacts.get(fact)
+                : undefined;
+            if (sourceFact === undefined)
+              throw new ReinsSdkError({
+                code: "invalid_params",
+                facts: {
+                  issues: [{ issue: "invalid_value", path: "factId" }],
+                },
+              });
+            try {
+              source.acknowledge(sourceFact);
+            } catch (error) {
+              throw projectSubscriptionError(error);
+            }
           },
           async next() {
             if (finished) return { value: undefined, done: true };
@@ -574,7 +595,9 @@ async function connectClient(
                 finished = true;
                 return { value: undefined, done: true };
               }
-              return { value: projectAgentFact(item.value), done: false };
+              const fact = projectAgentFact(item.value);
+              sourceFacts.set(fact, item.value);
+              return { value: fact, done: false };
             } catch (error) {
               throw projectSubscriptionError(error);
             }
@@ -879,18 +902,22 @@ async function connectClient(
 
 function projectAttachParams(
   target: AgentTarget,
-  replay: ReplayPolicy,
+  start: SubscriptionStart,
 ): AttachParams {
-  const protocolReplay =
-    replay.mode === "after"
+  const parsed = v.safeParse(subscriptionStartSchema, start);
+  if (!parsed.success)
+    throw new ReinsSdkError({
+      code: "invalid_params",
+      facts: { issues: [{ issue: "invalid_value", path: "start" }] },
+    });
+  const parsedStart = parsed.output;
+  const protocolStart =
+    parsedStart.mode === "after"
       ? {
           mode: "after" as const,
-          cursor: v.parse(
-            resumeCursorSchema,
-            serializeResumeCursor(replay.cursor),
-          ),
+          cursor: v.parse(resumeCursorSchema, parsedStart.cursor),
         }
-      : replay;
+      : parsedStart;
   if (target.scope === "session")
     return {
       scope: "session",
@@ -899,12 +926,38 @@ function projectAttachParams(
         "sessionHandle",
         "query",
       ),
-      replay: protocolReplay,
+      start: protocolStart,
     };
   return {
     scope: "turn",
     ...decodeTurnHandle(target.turnHandle),
-    replay: protocolReplay,
+    start: protocolStart,
+  };
+}
+
+function projectAgentSubscriptionInitial(
+  initial: ClientAgentSubscriptionInitial,
+): AgentSubscriptionInitial {
+  const target = projectAgentTarget(initial.target);
+  if (initial.mode !== "snapshot")
+    return {
+      ...initial,
+      target,
+      cursor: parseResumeCursor(initial.cursor),
+    };
+  return {
+    ...initial,
+    target,
+    cursor: parseResumeCursor(initial.cursor),
+    baseline: {
+      session: mapSessionInfo(initial.baseline.session),
+      confirmedTerminals: initial.baseline.confirmedTerminals.map(
+        projectAgentFact,
+      ) as AgentSubscriptionBaseline["confirmedTerminals"],
+      pendingPermissions: initial.baseline.pendingPermissions.map(
+        projectAgentFact,
+      ) as AgentSubscriptionBaseline["pendingPermissions"],
+    },
   };
 }
 
@@ -1318,6 +1371,11 @@ function projectFailure(
       return {
         code: failure.code,
         facts: { oldest: failure.oldest, head: failure.head },
+      };
+    case "event_history_unavailable":
+      return {
+        code: failure.code,
+        facts: { sessionHandle: parseSessionHandle(failure.sessionId) },
       };
     case "operation_key_conflict":
     case "operation_key_scope_mismatch":

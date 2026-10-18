@@ -125,7 +125,7 @@ export type RequestId = v.InferOutput<typeof requestIdSchema>;
 
 // —— 握手：协议主版本、daemon 世代与消费者绑定 ——
 
-export const REINS_PROTOCOL_MAJOR_VERSION = 2;
+export const REINS_PROTOCOL_MAJOR_VERSION = 3;
 
 // 主版本是兼容性边界；不匹配必须以 protocol_version_mismatch 类型化呈现，
 // 不能被字面量 schema 伪装成参数校验失败（ADR-0033）。
@@ -591,6 +591,7 @@ export type SubscriptionTarget = v.InferOutput<typeof subscriptionTargetSchema>;
 
 export const resumePositionSchema = v.strictObject({
   target: subscriptionTargetSchema,
+  runtimeScopeId: runtimeScopeIdSchema,
   daemonGeneration: daemonGenerationSchema,
   eventId: v.pipe(v.number(), v.integer(), v.minValue(0)),
 });
@@ -598,11 +599,11 @@ export type ResumePosition = v.InferOutput<typeof resumePositionSchema>;
 export function encodeResumeCursor(position: ResumePosition): ResumeCursor {
   return v.parse(
     resumeCursorSchema,
-    encodeIdentity("resume1_", resumePositionSchema, position),
+    encodeIdentity("resume2_", resumePositionSchema, position),
   );
 }
 export function decodeResumeCursor(cursor: string): ResumePosition {
-  return decodeIdentity("resume1_", resumePositionSchema, cursor);
+  return decodeIdentity("resume2_", resumePositionSchema, cursor);
 }
 export const resumeCursorSchema = v.pipe(
   v.string(),
@@ -617,22 +618,26 @@ export const resumeCursorSchema = v.pipe(
   v.brand("ResumeCursor"),
 );
 export type ResumeCursor = v.InferOutput<typeof resumeCursorSchema>;
-export const replayPolicySchema = v.variant("mode", [
-  v.strictObject({ mode: v.literal("none") }),
-  v.strictObject({ mode: v.literal("available") }),
+export const subscriptionStartSchema = v.variant("mode", [
+  v.strictObject({
+    mode: v.literal("snapshot"),
+    cursor: v.optional(v.never()),
+  }),
+  v.strictObject({ mode: v.literal("history"), cursor: v.optional(v.never()) }),
   v.strictObject({ mode: v.literal("after"), cursor: resumeCursorSchema }),
 ]);
+export type SubscriptionStart = v.InferOutput<typeof subscriptionStartSchema>;
 
 export const attachParamsSchema = v.variant("scope", [
   v.strictObject({
     scope: v.literal("session"),
     sessionId: sessionIdSchema,
-    replay: replayPolicySchema,
+    start: subscriptionStartSchema,
   }),
   v.strictObject({
     scope: v.literal("turn"),
     ...turnTargetSchema.entries,
-    replay: replayPolicySchema,
+    start: subscriptionStartSchema,
   }),
 ]);
 export type AttachParams = v.InferOutput<typeof attachParamsSchema>;
@@ -2317,6 +2322,7 @@ export const errorCodeSchema = v.union([
   v.literal("daemon_start_failed"),
   v.literal("daemon_disconnected"),
   v.literal("event_cursor_expired"),
+  v.literal("event_history_unavailable"),
 ]);
 export type ErrorCode = v.InferOutput<typeof errorCodeSchema>;
 
@@ -2583,6 +2589,10 @@ export const machineErrorSchema = v.union([
     oldest: v.nullable(eventIdSchema),
     head: v.nullable(eventIdSchema),
   }),
+  v.strictObject({
+    code: v.literal("event_history_unavailable"),
+    sessionId: sessionIdSchema,
+  }),
   v.strictObject({ code: v.literal("diagnostics_unavailable") }),
   unexpectedError("model_catalog_query_failed"),
   v.strictObject({
@@ -2795,6 +2805,7 @@ export const attachEndedSchema = v.strictObject({
   reason: v.union([
     stopReasonSchema,
     v.literal("session_killed"),
+    v.literal("control_unavailable"),
     v.literal("closed"),
   ]),
 });
@@ -2858,12 +2869,70 @@ export const initializeResultSchema = v.strictObject({
 });
 export type InitializeResult = v.InferOutput<typeof initializeResultSchema>;
 
-export const attachResultSchema = v.strictObject({
+const attachTerminalEventSchema = v.union([
+  v.strictObject({
+    type: v.literal("turn.completed"),
+    ...failedTurnCompletedSchema.entries,
+  }),
+  v.strictObject({
+    type: v.literal("turn.completed"),
+    ...successfulTurnCompletedSchema.entries,
+  }),
+  v.strictObject({
+    type: v.literal("session.killed"),
+    sessionId: sessionIdSchema,
+  }),
+]);
+const attachPermissionEventSchema = v.strictObject({
+  type: v.literal("permission.requested"),
   sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
+  permissionId: permissionIdSchema,
+  kind: v.string(),
+  input: v.optional(v.unknown()),
+  options: v.array(permissionOptionSchema),
+});
+const attachTerminalEntrySchema = v.strictObject({
+  eventId: eventIdSchema,
+  event: attachTerminalEventSchema,
+});
+const attachPermissionEntrySchema = v.strictObject({
+  eventId: eventIdSchema,
+  event: attachPermissionEventSchema,
+});
+const attachBaselineSchema = v.strictObject({
+  session: sessionInfoSchema,
+  confirmedTerminals: v.array(attachTerminalEntrySchema),
+  pendingPermissions: v.array(attachPermissionEntrySchema),
+});
+export type AttachBaseline = v.InferOutput<typeof attachBaselineSchema>;
+export const attachInitialSchema = v.variant("mode", [
+  v.strictObject({
+    mode: v.literal("snapshot"),
+    target: subscriptionTargetSchema,
+    cursor: resumeCursorSchema,
+    window: eventWindowSchema,
+    baseline: attachBaselineSchema,
+  }),
+  v.strictObject({
+    mode: v.literal("history"),
+    target: subscriptionTargetSchema,
+    cursor: resumeCursorSchema,
+    window: eventWindowSchema,
+    replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  }),
+  v.strictObject({
+    mode: v.literal("after"),
+    target: subscriptionTargetSchema,
+    cursor: resumeCursorSchema,
+    window: eventWindowSchema,
+    replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  }),
+]);
+export type AttachInitial = v.InferOutput<typeof attachInitialSchema>;
+export const attachResultSchema = v.strictObject({
   subscriptionId: subscriptionIdSchema,
-  target: subscriptionTargetSchema,
-  window: eventWindowSchema,
-  replayed: v.pipe(v.number(), v.integer(), v.minValue(0)),
+  initial: attachInitialSchema,
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 
