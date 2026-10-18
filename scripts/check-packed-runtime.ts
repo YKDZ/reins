@@ -439,6 +439,19 @@ async function runRecoveryAcceptance(options: {
       "prepareOperation 执行了远端副作用或未返回可保存输入",
     );
     const spawnIntent = prepared.intent;
+    const operationQuery = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "operation-query-validation",
+      { REINS_OPERATION_INTENT_JSON: spawnIntent },
+    );
+    assert(
+      operationQuery.malformedCode === "invalid_params" &&
+        operationQuery.malformedStage === "query" &&
+        operationQuery.validStatus === "unknown",
+      "SDK 操作查询未验证无效键或未读取合法身份",
+    );
 
     const workersBeforeValidation = readJsonLines(observationPath).filter(
       ({ type }) => type === "worker_started",
@@ -486,7 +499,7 @@ async function runRecoveryAcceptance(options: {
     await acknowledgementProxy.close();
     acknowledgementProxy = undefined;
     assert(
-      droppedSpawn.code === "command_outcome_unknown" &&
+      droppedSpawn.code === "operation_outcome_unknown" &&
         droppedSpawn.stage === "operation" &&
         spawnAcknowledgement.method === "spawn" &&
         isRecord(spawnAcknowledgement.result) &&
@@ -524,16 +537,17 @@ async function runRecoveryAcceptance(options: {
       ).length === modelCatalogQueriesBeforeRecovery,
       "恢复已接受 spawn 时重新查询了动态能力",
     );
-    const newCredential = await runSdkMode(
+    const newOperationKey = await runSdkMode(
       options.sdkConsumer,
       directEnv,
       options.logsDirectory,
-      "spawn-new-credential",
+      "spawn-new-operation-key",
       { REINS_OPERATION_INTENT_JSON: spawnIntent },
     );
     assert(
-      newCredential.code === "invalid_params" && newCredential.path === "model",
-      "新 spawn credential 未按变化后的模型目录重新校验",
+      newOperationKey.code === "invalid_params" &&
+        newOperationKey.path === "model",
+      "新 spawn operation key 未按变化后的模型目录重新校验",
     );
     writeFileSync(modelCatalogModePath, "with-model", "utf8");
 
@@ -583,7 +597,7 @@ async function runRecoveryAcceptance(options: {
       { REINS_OPERATION_INTENT_JSON: spawnIntent },
     );
     assert(
-      spawnConflict.code === "command_id_conflict",
+      spawnConflict.code === "operation_key_conflict",
       "spawn 请求指纹冲突未被拒绝",
     );
     assert(
@@ -635,7 +649,7 @@ async function runRecoveryAcceptance(options: {
     await acknowledgementProxy.close();
     acknowledgementProxy = undefined;
     assert(
-      droppedSend.code === "command_outcome_unknown" &&
+      droppedSend.code === "operation_outcome_unknown" &&
         sendAcknowledgement.method === "send" &&
         isRecord(sendAcknowledgement.result) &&
         sendAcknowledgement.result.sessionId ===
@@ -666,7 +680,7 @@ async function runRecoveryAcceptance(options: {
       { REINS_OPERATION_INTENT_JSON: sendIntent },
     );
     assert(
-      sendConflict.code === "command_id_conflict",
+      sendConflict.code === "operation_key_conflict",
       "send 请求指纹冲突未被拒绝",
     );
     const delivered = readJsonLines(observationPath).filter(
@@ -716,7 +730,7 @@ async function runRecoveryAcceptance(options: {
     await acknowledgementProxy.close();
     acknowledgementProxy = undefined;
     assert(
-      droppedInterrupt.code === "command_outcome_unknown" &&
+      droppedInterrupt.code === "operation_outcome_unknown" &&
         interruptAcknowledgement.method === "interrupt" &&
         isRecord(interruptAcknowledgement.result) &&
         interruptAcknowledgement.result.sessionId ===
@@ -864,8 +878,8 @@ async function runRecoveryAcceptance(options: {
     await acknowledgementProxy.close();
     acknowledgementProxy = undefined;
     assert(
-      droppedKill.code === "command_outcome_unknown" &&
-        droppedKill.operation === "kill" &&
+      droppedKill.code === "operation_outcome_unknown" &&
+        typeof droppedKill.operationKey === "string" &&
         killAcknowledgement.method === "kill" &&
         isRecord(killAcknowledgement.result) &&
         killAcknowledgement.result.sessionId === spawnResult.sessionHandle,
@@ -1001,9 +1015,9 @@ async function runRecoveryAcceptance(options: {
       { REINS_TARGET_SESSION: String(spawnResult.sessionHandle) },
     );
     assert(
-      staleSpawn.code === "stale_command_id" &&
-        staleSend.code === "stale_command_id" &&
-        staleInterrupt.code === "stale_command_id" &&
+      staleSpawn.code === "stale_operation_key" &&
+        staleSend.code === "stale_operation_key" &&
+        staleInterrupt.code === "stale_operation_key" &&
         staleSpawn.daemonGeneration !== generationBeforeRestart &&
         staleHandle.status === "not_found" &&
         staleHandle.sessionHandle === spawnResult.sessionHandle,
@@ -1174,7 +1188,7 @@ async function runPermissionAcceptance(options: {
         isRecord(mismatch.replay) &&
         JSON.stringify(mismatch.mismatch) === JSON.stringify(mismatch.replay) &&
         isRecord(mismatch.conflict) &&
-        mismatch.conflict.code === "command_id_conflict" &&
+        mismatch.conflict.code === "operation_key_conflict" &&
         readJsonLines(options.observationsPath).filter(
           (fact) =>
             fact.sessionId === firstSession.sessionHandle &&
@@ -1225,7 +1239,7 @@ async function runPermissionAcceptance(options: {
       );
       const acknowledgement = await proxy.waitForDroppedAcknowledgement();
       assert(
-        lost.code === "command_outcome_unknown" &&
+        lost.code === "operation_outcome_unknown" &&
           lost.stage === "operation" &&
           acknowledgement.method === "resolvePermission" &&
           isRecord(acknowledgement.result) &&

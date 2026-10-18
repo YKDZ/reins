@@ -80,7 +80,7 @@ try {
       message: "session A",
       cwd,
     },
-    owner.prepareOperation("spawn"),
+    { operationKey: owner.prepareOperation("spawn") },
   );
   firstSession = first.sessionHandle;
   firstTurn = first.turnHandle;
@@ -91,7 +91,7 @@ try {
       message: "session B",
       cwd,
     },
-    owner.prepareOperation("spawn"),
+    { operationKey: owner.prepareOperation("spawn") },
   );
   secondSession = second.sessionHandle;
   secondTurn = second.turnHandle;
@@ -143,7 +143,7 @@ try {
   assert((await foreign.list()).length === 0, "foreign list exposed a session");
   const foreignKill = await foreign.kill(
     { sessionHandle: firstSession },
-    foreign.prepareOperation("kill"),
+    { operationKey: foreign.prepareOperation("kill") },
   );
   assert(
     foreignKill.status === "not_found",
@@ -156,7 +156,7 @@ try {
         sessionHandle: firstSession!,
         message: "foreign input",
       },
-      foreign!.prepareOperation("send"),
+      { operationKey: foreign!.prepareOperation("send") },
     ),
   );
   await expectSessionMissing(() =>
@@ -171,7 +171,7 @@ try {
 
   const killedFirst = await owner.kill(
     { sessionHandle: firstSession },
-    owner.prepareOperation("kill"),
+    { operationKey: owner.prepareOperation("kill") },
   );
   assert(
     killedFirst.status === "killed",
@@ -210,7 +210,7 @@ try {
 
   const killedSecond = await recovery.kill(
     { sessionHandle: secondSession },
-    recovery.prepareOperation("kill"),
+    { operationKey: recovery.prepareOperation("kill") },
   );
   assert(
     killedSecond.status === "killed",
@@ -265,7 +265,7 @@ try {
     try {
       await owner.kill(
         { sessionHandle: firstSession },
-        owner.prepareOperation("kill"),
+        { operationKey: owner.prepareOperation("kill") },
       );
     } catch {
       // 清理仅在原断言失败后兜底，保留最初失败原因。
@@ -275,7 +275,7 @@ try {
     try {
       await recovery.kill(
         { sessionHandle: secondSession },
-        recovery.prepareOperation("kill"),
+        { operationKey: recovery.prepareOperation("kill") },
       );
     } catch {
       // 清理仅在原断言失败后兜底，保留最初失败原因。

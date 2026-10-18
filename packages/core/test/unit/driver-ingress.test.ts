@@ -60,7 +60,7 @@ describe("driver event ingress ownership", () => {
   test("treats synchronous spawn completion as terminal for later ingress", async () => {
     const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
-      start: (spec) => {
+      start: async (spec) => {
         fake.controls.emit({
           type: "turn.completed",
           sessionId: spec.sessionId,

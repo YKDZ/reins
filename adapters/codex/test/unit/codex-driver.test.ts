@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 
+import { WorkerStartFailure } from "@reins/protocol";
 import type {
   DriverDiagnosticFact,
   DomainEvent,
@@ -59,8 +60,8 @@ function startTracked(
   driver: ReturnType<ReturnType<typeof createCodexDriver>>,
   sessionId: SessionId,
   turnId: TurnId,
-): void {
-  driver.start({
+): Promise<void> {
+  return driver.start({
     sessionId,
     turnId,
     harness: "codex",
@@ -90,7 +91,7 @@ test("结构化额度失败不从正文猜测限流，停止等待在途失败�
       return undefined;
     },
   });
-  driver.start({
+  await driver.start({
     sessionId,
     turnId: firstTurnId,
     harness: "codex",
@@ -133,16 +134,16 @@ test("结构化额度失败不从正文猜测限流，停止等待在途失败�
   ]);
 });
 
-function setup(
+async function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
   terminateTimeoutMs?: number,
   workerOverrides: Partial<Pick<WorkerSpec, "model" | "reasoning">> = {},
-): {
+): Promise<{
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeTransport>;
   driver: ReturnType<ReturnType<typeof createCodexDriver>>;
-} {
+}> {
   const fake = createFakeTransport();
   const diagnostics: DriverDiagnosticFact[] = [];
   const factory = createCodexDriver({
@@ -157,7 +158,7 @@ function setup(
       return undefined;
     },
   });
-  driver.start({
+  await driver.start({
     sessionId,
     turnId: firstTurnId,
     harness: "codex",
@@ -169,7 +170,13 @@ function setup(
   return { events, diagnostics, fake, driver };
 }
 
-function setupWithMalformedResponse(method: "turn/steer" | "thread/delete") {
+async function setupWithMalformedResponse(
+  method: "turn/steer" | "thread/delete",
+): Promise<{
+  diagnostics: DriverDiagnosticFact[];
+  driver: ReturnType<ReturnType<typeof createCodexDriver>>;
+  events: DomainEvent[];
+}> {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
   const emitter = new EventEmitter();
@@ -221,7 +228,7 @@ function setupWithMalformedResponse(method: "turn/steer" | "thread/delete") {
       return undefined;
     },
   });
-  driver.start({
+  await driver.start({
     sessionId,
     turnId: firstTurnId,
     harness: "codex",
@@ -266,28 +273,41 @@ describe("codex driver", () => {
       "session:00000000-0000-4000-8000-000000000000:coldsecond:1" as SessionId;
     const thirdSession =
       "session:00000000-0000-4000-8000-000000000000:coldthird:1" as SessionId;
+    const starts: Promise<void>[] = [];
 
     try {
-      startTracked(first.driver, firstSession, firstTurnId);
+      const firstStart = startTracked(first.driver, firstSession, firstTurnId);
+      starts.push(firstStart);
       await flush();
       expect(firstStarts).toBe(1);
       expect(firstFake.controls.requests().map(({ method }) => method)).toEqual(
         ["initialize"],
       );
 
-      startTracked(second.driver, secondSession, secondTurnId);
+      const secondStart = startTracked(
+        second.driver,
+        secondSession,
+        secondTurnId,
+      );
+      starts.push(secondStart);
       await flush();
       expect(secondStarts).toBe(0);
       expect(secondFake.controls.requests()).toEqual([]);
 
       firstInitialize.resolve({});
+      await firstStart;
       await flush();
       expect(secondStarts).toBe(1);
       expect(
         secondFake.controls.requests().map(({ method }) => method),
       ).toEqual(["initialize"]);
 
-      startTracked(third.driver, thirdSession, "t3" as TurnId);
+      const thirdStart = startTracked(
+        third.driver,
+        thirdSession,
+        "t3" as TurnId,
+      );
+      starts.push(thirdStart);
       await flush();
       expect(thirdStarts).toBe(1);
       expect(thirdFake.controls.requests().map(({ method }) => method)).toEqual(
@@ -297,6 +317,7 @@ describe("codex driver", () => {
       firstInitialize.resolve({});
       secondInitialize.resolve({});
       thirdInitialize.resolve({});
+      await Promise.allSettled(starts);
       await Promise.all([
         first.driver.terminate(firstSession),
         second.driver.terminate(secondSession),
@@ -332,27 +353,48 @@ describe("codex driver", () => {
       "session:00000000-0000-4000-8000-000000000000:failedqueued:1" as SessionId;
     const laterSession =
       "session:00000000-0000-4000-8000-000000000000:failedlater:1" as SessionId;
+    const starts: Promise<void>[] = [];
 
     try {
-      startTracked(first.driver, firstSession, firstTurnId);
+      const firstStart = startTracked(first.driver, firstSession, firstTurnId);
+      starts.push(firstStart);
       await flush();
-      startTracked(queued.driver, queuedSession, secondTurnId);
+      const queuedStart = startTracked(
+        queued.driver,
+        queuedSession,
+        secondTurnId,
+      );
+      starts.push(queuedStart);
       await flush();
       expect(queuedStarts).toBe(0);
 
       firstInitialize.reject(new Error("sqlite initialization failed"));
+      await expect(firstStart).rejects.toBeInstanceOf(WorkerStartFailure);
+      await expect(firstStart).rejects.toMatchObject({
+        name: "WorkerStartFailure",
+        acceptance: "not_accepted",
+        cause: expect.objectContaining({
+          message: "sqlite initialization failed",
+        }),
+      });
+      await expect(queuedStart).rejects.toBeInstanceOf(WorkerStartFailure);
+      await expect(queuedStart).rejects.toMatchObject({
+        name: "WorkerStartFailure",
+        acceptance: "not_accepted",
+        cause: expect.objectContaining({
+          message: "sqlite initialization failed",
+        }),
+      });
       await flush();
       expect(queuedStarts).toBe(0);
-      for (const events of [first.events, queued.events]) {
-        expect(
-          events.some(
-            (event) =>
-              event.type === "turn.completed" && event.stopReason === "failed",
-          ),
-        ).toBe(true);
-      }
 
-      startTracked(later.driver, laterSession, "t3" as TurnId);
+      const laterStart = startTracked(
+        later.driver,
+        laterSession,
+        "t3" as TurnId,
+      );
+      starts.push(laterStart);
+      await laterStart;
       await flush();
       expect(laterStarts).toBe(1);
       expect(
@@ -360,6 +402,7 @@ describe("codex driver", () => {
       ).toContain("initialize");
     } finally {
       firstInitialize.resolve({});
+      await Promise.allSettled(starts);
       await Promise.all([
         first.driver.terminate(firstSession),
         queued.driver.terminate(queuedSession),
@@ -387,22 +430,32 @@ describe("codex driver", () => {
       "session:00000000-0000-4000-8000-000000000000:cancelfirst:1" as SessionId;
     const queuedSession =
       "session:00000000-0000-4000-8000-000000000000:cancelqueued:1" as SessionId;
+    const starts: Promise<void>[] = [];
 
     try {
-      startTracked(first.driver, firstSession, firstTurnId);
+      const firstStart = startTracked(first.driver, firstSession, firstTurnId);
+      starts.push(firstStart);
       await flush();
-      startTracked(queued.driver, queuedSession, secondTurnId);
+      const queuedStart = startTracked(
+        queued.driver,
+        queuedSession,
+        secondTurnId,
+      );
+      starts.push(queuedStart);
       await flush();
       expect(queuedStarts).toBe(0);
 
       await queued.driver.terminate(queuedSession);
       expect(queuedFake.controls.closed()).toBe(true);
       firstInitialize.resolve({});
+      await firstStart;
+      await expect(queuedStart).rejects.toThrow();
       await flush();
       expect(queuedStarts).toBe(0);
       expect(queuedFake.controls.requests()).toEqual([]);
     } finally {
       firstInitialize.resolve({});
+      await Promise.allSettled(starts);
       await first.driver.terminate(firstSession);
       if (previousHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousHome;
@@ -410,7 +463,7 @@ describe("codex driver", () => {
   });
 
   test("spawn 走 initialize → thread/start → turn/start", async () => {
-    const { fake } = setup();
+    const { fake } = await setup();
     await flush();
 
     const methods = fake.controls.requests().map((request) => request.method);
@@ -428,8 +481,106 @@ describe("codex driver", () => {
     });
   });
 
+  test("thread/start 尚未派发首条输入时失败记为未接受", async () => {
+    const fake = createFakeTransport();
+    const failure = new Error("thread/start response lost");
+    let rejectThreadStart!: (error: unknown) => void;
+    fake.controls.setResponse(
+      "thread/start",
+      new Promise<never>((_resolve, reject) => {
+        rejectThreadStart = reject;
+      }),
+    );
+    const { driver } = makeDriver(fake);
+    const starting = driver.start({
+      sessionId,
+      turnId: firstTurnId,
+      harness: "codex",
+      message: "caller task",
+      cwd: "/tmp/demo",
+    });
+    await flush();
+    expect(fake.controls.requests().map(({ method }) => method)).toEqual([
+      "initialize",
+      "thread/start",
+    ]);
+    rejectThreadStart(failure);
+    await expect(starting).rejects.toBeInstanceOf(WorkerStartFailure);
+    await expect(starting).rejects.toMatchObject({
+      acceptance: "not_accepted",
+      cause: failure,
+    });
+    await driver.terminate(sessionId);
+  });
+
+  test("首个 turn/start 明确拒绝记为未接受，断流仅记为未知", async () => {
+    const rejected = createFakeTransport();
+    const rejection = new CodexRequestError("native rejected turn/start");
+    let rejectTurnStart!: (error: unknown) => void;
+    rejected.controls.setResponse(
+      "turn/start",
+      new Promise<never>((_resolve, reject) => {
+        rejectTurnStart = reject;
+      }),
+    );
+    const rejectedDriver = makeDriver(rejected);
+    const rejectedStart = rejectedDriver.driver.start({
+      sessionId,
+      turnId: firstTurnId,
+      harness: "codex",
+      message: "caller task",
+      cwd: "/tmp/demo",
+    });
+    await flush();
+    expect(rejected.controls.requests().map(({ method }) => method)).toEqual([
+      "initialize",
+      "thread/start",
+      "turn/start",
+    ]);
+    rejectTurnStart(rejection);
+    await expect(rejectedStart).rejects.toBeInstanceOf(WorkerStartFailure);
+    await expect(rejectedStart).rejects.toMatchObject({
+      name: "WorkerStartFailure",
+      acceptance: "not_accepted",
+      cause: rejection,
+    });
+    await rejectedDriver.driver.terminate(sessionId);
+
+    const lost = createFakeTransport();
+    const disconnect = new Error("codex app-server closed after turn dispatch");
+    let loseTurnStart!: (error: unknown) => void;
+    lost.controls.setResponse(
+      "turn/start",
+      new Promise<never>((_resolve, reject) => {
+        loseTurnStart = reject;
+      }),
+    );
+    const lostDriver = makeDriver(lost);
+    const lostStart = lostDriver.driver.start({
+      sessionId,
+      turnId: firstTurnId,
+      harness: "codex",
+      message: "caller task",
+      cwd: "/tmp/demo",
+    });
+    await flush();
+    expect(lost.controls.requests().map(({ method }) => method)).toEqual([
+      "initialize",
+      "thread/start",
+      "turn/start",
+    ]);
+    loseTurnStart(disconnect);
+    await expect(lostStart).rejects.toBeInstanceOf(WorkerStartFailure);
+    await expect(lostStart).rejects.toMatchObject({
+      name: "WorkerStartFailure",
+      acceptance: "unknown",
+      cause: disconnect,
+    });
+    await lostDriver.driver.terminate(sessionId);
+  });
+
   test("allowAll 映射 approvalPolicy never + 沙箱全访问", async () => {
-    const { fake } = setup("allowAll");
+    const { fake } = await setup("allowAll");
     await flush();
 
     const threadStart = fake.controls.requests()[1];
@@ -442,7 +593,7 @@ describe("codex driver", () => {
   });
 
   test("未指定授权模式时不注入 approvalPolicy 或 sandbox", async () => {
-    const { fake } = setup("omitted");
+    const { fake } = await setup("omitted");
     await flush();
 
     const threadStart = fake.controls.requests()[1];
@@ -453,10 +604,14 @@ describe("codex driver", () => {
   });
 
   test("model 与 reasoning 只作为每次 turn/start override", async () => {
-    const { diagnostics, driver, fake } = setup("interactive", undefined, {
-      model: "gpt-5.4",
-      reasoning: "high",
-    });
+    const { diagnostics, driver, fake } = await setup(
+      "interactive",
+      undefined,
+      {
+        model: "gpt-5.4",
+        reasoning: "high",
+      },
+    );
     await flush();
 
     expect(fake.controls.requests()[1]?.params).toEqual({
@@ -495,7 +650,7 @@ describe("codex driver", () => {
   });
 
   test("agentMessage delta 与 completed、turn completed 映射事件流", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "notification",
@@ -534,7 +689,7 @@ describe("codex driver", () => {
   });
 
   test("工具 item 映射 tool.requested/tool.completed(isError)", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "notification",
@@ -588,7 +743,7 @@ describe("codex driver", () => {
   });
 
   test("审批请求转 permission.requested，决议翻译为决策应答", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "request",
@@ -632,7 +787,7 @@ describe("codex driver", () => {
   });
 
   test("不支持的入站请求归一化为 compatibility_gap，不泄漏请求对象", async () => {
-    const { diagnostics, fake } = setup();
+    const { diagnostics, fake } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "request",
@@ -655,7 +810,7 @@ describe("codex driver", () => {
   });
 
   test("worker reported failure 保留上游 message 到 turn_failure", async () => {
-    const { diagnostics, fake } = setup();
+    const { diagnostics, fake } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "notification",
@@ -685,7 +840,7 @@ describe("codex driver", () => {
   });
 
   test("worker 未提供失败 message 时使用通用证据", async () => {
-    const { diagnostics, fake } = setup();
+    const { diagnostics, fake } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "notification",
@@ -705,7 +860,7 @@ describe("codex driver", () => {
   });
 
   test("availableDecisions 只映射为菜单中的对应选项", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "request",
@@ -730,7 +885,7 @@ describe("codex driver", () => {
   });
 
   test("deny 映射 decline", async () => {
-    const { fake, driver } = setup();
+    const { fake, driver } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "request",
@@ -751,7 +906,7 @@ describe("codex driver", () => {
   });
 
   test("busy 时 deliver 走 steer，回合结束后走新 turn/start", async () => {
-    const { fake, driver } = setup();
+    const { fake, driver } = await setup();
     await flush();
 
     await driver.deliver(sessionId, firstTurnId, "继续", "active_turn");
@@ -776,7 +931,8 @@ describe("codex driver", () => {
   });
 
   test("真实 transport 已记录的 steer protocol error 不在 driver 重复记录", async () => {
-    const { diagnostics, driver } = setupWithMalformedResponse("turn/steer");
+    const { diagnostics, driver } =
+      await setupWithMalformedResponse("turn/steer");
     await flush();
 
     await expect(
@@ -794,7 +950,7 @@ describe("codex driver", () => {
   });
 
   test("精确 interrupt 等待原生接受，结束竞争不换用新 native TurnId", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     await flush();
     let accept!: (value: Record<string, never>) => void;
     fake.controls.setResponse(
@@ -841,7 +997,7 @@ describe("codex driver", () => {
   });
 
   test("interrupt 走 turn/interrupt，interrupted 合成 cancelled", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     await flush();
 
     await driver.interrupt(sessionId, firstTurnId);
@@ -864,7 +1020,7 @@ describe("codex driver", () => {
   });
 
   test("terminate 走 thread/delete 并关闭传输，不补发 failed", async () => {
-    const { events, diagnostics, fake, driver } = setup();
+    const { events, diagnostics, fake, driver } = await setup();
     await flush();
 
     await driver.terminate(sessionId);
@@ -881,7 +1037,7 @@ describe("codex driver", () => {
   });
 
   test("terminate 的 delete 超时仍强制关闭资源树并成功完成 kill", async () => {
-    const { diagnostics, fake, driver } = setup("interactive", 5);
+    const { diagnostics, fake, driver } = await setup("interactive", 5);
     await flush();
     fake.controls.setResponse("thread/delete", new Promise(() => {}));
 
@@ -904,7 +1060,7 @@ describe("codex driver", () => {
   });
 
   test("terminate 的 delete 拒绝仍关闭资源树且只记录一次失败", async () => {
-    const { diagnostics, fake, driver } = setup();
+    const { diagnostics, fake, driver } = await setup();
     await flush();
     fake.controls.setResponse(
       "thread/delete",
@@ -930,7 +1086,7 @@ describe("codex driver", () => {
   });
 
   test("thread/delete 成功但 close 拒绝时也只记录一条 terminate 失败", async () => {
-    const { diagnostics, fake, driver } = setup();
+    const { diagnostics, fake, driver } = await setup();
     await flush();
     fake.controls.setCloseError(new Error("close rejected"));
 
@@ -956,7 +1112,8 @@ describe("codex driver", () => {
   });
 
   test("真实 transport 已记录的 thread/delete protocol error 不在 terminate 重复记录", async () => {
-    const { diagnostics, driver } = setupWithMalformedResponse("thread/delete");
+    const { diagnostics, driver } =
+      await setupWithMalformedResponse("thread/delete");
     await flush();
 
     await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
@@ -971,7 +1128,7 @@ describe("codex driver", () => {
   });
 
   test("transport 关闭后新消息拒绝且不伪造新回合事实", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     await flush();
 
     // 第一轮正常结束，随后传输关闭（等价于 codex 子进程退出）。
@@ -997,7 +1154,7 @@ describe("codex driver", () => {
   });
 
   test("worker stream 读取异常只记录 read_error", async () => {
-    const { diagnostics, events, fake } = setup();
+    const { diagnostics, events, fake } = await setup();
     await flush();
 
     fake.controls.fail(new Error("stdout read failed"));
@@ -1017,7 +1174,7 @@ describe("codex driver", () => {
   });
 
   test("worker stream 自然 EOF 只记录 closed_unexpectedly", async () => {
-    const { diagnostics, events, fake } = setup();
+    const { diagnostics, events, fake } = await setup();
     await flush();
 
     fake.controls.end();
@@ -1042,7 +1199,7 @@ describe("codex driver", () => {
   });
 
   test("idle worker clean EOF 仍记录一次 exited_unexpectedly 且不伪造 turn", async () => {
-    const { diagnostics, events, fake, driver } = setup();
+    const { diagnostics, events, fake, driver } = await setup();
     await flush();
     fake.controls.pushInbound({
       kind: "notification",
@@ -1102,7 +1259,7 @@ import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
 test("adapter rejects an out-of-menu answer without consuming the original native request", async () => {
-  const { fake, driver } = setup();
+  const { fake, driver } = await setup();
   await flush();
   fake.controls.pushInbound({
     kind: "request",
@@ -1132,7 +1289,7 @@ test("adapter rejects an out-of-menu answer without consuming the original nativ
 });
 
 test("active_turn 等待原生 steer 接受并核对精确原生 TurnId", async () => {
-  const { driver, fake } = setup();
+  const { driver, fake } = await setup();
   await flush();
   let accept!: (ack: { turnId: string }) => void;
   fake.controls.setResponse(
@@ -1168,7 +1325,7 @@ test("active_turn 等待原生 steer 接受并核对精确原生 TurnId", async 
 });
 
 test("旧原生回合终态迟到不能结束新回合或改变 active_turn 目标", async () => {
-  const { driver, fake, events } = setup();
+  const { driver, fake, events } = await setup();
   await flush();
   fake.controls.pushInbound({
     kind: "notification",
@@ -1201,7 +1358,7 @@ test("旧原生回合终态迟到不能结束新回合或改变 active_turn 目�
 });
 
 test("原生拒绝的精确分类依据已观察终态，不依据自由文本", async () => {
-  const { driver, fake } = setup();
+  const { driver, fake } = await setup();
   await flush();
   const noActiveText = new CodexRequestError(
     '{"code":-32600,"message":"no active turn to steer"}',

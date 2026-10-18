@@ -12,6 +12,7 @@ import {
   type PermissionId,
   type TurnId,
   type MachineError,
+  WorkerStartFailure,
 } from "@reins/protocol";
 
 import type { UserInput } from "#/generated/v2/UserInput";
@@ -81,14 +82,21 @@ export function createCodexDriver(deps: {
     const nativeTurns = new Map<TurnId, Promise<string>>();
     const pendingByRequest = new Map<number, PermissionId>();
 
-    async function startTurn(message: string): Promise<string> {
+    async function startTurn(
+      message: string,
+      onDispatch?: () => void,
+    ): Promise<string> {
       if (transport === null || threadId === "" || ended)
         throw new Error("Codex session is unavailable");
-      const turn = await transport.request("turn/start", {
+      if (onDispatch !== undefined && transport.isClosed())
+        throw new Error("codex app-server closed");
+      const pendingTurn = transport.request("turn/start", {
         threadId,
         input: [textInput(message)],
         ...turnOverrides,
       });
+      onDispatch?.();
+      const turn = await pendingTurn;
       activeTurnId = turn.turn.id;
       return turn.turn.id;
     }
@@ -222,7 +230,7 @@ export function createCodexDriver(deps: {
     }
 
     const driver: WorkerDriver = {
-      start(spec: WorkerSpec) {
+      async start(spec: WorkerSpec) {
         const unsupported =
           spec.agent !== undefined
             ? "agent"
@@ -262,57 +270,56 @@ export function createCodexDriver(deps: {
         });
         nativeTurns.set(spec.turnId, initialReady);
         void initialReady.catch(() => undefined);
-        void (async () => {
-          let startingTurn = false;
-          try {
-            const startingTransport = transport;
-            if (startingTransport === null)
-              throw new Error("Codex transport is unavailable");
-            await initializeCodexTransport(startingTransport);
-            const thread = await startingTransport.request("thread/start", {
-              ephemeral: true,
-              cwd: spec.cwd,
-              ...(spec.authorizationMode === "allowAll"
-                ? {
-                    approvalPolicy: "never",
-                    sandbox: "danger-full-access",
-                  }
-                : spec.authorizationMode === "interactive"
-                  ? { approvalPolicy: "on-request" }
-                  : {}),
-            });
-            threadId = thread?.thread.id ?? "";
-            workerInitialized = true;
-            if (session !== null) {
-              await session.diagnostic({
-                kind: "lifecycle",
-                operation: "worker",
-                reason: "initialized",
-              });
-            }
-            startingTurn = true;
-            resolveInitial(await startTurn(spec.message));
-          } catch (error) {
-            rejectInitial(error);
-            if (!ended && session !== null) {
-              runPromise = session.failActiveTurn(
-                undefined,
-                isAlreadyDiagnosedError(error)
-                  ? undefined
-                  : {
-                      kind: "request_failure",
-                      operation: "spawn",
-                      stage: startingTurn ? "start_turn" : "start_session",
-                      reason: "upstream_error",
-                      message: makeTextEvidence(String(error)),
-                    },
-              );
-              await runPromise;
+        const startingTransport = transport;
+        if (startingTransport === null)
+          throw new Error("Codex transport is unavailable");
+        let initialTurnDispatched = false;
+        try {
+          await initializeCodexTransport(startingTransport);
+          const thread = await startingTransport.request("thread/start", {
+            ephemeral: true,
+            cwd: spec.cwd,
+            ...(spec.authorizationMode === "allowAll"
+              ? {
+                  approvalPolicy: "never",
+                  sandbox: "danger-full-access",
+                }
+              : spec.authorizationMode === "interactive"
+                ? { approvalPolicy: "on-request" }
+                : {}),
+          });
+          threadId = thread?.thread.id ?? "";
+          workerInitialized = true;
+          resolveInitial(
+            await startTurn(spec.message, () => {
+              initialTurnDispatched = true;
+            }),
+          );
+        } catch (error) {
+          rejectInitial(error);
+          if (threadId !== "" && !threadDeleted) {
+            try {
+              await startingTransport.request("thread/delete", { threadId });
+              threadDeleted = true;
+            } catch {
+              // 启动拒绝保持为主因；停止失败由随后关闭尝试保留。
             }
           }
-          runPromise = run();
-          await runPromise;
-        })();
+          await startingTransport.close().catch(() => undefined);
+          throw new WorkerStartFailure(
+            errorMessage(error),
+            initialTurnDispatched && !(error instanceof CodexRequestError)
+              ? "unknown"
+              : "not_accepted",
+            { cause: error },
+          );
+        }
+        runPromise = run();
+        void session?.diagnostic({
+          kind: "lifecycle",
+          operation: "worker",
+          reason: "initialized",
+        });
       },
       async deliver(sessionId, turnId, message, placement) {
         if (session === null || session.sessionId !== sessionId || ended)

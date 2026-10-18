@@ -4,7 +4,7 @@ declare const agentFactIdBrand: unique symbol;
 declare const messageKeyBrand: unique symbol;
 declare const toolKeyBrand: unique symbol;
 declare const resumeCursorBrand: unique symbol;
-declare const operationCredentialBrand: unique symbol;
+declare const operationKeyBrand: unique symbol;
 declare const permissionHandleBrand: unique symbol;
 declare const diagnosticIdBrand: unique symbol;
 declare const runtimeScopeIdBrand: unique symbol;
@@ -38,8 +38,11 @@ export type OperationKind =
   | "interrupt"
   | "kill"
   | "resolvePermission";
-export type OperationCredential<Kind extends OperationKind> = string & {
-  readonly [operationCredentialBrand]: Kind;
+export type OperationKey<Kind extends OperationKind> = string & {
+  readonly [operationKeyBrand]: Kind;
+};
+export type OperationOptions<Kind extends OperationKind> = {
+  operationKey?: OperationKey<Kind>;
 };
 
 export type HarnessId = "codex" | "qoder";
@@ -61,6 +64,41 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
+export type OperationRecord =
+  | {
+      status: "unknown" | "unavailable" | "pending";
+      operationKey: OperationKey<"spawn">;
+    }
+  | {
+      status: "outcome_unknown";
+      operationKey: OperationKey<"spawn">;
+      cause?: ErrorCause;
+      cleanupCause?: ErrorCause;
+    }
+  | {
+      status: "succeeded";
+      operationKey: OperationKey<"spawn">;
+      result: SpawnResult;
+    }
+  | {
+      status: "failed";
+      operationKey: OperationKey<"spawn">;
+      error: ReinsFailure;
+    }
+  | {
+      status: "accepted_uncommitted";
+      operationKey: OperationKey<"spawn">;
+      result: SpawnResult;
+      cause: ErrorCause;
+      cleanupCause?: ErrorCause;
+    }
+  | {
+      status: "accepted_unconfirmed";
+      operationKey: OperationKey<"spawn">;
+      result: SpawnResult;
+      cause: ErrorCause;
+      cleanupCause?: ErrorCause;
+    };
 export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
@@ -685,13 +723,23 @@ type FailureFactsByCode = {
   daemon_disconnected: { resumeCursor?: ResumeCursor };
   daemon_shutting_down: Record<never, never>;
   workspace_detaching: Record<never, never>;
-  command_id_conflict: Record<never, never>;
-  stale_command_id: Record<never, never>;
-  command_outcome_unknown: {
-    cause: "timeout" | "disconnected" | "invalid_daemon_response";
-    operation: OperationKind;
+  operation_key_conflict: Record<never, never>;
+  operation_key_scope_mismatch: Record<never, never>;
+  stale_operation_key: Record<never, never>;
+  operation_pending: { operationKey: OperationKey<OperationKind> };
+  operation_outcome_unknown: {
+    operationKey: OperationKey<OperationKind>;
+    cause?: ErrorCause;
+    cleanupCause?: ErrorCause;
   };
-  operation_credential_invalid: Record<never, never>;
+  control_store_unavailable: {
+    operationKey: OperationKey<OperationKind>;
+    stage: "register" | "dispatch" | "commit" | "failure";
+    acceptance: "not_dispatched" | "unknown" | "accepted";
+    cause: ErrorCause;
+    acceptedResult?: SpawnResult;
+    cleanupCause?: ErrorCause;
+  };
   permission_not_pending: { permissionHandle: PermissionHandle };
   permission_resolution_mismatch: { permissionHandle: PermissionHandle };
   diagnostic_not_found: { diagnosticId: DiagnosticId };
@@ -707,7 +755,11 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     diagnosticId?: DiagnosticId;
   };
-  internal_error: { cause?: ErrorCause; diagnosticId?: DiagnosticId };
+  internal_error: {
+    cause?: ErrorCause;
+    diagnosticId?: DiagnosticId;
+    cleanupCause?: ErrorCause;
+  };
   diagnostics_store_corrupt: {
     cause?: ErrorCause;
     diagnosticId?: DiagnosticId;
@@ -783,31 +835,30 @@ export type ReinsConnection = {
     replay: ReplayPolicy,
     signal?: AbortSignal,
   ): Promise<FactSubscription>;
-  prepareOperation<Kind extends OperationKind>(
-    kind: Kind,
-  ): OperationCredential<Kind>;
+  prepareOperation<Kind extends OperationKind>(kind: Kind): OperationKey<Kind>;
+  getOperation(operationKey: OperationKey<"spawn">): Promise<OperationRecord>;
   spawn(
     input: SpawnInput,
-    credential: OperationCredential<"spawn">,
+    options?: OperationOptions<"spawn">,
   ): Promise<SpawnResult>;
   kill(
     input: KillInput,
-    credential: OperationCredential<"kill">,
+    options?: OperationOptions<"kill">,
   ): Promise<KillResult>;
   resolvePermission(
     permissionHandle: PermissionHandle,
     resolution: PermissionResolution,
-    credential: OperationCredential<"resolvePermission">,
+    options?: OperationOptions<"resolvePermission">,
   ): Promise<{ permissionHandle: PermissionHandle; status: "resolved" }>;
   diagnostics(query?: DiagnosticsQuery): Promise<DiagnosticsResult>;
   send(
     input: SendInput,
-    credential: OperationCredential<"send">,
+    options?: OperationOptions<"send">,
   ): Promise<SendResult>;
   wait(input: WaitInput): Promise<WaitResult>;
   interrupt(
     input: InterruptInput,
-    credential: OperationCredential<"interrupt">,
+    options?: OperationOptions<"interrupt">,
   ): Promise<InterruptResult>;
   close(): void;
 };

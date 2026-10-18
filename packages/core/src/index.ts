@@ -1,6 +1,8 @@
 // 接口层核心：七动作状态机与事件总线。
 export {
   createSessionMachine,
+  SpawnCommitFailure,
+  SpawnStartFailure,
   type SessionMachine,
   type SessionIdentity,
 } from "./session-machine.ts";

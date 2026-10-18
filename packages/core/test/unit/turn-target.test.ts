@@ -68,7 +68,7 @@ test("turn targets retain their original parent across active and completed turn
 
 test("spawn returns its accepted first turn even when the driver completes it synchronously", async () => {
   const fake = createFakeDriver({
-    start(spec) {
+    async start(spec) {
       fake.controls.emit({
         type: "turn.completed",
         sessionId: spec.sessionId,

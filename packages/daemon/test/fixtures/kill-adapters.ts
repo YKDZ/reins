@@ -19,7 +19,7 @@ export default {
       let failTermination = false;
       return {
         ...driver,
-        start(spec) {
+        async start(spec) {
           failTermination = spec.message === "fail first termination";
           return driver.start(spec);
         },

@@ -1,9 +1,10 @@
 import { randomUUID } from "node:crypto";
 
 import {
-  commandIdSchema,
+  operationKeyClaimsSchema,
   isSideEffectMethod,
   initializeResultSchema,
+  serializeOperationKey,
 } from "@reins/protocol";
 import { REINS_PROTOCOL_MAJOR_VERSION } from "@reins/protocol";
 import type { ProtocolMessage, ProtocolResponse } from "@reins/protocol";
@@ -13,7 +14,10 @@ import { expect, test } from "vitest";
 
 import { openEphemeralDaemonForTest } from "../../src/testing.ts";
 
-const generations = new WeakMap<TransportConnection<ProtocolMessage>, string>();
+const generations = new WeakMap<
+  TransportConnection<ProtocolMessage>,
+  { generation: string; consumerContext: string; runtimeScopeId: string }
+>();
 
 async function request(
   connection: TransportConnection<ProtocolMessage>,
@@ -28,21 +32,40 @@ async function request(
       ) {
         unsubscribe();
         if (message.method === "initialize" && "result" in event.message)
-          generations.set(
-            connection,
-            v.parse(initializeResultSchema, event.message.result)
-              .daemonGeneration,
-          );
+          if (
+            message.method === "initialize" &&
+            typeof message.params === "object" &&
+            message.params !== null
+          ) {
+            const initialized = v.parse(
+              initializeResultSchema,
+              event.message.result,
+            );
+            generations.set(connection, {
+              generation: initialized.daemonGeneration,
+              consumerContext: String(
+                (message.params as { consumerContext?: unknown })
+                  .consumerContext,
+              ),
+              runtimeScopeId: initialized.runtimeScopeId,
+            });
+          }
         resolve(event.message);
       }
     });
+    const context = generations.get(connection);
     connection.send(
       isSideEffectMethod(message.method)
         ? {
             ...message,
-            commandId: v.parse(
-              commandIdSchema,
-              generations.get(connection) + ":" + randomUUID(),
+            operationKey: serializeOperationKey(
+              v.parse(operationKeyClaimsSchema, {
+                runtimeScopeId: context?.runtimeScopeId,
+                consumer: context?.consumerContext,
+                kind: message.method,
+                generation: context?.generation,
+                nonce: randomUUID(),
+              }),
             ),
           }
         : message,
@@ -72,7 +95,7 @@ test("failed cleanup rejects connections and retries without reopening", async (
         "codex",
         {
           driverFactory: () => ({
-            start() {},
+            async start() {},
             async deliver() {},
             async interrupt() {},
             resolvePermission() {},

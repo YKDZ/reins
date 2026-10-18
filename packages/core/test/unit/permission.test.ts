@@ -314,7 +314,7 @@ describe("resolvePermission", () => {
   test("driver 同步发出的内容事件排在 resolved 之后", async () => {
     let workerSessionId: SessionId | undefined;
     const fake = createFakeDriver({
-      start(spec) {
+      async start(spec) {
         workerSessionId = spec.sessionId;
       },
       resolvePermission: () => {

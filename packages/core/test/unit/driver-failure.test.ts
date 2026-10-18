@@ -23,7 +23,7 @@ describe("driver 抛错时动作整体回滚", () => {
     });
     const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
-      start: (spec) => {
+      start: async (spec) => {
         queueMicrotask(() => {
           fake.controls.emit({
             type: "text.delta",
@@ -59,7 +59,10 @@ describe("driver 抛错时动作整体回滚", () => {
     await vi.waitFor(() =>
       expect(diagnostics).toEqual(
         expect.arrayContaining([
-          expect.objectContaining({ kind: "protocol_violation" }),
+          expect.objectContaining({
+            kind: "request_failure",
+            operation: "spawn",
+          }),
         ]),
       ),
     );
@@ -67,10 +70,14 @@ describe("driver 抛错时动作整体回滚", () => {
     expect(machine.list()).toEqual([]);
     expect(
       diagnostics.filter((input) => input.kind === "protocol_violation"),
-    ).toHaveLength(1);
+    ).toHaveLength(0);
 
     releaseFailure();
-    await expect(failure).rejects.toMatchObject({ code: "internal_error" });
+    await expect(failure).rejects.toMatchObject({
+      name: "SpawnStartFailure",
+      acceptance: "unknown",
+      failure: { code: "internal_error" },
+    });
   });
 
   test("failure waits for an accepted diagnostic before exposing its id", async () => {
@@ -84,7 +91,7 @@ describe("driver 抛错时动作整体回滚", () => {
       accept = resolve;
     });
     const fake = createFakeDriver({
-      start: () => {
+      start: async () => {
         throw new Error("driver failed");
       },
     });
@@ -107,14 +114,16 @@ describe("driver 抛错时动作整体回滚", () => {
     expect(settled).toBe(false);
 
     accept(diagnosticId);
-    await expect(failure).rejects.toEqual(
-      expect.objectContaining({ diagnosticId }),
-    );
+    await expect(failure).rejects.toMatchObject({
+      name: "SpawnStartFailure",
+      acceptance: "unknown",
+      failure: { diagnosticId },
+    });
   });
 
   test("诊断 emitter 抛错不改变 driver failure 的控制流", async () => {
     const fake = createFakeDriver({
-      start: () => {
+      start: async () => {
         throw new Error("driver failed");
       },
     });
@@ -136,12 +145,14 @@ describe("driver 抛错时动作整体回滚", () => {
         message: "start",
         cwd: "/tmp/demo",
       }),
-    ).rejects.toEqual(
-      expect.objectContaining({
+    ).rejects.toMatchObject({
+      name: "SpawnStartFailure",
+      acceptance: "unknown",
+      failure: {
         code: "internal_error",
         cause: { kind: "exception", message: "driver failed" },
-      }),
-    );
+      },
+    });
     expect(machine.list()).toEqual([]);
   });
 
@@ -152,7 +163,7 @@ describe("driver 抛错时动作整体回滚", () => {
       "recorded",
     );
     const fake = createFakeDriver({
-      start: () => {
+      start: async () => {
         throw {
           code: "internal_error",
           diagnosticId,
@@ -174,13 +185,17 @@ describe("driver 抛错时动作整体回滚", () => {
         message: "start",
         cwd: "/tmp/demo",
       }),
-    ).rejects.toEqual(expect.objectContaining({ diagnosticId }));
+    ).rejects.toMatchObject({
+      name: "SpawnStartFailure",
+      acceptance: "not_accepted",
+      failure: { diagnosticId },
+    });
     expect(record).not.toHaveBeenCalled();
   });
 
   test("spawn：driver.start 抛错则不产生会话、事件与孤儿状态", async () => {
     const fake = createFakeDriver({
-      start: () => {
+      start: async () => {
         throw new Error("启动失败");
       },
     });
@@ -211,13 +226,15 @@ describe("driver 抛错时动作整体回滚", () => {
         message: "开始",
         cwd: "/tmp/demo",
       }),
-    ).rejects.toEqual(
-      expect.objectContaining({
+    ).rejects.toMatchObject({
+      name: "SpawnStartFailure",
+      acceptance: "unknown",
+      failure: {
         code: "internal_error",
         diagnosticId,
         cause: { kind: "exception", message: "启动失败" },
-      }),
-    );
+      },
+    });
 
     expect(events).toEqual([]);
     expect(machine.list()).toEqual([]);

@@ -22,15 +22,15 @@ const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 const permissionId = "p1" as PermissionId;
 
-function setup(
+async function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
   close?: () => Promise<void>,
-): {
+): Promise<{
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
-} {
+}> {
   const fake = createFakeSdk(close === undefined ? {} : { close });
   const diagnostics: DriverDiagnosticFact[] = [];
   const sink: DiagnosticSink = async (input) => {
@@ -43,7 +43,7 @@ function setup(
     emit: (event) => events.push(event),
     diagnostics: sink,
   });
-  driver.start({
+  await driver.start({
     sessionId,
     turnId: firstTurnId,
     harness: "qoder",
@@ -173,8 +173,61 @@ const assistantThinking = (uuid: string): SDKMessage => ({
 });
 
 describe("qoder driver 事件映射", () => {
+  test("先启动reader并等待官方初始化后才提交首条输入", async () => {
+    let resolveInitialization!: () => void;
+    const initialization = new Promise<void>((resolve) => {
+      resolveInitialization = resolve;
+    });
+    const fake = createFakeSdk({
+      initializationResult: () => initialization,
+    });
+    const driver = createQoderDriver({ sdk: fake.sdk })({
+      emit: () => {},
+      diagnostics: async () => undefined,
+    });
+    const started = driver.start({
+      sessionId,
+      turnId: firstTurnId,
+      harness: "qoder",
+      message: "初始化完成后提交",
+      cwd: "/tmp/demo",
+    });
+    await flush();
+
+    expect(fake.controls.delivered()).toEqual([]);
+    resolveInitialization();
+    await started;
+    expect(fake.controls.delivered()).toHaveLength(1);
+    await driver.terminate(sessionId);
+  });
+
+  test("官方初始化失败时首条输入没有派发且接受为未发生", async () => {
+    const fake = createFakeSdk({
+      initializationResult: async () => {
+        throw new Error("unsupported CLI protocol");
+      },
+    });
+    const driver = createQoderDriver({ sdk: fake.sdk })({
+      emit: () => {},
+      diagnostics: async () => undefined,
+    });
+    const started = driver.start({
+      sessionId,
+      turnId: firstTurnId,
+      harness: "qoder",
+      message: "不得派发",
+      cwd: "/tmp/demo",
+    });
+
+    await expect(started).rejects.toMatchObject({
+      acceptance: "not_accepted",
+    });
+    expect(fake.controls.delivered()).toEqual([]);
+    await driver.terminate(sessionId);
+  });
+
   test("文本流与回合结束：text.delta、message、turn.completed", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(messageStart("start-1", "native-a1"));
     fake.controls.push(textDelta("a1", "分析"));
     fake.controls.push(textDelta("a2", "完成"));
@@ -200,7 +253,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("按原生产物去重重复 snapshot 与双工具结果", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(messageStart("start-1", "native-text"));
     fake.controls.push(textDelta("delta-1", "稳"));
     fake.controls.push(textDelta("delta-2", "定"));
@@ -319,7 +372,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("content tool_result 阻止同一消息的跨工具 top-level wrapper", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantToolUseBlock("request-1", "tc1"));
     fake.controls.push({
       type: "assistant",
@@ -408,7 +461,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("无效 content tool_result 也阻止 top-level fallback", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantToolUseBlock("request-1", "tc1"));
     fake.controls.push({
       type: "user",
@@ -455,7 +508,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("没有稳定原生 assistant id 时不从外层 uuid 制造消息身份", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(textDelta("outer-delta", "不可关联"));
     fake.controls.push({
       type: "assistant",
@@ -489,7 +542,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("缺少 id 的中间 snapshot 清除此前的 assistant identity", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(messageStart("start-a", "native-a"));
     fake.controls.push(textDelta("delta-before", "可关联"));
     fake.controls.push({
@@ -522,7 +575,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("同一原生消息的渐进完整 snapshot 在 idle 前只发布最新文本", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantText("outer-a", "A", "native-progressive"));
     fake.controls.push(assistantText("outer-ab", "AB", "native-progressive"));
     fake.controls.push(idle());
@@ -553,7 +606,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("同一原生消息的相同完整 snapshot 幂等发布一次", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantText("outer-a1", "A", "native-repeat"));
     fake.controls.push(assistantText("outer-a2", "A", "native-repeat"));
     fake.controls.push(idle());
@@ -584,7 +637,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("content_block_stop 后的渐进 snapshot 在终态发布最新文本", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantText("outer-a", "A", "native-flushed"));
     fake.controls.push({
       type: "stream_event",
@@ -633,7 +686,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("content_block_stop 后由 message_stop 发布完整 snapshot", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantText("outer-a", "A", "native-boundary"));
     fake.controls.push({
       type: "stream_event",
@@ -664,7 +717,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("message_stop 后同 id 的不同文本保持已发布事实", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantText("outer-a", "A", "native-flushed"));
     fake.controls.push({
       type: "stream_event",
@@ -713,7 +766,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("message_stop 后丢弃迟到文本但保留 end_turn usage", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(messageStart("start-a", "native-a"));
     fake.controls.push(textDelta("delta-a", "A"));
     fake.controls.push(assistantText("snapshot-a", "A", "native-a"));
@@ -773,7 +826,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("同一回合的多个原生 assistant 消息按边界顺序发布", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(messageStart("start-1", "native-1"));
     fake.controls.push(assistantText("outer-1", "first", "native-1"));
     fake.controls.push(messageStart("start-2", "native-2"));
@@ -802,7 +855,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("拒绝 active_turn 后保留未完成 tool state", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     fake.controls.push(assistantToolUseBlock("request-t1", "tc-active"));
     await flush();
 
@@ -841,7 +894,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("拒绝 active_turn 后保留 pending snapshot", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     fake.controls.push(
       assistantText("snapshot-t1", "pending", "native-active"),
     );
@@ -881,7 +934,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("新回合丢弃迟到工具结果并允许复用原生 tool id", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     fake.controls.push(assistantToolUseBlock("request-t1", "tc-shared"));
     fake.controls.push(idle());
     await flush();
@@ -940,7 +993,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("新回合可复用原生 assistant id 及通用 MessageId", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     fake.controls.push(messageStart("start-t1", "native-shared"));
     fake.controls.push(textDelta("delta-t1", "one"));
     fake.controls.push(assistantText("snapshot-t1", "one", "native-shared"));
@@ -986,7 +1039,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("assistant stop_reason=end_turn 合成回合终态", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantEndTurn("a1", "回答完毕"));
     await flush();
 
@@ -1005,7 +1058,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("缺少 usage 时不填造 token 字段", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push({
       type: "assistant",
       message: {
@@ -1032,7 +1085,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("message_delta 的 end_turn 合成回合终态（partial 模式）", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantText("a1", "回答完毕"));
     fake.controls.push({
       type: "stream_event",
@@ -1058,7 +1111,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("完整消息里的 tool_use 块与流式起点不重复映射", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push({
       type: "stream_event",
       event: {
@@ -1084,7 +1137,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("user 消息 content 中的 tool_result 块映射 tool.completed", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push(assistantToolUseBlock("a3", "tc2"));
     fake.controls.push(userToolResultBlock("u1", "tc2", "ok"));
     await flush();
@@ -1103,7 +1156,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("thinking 块不进入消息或诊断", async () => {
-    const { events, fake, diagnostics } = setup();
+    const { events, fake, diagnostics } = await setup();
     fake.controls.push(assistantThinking("a4"));
     await flush();
 
@@ -1114,7 +1167,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("工具生命周期：tool.requested 与 tool.completed(isError)", async () => {
-    const { events, fake } = setup();
+    const { events, fake } = await setup();
     fake.controls.push({
       type: "stream_event",
       event: {
@@ -1177,7 +1230,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("worker reported failure 合成终态并记录类型化 turn_failure", async () => {
-    const { events, fake, diagnostics } = setup();
+    const { events, fake, diagnostics } = await setup();
     fake.controls.push({
       type: "assistant",
       message: { role: "assistant", content: [] },
@@ -1208,7 +1261,7 @@ describe("qoder driver 事件映射", () => {
   });
 
   test("busy 与 idle 的 clean EOF 都各记录一次 exited_unexpectedly", async () => {
-    const busy = setup();
+    const busy = await setup();
     busy.fake.controls.end();
     await flush();
     expect(
@@ -1218,7 +1271,7 @@ describe("qoder driver 事件映射", () => {
       ),
     ).toHaveLength(1);
 
-    const idleWorker = setup();
+    const idleWorker = await setup();
     idleWorker.fake.controls.push(idle());
     await flush();
     idleWorker.fake.controls.end();
@@ -1238,16 +1291,16 @@ describe("qoder driver 事件映射", () => {
 });
 
 describe("授权模式映射", () => {
-  test("未指定时不注入 SDK 权限选项", () => {
-    const { fake } = setup("omitted");
+  test("未指定时不注入 SDK 权限选项", async () => {
+    const { fake } = await setup("omitted");
     const options = fake.controls.lastOptions();
     expect(options?.permissionMode).toBeUndefined();
     expect(options?.allowDangerouslySkipPermissions).toBeUndefined();
     expect(options?.canUseTool).toBeUndefined();
   });
 
-  test("interactive：default + canUseTool 注册", () => {
-    const { fake } = setup("interactive");
+  test("interactive：default + canUseTool 注册", async () => {
+    const { fake } = await setup("interactive");
     const options = fake.controls.lastOptions();
     expect(options?.permissionMode).toBe("default");
     expect(options?.canUseTool).toBeTypeOf("function");
@@ -1257,8 +1310,8 @@ describe("授权模式映射", () => {
     expect(options?.cwd).toBe("/tmp/demo");
   });
 
-  test("allowAll：bypassPermissions + 显式确认，不注册 canUseTool", () => {
-    const { fake } = setup("allowAll");
+  test("allowAll：bypassPermissions + 显式确认，不注册 canUseTool", async () => {
+    const { fake } = await setup("allowAll");
     const options = fake.controls.lastOptions();
     expect(options?.permissionMode).toBe("bypassPermissions");
     expect(options?.allowDangerouslySkipPermissions).toBe(true);
@@ -1268,7 +1321,7 @@ describe("授权模式映射", () => {
 
 describe("permission 桥", () => {
   test("allow session：决议翻译为带会话规则的 PermissionResult", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     const canUseTool = fake.controls.lastOptions()?.canUseTool;
     expect(canUseTool).toBeTypeOf("function");
     const signal = new AbortController().signal;
@@ -1319,7 +1372,7 @@ describe("permission 桥", () => {
   });
 
   test("deny feedback：原样翻译调用方 message", async () => {
-    const { fake, driver } = setup();
+    const { fake, driver } = await setup();
     const canUseTool = fake.controls.lastOptions()?.canUseTool;
     const resultPromise = canUseTool?.(
       "Bash",
@@ -1351,7 +1404,7 @@ describe("interrupt 与 kill", () => {
     const closing = new Promise<void>((resolve) => {
       finishClose = resolve;
     });
-    const { diagnostics, fake, driver } = setup("interactive", () => {
+    const { diagnostics, fake, driver } = await setup("interactive", () => {
       signalWasAbortedWhenCloseStarted =
         fakeForClose?.controls.lastOptions()?.abortController?.signal.aborted;
       return closing;
@@ -1386,9 +1439,12 @@ describe("interrupt 与 kill", () => {
 
   test("a rejected official close remains failed on explicit retry", async () => {
     const closeFailure = new Error("official Qoder close failed");
-    const { diagnostics, fake, driver } = setup("interactive", async () => {
-      throw closeFailure;
-    });
+    const { diagnostics, fake, driver } = await setup(
+      "interactive",
+      async () => {
+        throw closeFailure;
+      },
+    );
 
     await expect(driver.terminate(sessionId)).rejects.toBe(closeFailure);
     expect(fake.controls.closeCount()).toBe(1);
@@ -1401,7 +1457,7 @@ describe("interrupt 与 kill", () => {
   });
 
   test("精确 interrupt 不受公开原生入口支持，拒绝前不调用会话 interrupt", async () => {
-    const { events, fake, driver } = setup();
+    const { events, fake, driver } = await setup();
     await expect(driver.interrupt(sessionId, firstTurnId)).rejects.toEqual({
       code: "unsupported_feature",
       feature: "interrupt",
@@ -1414,7 +1470,7 @@ describe("interrupt 与 kill", () => {
   });
 
   test("terminate 等到底层流关闭且不伪造 turn failure", async () => {
-    const { events, diagnostics, fake, driver } = setup();
+    const { events, diagnostics, fake, driver } = await setup();
     const termination = driver.terminate(sessionId);
     await flush();
     expect(fake.controls.lastOptions()?.abortController?.signal.aborted).toBe(
@@ -1437,7 +1493,7 @@ describe("interrupt 与 kill", () => {
   });
 
   test("terminate 导致的底层流抛错不伪装成 stream failure", async () => {
-    const { diagnostics, fake, driver } = setup();
+    const { diagnostics, fake, driver } = await setup();
     const termination = driver.terminate(sessionId);
     fake.controls.fail(new Error("stream rejected during termination"));
     await termination;
@@ -1454,7 +1510,7 @@ describe("interrupt 与 kill", () => {
 });
 
 test("adapter refuses unavailable session scope and preserves the caller feedback callback", async () => {
-  const { fake, driver } = setup();
+  const { fake, driver } = await setup();
   const callback = fake.controls.lastOptions()!.canUseTool!;
   const answer = callback(
     "Bash",
@@ -1484,7 +1540,7 @@ test("adapter refuses unavailable session scope and preserves the caller feedbac
 });
 
 test("QoderCN 无精确原生接受入口时 active_turn 在输入副作用前类型化拒绝", async () => {
-  const { driver, fake } = setup();
+  const { driver, fake } = await setup();
   await flush();
   const before = fake.controls.delivered();
   try {

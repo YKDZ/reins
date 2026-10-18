@@ -172,7 +172,7 @@ describe("daemon diagnostics lifecycle ownership", () => {
     };
     let shutdown: Promise<void> | undefined;
     const ownedDaemon: Daemon = {
-      start: () => daemon.start(),
+      start: async () => daemon.start(),
       stop: () => (shutdown ??= daemon.stop()),
     };
     let closes = 0;
