@@ -118,7 +118,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
       message: "hello",
       cwd: directory,
     },
-    secondClient.prepareOperation("spawn"),
+    { operationKey: secondClient.prepareOperation("spawn") },
   );
   expect(
     await secondClient.wait({
@@ -150,7 +150,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
       message: "hello",
       cwd: directory,
     },
-    thirdClient.prepareOperation("spawn"),
+    { operationKey: thirdClient.prepareOperation("spawn") },
   );
   const currentGeneration = thirdClient.handshake.daemonGeneration;
   const counterAfterThird = (
@@ -166,7 +166,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   expect(
     await thirdClient.kill(
       { sessionHandle: staleHandle },
-      thirdClient.prepareOperation("kill"),
+      { operationKey: thirdClient.prepareOperation("kill") },
     ),
   ).toEqual({ sessionHandle: staleHandle, status: "not_found" });
   expect(await thirdClient.list({ sessionLabel: "foo" })).toMatchObject([
@@ -176,7 +176,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   expect(
     await thirdClient.kill(
       { sessionHandle: current.sessionHandle },
-      thirdClient.prepareOperation("kill"),
+      { operationKey: thirdClient.prepareOperation("kill") },
     ),
   ).toMatchObject({ status: "killed" });
   thirdClient.close();

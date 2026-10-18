@@ -29,7 +29,7 @@ async function fixture(interrupt: () => Promise<void>) {
     driverFactory: ({ emit }) => {
       publish = emit;
       return {
-        start(spec) {
+        async start(spec) {
           calls.starts.push(spec);
         },
         async deliver(...args) {

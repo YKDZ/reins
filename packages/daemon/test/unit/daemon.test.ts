@@ -5,6 +5,10 @@ import {
   HarnessModelCatalogFailure,
 } from "@reins/adapter-kit";
 import { createSessionMachine } from "@reins/core";
+import {
+  createInMemoryControlStore,
+  type ControlStore,
+} from "@reins/event-journal";
 import type {
   DomainEvent,
   ModelCatalogResult,
@@ -30,12 +34,15 @@ import type {
 import {
   isSideEffectMethod,
   encodeResumeCursor,
-  commandIdSchema,
+  operationKeyClaimsSchema,
+  serializeOperationKey,
+  initializeResultSchema,
   machineErrorSchema,
   makeDiagnosticId,
   REINS_PROTOCOL_MAJOR_VERSION,
   runtimeScopeIdSchema,
   sessionIdSchema,
+  WorkerStartFailure,
 } from "@reins/protocol";
 import {
   createInMemoryTransportServer,
@@ -88,7 +95,7 @@ const testRuntimeScopeId: RuntimeScopeId = v.parse(
   "00000000-0000-4000-8000-000000000000",
 );
 const testSessionIdPattern = new RegExp(
-  `^session:${testRuntimeScopeId}:gdaemontest:\\d+$`,
+  `^session:${testRuntimeScopeId}:test:\\d+$`,
   "u",
 );
 
@@ -98,7 +105,7 @@ const testIdentity = {
     sessionCounter += 1;
     return v.parse(
       sessionIdSchema,
-      `session:${testRuntimeScopeId}:gdaemontest:${sessionCounter}`,
+      `session:${testRuntimeScopeId}:test:${sessionCounter}`,
     );
   },
 };
@@ -108,7 +115,7 @@ const testDiagnostics: DiagnosticsRuntime = {
   sessionId: testIdentity.session,
   async record(input) {
     return input.kind === "lifecycle" && input.operation === "daemon"
-      ? makeDiagnosticId("test", "1")
+      ? makeDiagnosticId(testRuntimeScopeId, "test", "1")
       : undefined;
   },
   async query() {
@@ -178,6 +185,34 @@ type Requester = {
   ): Promise<ProtocolResponse>;
 };
 
+const operationContexts = new WeakMap<
+  TransportConnection<ProtocolMessage>,
+  {
+    generation: string;
+    consumerContext: string;
+    runtimeScopeId: RuntimeScopeId;
+  }
+>();
+
+function testOperationKey(
+  client: TransportConnection<ProtocolMessage>,
+  method: ProtocolMethod,
+  nonce: string = randomUUID(),
+): string {
+  const context = operationContexts.get(client);
+  if (context === undefined || !isSideEffectMethod(method))
+    throw new Error("OperationKey requires an initialized consumer connection");
+  return serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, {
+      runtimeScopeId: context.runtimeScopeId,
+      consumer: context.consumerContext,
+      kind: method,
+      generation: context.generation,
+      nonce,
+    }),
+  );
+}
+
 function makeRequester(
   client: TransportConnection<ProtocolMessage>,
   consumerContext = "test-consumer",
@@ -204,6 +239,20 @@ function makeRequester(
           if (message.kind === "response" && message.requestId === requestId) {
             clearTimeout(timer);
             unsubscribe();
+            if (method === "initialize" && "result" in message) {
+              const initialized = v.parse(
+                initializeResultSchema,
+                message.result,
+              );
+              const requested = params as {
+                consumerContext?: unknown;
+              };
+              operationContexts.set(client, {
+                generation: initialized.daemonGeneration,
+                consumerContext: String(requested.consumerContext),
+                runtimeScopeId: initialized.runtimeScopeId,
+              });
+            }
             resolve(message);
           }
         });
@@ -220,7 +269,7 @@ function makeRequester(
                 ? { runtimeScopeId, ...params }
                 : params,
           ...(isSideEffectMethod(method)
-            ? { commandId: v.parse(commandIdSchema, "test:" + randomUUID()) }
+            ? { operationKey: testOperationKey(client, method) as never }
             : {}),
         });
       });
@@ -259,6 +308,20 @@ function sendRaw(
         resolve(candidate);
       }
     });
+    const request = message as Record<string, unknown>;
+    const testOperationId = request.testOperationId;
+    if (
+      typeof testOperationId === "string" &&
+      typeof request.method === "string" &&
+      isSideEffectMethod(request.method)
+    ) {
+      const { testOperationId: _testOperationId, ...wireRequest } = request;
+      client.send({
+        ...wireRequest,
+        operationKey: testOperationKey(client, request.method, testOperationId),
+      } as ProtocolMessage);
+      return;
+    }
     client.send(message as ProtocolMessage);
   });
 }
@@ -332,7 +395,7 @@ function createFakeHarness(options: {
   let messageSeq = 0;
 
   const driver: WorkerDriver = {
-    start(spec) {
+    async start(spec) {
       calls.starts += 1;
       calls.specs.push(spec);
       current = { sessionId: spec.sessionId, turnId: spec.turnId };
@@ -1856,7 +1919,7 @@ describe("daemon 协议面（缝 C）", () => {
       },
     });
     const dummyDriver: WorkerDriver = {
-      start() {},
+      async start() {},
       async deliver() {},
       async interrupt() {},
       resolvePermission() {},
@@ -1900,7 +1963,7 @@ describe("daemon 协议面（缝 C）", () => {
   test("模型目录聚合保留 adapter 提供的结构化失败分类", async () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -1934,7 +1997,7 @@ describe("daemon 协议面（缝 C）", () => {
   test("伪造 AlreadyDiagnosed 结构不会污染 modelCatalog response", async () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -1967,7 +2030,7 @@ describe("daemon 协议面（缝 C）", () => {
   test("公开 AlreadyDiagnosed constructor 的悬空 ID 不成为 modelCatalog authority", async () => {
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -1976,7 +2039,7 @@ describe("daemon 协议面（缝 C）", () => {
       async modelCatalog() {
         throw new AlreadyDiagnosedError(
           "supplied",
-          makeDiagnosticId("test", "1"),
+          makeDiagnosticId(testRuntimeScopeId, "test", "1"),
         );
       },
     };
@@ -1994,8 +2057,8 @@ describe("daemon 协议面（缝 C）", () => {
   });
 
   test("模型目录忽略不相关诊断并记录一次 fallback", async () => {
-    const suppliedId = makeDiagnosticId("test", "2");
-    const fallbackId = makeDiagnosticId("test", "3");
+    const suppliedId = makeDiagnosticId(testRuntimeScopeId, "test", "2");
+    const fallbackId = makeDiagnosticId(testRuntimeScopeId, "test", "3");
     const modelCatalogRecords: unknown[] = [];
     const diagnostics: DiagnosticsRuntime = {
       ...testDiagnostics,
@@ -2007,7 +2070,7 @@ describe("daemon 协议面（缝 C）", () => {
           modelCatalogRecords.push(input);
           return fallbackId;
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
       async query(params) {
         if ("diagnosticId" in params && params.diagnosticId === suppliedId) {
@@ -2031,7 +2094,7 @@ describe("daemon 协议面（缝 C）", () => {
     };
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -2065,8 +2128,8 @@ describe("daemon 协议面（缝 C）", () => {
 
   test("unexpected dispatch errors are schema-valid UTF-8 bounded causes", async () => {
     const failingDriver: WorkerDriver = {
-      start() {
-        throw new Error("a".repeat(5000));
+      async start() {
+        throw new WorkerStartFailure("a".repeat(5000), "not_accepted");
       },
       async deliver() {},
       async interrupt() {},
@@ -2189,6 +2252,646 @@ describe("daemon 空闲退出", () => {
     readiness.close();
     await vi.advanceTimersByTimeAsync(100);
     await expect(started).resolves.toBeUndefined();
+  });
+
+  test("创建提交与首次停止均失败时，pending driver 阻止空闲退出并可再次收束", async () => {
+    vi.useFakeTimers();
+    let terminationAttempts = 0;
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async () => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1) throw new Error("first stop failed");
+      },
+    });
+    const backingStore = createInMemoryControlStore();
+    const controlStore: ControlStore = {
+      ...backingStore,
+      commitSpawn() {
+        throw new Error("injected commit failure");
+      },
+    };
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 100,
+    });
+    daemons.push(daemon);
+    let startedResolved = false;
+    const started = daemon.start().then(() => {
+      startedResolved = true;
+    });
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const response = await requester("spawn", {
+      harness: "codex",
+      sessionLabel: "accepted-but-uncommitted",
+      message: "keep the pending worker reachable",
+    });
+    expect(response).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+        cleanupCause: { kind: "closed" },
+      },
+    });
+    expect(fake.calls.starts).toBe(1);
+    expect(terminationAttempts).toBe(1);
+    expect(await requester("list", {})).toMatchObject({ result: [] });
+
+    connection.close();
+    await vi.advanceTimersByTimeAsync(100);
+    expect(startedResolved).toBe(false);
+    expect(terminationAttempts).toBe(1);
+
+    await daemon.stop();
+    await expect(started).resolves.toBeUndefined();
+    expect(terminationAttempts).toBe(2);
+  });
+
+  test("存储故障后仍尝试kill，已关闭但未提交时不返回成功", async () => {
+    let writeUnavailable = false;
+    let spawnCommits = 0;
+    const backingStore = createInMemoryControlStore();
+    const controlStore: ControlStore = {
+      ...backingStore,
+      health() {
+        return writeUnavailable
+          ? { status: "unavailable" }
+          : backingStore.health();
+      },
+      registerSpawn(input) {
+        if (writeUnavailable) throw new Error("injected store failure");
+        return backingStore.registerSpawn(input);
+      },
+      markSpawnDispatched(operationKey) {
+        if (writeUnavailable) throw new Error("injected store failure");
+        backingStore.markSpawnDispatched(operationKey);
+      },
+      commitSpawn(input) {
+        spawnCommits += 1;
+        if (spawnCommits === 2) {
+          writeUnavailable = true;
+          throw new Error("injected result commit failure");
+        }
+        return backingStore.commitSpawn(input);
+      },
+      failSpawn(operationKey, error) {
+        if (writeUnavailable) throw new Error("injected store failure");
+        backingStore.failSpawn(operationKey, error);
+      },
+      recordEvent(event, session) {
+        if (writeUnavailable) throw new Error("injected event commit failure");
+        return backingStore.recordEvent(event, session);
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const first = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "committed-session",
+        message: "start A",
+      }),
+    ) as { sessionId: SessionId };
+    const failed = await requester("spawn", {
+      harness: "codex",
+      sessionLabel: "failed-session",
+      message: "start B",
+    });
+    expect(failed).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+      },
+    });
+    expect(fake.calls.starts).toBe(2);
+
+    const stopped = await requester("kill", { sessionId: first.sessionId });
+    expect(stopped).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+      },
+    });
+    expect(fake.calls.terminated).toContain(first.sessionId);
+    expect(await requester("list", {})).toMatchObject({
+      result: [{ sessionId: first.sessionId, state: "busy" }],
+    });
+    connection.close();
+    await expect(daemon.stop()).rejects.toThrow();
+    await expect(running).rejects.toThrow();
+  });
+
+  test("既有事件写故障不覆盖失败的原生停止原因", async () => {
+    const backingStore = createInMemoryControlStore();
+    let failEventWrite = false;
+    let terminationAttempts = 0;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      recordEvent(event, session) {
+        if (failEventWrite) throw new Error("先前事件无法写入存储");
+        return backingStore.recordEvent(event, session);
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+      terminate: async () => {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1) throw new Error("原生停止请求被拒绝");
+      },
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const spawned = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "stop-error-cause",
+        message: "创建活动 worker",
+      }),
+    ) as { sessionId: SessionId };
+    failEventWrite = true;
+    fake.controls.emitWorkerMessage("触发事件写入失败");
+
+    const stopped = await requester("kill", { sessionId: spawned.sessionId });
+    expect(stopped).toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { message: "原生停止请求被拒绝" },
+        cleanupCause: {
+          kind: "io",
+          message: expect.stringContaining("先前事件无法写入存储"),
+        },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    connection.close();
+    await expect(daemon.stop()).rejects.toThrow();
+    await expect(running).rejects.toThrow();
+    expect(terminationAttempts).toBe(2);
+  });
+
+  test("提交已落盘但回执丢失时保留持久成功结果", async () => {
+    const backingStore = createInMemoryControlStore();
+    let lostAcknowledgment = true;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      commitSpawn(input) {
+        const committed = backingStore.commitSpawn(input);
+        if (lostAcknowledgment) {
+          lostAcknowledgment = false;
+          throw new Error("injected lost commit acknowledgment");
+        }
+        return committed;
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    await makeRequester(connection)("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext: "test-consumer",
+    });
+    const operationKey = testOperationKey(
+      connection,
+      "spawn",
+      "01234567-0123-4123-8123-0123456789ac",
+    );
+    const spawned = await sendRaw(connection, {
+      kind: "request",
+      requestId: "spawn-after-commit-ack-loss",
+      method: "spawn",
+      operationKey,
+      params: {
+        harness: "codex",
+        sessionLabel: "durable-after-ack-loss",
+        cwd: "/tmp",
+        message: "start once",
+      },
+    });
+    expect(spawned).toHaveProperty("result");
+    const operation = await sendRaw(connection, {
+      kind: "request",
+      requestId: "read-after-commit-ack-loss",
+      method: "getOperation",
+      params: { operationKey },
+    });
+    expect(operation).toMatchObject({
+      result: { status: "succeeded", operationKey },
+    });
+    expect(fake.calls.starts).toBe(1);
+    expect(fake.calls.terminated).toHaveLength(0);
+    connection.close();
+    await daemon.stop();
+    await running;
+  });
+
+  test("接受已知但提交状态无法核实时，同键重试保留接受事实", async () => {
+    const backingStore = createInMemoryControlStore();
+    let commitPending = true;
+    let verificationUnavailable = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      commitSpawn() {
+        if (commitPending) {
+          commitPending = false;
+          verificationUnavailable = true;
+          throw new Error("spawn 提交回执丢失");
+        }
+        throw new Error("spawn 不应重复提交");
+      },
+      getOperation(operationKey) {
+        if (verificationUnavailable)
+          throw new Error("spawn 提交状态核验不可用");
+        return backingStore.getOperation(operationKey);
+      },
+    };
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", fake.adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    daemons.push(daemon);
+    const running = daemon.start();
+    const connection = server.connect();
+    await makeRequester(connection)("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext: "test-consumer",
+    });
+    const operationKey = testOperationKey(
+      connection,
+      "spawn",
+      "01234567-0123-4123-8123-0123456789bd",
+    );
+    const request = {
+      kind: "request",
+      method: "spawn",
+      operationKey,
+      params: {
+        harness: "codex",
+        sessionLabel: "accepted-unconfirmed",
+        cwd: "/tmp",
+        message: "保留首次已接受的结果",
+      },
+    } as const;
+    const first = await sendRaw(connection, {
+      ...request,
+      requestId: "spawn-unconfirmed-first",
+    });
+    expect(first).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+      },
+    });
+    const retry = await sendRaw(connection, {
+      ...request,
+      requestId: "spawn-unconfirmed-retry",
+    });
+    expect(retry).toMatchObject({
+      error: {
+        code: "control_store_unavailable",
+        stage: "commit",
+        acceptance: "accepted",
+      },
+    });
+    const queried = await sendRaw(connection, {
+      kind: "request",
+      requestId: "spawn-unconfirmed-query",
+      method: "getOperation",
+      params: { operationKey },
+    });
+    expect(queried).toMatchObject({
+      result: {
+        status: "accepted_unconfirmed",
+        operationKey,
+        result: { sessionId: expect.any(String) },
+      },
+    });
+    expect(fake.calls.starts).toBe(1);
+    connection.close();
+    await daemon.stop();
+    await running;
+  });
+
+  test("原生接受仍在等待时查询为处理中，接受后查询为成功", async () => {
+    let startInvokedResolve!: () => void;
+    const startInvoked = new Promise<void>((resolve) => {
+      startInvokedResolve = resolve;
+    });
+    let acceptResolve!: () => void;
+    const accepted = new Promise<void>((resolve) => {
+      acceptResolve = resolve;
+    });
+    const driver: WorkerDriver = {
+      async start() {
+        startInvokedResolve();
+        await accepted;
+      },
+      async deliver() {},
+      async interrupt() {},
+      resolvePermission() {},
+      async terminate() {},
+    };
+    const adapter: HarnessAdapter = {
+      driverFactory: () => driver,
+      async modelCatalog() {
+        return emptyModelCatalog("codex");
+      },
+    };
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore: createInMemoryControlStore(),
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    await makeRequester(connection)("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext: "test-consumer",
+    });
+    const operationKey = testOperationKey(
+      connection,
+      "spawn",
+      "01234567-0123-4123-8123-0123456789ad",
+    );
+    const spawn = sendRaw(connection, {
+      kind: "request",
+      requestId: "spawn-while-accepting",
+      method: "spawn",
+      operationKey,
+      params: {
+        harness: "codex",
+        sessionLabel: "acceptance-pending",
+        cwd: "/tmp",
+        message: "wait for native acceptance",
+      },
+    });
+    await startInvoked;
+
+    const duringStart = await sendRaw(connection, {
+      kind: "request",
+      requestId: "read-while-accepting",
+      method: "getOperation",
+      params: { operationKey },
+    });
+    expect(duringStart).toMatchObject({
+      result: { status: "pending", operationKey },
+    });
+
+    acceptResolve();
+    expect(await spawn).toHaveProperty("result");
+    const afterStart = await sendRaw(connection, {
+      kind: "request",
+      requestId: "read-after-acceptance",
+      method: "getOperation",
+      params: { operationKey },
+    });
+    expect(afterStart).toMatchObject({
+      result: { status: "succeeded", operationKey },
+    });
+    connection.close();
+    await daemon.stop();
+    await running;
+  });
+
+  test("启动接受未知且停止失败时查询保留两个原因", async () => {
+    let terminationAttempts = 0;
+    const driver: WorkerDriver = {
+      async start() {
+        throw new WorkerStartFailure("原生队列回执丢失", "unknown");
+      },
+      async deliver() {},
+      async interrupt() {},
+      resolvePermission() {},
+      async terminate() {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1) throw new Error("原生关闭确认失败");
+      },
+    };
+    const adapter: HarnessAdapter = {
+      driverFactory: () => driver,
+      async modelCatalog() {
+        return emptyModelCatalog("codex");
+      },
+    };
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore: createInMemoryControlStore(),
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    await makeRequester(connection)("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext: "test-consumer",
+    });
+    const operationKey = testOperationKey(
+      connection,
+      "spawn",
+      "01234567-0123-4123-8123-0123456789ae",
+    );
+    const failed = await sendRaw(connection, {
+      kind: "request",
+      requestId: "spawn-acceptance-unknown",
+      method: "spawn",
+      operationKey,
+      params: {
+        harness: "codex",
+        sessionLabel: "unknown-acceptance",
+        cwd: "/tmp",
+        message: "observe unknown acceptance",
+      },
+    });
+    expect(failed).toMatchObject({
+      error: {
+        code: "operation_outcome_unknown",
+        cause: { message: expect.stringContaining("原生队列回执丢失") },
+        cleanupCause: {
+          message: expect.stringContaining("原生关闭确认失败"),
+        },
+      },
+    });
+
+    const queried = await sendRaw(connection, {
+      kind: "request",
+      requestId: "read-acceptance-unknown",
+      method: "getOperation",
+      params: { operationKey },
+    });
+    expect(queried).toMatchObject({
+      result: {
+        status: "outcome_unknown",
+        operationKey,
+        cause: { message: expect.stringContaining("原生队列回执丢失") },
+        cleanupCause: {
+          message: expect.stringContaining("原生关闭确认失败"),
+        },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    connection.close();
+    await daemon.stop();
+    await running;
+    expect(terminationAttempts).toBe(2);
+  });
+
+  test("明确未接受且停止失败时持久失败保留两个原因", async () => {
+    let terminationAttempts = 0;
+    const driver: WorkerDriver = {
+      async start() {
+        throw new WorkerStartFailure("原生启动明确拒绝", "not_accepted");
+      },
+      async deliver() {},
+      async interrupt() {},
+      resolvePermission() {},
+      async terminate() {
+        terminationAttempts += 1;
+        if (terminationAttempts === 1) throw new Error("启动后资源停止失败");
+      },
+    };
+    const adapter: HarnessAdapter = {
+      driverFactory: () => driver,
+      async modelCatalog() {
+        return emptyModelCatalog("codex");
+      },
+    };
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([["codex", adapter]]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore: createInMemoryControlStore(),
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    await makeRequester(connection)("initialize", {
+      protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+      consumerContext: "test-consumer",
+    });
+    const operationKey = testOperationKey(
+      connection,
+      "spawn",
+      "01234567-0123-4123-8123-0123456789af",
+    );
+    const failed = await sendRaw(connection, {
+      kind: "request",
+      requestId: "spawn-not-accepted",
+      method: "spawn",
+      operationKey,
+      params: {
+        harness: "codex",
+        sessionLabel: "not-accepted",
+        cwd: "/tmp",
+        message: "preserve both failures",
+      },
+    });
+    expect(failed).toMatchObject({
+      error: {
+        code: "internal_error",
+        cause: { message: expect.stringContaining("原生启动明确拒绝") },
+        cleanupCause: {
+          message: expect.stringContaining("启动后资源停止失败"),
+        },
+      },
+    });
+    const queried = await sendRaw(connection, {
+      kind: "request",
+      requestId: "read-not-accepted",
+      method: "getOperation",
+      params: { operationKey },
+    });
+    expect(queried).toMatchObject({
+      result: {
+        status: "failed",
+        operationKey,
+        error: {
+          code: "internal_error",
+          cause: { message: expect.stringContaining("原生启动明确拒绝") },
+          cleanupCause: {
+            message: expect.stringContaining("启动后资源停止失败"),
+          },
+        },
+      },
+    });
+    expect(terminationAttempts).toBe(1);
+    connection.close();
+    await daemon.stop();
+    await running;
+    expect(terminationAttempts).toBe(2);
   });
 
   test("有会话时保持存活，全部清理后退出", async () => {
@@ -2326,7 +3029,7 @@ describe("daemon 空闲退出", () => {
         if (input.kind === "lifecycle" && input.operation === "daemon") {
           lifecycle.push(input.reason);
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     const server = createInMemoryTransportServer<ProtocolMessage>();
@@ -2370,7 +3073,7 @@ describe("daemon 空闲退出", () => {
         ) {
           return undefined;
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     const server = createInMemoryTransportServer<ProtocolMessage>();
@@ -2469,7 +3172,7 @@ describe("daemon 空闲退出", () => {
         if (input.kind === "lifecycle" && input.operation === "daemon") {
           lifecycle.push(input.reason);
         }
-        return makeDiagnosticId("test", "1");
+        return makeDiagnosticId(testRuntimeScopeId, "test", "1");
       },
     };
     let rejectClose = true;
@@ -2732,7 +3435,7 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
   const command = {
     kind: "request",
     method: "spawn",
-    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+    testOperationId: "01234567-0123-4123-8123-0123456789ab",
     params: {
       harness: "codex",
       cwd: "/tmp",
@@ -2777,7 +3480,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
   const original = {
     kind: "request",
     method: "spawn",
-    commandId: "test:00000001-0123-4123-8123-0123456789ab",
+    testOperationId: "00000001-0123-4123-8123-0123456789ab",
     params: {
       harness: "codex",
       cwd: "/tmp",
@@ -2814,7 +3517,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
       kind: "request",
       requestId: "new-execution",
       method: "spawn",
-      commandId: "test:00000002-0123-4123-8123-0123456789ab",
+      testOperationId: "00000002-0123-4123-8123-0123456789ab",
       params: {
         harness: "codex",
         cwd: "/tmp",
@@ -2833,7 +3536,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
       kind: "request",
       requestId: "new-turn",
       method: "send",
-      commandId: "test:00000005-0123-4123-8123-0123456789ab",
+      testOperationId: "00000005-0123-4123-8123-0123456789ab",
       params: {
         placement: "new_turn",
         sessionId,
@@ -2851,7 +3554,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
       kind: "request",
       requestId: "continue-permission",
       method: "resolvePermission",
-      commandId: "test:00000006-0123-4123-8123-0123456789ab",
+      testOperationId: "00000006-0123-4123-8123-0123456789ab",
       params: {
         sessionId,
         turnId: "t1",
@@ -2874,7 +3577,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
       kind: "request",
       requestId: "interrupt-existing",
       method: "interrupt",
-      commandId: "test:00000007-0123-4123-8123-0123456789ab",
+      testOperationId: "00000007-0123-4123-8123-0123456789ab",
       params: { sessionId, turnId: "t1" },
     }),
   ).toMatchObject({ result: { sessionId } });
@@ -2885,7 +3588,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
       kind: "request",
       requestId: "stop-existing",
       method: "kill",
-      commandId: "test:00000008-0123-4123-8123-0123456789ab",
+      testOperationId: "00000008-0123-4123-8123-0123456789ab",
       params: { sessionId },
     }),
   ).toMatchObject({ result: { sessionId, status: "killed" } });
@@ -2938,7 +3641,7 @@ test("writer lease 在模型目录等待期间丢失会阻止 native spawn", asy
     kind: "request",
     requestId: "waiting-spawn",
     method: "spawn",
-    commandId: "test:00000004-0123-4123-8123-0123456789ab",
+    testOperationId: "00000004-0123-4123-8123-0123456789ab",
     params: {
       harness: "codex",
       model: "available",
@@ -2978,10 +3681,15 @@ test("命令结果恢复：其他消费者不能用原身份取结果或另起�
     protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
     consumerContext: "beta",
   });
+  const operationKey = testOperationKey(
+    a,
+    "spawn",
+    "01234567-0123-4123-8123-0123456789ab",
+  );
   const command = {
     kind: "request",
     method: "spawn",
-    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+    operationKey,
     params: {
       harness: "codex",
       cwd: "/tmp",
@@ -2993,7 +3701,7 @@ test("命令结果恢复：其他消费者不能用原身份取结果或另起�
     await sendRaw(a, { ...command, requestId: "original" }),
   ).toHaveProperty("result");
   expect(await sendRaw(b, { ...command, requestId: "foreign" })).toMatchObject({
-    error: { code: "command_id_conflict" },
+    error: { code: "operation_key_scope_mismatch" },
   });
   expect(fake.calls.starts).toBe(1);
   a.close();
@@ -3022,20 +3730,20 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
     params: unknown,
     id: string,
   ) => {
-    const commandId = `test:${id.padStart(8, "0")}-0123-4123-8123-0123456789ab`;
+    const testOperationId = `${id.padStart(8, "0")}-0123-4123-8123-0123456789ab`;
     const original = await sendRaw(a, {
       kind: "request",
       requestId: `a${id}`,
       method,
       params,
-      commandId,
+      testOperationId,
     });
     const recovered = await sendRaw(b, {
       kind: "request",
       requestId: `b${id}`,
       method,
       params,
-      commandId,
+      testOperationId,
     });
     expect(recovered).toEqual({ ...original, requestId: `b${id}` });
     return original;
@@ -3067,7 +3775,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       requestId: "old-error",
       method: "send",
       params: { placement: "new_turn", message: "before spawn", sessionId },
-      commandId: "test:00000001-0123-4123-8123-0123456789ab",
+      testOperationId: "00000001-0123-4123-8123-0123456789ab",
     }),
   ).toMatchObject({ error: { code: "session_not_found" } });
   expect(
@@ -3103,18 +3811,22 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       requestId: "changed",
       method: "send",
       params: { placement: "new_turn", sessionId, message: "different" },
-      commandId: "test:00000003-0123-4123-8123-0123456789ab",
+      testOperationId: "00000003-0123-4123-8123-0123456789ab",
     }),
-  ).toMatchObject({ error: { code: "command_id_conflict" } });
+  ).toMatchObject({ error: { code: "operation_key_conflict" } });
   expect(
     await sendRaw(b, {
       kind: "request",
       requestId: "changed-method",
       method: "kill",
       params: { sessionId: sessionId },
-      commandId: "test:00000003-0123-4123-8123-0123456789ab",
+      operationKey: testOperationKey(
+        a,
+        "send",
+        "00000003-0123-4123-8123-0123456789ab",
+      ),
     }),
-  ).toMatchObject({ error: { code: "command_id_conflict" } });
+  ).toMatchObject({ error: { code: "operation_key_conflict" } });
   expect(
     await command("kill", { sessionId: spawnedSessionId }, "6"),
   ).toHaveProperty("result");
@@ -3156,7 +3868,7 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
   const rejected = {
     kind: "request",
     method: "spawn",
-    commandId: "test:00000001-0123-4123-8123-0123456789ab",
+    testOperationId: "00000001-0123-4123-8123-0123456789ab",
     params,
   };
   const first = await sendRaw(connection, {
@@ -3193,7 +3905,7 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
   const unsupportedReasoning = await sendRaw(connection, {
     kind: "request",
     method: "spawn",
-    commandId: "test:00000003-0123-4123-8123-0123456789ab",
+    testOperationId: "00000003-0123-4123-8123-0123456789ab",
     requestId: "invalid-reasoning",
     params: {
       ...params,
@@ -3213,7 +3925,7 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
 
   const accepted = {
     ...rejected,
-    commandId: "test:00000002-0123-4123-8123-0123456789ab",
+    testOperationId: "00000002-0123-4123-8123-0123456789ab",
     requestId: "accepted-original",
   };
   const created = await sendRaw(connection, accepted);
@@ -3281,7 +3993,7 @@ test("kill 恢复返回原清理失败，新身份才会重试", async () => {
   const original = {
     kind: "request",
     method: "kill",
-    commandId: "test:00000001-0123-4123-8123-0123456789ab",
+    testOperationId: "00000001-0123-4123-8123-0123456789ab",
     params: { sessionId: spawned.sessionId },
   };
   const failed = await sendRaw(connection, {
@@ -3299,7 +4011,7 @@ test("kill 恢复返回原清理失败，新身份才会重试", async () => {
 
   const retried = await sendRaw(connection, {
     ...original,
-    commandId: "test:00000002-0123-4123-8123-0123456789ab",
+    testOperationId: "00000002-0123-4123-8123-0123456789ab",
     requestId: "kill-new-operation",
   });
   expect(retried).toMatchObject({
@@ -3330,13 +4042,19 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
   const base = {
     kind: "request",
     method: "spawn",
-    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+    testOperationId: "01234567-0123-4123-8123-0123456789ab",
   };
   expect(
     await sendRaw(connection, {
       ...base,
       requestId: "invalid",
-      params: { harness: "codex", sessionLabel: "params" },
+      params: {
+        harness: "codex",
+        cwd: "/tmp",
+        sessionLabel: "params",
+        message: "unavailable model",
+        model: "unavailable",
+      },
     }),
   ).toMatchObject({ error: { code: "invalid_params" } });
   expect(
@@ -3350,7 +4068,7 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
         message: "now valid",
       },
     }),
-  ).toMatchObject({ error: { code: "command_id_conflict" } });
+  ).toMatchObject({ error: { code: "operation_key_conflict" } });
   expect(fake.calls.starts).toBe(0);
   connection.close();
 });
@@ -3405,7 +4123,7 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
   const command = {
     kind: "request",
     method: "spawn",
-    commandId: "test:01234567-0123-4123-8123-0123456789ab",
+    testOperationId: "01234567-0123-4123-8123-0123456789ab",
     params: {
       harness: "codex",
       cwd: "/tmp",
@@ -3413,9 +4131,11 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
       message: "original",
     },
   };
+  const { testOperationId, ...wireCommand } = command;
   client.send({
-    ...command,
+    ...wireCommand,
     requestId: "accepted-original",
+    operationKey: testOperationKey(client, "spawn", testOperationId),
   } as ProtocolMessage);
   await flush();
   const recovery = server.connect();

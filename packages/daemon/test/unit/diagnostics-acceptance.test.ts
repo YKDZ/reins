@@ -3,6 +3,7 @@ import {
   sessionIdSchema,
   type DiagnosticInput,
   type DiagnosticsResult,
+  type RuntimeScopeId,
 } from "@reins/protocol";
 import * as v from "valibot";
 import { describe, expect, test } from "vitest";
@@ -11,6 +12,9 @@ import { createConsumerScope } from "../../src/consumer-scope.ts";
 import { orderDiagnosticsAcceptance } from "../../src/diagnostics-acceptance.ts";
 import type { DiagnosticsRuntime } from "../../src/diagnostics-recorder.ts";
 import { daemonGenerationSchema } from "../../src/generation.ts";
+
+const diagnosticRuntimeScopeId =
+  "00000000-0000-4000-8000-000000000000" as RuntimeScopeId;
 
 const lifecycleFact = {
   source: "daemon",
@@ -45,7 +49,7 @@ describe("diagnostics acceptance ordering", () => {
         nestedQuery = ordered.query({});
         return recordReleased.then(() => {
           trace.push("record-end");
-          return makeDiagnosticId("reentry", "1");
+          return makeDiagnosticId(diagnosticRuntimeScopeId, "reentry", "1");
         });
       },
       query() {

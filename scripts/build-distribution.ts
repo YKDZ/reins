@@ -90,13 +90,14 @@ function verifyBundle(
       importedPackages.add(name);
     }
   }
-  const actual = [...importedPackages].sort();
-  const expected = [...expectedDependencies].sort();
-  if (actual.join("\n") !== expected.join("\n")) {
-    throw new Error(
-      `Runtime external mismatch\nexpected: ${expected.join(", ")}\nactual: ${actual.join(", ")}`,
-    );
-  }
+  const declared = new Set(expectedDependencies);
+  const undeclared = [...importedPackages]
+    .filter((name) => !declared.has(name))
+    .sort();
+  // 官方 profile 会按插件名动态加载依赖，打包器无法静态发现这些外部包；
+  // release:verify 会在真实 tgz 安装后启动完整 profile 验证其运行闭包。
+  if (undeclared.length > 0)
+    throw new Error(`Runtime externals are undeclared: ${undeclared.join(", ")}`);
 }
 
 function filesRecursively(directory: string): string[] {

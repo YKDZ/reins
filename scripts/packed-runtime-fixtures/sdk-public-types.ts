@@ -1,11 +1,11 @@
 import {
   connect,
   parseDiagnosticId,
-  parseOperationCredential,
+  parseOperationKey,
   parseSessionHandle,
   parseTurnHandle,
   serializeDiagnosticId,
-  serializeOperationCredential,
+  serializeOperationKey,
   serializeSessionHandle,
   serializeTurnHandle,
   type AgentTarget,
@@ -14,6 +14,7 @@ import {
   type ModelCatalogResult,
   type DiagnosticId,
   type ReinsConnection,
+  type ReinsFailure,
   type ResumeCursor,
   type SendInput,
   type SessionHandle,
@@ -38,8 +39,11 @@ const spawnInput: SpawnInput = {
   model: dynamicModelId,
   reasoning: dynamicReasoningEffort,
 };
-const spawnCredential = connection.prepareOperation("spawn");
-const started = connection.spawn(spawnInput, spawnCredential);
+const spawnOperationKey = connection.prepareOperation("spawn");
+const started = connection.spawn(spawnInput, {
+  operationKey: spawnOperationKey,
+});
+const generatedOperation = connection.spawn(spawnInput);
 const activeTurnSend: SendInput = {
   placement: "active_turn",
   turnHandle,
@@ -64,21 +68,41 @@ const restoredSessionHandle = parseSessionHandle(
   serializeSessionHandle(sessionHandle),
 );
 const restoredTurnHandle = parseTurnHandle(serializeTurnHandle(turnHandle));
-const restoredCredential = parseOperationCredential(
+const restoredOperationKey = parseOperationKey(
+  serializeOperationKey(spawnOperationKey),
   "spawn",
-  serializeOperationCredential("spawn", spawnCredential),
 );
 const restoredDiagnosticId = parseDiagnosticId(
   serializeDiagnosticId(diagnosticId),
 );
 
 const supportedHarness: HarnessId = "qoder";
+async function inspectSpawnOperation(): Promise<DiagnosticId | undefined> {
+  const operation = await connection.getOperation(spawnOperationKey);
+  if (operation.status === "succeeded") return undefined;
+  if (operation.status === "outcome_unknown" && operation.diagnosticId) {
+    const evidence = await connection.diagnostics({
+      diagnosticId: operation.diagnosticId,
+    });
+    if ("record" in evidence) return evidence.record.diagnosticId;
+  }
+  return undefined;
+}
+
+function inspectUnknownSpawnFailure(
+  failure: ReinsFailure,
+): DiagnosticId | undefined {
+  return failure.code === "operation_outcome_unknown"
+    ? failure.facts.diagnosticId
+    : undefined;
+}
+
 function spawnWithHarness<Harness extends SpawnInput["harness"]>(
   harness: Harness,
 ) {
   return connection.spawn(
     { ...spawnInput, harness },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
 }
 const arbitraryHarness: string = "third-party-harness";
@@ -103,12 +127,15 @@ void supportedHarness;
 void invalidHarness;
 void invalidSpawn;
 void inspectModelCatalog;
+void inspectSpawnOperation;
+void inspectUnknownSpawnFailure;
 void started;
+void generatedOperation;
 void activeTurnSend;
 void newTurnSend;
 void waitInput;
 void resumed;
 void restoredSessionHandle;
 void restoredTurnHandle;
-void restoredCredential;
+void restoredOperationKey;
 void restoredDiagnosticId;

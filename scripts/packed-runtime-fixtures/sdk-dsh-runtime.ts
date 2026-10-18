@@ -59,7 +59,7 @@ try {
       cwd: required("REINS_DSH_WORKSPACE"),
       message: "Read evidence.txt and report its contents.",
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
 
   const baseUrl = required("REINS_DSH_FIXTURE_BASE_URL");
@@ -132,7 +132,7 @@ try {
       sessionHandle: started.sessionHandle,
       message: "Continue in the same session and say DSH_NEW_TURN_CONFIRMED.",
     },
-    connection.prepareOperation("send"),
+    { operationKey: connection.prepareOperation("send") },
   );
   assert(
     second.sessionHandle === started.sessionHandle &&
@@ -152,7 +152,7 @@ try {
 
   const killed = await connection.kill(
     { sessionHandle: started.sessionHandle },
-    connection.prepareOperation("kill"),
+    { operationKey: connection.prepareOperation("kill") },
   );
   assert(
     killed.status === "killed" &&

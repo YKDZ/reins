@@ -1,9 +1,6 @@
 import {
   createReinsClient,
   AgentSubscriptionError,
-  isCommandOutcomeUnknown,
-  OperationCredentialError,
-  parseRetryToken,
   ReinsClientError,
   type ReinsClient as ControlClient,
   type AgentFact as ClientAgentFact,
@@ -17,6 +14,8 @@ import type {
   ProtocolMessage,
   ProtocolParams,
   ProtocolResult,
+  OperationKey as ProtocolOperationKey,
+  OperationRecord as ProtocolOperationRecord,
   RuntimeScopeId as ProtocolRuntimeScopeId,
   SideEffectMethod,
   SessionInfo as ProtocolSessionInfo,
@@ -34,6 +33,7 @@ import {
   encodeTurnHandle,
   messageKeySchema,
   permissionHandleSchema,
+  parseOperationKey as parseProtocolOperationKey,
   REINS_PROTOCOL_MAJOR_VERSION,
   resumeCursorSchema,
   sessionIdSchema,
@@ -52,8 +52,10 @@ import {
   type DiagnosticRecord,
   type DiagnosticsQuery,
   type DiagnosticsResult,
-  type OperationCredential,
+  type OperationKey,
   type OperationKind,
+  type OperationOptions,
+  type OperationRecord,
   type ReinsConnection,
   type ReinsFailure,
   type RuntimeScopeId,
@@ -165,8 +167,10 @@ export type {
   InterruptInput,
   InterruptResult,
   HarnessId,
-  OperationCredential,
+  OperationKey,
   OperationKind,
+  OperationOptions,
+  OperationRecord,
   HarnessModelCatalog,
   HarnessFailure,
   LastCompletedTurn,
@@ -247,19 +251,48 @@ export function parseResumeCursor(value: unknown): ResumeCursor {
 export function serializeResumeCursor(cursor: ResumeCursor): string {
   return v.parse(resumeCursorSchema, cursor);
 }
-export function parseOperationCredential<Kind extends OperationKind>(
-  kind: Kind,
+export function parseOperationKey(value: unknown): OperationKey<OperationKind>;
+export function parseOperationKey<Kind extends OperationKind>(
   value: unknown,
-): OperationCredential<Kind> {
-  if (typeof value !== "string" || parseRetryToken(value).method !== kind)
-    throw new Error("Invalid operation credential");
-  return value as OperationCredential<Kind>;
-}
-export function serializeOperationCredential<Kind extends OperationKind>(
   kind: Kind,
-  credential: OperationCredential<NoInfer<Kind>>,
+): OperationKey<Kind>;
+export function parseOperationKey(
+  value: unknown,
+  kind?: OperationKind,
+): OperationKey<OperationKind> {
+  if (typeof value !== "string") throw new Error("Invalid OperationKey");
+  if (kind === undefined) parseProtocolOperationKey(value);
+  else parseProtocolOperationKey(value, kind);
+  return value as OperationKey<OperationKind>;
+}
+export function serializeOperationKey<Kind extends OperationKind>(
+  operationKey: OperationKey<NoInfer<Kind>>,
 ): string {
-  return parseOperationCredential(kind, credential);
+  return parseOperationKey(operationKey);
+}
+
+function operationKeyFor<Kind extends OperationKind>(
+  client: ControlClient,
+  kind: Kind,
+  options: OperationOptions<Kind> | undefined,
+): OperationKey<Kind> {
+  if (options === undefined)
+    return parseOperationKey(client.prepareOperation(kind), kind);
+  if (
+    typeof options !== "object" ||
+    options === null ||
+    Array.isArray(options) ||
+    Object.keys(options).some((key) => key !== "operationKey")
+  )
+    throw invalidInput("options", "operation");
+  const operationKey = (options as { operationKey?: unknown }).operationKey;
+  if (operationKey === undefined)
+    return parseOperationKey(client.prepareOperation(kind), kind);
+  try {
+    return parseOperationKey(operationKey, kind);
+  } catch {
+    throw invalidInput("operationKey", "operation");
+  }
 }
 export function parseAgentFactId(value: unknown): AgentFactId {
   if (typeof value !== "string" || !/^fact1_[A-Za-z0-9_-]+$/u.test(value))
@@ -560,7 +593,7 @@ async function connectClient(
       },
       prepareOperation(kind) {
         try {
-          return client!.prepareOperation(kind) as OperationCredential<
+          return client!.prepareOperation(kind) as unknown as OperationKey<
             typeof kind
           >;
         } catch (error) {
@@ -575,20 +608,30 @@ async function connectClient(
           );
         }
       },
-      async spawn(input, credential) {
-        const result = await perform(client!, "spawn", input, credential);
-        return {
-          sessionHandle: parseSessionHandle(result.sessionId),
-          turnHandle: parseTurnHandle(
-            encodeTurnHandle({
-              sessionId: result.sessionId,
-              turnId: result.turnId,
-            }),
-          ),
-          cwd: result.cwd,
-        };
+      async getOperation(operationKey: OperationKey<"spawn">) {
+        try {
+          parseOperationKey(operationKey, "spawn");
+        } catch {
+          throw invalidInput("operationKey", "query");
+        }
+        const result = await query(client!, "getOperation", {
+          operationKey: serializeOperationKey(
+            operationKey,
+          ) as ProtocolOperationKey,
+        });
+        return projectOperationRecord(result);
       },
-      async kill(input, credential) {
+      async spawn(input, options) {
+        return projectSpawnResult(
+          await perform(
+            client!,
+            "spawn",
+            input,
+            operationKeyFor(client!, "spawn", options),
+          ),
+        );
+      },
+      async kill(input, options) {
         const result = await perform(
           client!,
           "kill",
@@ -598,14 +641,14 @@ async function connectClient(
               "sessionHandle",
             ),
           },
-          credential,
+          operationKeyFor(client!, "kill", options),
         );
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
           status: result.status,
         };
       },
-      async resolvePermission(permissionHandle, resolution, credential) {
+      async resolvePermission(permissionHandle, resolution, options) {
         let target: ReturnType<typeof decodePermissionHandle>;
         try {
           target = decodePermissionHandle(
@@ -626,7 +669,7 @@ async function connectClient(
           client!,
           "resolvePermission",
           { ...target, resolution },
-          credential,
+          operationKeyFor(client!, "resolvePermission", options),
           permissionHandle,
         );
         return {
@@ -636,7 +679,7 @@ async function connectClient(
           status: "resolved",
         };
       },
-      async send(input: SendInput, credential) {
+      async send(input: SendInput, options) {
         if (
           typeof input !== "object" ||
           input === null ||
@@ -661,7 +704,12 @@ async function connectClient(
             message: input.message,
           };
         }
-        const result = await perform(client!, "send", params, credential);
+        const result = await perform(
+          client!,
+          "send",
+          params,
+          operationKeyFor(client!, "send", options),
+        );
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
           turnHandle: parseTurnHandle(
@@ -715,9 +763,14 @@ async function connectClient(
           ),
         } satisfies WaitResult;
       },
-      async interrupt(input: InterruptInput, credential) {
+      async interrupt(input: InterruptInput, options) {
         const target = targetFromHandle(input.turnHandle, "turnHandle");
-        await perform(client!, "interrupt", target, credential);
+        await perform(
+          client!,
+          "interrupt",
+          target,
+          operationKeyFor(client!, "interrupt", options),
+        );
         return {
           turnHandle: input.turnHandle,
           status: "accepted",
@@ -818,11 +871,15 @@ async function perform<M extends SideEffectMethod>(
   client: ControlClient,
   method: M,
   params: ProtocolParams<M>,
-  credential: OperationCredential<M & OperationKind>,
+  operationKey: OperationKey<M & OperationKind>,
   permissionHandle?: PermissionHandle,
 ): Promise<ProtocolResult<M>> {
   try {
-    const response = await client.executeOperation(method, params, credential);
+    const response = await client.executeOperation(
+      method,
+      params,
+      operationKey as unknown as ProtocolOperationKey<M>,
+    );
     if ("error" in response)
       throw new ReinsSdkError(
         projectFailure(response.error, permissionHandle),
@@ -831,11 +888,6 @@ async function perform<M extends SideEffectMethod>(
     return response.result;
   } catch (error) {
     if (error instanceof ReinsSdkError) throw error;
-    if (error instanceof OperationCredentialError)
-      throw new ReinsSdkError(
-        { code: "operation_credential_invalid", facts: {} },
-        "operation",
-      );
     if (error instanceof ReinsClientError)
       throw new ReinsSdkError(projectClientFailure(error.failure), "operation");
     throw new ReinsSdkError(
@@ -846,7 +898,7 @@ async function perform<M extends SideEffectMethod>(
 }
 
 async function query<
-  M extends "modelCatalog" | "list" | "diagnostics" | "wait",
+  M extends "modelCatalog" | "list" | "diagnostics" | "wait" | "getOperation",
 >(
   client: ControlClient,
   method: M,
@@ -1003,26 +1055,80 @@ function projectCompletedTurn(
   } as import("./contracts.ts").CompletedTurn;
 }
 
+function projectSpawnResult(
+  result: ProtocolResult<"spawn">,
+): import("./contracts.ts").SpawnResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+      }),
+    ),
+    cwd: result.cwd,
+  };
+}
+
+function projectOperationRecord(
+  record: ProtocolOperationRecord,
+): OperationRecord {
+  const operationKey = parseOperationKey(record.operationKey, "spawn");
+  switch (record.status) {
+    case "unknown":
+    case "unavailable":
+    case "pending":
+      return { status: record.status, operationKey };
+    case "outcome_unknown":
+      return {
+        status: "outcome_unknown",
+        operationKey,
+        ...(record.cause === undefined ? {} : { cause: record.cause }),
+        ...(record.cleanupCause === undefined
+          ? {}
+          : { cleanupCause: record.cleanupCause }),
+        ...(record.diagnosticId === undefined
+          ? {}
+          : { diagnosticId: parseDiagnosticId(record.diagnosticId) }),
+      };
+    case "succeeded":
+      return {
+        status: "succeeded",
+        operationKey,
+        result: projectSpawnResult(record.result),
+      };
+    case "failed":
+      return {
+        status: "failed",
+        operationKey,
+        error: projectFailure(record.error),
+      };
+    case "accepted_uncommitted":
+      return {
+        status: "accepted_uncommitted",
+        operationKey,
+        result: projectSpawnResult(record.result),
+        cause: record.cause,
+        ...(record.cleanupCause === undefined
+          ? {}
+          : { cleanupCause: record.cleanupCause }),
+      };
+    case "accepted_unconfirmed":
+      return {
+        status: "accepted_unconfirmed",
+        operationKey,
+        result: projectSpawnResult(record.result),
+        cause: record.cause,
+        ...(record.cleanupCause === undefined
+          ? {}
+          : { cleanupCause: record.cleanupCause }),
+      };
+  }
+}
+
 function projectClientFailure(
   failure: ReinsClientError["failure"],
 ): ReinsFailure {
-  if (isCommandOutcomeUnknown(failure)) {
-    if (
-      failure.method !== "spawn" &&
-      failure.method !== "send" &&
-      failure.method !== "interrupt" &&
-      failure.method !== "kill" &&
-      failure.method !== "resolvePermission"
-    )
-      return {
-        code: "unexpected_failure",
-        facts: { remoteCode: failure.code },
-      };
-    return {
-      code: "command_outcome_unknown",
-      facts: { cause: failure.cause, operation: failure.method },
-    };
-  }
   return projectFailure(failure);
 }
 
@@ -1045,9 +1151,45 @@ function projectFailure(
         code: failure.code,
         facts: { oldest: failure.oldest, head: failure.head },
       };
-    case "command_id_conflict":
-    case "stale_command_id":
+    case "operation_key_conflict":
+    case "operation_key_scope_mismatch":
+    case "stale_operation_key":
       return { code: failure.code, facts: {} };
+    case "operation_pending":
+      return {
+        code: failure.code,
+        facts: { operationKey: parseOperationKey(failure.operationKey) },
+      };
+    case "operation_outcome_unknown":
+      return {
+        code: failure.code,
+        facts: {
+          operationKey: parseOperationKey(failure.operationKey),
+          ...(failure.cause === undefined ? {} : { cause: failure.cause }),
+          ...(failure.cleanupCause === undefined
+            ? {}
+            : { cleanupCause: failure.cleanupCause }),
+          ...(failure.diagnosticId === undefined
+            ? {}
+            : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+        },
+      };
+    case "control_store_unavailable":
+      return {
+        code: failure.code,
+        facts: {
+          operationKey: parseOperationKey(failure.operationKey),
+          stage: failure.stage,
+          acceptance: failure.acceptance,
+          cause: failure.cause,
+          ...(failure.acceptedResult === undefined
+            ? {}
+            : { acceptedResult: projectSpawnResult(failure.acceptedResult) }),
+          ...(failure.cleanupCause === undefined
+            ? {}
+            : { cleanupCause: failure.cleanupCause }),
+        },
+      };
     case "protocol_version_mismatch":
       return {
         code: failure.code,
@@ -1135,7 +1277,6 @@ function projectFailure(
         },
       };
     case "model_catalog_query_failed":
-    case "internal_error":
     case "diagnostics_store_corrupt":
       return {
         code: failure.code,
@@ -1144,6 +1285,19 @@ function projectFailure(
           ...(failure.diagnosticId === undefined
             ? {}
             : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+        },
+      };
+    case "internal_error":
+      return {
+        code: failure.code,
+        facts: {
+          ...(failure.cause === undefined ? {} : { cause: failure.cause }),
+          ...(failure.diagnosticId === undefined
+            ? {}
+            : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
+          ...(failure.cleanupCause === undefined
+            ? {}
+            : { cleanupCause: failure.cleanupCause }),
         },
       };
     case "daemon_start_failed":

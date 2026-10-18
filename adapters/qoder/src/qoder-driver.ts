@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import { createAsyncQueue, HarnessSession } from "@reins/adapter-kit";
 import type {
   WorkerDriver,
@@ -5,7 +7,7 @@ import type {
   WorkerSpec,
   MachineError,
 } from "@reins/protocol";
-import { makeTextEvidence } from "@reins/protocol";
+import { makeTextEvidence, WorkerStartFailure } from "@reins/protocol";
 
 import {
   createQoderMappingState,
@@ -18,6 +20,7 @@ import type {
   PermissionUpdate,
   QoderOptions,
   QoderSdk,
+  SDKMessage,
   SDKUserMessage,
 } from "./sdk-seam.ts";
 
@@ -33,6 +36,7 @@ function userMessage(
   content: string,
   priority: "next" | "later",
   shouldQuery: boolean,
+  uuid: string,
 ): SDKUserMessage {
   return {
     type: "user",
@@ -40,11 +44,84 @@ function userMessage(
     parent_tool_use_id: null,
     priority,
     shouldQuery,
+    uuid,
   };
+}
+
+type CommandLifecycle = {
+  readonly type: "command_lifecycle";
+  readonly command_uuid: string;
+  readonly state: "queued" | "started" | "completed" | "cancelled";
+  readonly uuid: string;
+  readonly session_id: string;
+};
+
+function record(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null && !Array.isArray(value)
+    ? (value as Record<string, unknown>)
+    : undefined;
+}
+
+function commandLifecycle(value: unknown): CommandLifecycle | undefined {
+  const candidate = record(value);
+  if (candidate?.type !== "command_lifecycle") return undefined;
+  const keys = Object.keys(candidate).sort();
+  if (
+    keys.join(",") !== "command_uuid,session_id,state,type,uuid" ||
+    typeof candidate.command_uuid !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      candidate.command_uuid,
+    ) ||
+    typeof candidate.uuid !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      candidate.uuid,
+    ) ||
+    typeof candidate.session_id !== "string" ||
+    !/^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+      candidate.session_id,
+    ) ||
+    !["queued", "started", "completed", "cancelled"].includes(
+      String(candidate.state),
+    )
+  )
+    throw new Error(
+      "Qoder command_lifecycle did not match the pinned CLI shape",
+    );
+  return candidate as unknown as CommandLifecycle;
+}
+
+function sdkMessage(value: unknown): value is SDKMessage {
+  const candidate = record(value);
+  if (candidate === undefined || typeof candidate.type !== "string")
+    return false;
+  if (
+    !["stream_event", "assistant", "user", "system", "result"].includes(
+      candidate.type,
+    ) ||
+    typeof candidate.uuid !== "string" ||
+    typeof candidate.session_id !== "string"
+  )
+    return false;
+  if (candidate.type === "stream_event")
+    return record(candidate.event) !== undefined;
+  if (candidate.type === "assistant" || candidate.type === "user")
+    return record(candidate.message) !== undefined;
+  if (candidate.type === "system") return typeof candidate.subtype === "string";
+  return typeof candidate.subtype === "string";
+}
+
+function systemInit(value: unknown): string | undefined {
+  const candidate = record(value);
+  if (candidate?.type !== "system" || candidate.subtype !== "init")
+    return undefined;
+  if (typeof candidate.qodercli_version !== "string")
+    throw new Error("Qoder system/init omitted qodercli_version");
+  return candidate.qodercli_version;
 }
 
 export function createQoderDriver(deps: {
   sdk: QoderSdk;
+  expectedCliVersion?: string;
 }): AdapterDriverFactory {
   return ({ emit, diagnostics: runtimeDiagnostics }) => {
     const diagnosticSink = runtimeDiagnostics;
@@ -60,6 +137,19 @@ export function createQoderDriver(deps: {
     let terminationPromise: Promise<void> | null = null;
     let queryClosePromise: Promise<void> | null = null;
     let closedDiagnosticEmitted = false;
+    let initialInputUuid: string | null = null;
+    let initialInputSent = false;
+    let nativeSessionId: string | null = null;
+    let startSettled = false;
+    let resolveStart: (() => void) | undefined;
+    let rejectStart: ((error: unknown) => void) | undefined;
+
+    function settleStart(error?: unknown): void {
+      if (startSettled) return;
+      startSettled = true;
+      if (error === undefined) resolveStart?.();
+      else rejectStart?.(error);
+    }
 
     function makeCanUseTool(): CanUseTool {
       return async (toolName, input, options) => {
@@ -100,13 +190,50 @@ export function createQoderDriver(deps: {
       let readFailed = false;
       let evidence: Parameters<HarnessSession["failActiveTurn"]>[1];
       try {
-        for await (const message of query) {
-          const events = await mapSdkMessage(session, mappingState, message);
+        for await (const rawMessage of query) {
+          const lifecycle = commandLifecycle(rawMessage);
+          if (lifecycle !== undefined) {
+            if (nativeSessionId === null) {
+              nativeSessionId = lifecycle.session_id;
+            } else if (nativeSessionId !== lifecycle.session_id) {
+              throw new Error("Qoder command_lifecycle changed session_id");
+            }
+            if (
+              lifecycle.command_uuid === initialInputUuid &&
+              lifecycle.state === "queued"
+            )
+              settleStart();
+            continue;
+          }
+          const version = systemInit(rawMessage);
+          if (version !== undefined) {
+            if (
+              deps.expectedCliVersion !== undefined &&
+              version !== deps.expectedCliVersion
+            )
+              throw new Error(
+                `Qoder CLI version ${version} does not match the configured ${deps.expectedCliVersion}`,
+              );
+            continue;
+          }
+          if (!sdkMessage(rawMessage))
+            throw new Error("Qoder SDK returned an unrecognized message");
+          const events = await mapSdkMessage(session, mappingState, rawMessage);
           for (const event of events) {
             emit(event);
           }
         }
       } catch (error) {
+        if (!startSettled)
+          settleStart(
+            error instanceof WorkerStartFailure
+              ? error
+              : new WorkerStartFailure(
+                  "Qoder did not confirm the initial command as queued",
+                  initialInputSent ? "unknown" : "not_accepted",
+                  { cause: error },
+                ),
+          );
         if (!terminating) {
           readFailed = true;
           evidence = {
@@ -118,6 +245,13 @@ export function createQoderDriver(deps: {
         }
       }
       if (!readFailed && !terminating) {
+        if (!startSettled)
+          settleStart(
+            new WorkerStartFailure(
+              "Qoder stream ended before the initial command was confirmed queued",
+              initialInputSent ? "unknown" : "not_accepted",
+            ),
+          );
         evidence = {
           kind: "lifecycle",
           operation: "worker",
@@ -164,6 +298,14 @@ export function createQoderDriver(deps: {
         terminationPromise = null;
         queryClosePromise = null;
         closedDiagnosticEmitted = false;
+        initialInputUuid = randomUUID();
+        initialInputSent = false;
+        nativeSessionId = null;
+        startSettled = false;
+        const accepted = new Promise<void>((resolve, reject) => {
+          resolveStart = resolve;
+          rejectStart = reject;
+        });
         session = new HarnessSession<PendingEntry>({
           sessionId: spec.sessionId,
           emit,
@@ -197,24 +339,41 @@ export function createQoderDriver(deps: {
         try {
           query = deps.sdk.query({ prompt: stream, options });
         } catch (error) {
-          runPromise = session.failActiveTurn(undefined, {
-            kind: "request_failure",
-            operation: "spawn",
-            stage: "start_session",
-            reason: "upstream_error",
-            message: makeTextEvidence(String(error)),
-          });
-          return;
+          throw new WorkerStartFailure(
+            "Qoder query could not be created",
+            "not_accepted",
+            { cause: error },
+          );
         }
-        runPromise = (async () => {
-          await session?.diagnostic({
-            kind: "lifecycle",
-            operation: "worker",
-            reason: "initialized",
+        void session.diagnostic({
+          kind: "lifecycle",
+          operation: "worker",
+          reason: "initialized",
+        });
+        // reader先启动；首条输入等待官方initialize响应后再提交。
+        runPromise = run();
+        const initialQuery = query;
+        const initialStream = stream;
+        const initialUuid = initialInputUuid;
+        void Promise.resolve()
+          .then(async () => {
+            await initialQuery.initializationResult();
+            if (startSettled || terminating) return;
+            initialInputSent = true;
+            initialStream.push(
+              userMessage(spec.message, "next", true, initialUuid),
+            );
+          })
+          .catch((error: unknown) => {
+            settleStart(
+              new WorkerStartFailure(
+                "Qoder initialization failed before the initial command",
+                "not_accepted",
+                { cause: error },
+              ),
+            );
           });
-          stream?.push(userMessage(spec.message, "next", true));
-          await run();
-        })();
+        return accepted;
       },
       async deliver(sessionId, turnId, message, placement) {
         if (placement === "active_turn") {
@@ -225,7 +384,7 @@ export function createQoderDriver(deps: {
         }
         void sessionId;
         session?.setTurnId(turnId);
-        stream?.push(userMessage(message, "next", true));
+        stream?.push(userMessage(message, "next", true, randomUUID()));
       },
       async interrupt() {
         throw { code: "unsupported_feature", feature: "interrupt" };

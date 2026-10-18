@@ -2,7 +2,12 @@ import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { PassThrough } from "node:stream";
 
-import type { DriverDiagnosticFact, SessionId, TurnId } from "@reins/protocol";
+import type {
+  DriverDiagnosticFact,
+  RuntimeScopeId,
+  SessionId,
+  TurnId,
+} from "@reins/protocol";
 import { makeDiagnosticId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
@@ -54,10 +59,11 @@ describe("Codex 模型目录", () => {
       emit: () => undefined,
       diagnostics: async () => undefined,
     });
+    let workerStart: Promise<void> | undefined;
     let modelCatalogPromise: Promise<unknown> | undefined;
 
     try {
-      worker.start({
+      workerStart = worker.start({
         sessionId,
         turnId: "t1" as TurnId,
         harness: "codex",
@@ -75,6 +81,7 @@ describe("Codex 模型目录", () => {
       expect(modelCatalogFake.controls.requests()).toEqual([]);
 
       workerInitialize.resolve({});
+      await workerStart;
       await flush();
       expect(modelCatalogStarts).toBe(1);
       await expect(modelCatalogPromise).resolves.toEqual({
@@ -85,6 +92,7 @@ describe("Codex 模型目录", () => {
       workerInitialize.resolve({});
       if (modelCatalogPromise !== undefined)
         await modelCatalogPromise.catch(() => {});
+      if (workerStart !== undefined) await workerStart.catch(() => {});
       await worker.terminate(sessionId);
       if (previousHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousHome;
@@ -182,7 +190,11 @@ describe("Codex 模型目录", () => {
       }
     });
     const diagnostics: DriverDiagnosticFact[] = [];
-    const diagnosticId = makeDiagnosticId("modelcatalog", "98");
+    const diagnosticId = makeDiagnosticId(
+      "00000000-0000-4000-8000-000000000000" as RuntimeScopeId,
+      "modelcatalog",
+      "98",
+    );
     const query = createCodexModelCatalog({
       transportFactory: (options) =>
         createCodexTransport({ ...options, spawnChild: () => child }),

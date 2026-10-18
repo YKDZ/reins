@@ -56,6 +56,7 @@ function productionDependencies(state: DaemonState): RuntimeDependencies {
     openStore: (state) =>
       openDiagnosticsStore({
         directory: state.diagnosticsDirectory,
+        runtimeScopeId: state.runtimeScopeId,
         maxAgeMs: state.retention.maxAgeMs,
         maxBytes: state.retention.maxBytes,
       }),

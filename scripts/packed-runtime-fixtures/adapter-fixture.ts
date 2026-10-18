@@ -63,9 +63,14 @@ function currentModelCatalog(): HarnessModelCatalog {
 const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
   const workers = new Map<SessionId, WorkerState>();
   const terminationAttempts = new Map<SessionId, number>();
+  const uncertainStartSessions = new Set<SessionId>();
 
   const driver: WorkerDriver = {
-    start(spec) {
+    async start(spec) {
+      if (spec.message === "packed-unknown-spawn-diagnostic") {
+        uncertainStartSessions.add(spec.sessionId);
+        throw new Error("夹具原生启动回执丢失");
+      }
       const child = spawn(
         process.execPath,
         [workerPath, "worker", activityPath ?? ""],
@@ -204,10 +209,16 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
     },
     async terminate(sessionId) {
       const worker = workers.get(sessionId);
-      if (worker === undefined) return;
+      if (worker === undefined && !uncertainStartSessions.has(sessionId))
+        return;
       const attempt = (terminationAttempts.get(sessionId) ?? 0) + 1;
       terminationAttempts.set(sessionId, attempt);
       record({ type: "terminate_called", sessionId, attempt });
+      if (uncertainStartSessions.has(sessionId) && attempt === 1) {
+        record({ type: "terminate_rejected", sessionId, attempt });
+        throw new Error("夹具无法确认原生清理");
+      }
+      if (worker === undefined) return;
       if (
         attempt === 1 &&
         terminateFailureMarkerPath !== undefined &&

@@ -14,13 +14,13 @@ export type AcknowledgementDrop = {
     | "kill"
     | "resolvePermission";
   readonly requestId: string;
-  readonly commandId: string;
+  readonly operationKey: string;
   readonly result: unknown;
 };
 
 type TargetRequest = Pick<
   AcknowledgementDrop,
-  "method" | "requestId" | "commandId"
+  "method" | "requestId" | "operationKey"
 >;
 
 export type UnixAcknowledgementProxy = {
@@ -38,7 +38,7 @@ export type UnixAcknowledgementProxyOptions = {
   readonly socketPath: string;
   readonly targetPath: string;
   readonly method: AcknowledgementDrop["method"];
-  readonly commandId?: string;
+  readonly operationKey?: string;
 };
 
 export async function startUnixAcknowledgementProxy(
@@ -87,15 +87,15 @@ export async function startUnixAcknowledgementProxy(
             request.method === options.method &&
             "requestId" in request &&
             typeof request.requestId === "string" &&
-            "commandId" in request &&
-            typeof request.commandId === "string" &&
-            (options.commandId === undefined ||
-              request.commandId === options.commandId)
+            "operationKey" in request &&
+            typeof request.operationKey === "string" &&
+            (options.operationKey === undefined ||
+              request.operationKey === options.operationKey)
           ) {
             targetRequests.set(request.requestId, {
               method: options.method,
               requestId: request.requestId,
-              commandId: request.commandId,
+              operationKey: request.operationKey,
             });
           }
           upstream.write(`${line}\n`);

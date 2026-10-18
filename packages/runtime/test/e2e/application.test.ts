@@ -217,7 +217,7 @@ test("different endpoints cannot start writers for the same state root", async (
       sessionLabel: "writer-session",
       cwd: process.cwd(),
     },
-    first.prepareOperation("spawn"),
+    { operationKey: first.prepareOperation("spawn") },
   );
 
   await expect(
@@ -278,7 +278,7 @@ test("an in-flight spawn keeps the shared daemon alive after its client closes",
       sessionLabel: "pending-session",
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   void spawning.catch(() => undefined);
   const dispatchDeadline = Date.now() + 2_000;
@@ -364,8 +364,7 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
     sessionLabel: "application-session",
     cwd: process.cwd(),
   } satisfies SpawnInput;
-  const spawnCredential = first.prepareOperation("spawn");
-  const spawned = await first.spawn(spawnInput, spawnCredential);
+  const spawned = await first.spawn(spawnInput);
   const sessionHandle = spawned.sessionHandle;
 
   const observedBySecond = await second.list({
@@ -609,7 +608,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
       cwd: process.cwd(),
       captureHarnessStderr: true,
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   let result = await connection.diagnostics({
     sessionHandle: captured.sessionHandle,
@@ -629,24 +628,26 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   expect(result).toMatchObject({ truncated: false });
   if (!("records" in result))
     throw new Error("missing bounded stderr diagnostics");
-  const evidence = result.records[0]?.text as
-    | { text: string; truncated: boolean; originalBytes: number }
-    | undefined;
+  const first = result.records[0];
+  if (first?.source !== "harness" || first.kind !== "harness_stderr")
+    throw new Error("missing harness stderr diagnostic record");
+  const evidence = first.text;
   expect(evidence).toMatchObject({
     text: "é".repeat(8_192),
     truncated: true,
     originalBytes: 20_000,
   });
-  expect(Buffer.byteLength(evidence?.text ?? "", "utf8")).toBe(16 * 1024);
-  const first = result.records[0];
-  if (first === undefined) throw new Error("missing stderr diagnostic record");
+  expect(Buffer.byteLength(evidence.text, "utf8")).toBe(16 * 1024);
+  const firstTurnHandle = first.turnHandle;
+  if (firstTurnHandle === undefined)
+    throw new Error("missing stderr diagnostic turn handle");
   expect(
     await connection.diagnostics({
       diagnosticId: parseDiagnosticId(first.diagnosticId),
     }),
   ).toMatchObject({ record: { diagnosticId: first.diagnosticId } });
   const byTurn = await connection.diagnostics({
-    turnHandle: parseTurnHandle(first.turnHandle),
+    turnHandle: parseTurnHandle(firstTurnHandle),
     kinds: ["harness_stderr"],
   });
   expect("records" in byTurn ? byTurn.records.length : 0).toBe(3);
@@ -664,7 +665,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
       sessionHandle: parseSessionHandle(
         "session:00000000-0000-4000-8000-000000000000:other:1",
       ),
-      turnHandle: parseTurnHandle(first.turnHandle),
+      turnHandle: parseTurnHandle(firstTurnHandle),
     }),
   ).rejects.toMatchObject({
     failure: {
@@ -684,7 +685,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     { sessionHandle: captured.sessionHandle },
     {
       sessionHandle: captured.sessionHandle,
-      turnHandle: first.turnHandle as TurnHandle,
+      turnHandle: firstTurnHandle,
     },
     {
       harness: "codex",
@@ -730,7 +731,9 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   });
   await expect(
     connection.diagnostics({
-      diagnosticId: parseDiagnosticId("diagnostic:missing:1"),
+      diagnosticId: parseDiagnosticId(
+        `diagnostic:${connection.handshake.runtimeScopeId}:missing:1`,
+      ),
     }),
   ).rejects.toMatchObject({
     failure: { code: "diagnostic_not_found" },
@@ -746,7 +749,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
         cwd: process.cwd(),
         captureHarnessStderr: true,
       },
-      connection.prepareOperation("spawn"),
+      { operationKey: connection.prepareOperation("spawn") },
     ),
   ).rejects.toMatchObject({
     failure: {
@@ -786,7 +789,7 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
       sessionLabel: "owned-session",
       cwd: process.cwd(),
     },
-    owner.prepareOperation("spawn"),
+    { operationKey: owner.prepareOperation("spawn") },
   );
   const foreign = await connect({
     socketPath: env.REINS_SOCKET!,
@@ -817,7 +820,7 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
   expect(
     await foreign.kill(
       { sessionHandle: spawned.sessionHandle },
-      foreign.prepareOperation("kill"),
+      { operationKey: foreign.prepareOperation("kill") },
     ),
   ).toEqual({ sessionHandle: spawned.sessionHandle, status: "not_found" });
   await expect(
@@ -827,7 +830,7 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
         sessionHandle: spawned.sessionHandle,
         message: "foreign input",
       },
-      foreign.prepareOperation("send"),
+      { operationKey: foreign.prepareOperation("send") },
     ),
   ).rejects.toMatchObject({
     failure: {
@@ -878,7 +881,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
       message: "unlabelled",
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   const label = "root";
   const first = await connection.spawn(
@@ -888,7 +891,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
       sessionLabel: label,
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   const second = await connection.spawn(
     {
@@ -897,7 +900,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
       sessionLabel: label,
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   const longLabel = "标签—".repeat(40);
   const longLabelled = await connection.spawn(
@@ -907,7 +910,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
       sessionLabel: longLabel,
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
 
   expect(unlabelled.sessionHandle).not.toBe(first.sessionHandle);
@@ -940,7 +943,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
       sessionLabel: "",
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   expect(await connection.list({ sessionLabel: "" })).toMatchObject([
     { sessionHandle: emptyLabel.sessionHandle, sessionLabel: "" },
@@ -952,21 +955,25 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
     sessionLabel: formerReservedLabel,
     cwd: process.cwd(),
   } satisfies SpawnInput;
-  const retryCredential = connection.prepareOperation("spawn");
-  const original = await connection.spawn(retryInput, retryCredential);
-  const replay = await connection.spawn(retryInput, retryCredential);
+  const retryOperationKey = connection.prepareOperation("spawn");
+  const original = await connection.spawn(retryInput, {
+    operationKey: retryOperationKey,
+  });
+  const replay = await connection.spawn(retryInput, {
+    operationKey: retryOperationKey,
+  });
   expect(replay.sessionHandle).toBe(original.sessionHandle);
   await expect(
     connection.spawn(
       { ...retryInput, sessionLabel: "changed label" },
-      retryCredential,
+      { operationKey: retryOperationKey },
     ),
   ).rejects.toMatchObject({
-    failure: { code: "command_id_conflict" },
+    failure: { code: "operation_key_conflict" },
   });
   const independent = await connection.spawn(
     { ...retryInput, message: "different operation, same label" },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   expect(independent.sessionHandle).not.toBe(original.sessionHandle);
   expect(
@@ -978,7 +985,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
   expect(
     await connection.kill(
       { sessionHandle: first.sessionHandle },
-      connection.prepareOperation("kill"),
+      { operationKey: connection.prepareOperation("kill") },
     ),
   ).toEqual({ sessionHandle: first.sessionHandle, status: "killed" });
   expect(await connection.list({ sessionLabel: label })).toMatchObject([
@@ -1020,7 +1027,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       sessionLabel: "active-send",
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   for (const input of [
     {
@@ -1034,10 +1041,9 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
     },
   ]) {
     await expect(
-      connection.send(
-        input as unknown as SendInput,
-        connection.prepareOperation("send"),
-      ),
+      connection.send(input as unknown as SendInput, {
+        operationKey: connection.prepareOperation("send"),
+      }),
     ).rejects.toMatchObject({
       stage: "operation",
       failure: { code: "invalid_params" },
@@ -1068,7 +1074,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       turnHandle: active.turnHandle,
       message: activeMessage,
     },
-    connection.prepareOperation("send"),
+    { operationKey: connection.prepareOperation("send") },
   );
   expect(activeSend).toMatchObject({
     sessionHandle: active.sessionHandle,
@@ -1107,7 +1113,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       sessionHandle: active.sessionHandle,
       message: nextMessage,
     },
-    connection.prepareOperation("send"),
+    { operationKey: connection.prepareOperation("send") },
   );
   expect(nextTurn).toMatchObject({
     sessionHandle: active.sessionHandle,
@@ -1129,12 +1135,12 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
       sessionLabel: "interrupt-target",
       cwd: process.cwd(),
     },
-    connection.prepareOperation("spawn"),
+    { operationKey: connection.prepareOperation("spawn") },
   );
   expect(
     await connection.interrupt(
       { turnHandle: held.turnHandle },
-      connection.prepareOperation("interrupt"),
+      { operationKey: connection.prepareOperation("interrupt") },
     ),
   ).toEqual({ turnHandle: held.turnHandle, status: "accepted" });
   expect(
@@ -1151,7 +1157,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   expect(
     await connection.kill(
       { sessionHandle: held.sessionHandle },
-      connection.prepareOperation("kill"),
+      { operationKey: connection.prepareOperation("kill") },
     ),
   ).toEqual({ sessionHandle: held.sessionHandle, status: "killed" });
   expect(

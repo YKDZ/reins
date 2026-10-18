@@ -16,6 +16,7 @@ import {
   toQoderSdkMessages,
   type RecordedQoderFixtureMetadata,
   type RecordedQoderFixtureName,
+  type RecordedQoderMessage,
 } from "../../src/fixture-projection.ts";
 import { loadRecordedQoderFixtureSource } from "../../src/testing.ts";
 import { assertMatchesKnownCredentialPolicy } from "./fixture-files.ts";
@@ -177,7 +178,9 @@ export async function prepareFixtureCandidate(options: {
     throw new Error("Recorded Qoder source metadata mismatch");
   }
   const projected = projectRecordedQoderMessages(source);
-  await assertQoderProjectionSemanticEquivalence(sourceMessages);
+  await assertQoderProjectionSemanticEquivalence(
+    toQoderSdkMessages(source as RecordedQoderMessage[]),
+  );
   assertMatchesKnownCredentialPolicy(projected);
   assertCanonicalRecordedQoderMessages(projected);
   const projectedMessages = toQoderSdkMessages(projected);

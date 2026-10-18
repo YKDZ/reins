@@ -6,6 +6,7 @@ import type {
   DiagnosticRecord,
   DiagnosticsParams,
   DiagnosticsResult,
+  RuntimeScopeId,
 } from "@reins/protocol";
 import {
   diagnosticRecordSchema,
@@ -37,6 +38,7 @@ const state: DaemonState = {
   ),
   retention: { maxAgeMs: 1, maxBytes: 1 },
 };
+const diagnosticRuntimeScopeId = state.runtimeScopeId;
 const temporaryDirectories: string[] = [];
 
 async function temporaryDirectory(): Promise<string> {
@@ -111,9 +113,10 @@ class MemoryStore implements DiagnosticsStore {
 
 async function openRuntime(
   store: DiagnosticsStore = new MemoryStore(),
+  runtimeScopeId: RuntimeScopeId = state.runtimeScopeId,
 ): Promise<DiagnosticsRuntime> {
   return await openDiagnosticsRuntimeForTest({
-    resolveState: async () => state,
+    resolveState: async () => ({ ...state, runtimeScopeId }),
     openStore: async () => store,
     allocateGeneration: async () => v.parse(daemonGenerationSchema, "a"),
     now: () => new Date("2026-08-20T00:00:00.000Z"),
@@ -122,6 +125,38 @@ async function openRuntime(
 }
 
 describe("DiagnosticsRuntime", () => {
+  test("同世代同计数的跨 scope 诊断引用只命中原 scope 记录", async () => {
+    const scopeA = state.runtimeScopeId;
+    const scopeB = v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000001",
+    );
+    const storeA = new MemoryStore();
+    const storeB = new MemoryStore();
+    const runtimeA = await openRuntime(storeA, scopeA);
+    const runtimeB = await openRuntime(storeB, scopeB);
+
+    const diagnosticA = await runtimeA.record(input());
+    const diagnosticB = await runtimeB.record(input());
+
+    expect(diagnosticA).toBeDefined();
+    expect(diagnosticB).toBeDefined();
+    expect(diagnosticA).not.toBe(diagnosticB);
+    await expect(
+      runtimeB.query({ diagnosticId: diagnosticA! }),
+    ).rejects.toMatchObject({
+      code: "diagnostic_not_found",
+    });
+    await expect(
+      runtimeB.query({ diagnosticId: diagnosticB! }),
+    ).resolves.toMatchObject({
+      record: { diagnosticId: diagnosticB },
+    });
+
+    await runtimeA.close();
+    await runtimeB.close();
+  });
+
   test("未结束的写入有界拒绝引用，释放查询水位且不重试", async () => {
     const store = new MemoryStore();
     const runtime = await openRuntime(store);
@@ -330,7 +365,9 @@ describe("DiagnosticsRuntime", () => {
     ).toBeUndefined();
     const diagnosticId = await runtime.record(input());
 
-    expect(diagnosticId).toMatch(/^diagnostic:a:2$/u);
+    expect(diagnosticId).toMatch(
+      /^diagnostic:00000000-0000-4000-8000-000000000000:a:2$/u,
+    );
     await runtime.close();
   });
 
@@ -451,7 +488,7 @@ describe("DiagnosticsRuntime", () => {
         diagnosticId: v.parse(diagnosticRecordSchema, {
           ...input(),
           v: 1,
-          diagnosticId: makeDiagnosticId("a", "1"),
+          diagnosticId: makeDiagnosticId(diagnosticRuntimeScopeId, "a", "1"),
           recordedAt: "2026-08-20T00:00:00.000Z",
           severity: "info",
         }).diagnosticId,

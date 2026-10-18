@@ -56,7 +56,7 @@ function readHistoryRequest(message: string): HistoryRequest {
 
 const simulatedDriverFactory: HarnessAdapter["driverFactory"] = ({ emit }) => {
   const driver: WorkerDriver = {
-    start(spec) {
+    async start(spec) {
       const request = readHistoryRequest(spec.message);
       void (async () => {
         await waitForGate(request.gate);

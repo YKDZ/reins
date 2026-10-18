@@ -85,7 +85,7 @@ describe("spawn", () => {
     let nestedSpawn: Promise<SessionId> | undefined;
     const diagnostics: CoreDiagnosticFact[] = [];
     const fake = createFakeDriver({
-      start: (spec) => {
+      start: async (spec) => {
         if (spec.message === "outer") {
           nestedSpawn = machine
             .spawn({

@@ -1,9 +1,10 @@
 import {
   type AgentTarget,
   type CompletedTurn,
+  type DiagnosticRecord,
   type DiagnosticId,
   type MessageKey,
-  type OperationCredential,
+  type OperationKey,
   type PermissionHandle,
   type ReplayPolicy,
   type ResumeCursor,
@@ -12,9 +13,10 @@ import {
   type SessionHandle,
   type ToolKey,
   type TurnHandle,
+  parseOperationKey,
   serializeDiagnosticId,
   serializeMessageKey,
-  serializeOperationCredential,
+  serializeOperationKey,
   serializePermissionHandle,
   serializeResumeCursor,
   serializeToolKey,
@@ -24,14 +26,77 @@ import {
 declare const connection: ReinsConnection;
 declare const sessionHandle: SessionHandle;
 declare const turnHandle: TurnHandle;
-declare const spawnCredential: OperationCredential<"spawn">;
-declare const sendCredential: OperationCredential<"send">;
+declare const spawnOperationKey: OperationKey<"spawn">;
+declare const sendOperationKey: OperationKey<"send">;
 declare const resumeCursor: ResumeCursor;
 declare const completed: CompletedTurn;
 declare const diagnosticId: DiagnosticId;
 declare const messageKey: MessageKey;
 declare const permissionHandle: PermissionHandle;
 declare const toolKey: ToolKey;
+
+const diagnosticWithUnknownField: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "info",
+  source: "daemon",
+  kind: "lifecycle",
+  operation: "daemon",
+  reason: "started",
+  // @ts-expect-error 公开诊断记录不能夹带未定义字段。
+  privatePayload: "secret",
+};
+const diagnosticWithUnknownReason: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "info",
+  source: "daemon",
+  kind: "lifecycle",
+  operation: "daemon",
+  // @ts-expect-error 来源、阶段、原因必须匹配具体诊断类型。
+  reason: "unlisted_reason",
+};
+const diagnosticWithMismatchedStage: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "error",
+  source: "daemon",
+  kind: "request_failure",
+  operation: "send",
+  // @ts-expect-error 请求阶段必须与操作匹配。
+  stage: "start_session",
+  reason: "upstream_error",
+  message: { text: "failed", truncated: false, originalBytes: 6 },
+};
+const diagnosticWithInvalidWorkerEventState: DiagnosticRecord = {
+  v: 1,
+  diagnosticId,
+  recordedAt: "2026-10-18T00:00:00.000Z",
+  severity: "error",
+  source: "core",
+  sessionHandle,
+  kind: "protocol_violation",
+  operation: "validate_worker_event",
+  reason: "unknown_session",
+  eventType: "message",
+  // @ts-expect-error unknown_session 只能对应 unknown 状态。
+  sessionState: "busy",
+};
+
+function readRequiredToolCallId(record: DiagnosticRecord): string | undefined {
+  if (
+    record.kind === "protocol_violation" &&
+    record.operation === "validate_worker_event" &&
+    record.reason === "tool_already_requested"
+  ) {
+    const toolCallId: string = record.toolCallId;
+    return toolCallId;
+  }
+  return undefined;
+}
 
 // @ts-expect-error 会话句柄与回合句柄具有不同的公开身份。
 const wrongTurn: TurnHandle = sessionHandle;
@@ -49,13 +114,22 @@ serializeMessageKey(toolKey);
 serializeToolKey(permissionHandle);
 // @ts-expect-error 诊断身份不能序列化为授权句柄。
 serializePermissionHandle(diagnosticId);
-// @ts-expect-error spawn 操作不能使用 send 凭据。
-const wrongSpawnCredential: OperationCredential<"spawn"> =
+// @ts-expect-error spawn 操作不能使用 send 操作键。
+const wrongSpawnOperationKey: OperationKey<"spawn"> =
   connection.prepareOperation("send");
-// @ts-expect-error 凭据会在泛型推断中保留操作类型。
-const wrongOperation: OperationCredential<"send"> = spawnCredential;
-// @ts-expect-error 序列化器的显式操作种类决定所接受的凭据类型。
-serializeOperationCredential("spawn", sendCredential);
+// @ts-expect-error 操作键会在泛型推断中保留操作类型。
+const wrongOperation: OperationKey<"send"> = spawnOperationKey;
+// @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
+parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
+// @ts-expect-error 仅创建记录在本票提供可恢复结果查询。
+void connection.getOperation(sendOperationKey);
+void connection.spawn(
+  { harness: "codex", cwd: "/tmp", message: "x" },
+  {
+    // @ts-expect-error 显式操作键必须和动作种类一致。
+    operationKey: sendOperationKey,
+  },
+);
 
 const invalidSend: SendInput = {
   placement: "active_turn",
@@ -79,9 +153,14 @@ if (completed.stopReason === "end_turn") {
 void wrongTurn;
 void wrongToolKey;
 void wrongOperation;
-void wrongSpawnCredential;
+void wrongSpawnOperationKey;
 void invalidSend;
 void invalidReplay;
 void sessionTarget;
 void mismatchedTarget;
 void resumeCursor;
+void diagnosticWithUnknownField;
+void diagnosticWithUnknownReason;
+void diagnosticWithMismatchedStage;
+void diagnosticWithInvalidWorkerEventState;
+void readRequiredToolCallId;

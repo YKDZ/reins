@@ -9,8 +9,14 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
   let sessionId: Parameters<ReturnType<AdapterDriverFactory>["deliver"]>[0];
   const accepted = new Map<TurnId, () => void>();
   return {
-    start(spec) {
+    async start(spec) {
       sessionId = spec.sessionId;
+      let resolveInitial!: () => void;
+      let rejectInitial!: (error: Error) => void;
+      const initialAccepted = new Promise<void>((resolve, reject) => {
+        resolveInitial = resolve;
+        rejectInitial = reject;
+      });
       child = spawn(
         process.execPath,
         [fileURLToPath(new URL("./wait-worker.ts", import.meta.url))],
@@ -27,6 +33,7 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
                 finalReply: string;
               };
           if (reply.kind === "accepted") {
+            if (reply.turnId === spec.turnId) resolveInitial();
             accepted.get(reply.turnId)?.();
             accepted.delete(reply.turnId);
           } else
@@ -46,10 +53,16 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
               finalReply: reply.finalReply,
             });
         }
-      })();
+      })().catch((error: unknown) => {
+        rejectInitial(
+          error instanceof Error ? error : new Error(String(error)),
+        );
+      });
+      child.once("error", rejectInitial);
       child.stdin.write(
         JSON.stringify({ turnId: spec.turnId, message: spec.message }) + "\n",
       );
+      await initialAccepted;
     },
     async deliver(_sessionId, turnId, message) {
       await new Promise<void>((resolve) => {

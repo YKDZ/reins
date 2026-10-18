@@ -1,3 +1,5 @@
+import { randomUUID } from "node:crypto";
+
 import type {
   ModelInfo,
   SDKMessage,
@@ -21,6 +23,7 @@ export type FakeQoderControls = {
 
 export function createFakeSdk(
   behavior: {
+    initializationResult?: () => Promise<unknown>;
     interrupt?: () => Promise<unknown>;
     close?: () => Promise<void>;
   } = {},
@@ -29,7 +32,7 @@ export function createFakeSdk(
   controls: FakeQoderControls;
 } {
   const failureMarker = Symbol("failure");
-  const queue = createAsyncQueue<SDKMessage | typeof failureMarker>();
+  const queue = createAsyncQueue<unknown>();
   let queryFailure: unknown;
   const delivered: SDKUserMessage[] = [];
   let lastOptions: QoderOptions | null = null;
@@ -43,7 +46,21 @@ export function createFakeSdk(
     query({ prompt, options }) {
       lastOptions = options ?? null;
       const promptReader = (async () => {
-        for await (const message of prompt) delivered.push(message);
+        for await (const message of prompt) {
+          delivered.push(message);
+          queue.push({
+            type: "command_lifecycle",
+            command_uuid: message.uuid,
+            state: "queued",
+            uuid: randomUUID(),
+            session_id: "00000000-0000-4000-8000-000000000001",
+          });
+          queue.push({
+            type: "system",
+            subtype: "init",
+            qodercli_version: "1.1.65",
+          });
+        }
       })();
       void promptReader.catch(() => {});
       const q: QoderQuery = {
@@ -55,13 +72,16 @@ export function createFakeSdk(
               if (!result.done && result.value === failureMarker) {
                 throw queryFailure;
               }
-              return result as IteratorResult<SDKMessage, undefined>;
+              return result as IteratorResult<unknown, undefined>;
             },
           };
         },
         interrupt: async () => {
           interruptCount += 1;
           return await behavior.interrupt?.();
+        },
+        initializationResult: async () => {
+          return await behavior.initializationResult?.();
         },
         close: () => {
           closeCount += 1;

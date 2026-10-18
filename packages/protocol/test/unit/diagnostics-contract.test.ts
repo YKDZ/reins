@@ -18,6 +18,7 @@ import {
   protocolParamsSchemaFor,
   protocolResultSchemaFor,
   requestIdSchema,
+  runtimeScopeIdSchema,
   sessionIdSchema,
   toolCallIdSchema,
   transportFailureFactSchema,
@@ -44,7 +45,11 @@ const bad = (schema: v.GenericSchema, input: unknown): void =>
   expect(v.safeParse(schema, input).success).toBe(false);
 
 const sessionId = "session:00000000-0000-4000-8000-000000000000:reviewer:7";
-const diagnosticId = makeDiagnosticId("7", "42");
+const runtimeScopeId = v.parse(
+  runtimeScopeIdSchema,
+  "00000000-0000-4000-8000-000000000000",
+);
+const diagnosticId = makeDiagnosticId(runtimeScopeId, "7", "42");
 
 describe("worker event rejection contract", () => {
   const rejections = [
@@ -303,6 +308,13 @@ describe("typed identifiers", () => {
   test("keeps domain IDs distinct by type", () => {
     ok(sessionIdSchema, sessionId);
     ok(diagnosticIdSchema, diagnosticId);
+    expect(
+      v.safeParse(diagnosticIdSchema, `diagnostic:${runtimeScopeId}:7:42`)
+        .success,
+    ).toBe(true);
+    expect(v.safeParse(diagnosticIdSchema, "diagnostic:7:42").success).toBe(
+      false,
+    );
     const sid: SessionId = v.parse(sessionIdSchema, sessionId);
     const tid: TurnId = v.parse(turnIdSchema, "t1");
     const pid: PermissionId = v.parse(permissionIdSchema, "p1");

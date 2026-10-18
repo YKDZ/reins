@@ -42,8 +42,10 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.diagnosticId ?? failure.facts.cause?.kind ?? "";
     case "unknown_harness":
       return failure.facts.availableHarnesses.join(",");
-    case "command_outcome_unknown":
-      return failure.facts.operation;
+    case "operation_pending":
+    case "operation_outcome_unknown":
+    case "control_store_unavailable":
+      return failure.facts.operationKey;
     case "session_busy":
       return failure.facts.sessionHandle;
     case "permission_not_pending":
@@ -61,9 +63,9 @@ function inspectFailure(failure: ReinsFailure): string {
       return `${failure.facts.oldest ?? "empty"}:${failure.facts.head ?? "empty"}`;
     case "method_not_found":
       return failure.facts.method;
-    case "command_id_conflict":
-    case "stale_command_id":
-    case "operation_credential_invalid":
+    case "operation_key_conflict":
+    case "operation_key_scope_mismatch":
+    case "stale_operation_key":
       return failure.code;
     case "unexpected_failure":
       return failure.facts.remoteCode ?? "";
