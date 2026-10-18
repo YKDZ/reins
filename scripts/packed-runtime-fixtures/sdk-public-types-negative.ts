@@ -6,12 +6,14 @@ import {
   type MessageContentPart,
   type MessageKey,
   type OperationKey,
+  type OperationRecord,
   type PermissionHandle,
   type SubscriptionStart,
   type ResumeCursor,
   type ReinsFailure,
   type ReinsConnection,
   type SendInput,
+  type SendResult,
   type SessionHandle,
   type SessionInfo,
   type ToolKey,
@@ -133,10 +135,31 @@ const wrongSpawnOperationKey: OperationKey<"spawn"> =
   connection.prepareOperation("send");
 // @ts-expect-error 操作键会在泛型推断中保留操作类型。
 const wrongOperation: OperationKey<"send"> = spawnOperationKey;
+const activeTurnVariableWithPrecondition = {
+  placement: "active_turn" as const,
+  turnHandle,
+  ifLastCompletedTurn: turnHandle,
+  message: "invalid active turn precondition",
+};
+// @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
+const invalidActiveTurnSend: SendInput = activeTurnVariableWithPrecondition;
+// @ts-expect-error active_turn 不接受新回合前置条件，即使变量带有该字段。
+void connection.send(activeTurnVariableWithPrecondition);
+void invalidActiveTurnSend;
+declare const sendRecord: OperationRecord<"send">;
+// @ts-expect-error send 查询记录不能伪装成 spawn 查询记录。
+const wrongSendRecord: OperationRecord<"spawn"> = sendRecord;
 // @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
 parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
-// @ts-expect-error 仅创建记录在本票提供可恢复结果查询。
-void connection.getOperation(sendOperationKey);
+async function inspectSendRecordKind(): Promise<void> {
+  const operation = await connection.getOperation(sendOperationKey);
+  if (operation.status !== "succeeded") return;
+  const result: SendResult = operation.result;
+  // @ts-expect-error send 结果不能读取 spawn 专属的工作目录。
+  const cwd: string = operation.result.cwd;
+  void result;
+  void cwd;
+}
 void connection.spawn(
   { harness: "codex", cwd: "/tmp", message: "x" },
   {
@@ -152,7 +175,6 @@ const invalidSend: SendInput = {
   sessionHandle,
   message: "ambiguous target",
 };
-
 const unreachableSessionFields = {
   sessionHandle,
   harness: "qoder" as const,
@@ -259,6 +281,8 @@ if (completed.stopReason === "end_turn") {
 void wrongTurn;
 void wrongToolKey;
 void wrongOperation;
+void wrongSendRecord;
+void inspectSendRecordKind;
 void wrongSpawnOperationKey;
 void invalidSend;
 void invalidAfterStart;

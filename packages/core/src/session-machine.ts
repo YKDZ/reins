@@ -41,6 +41,7 @@ import {
   type WorkerDriverFactory,
   type WorkerEventRejection,
   WorkerStartFailure,
+  WorkerDeliveryFailure,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -101,7 +102,9 @@ type IngressActionFrame = {
 type PendingDelivery = {
   readonly projection: IngressProjection;
   readonly events: DomainEvent[];
+  readonly lateEvents: DomainEvent[];
   readonly creating: boolean;
+  phase: "accepting" | "committing";
   readonly settled: Promise<void>;
   readonly settle: () => void;
   count: number;
@@ -115,7 +118,16 @@ function createPendingDelivery(
   const settled = new Promise<void>((resolve) => {
     settle = resolve;
   });
-  return { projection, creating, events: [], count: 0, settled, settle };
+  return {
+    projection,
+    creating,
+    phase: "accepting",
+    events: [],
+    lateEvents: [],
+    count: 0,
+    settled,
+    settle,
+  };
 }
 
 type WorkerEventIngressDecision =
@@ -274,7 +286,16 @@ export type SessionMachine = {
       events: readonly DomainEvent[],
     ) => void | Promise<void>,
   ): Promise<SpawnAck>;
-  send(params: SendParams): Promise<SendAck>;
+  send(
+    params: SendParams,
+    hooks?: {
+      readonly beforeDispatch?: () => void | Promise<void>;
+      readonly commit?: (
+        result: SendAck,
+        events: readonly DomainEvent[],
+      ) => void | Promise<void>;
+    },
+  ): Promise<SendAck>;
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): Promise<InterruptAck>;
   resolvePermission(params: ResolvePermissionParams): Promise<void>;
@@ -328,6 +349,51 @@ export class SpawnStartFailure extends Error {
   }
 }
 
+export class SendCommitFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly result: SendAck;
+  readonly commitError: unknown;
+  readonly terminationError: unknown;
+
+  constructor(
+    sessionId: SessionId,
+    result: SendAck,
+    commitError: unknown,
+    terminationError: unknown,
+  ) {
+    super("Send was accepted but its control record could not be committed");
+    this.name = "SendCommitFailure";
+    this.sessionId = sessionId;
+    this.result = result;
+    this.commitError = commitError;
+    this.terminationError = terminationError;
+  }
+}
+
+export class SendDeliveryFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly turnId: TurnId;
+  readonly acceptance: "not_accepted" | "unknown";
+  readonly failure: MachineError;
+  readonly terminationError: unknown;
+
+  constructor(
+    sessionId: SessionId,
+    turnId: TurnId,
+    acceptance: "not_accepted" | "unknown",
+    failure: MachineError,
+    terminationError: unknown,
+  ) {
+    super("New turn delivery did not produce a confirmed receipt");
+    this.name = "SendDeliveryFailure";
+    this.sessionId = sessionId;
+    this.turnId = turnId;
+    this.acceptance = acceptance;
+    this.failure = failure;
+    this.terminationError = terminationError;
+  }
+}
+
 export type SessionIdentity = {
   session(): SessionId;
 };
@@ -350,6 +416,7 @@ export function createSessionMachine(options: {
   const pendingSpawns = new Map<SessionId, PendingSpawn>();
   const terminations = new Map<SessionId, Promise<void>>();
   const ingressActions: IngressActionFrame[] = [];
+  const uncertainDeliveries = new Set<SessionId>();
   // 接受响应与终态通知可能在同一轮到达；只暂存本会话事件，
   // 保证已接受 caller 事实先于该回合终态，拒绝后仍释放真实终态。
   const pendingDeliveries = new Map<SessionId, PendingDelivery>();
@@ -881,7 +948,8 @@ export function createSessionMachine(options: {
     }
     const delivering = pendingDeliveries.get(event.sessionId);
     if (delivering === undefined) bus.publish(event);
-    else delivering.events.push(event);
+    else if (delivering.phase === "accepting") delivering.events.push(event);
+    else delivering.lateEvents.push(event);
   };
 
   function assertTurnTarget(target: TurnTarget): void {
@@ -1133,7 +1201,7 @@ export function createSessionMachine(options: {
         pendingSpawns.delete(sessionId);
       return result;
     },
-    async send(params) {
+    async send(params, hooks) {
       const parsed = v.safeParse(sendParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -1149,9 +1217,37 @@ export function createSessionMachine(options: {
       assertNotTerminating(sessionId);
       if (
         parsed.output.placement === "new_turn" &&
-        (session.state !== "idle" || pendingDeliveries.has(sessionId))
+        (session.state !== "idle" ||
+          pendingDeliveries.has(sessionId) ||
+          uncertainDeliveries.has(sessionId))
       ) {
         throw machineError({ code: "session_busy", sessionId });
+      }
+      if (parsed.output.placement === "new_turn") {
+        const condition = parsed.output.ifLastCompletedTurn;
+        if (condition !== undefined) {
+          if (condition.sessionId !== sessionId)
+            throw machineError({
+              code: "invalid_params",
+              issues: [{ issue: "invalid_value", path: "ifLastCompletedTurn" }],
+            });
+          const actual = session.turns.at(-1)?.turnId;
+          if (actual === undefined)
+            throw machineError({
+              code: "internal_error",
+              cause: makeErrorCause(
+                "exception",
+                "An idle session has no completed turn",
+              ),
+            });
+          if (actual !== condition.turnId)
+            throw machineError({
+              code: "turn_precondition_failed",
+              sessionId,
+              expected: condition.turnId,
+              actual,
+            });
+        }
       }
       const messageId = nextMessageId();
       const callerMessage: Extract<DomainEvent, { type: "message" }> = {
@@ -1177,34 +1273,108 @@ export function createSessionMachine(options: {
         const delivery = createPendingDelivery(projection, true);
         pendingDeliveries.set(sessionId, delivery);
         try {
-          await driver.deliver(
+          await hooks?.beforeDispatch?.();
+          const ack: SendAck = {
             sessionId,
             turnId,
-            message,
-            "new_turn",
             messageId,
-          );
+            deliveryPoint: "new_turn",
+          };
+          try {
+            await driver.deliver(
+              sessionId,
+              turnId,
+              message,
+              "new_turn",
+              messageId,
+            );
+          } catch (error) {
+            const acceptance =
+              error instanceof WorkerDeliveryFailure
+                ? error.acceptance
+                : "unknown";
+            const failure = await unexpectedFailure(
+              options.diagnostics,
+              error,
+              {
+                sessionId,
+                turnId,
+                kind: "request_failure",
+                operation: "send",
+                stage: "deliver",
+                reason: "upstream_error",
+                message: evidence(error),
+              },
+            );
+            let terminationError: unknown;
+            let terminated = false;
+            if (acceptance === "unknown") {
+              try {
+                await driver.terminate(sessionId);
+                terminated = true;
+              } catch (stopError) {
+                terminationError = stopError;
+                uncertainDeliveries.add(sessionId);
+              }
+            }
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+            if (terminated) bus.publish({ type: "session.killed", sessionId });
+            throw new SendDeliveryFailure(
+              sessionId,
+              turnId,
+              acceptance,
+              failure,
+              terminationError,
+            );
+          }
           const selected = selectCallerMessage(delivery.events, callerMessage);
-          bus.publish([started, selected.caller, ...selected.remainder]);
+          delivery.phase = "committing";
+          const batch = Object.freeze([
+            started,
+            selected.caller,
+            ...selected.remainder,
+          ]);
+          try {
+            await hooks?.commit?.(ack, batch);
+          } catch (commitError) {
+            let terminationError: unknown;
+            let terminated = false;
+            try {
+              await driver.terminate(sessionId);
+              terminated = true;
+            } catch (stopError) {
+              terminationError = stopError;
+              uncertainDeliveries.add(sessionId);
+            }
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+            if (terminated) bus.publish({ type: "session.killed", sessionId });
+            throw new SendCommitFailure(
+              sessionId,
+              ack,
+              commitError,
+              terminationError,
+            );
+          }
+          bus.publish(batch);
           if (selected.caller === callerMessage)
             sessions
               .get(sessionId)
               ?.activeTurn?.nativeCallerCompletions.add(messageId);
-        } catch (error) {
-          throw await unexpectedFailure(options.diagnostics, error, {
-            sessionId,
-            turnId,
-            kind: "request_failure",
-            operation: "send",
-            stage: "deliver",
-            reason: "upstream_error",
-            message: evidence(error),
-          });
-        } finally {
+          while (delivery.lateEvents.length > 0) {
+            const lateBatch = delivery.lateEvents.splice(0);
+            bus.publish(lateBatch);
+          }
           pendingDeliveries.delete(sessionId);
           delivery.settle();
+          return ack;
+        } finally {
+          if (pendingDeliveries.get(sessionId) === delivery) {
+            pendingDeliveries.delete(sessionId);
+            delivery.settle();
+          }
         }
-        return { sessionId, turnId, messageId, deliveryPoint: "new_turn" };
       }
       const turnId = parsed.output.turnId;
       if (pendingDeliveries.get(sessionId)?.creating)
@@ -1437,6 +1607,7 @@ export function createSessionMachine(options: {
           try {
             // terminate 的 resolve 是资源清理完成的承诺；成功前不得发布终态。
             await driver.terminate(id);
+            uncertainDeliveries.delete(id);
             // 停止后先结算原生已接受或拒绝的消息，避免 kill 越过其事实。
             await pendingDeliveries.get(id)?.settled;
             // 停止期间自然终态可能已提交；只补仍活动的回合，且先于会话终态。

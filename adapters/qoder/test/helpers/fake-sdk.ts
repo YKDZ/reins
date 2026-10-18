@@ -19,6 +19,7 @@ export type FakeQoderControls = {
   closeCount(): number;
   setAvailableModels(models: ModelInfo[]): void;
   modelsCalls(): number;
+  acknowledge(uuid: string, state?: "queued" | "cancelled"): void;
 };
 
 export function createFakeSdk(
@@ -26,6 +27,7 @@ export function createFakeSdk(
     initializationResult?: () => Promise<unknown>;
     interrupt?: () => Promise<unknown>;
     close?: () => Promise<void>;
+    autoQueueAcceptance?: boolean;
   } = {},
 ): {
   sdk: QoderSdk;
@@ -45,16 +47,19 @@ export function createFakeSdk(
   const sdk: QoderSdk = {
     query({ prompt, options }) {
       lastOptions = options ?? null;
+      let promptCount = 0;
       const promptReader = (async () => {
         for await (const message of prompt) {
           delivered.push(message);
-          queue.push({
-            type: "command_lifecycle",
-            command_uuid: message.uuid,
-            state: "queued",
-            uuid: randomUUID(),
-            session_id: "00000000-0000-4000-8000-000000000001",
-          });
+          if (promptCount === 0 || behavior.autoQueueAcceptance !== false)
+            queue.push({
+              type: "command_lifecycle",
+              command_uuid: message.uuid,
+              state: "queued",
+              uuid: randomUUID(),
+              session_id: "00000000-0000-4000-8000-000000000001",
+            });
+          promptCount += 1;
           queue.push({
             type: "system",
             subtype: "init",
@@ -119,6 +124,14 @@ export function createFakeSdk(
         availableModels = models;
       },
       modelsCalls: () => modelsCallsCount,
+      acknowledge: (uuid, state = "queued") =>
+        queue.push({
+          type: "command_lifecycle",
+          command_uuid: uuid,
+          state,
+          uuid: randomUUID(),
+          session_id: "00000000-0000-4000-8000-000000000001",
+        }),
     },
   };
 }

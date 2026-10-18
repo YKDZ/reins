@@ -17,6 +17,7 @@ import type {
   ProtocolResult,
   OperationKey as ProtocolOperationKey,
   OperationRecord as ProtocolOperationRecord,
+  DaemonGeneration as ProtocolDaemonGeneration,
   RuntimeScopeId as ProtocolRuntimeScopeId,
   SideEffectMethod,
   SessionInfo as ProtocolSessionInfo,
@@ -33,6 +34,7 @@ import {
   encodePermissionHandle,
   encodeTurnHandle,
   messageKeySchema,
+  operationRecordSchemaFor,
   permissionHandleSchema,
   parseOperationKey as parseProtocolOperationKey,
   REINS_PROTOCOL_MAJOR_VERSION,
@@ -633,9 +635,17 @@ async function connectClient(
           );
         }
       },
-      async getOperation(operationKey: OperationKey<"spawn">) {
+      async getOperation<Kind extends "spawn" | "send">(
+        operationKey: OperationKey<Kind>,
+      ): Promise<OperationRecord<Kind>> {
+        let kind: "spawn" | "send";
+        let generation: ProtocolDaemonGeneration;
         try {
-          parseOperationKey(operationKey, "spawn");
+          const claims = parseProtocolOperationKey(operationKey);
+          if (claims.kind !== "spawn" && claims.kind !== "send")
+            throw new Error("Operation kind is not recoverable");
+          kind = claims.kind;
+          generation = claims.generation;
         } catch {
           throw invalidInput("operationKey", "query");
         }
@@ -644,7 +654,14 @@ async function connectClient(
             operationKey,
           ) as ProtocolOperationKey,
         });
-        return projectOperationRecord(result);
+        return projectOperationRecord(
+          v.parse(
+            operationRecordSchemaFor(kind),
+            result,
+          ) as ProtocolOperationRecord,
+          kind,
+          generation,
+        ) as OperationRecord<Kind>;
       },
       async spawn(input, options) {
         return projectSpawnResult(
@@ -713,6 +730,8 @@ async function connectClient(
           throw invalidInput("placement", "operation");
         let params: ProtocolParams<"send">;
         if (input.placement === "active_turn") {
+          if (Object.hasOwn(input, "ifLastCompletedTurn"))
+            throw invalidInput("ifLastCompletedTurn", "operation");
           const target = targetFromHandle(input.turnHandle, "turnHandle");
           params = {
             placement: "active_turn",
@@ -720,12 +739,28 @@ async function connectClient(
             message: input.message,
           };
         } else {
+          const sessionId = sessionIdFromHandle(
+            input.sessionHandle,
+            "sessionHandle",
+          );
+          const ifLastCompletedTurn =
+            input.ifLastCompletedTurn === undefined
+              ? undefined
+              : targetFromHandle(
+                  input.ifLastCompletedTurn,
+                  "ifLastCompletedTurn",
+                );
+          if (
+            ifLastCompletedTurn !== undefined &&
+            ifLastCompletedTurn.sessionId !== sessionId
+          )
+            throw invalidInput("ifLastCompletedTurn", "operation");
           params = {
             placement: "new_turn",
-            sessionId: sessionIdFromHandle(
-              input.sessionHandle,
-              "sessionHandle",
-            ),
+            sessionId,
+            ...(ifLastCompletedTurn === undefined
+              ? {}
+              : { ifLastCompletedTurn }),
             message: input.message,
           };
         }
@@ -1147,15 +1182,17 @@ function projectSpawnResult(
   };
 }
 
-function projectOperationRecord(
+function projectOperationRecord<Kind extends "spawn" | "send">(
   record: ProtocolOperationRecord,
-): OperationRecord {
-  const operationKey = parseOperationKey(record.operationKey, "spawn");
+  kind: Kind,
+  generation: ProtocolDaemonGeneration,
+): OperationRecord<Kind> {
+  const operationKey = parseOperationKey(record.operationKey, kind);
   switch (record.status) {
     case "unknown":
     case "unavailable":
     case "pending":
-      return { status: record.status, operationKey };
+      return { status: record.status, operationKey } as OperationRecord<Kind>;
     case "outcome_unknown":
       return {
         status: "outcome_unknown",
@@ -1167,40 +1204,90 @@ function projectOperationRecord(
         ...(record.diagnosticId === undefined
           ? {}
           : { diagnosticId: parseDiagnosticId(record.diagnosticId) }),
-      };
+      } as OperationRecord<Kind>;
     case "succeeded":
       return {
         status: "succeeded",
         operationKey,
-        result: projectSpawnResult(record.result),
-      };
+        result:
+          kind === "spawn"
+            ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
+            : projectSendResult(
+                record.result as ProtocolResult<"send">,
+                generation,
+              ),
+      } as OperationRecord<Kind>;
     case "failed":
       return {
         status: "failed",
         operationKey,
         error: projectFailure(record.error),
-      };
+      } as OperationRecord<Kind>;
+    case "not_accepted_uncommitted":
+    case "not_accepted_unconfirmed":
+      return {
+        status: record.status,
+        operationKey,
+        error: projectFailure(record.error),
+        cause: record.cause,
+      } as OperationRecord<Kind>;
     case "accepted_uncommitted":
       return {
         status: "accepted_uncommitted",
         operationKey,
-        result: projectSpawnResult(record.result),
+        result:
+          kind === "spawn"
+            ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
+            : projectSendResult(
+                record.result as ProtocolResult<"send">,
+                generation,
+              ),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
-      };
+      } as OperationRecord<Kind>;
     case "accepted_unconfirmed":
       return {
         status: "accepted_unconfirmed",
         operationKey,
-        result: projectSpawnResult(record.result),
+        result:
+          kind === "spawn"
+            ? projectSpawnResult(record.result as ProtocolResult<"spawn">)
+            : projectSendResult(
+                record.result as ProtocolResult<"send">,
+                generation,
+              ),
         cause: record.cause,
         ...(record.cleanupCause === undefined
           ? {}
           : { cleanupCause: record.cleanupCause }),
-      };
+      } as OperationRecord<Kind>;
   }
+}
+
+function projectSendResult(
+  result: ProtocolResult<"send">,
+  generation: ProtocolDaemonGeneration,
+): SendResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+      }),
+    ),
+    messageKey: parseMessageKey(
+      encodeMessageKey({
+        generation,
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+        messageId: result.messageId,
+      }),
+    ),
+    deliveryPoint: result.deliveryPoint,
+  };
 }
 
 function projectClientFailure(
@@ -1307,7 +1394,16 @@ function projectFailure(
           cause: failure.cause,
           ...(failure.acceptedResult === undefined
             ? {}
-            : { acceptedResult: projectSpawnResult(failure.acceptedResult) }),
+            : {
+                acceptedResult:
+                  "deliveryPoint" in failure.acceptedResult
+                    ? projectSendResult(
+                        failure.acceptedResult,
+                        parseProtocolOperationKey(failure.operationKey)
+                          .generation,
+                      )
+                    : projectSpawnResult(failure.acceptedResult),
+              }),
           ...(failure.cleanupCause === undefined
             ? {}
             : { cleanupCause: failure.cleanupCause }),
@@ -1362,6 +1458,25 @@ function projectFailure(
         code: failure.code,
         facts: {
           sessionHandle: parseSessionHandle(failure.sessionId),
+        },
+      };
+    case "turn_precondition_failed":
+      return {
+        code: failure.code,
+        facts: {
+          sessionHandle: parseSessionHandle(failure.sessionId),
+          expected: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.expected,
+            }),
+          ),
+          actual: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.actual,
+            }),
+          ),
         },
       };
     case "session_not_found":

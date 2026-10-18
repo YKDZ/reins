@@ -15,11 +15,14 @@ import {
   type ModelCatalogFailure,
   type ModelCatalogResult,
   type DiagnosticId,
+  type MessageKey,
+  type OperationRecord,
   type OperationKey,
   type ReinsConnection,
   type ReinsFailure,
   type ResumeCursor,
   type SendInput,
+  type SendResult,
   type SessionHandle,
   type SessionInfo,
   type SessionState,
@@ -59,8 +62,30 @@ const activeTurnSend: SendInput = {
 const newTurnSend: SendInput = {
   placement: "new_turn",
   sessionHandle,
+  ifLastCompletedTurn: turnHandle,
   message: "next turn",
 };
+const sendOperationKey = connection.prepareOperation("send");
+const generatedSend = connection.send(newTurnSend);
+const keyedSend = connection.send(newTurnSend, {
+  operationKey: sendOperationKey,
+});
+const sendOperationQuery: Promise<OperationRecord<"send">> =
+  connection.getOperation(sendOperationKey);
+function inspectUncommittedSendFailure(record: OperationRecord<"send">): void {
+  if (
+    record.status !== "not_accepted_uncommitted" &&
+    record.status !== "not_accepted_unconfirmed"
+  )
+    return;
+  if (record.cause.kind === "io") {
+    const causeKind: "io" = record.cause.kind;
+    void causeKind;
+  }
+  const failureCode: ReinsFailure["code"] = record.error.code;
+  void failureCode;
+}
+void inspectUncommittedSendFailure;
 const target: AgentTarget = { scope: "turn", turnHandle };
 const waitInput: WaitInput = {
   targets: [turnHandle],
@@ -97,6 +122,13 @@ async function inspectSpawnOperation(): Promise<
     if ("record" in evidence) return evidence.record.diagnosticId;
   }
   return undefined;
+}
+
+async function inspectSendOperation(): Promise<MessageKey | undefined> {
+  const operation = await connection.getOperation(sendOperationKey);
+  if (operation.status !== "succeeded") return undefined;
+  const result: SendResult = operation.result;
+  return result.messageKey;
 }
 
 function inspectUnknownSpawnFailure(
@@ -204,11 +236,15 @@ void inspectModelCatalog;
 void inspectWaitResult;
 void inspectUnreachableSession;
 void inspectSpawnOperation;
+void inspectSendOperation;
 void inspectUnknownSpawnFailure;
 void started;
 void generatedOperation;
 void activeTurnSend;
 void newTurnSend;
+void generatedSend;
+void keyedSend;
+void sendOperationQuery;
 void waitInput;
 void resumed;
 void restoredSessionHandle;

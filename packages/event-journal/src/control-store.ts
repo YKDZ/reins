@@ -11,6 +11,8 @@ import {
   operationKeySchema,
   parseOperationKey,
   runtimeScopeIdSchema,
+  sendAckSchema,
+  newTurnSendParamsSchema,
   sessionIdSchema,
   sessionInfoSchema,
   spawnAckSchema,
@@ -22,6 +24,8 @@ import {
   type EventId,
   type MachineError,
   type RuntimeScopeId,
+  type SendAck,
+  type NewTurnSendParams,
   type SessionInfo,
   type SessionId,
   type SpawnAck,
@@ -32,28 +36,39 @@ import * as v from "valibot";
 
 type StoredOperationKey = v.InferOutput<typeof operationKeySchema>;
 
-export type ControlOperationInput = {
+type ControlOperationOwner = {
   readonly operationKey: StoredOperationKey;
   readonly runtimeScopeId: RuntimeScopeId;
   readonly consumer: ConsumerContext;
   readonly generation: DaemonGeneration;
+};
+
+export type ControlOperationInput = ControlOperationOwner & {
   readonly request: SpawnParams;
 };
 
-export type ControlOperation = ControlOperationInput &
-  (
-    | { readonly status: "pending" }
-    | { readonly status: "dispatched" }
-    | {
-        readonly status: "outcome_unknown";
-        readonly error: Extract<
-          MachineError,
-          { code: "operation_outcome_unknown" }
-        >;
-      }
-    | { readonly status: "succeeded"; readonly result: SpawnAck }
-    | { readonly status: "failed"; readonly error: MachineError }
-  );
+export type SendControlOperationInput = ControlOperationOwner & {
+  readonly request: NewTurnSendParams;
+};
+
+type ControlOperationStatus<Result> =
+  | { readonly status: "pending" }
+  | { readonly status: "dispatched" }
+  | {
+      readonly status: "outcome_unknown";
+      readonly error: Extract<
+        MachineError,
+        { code: "operation_outcome_unknown" }
+      >;
+    }
+  | { readonly status: "succeeded"; readonly result: Result }
+  | { readonly status: "failed"; readonly error: MachineError };
+
+export type ControlOperation =
+  | (ControlOperationInput &
+      ControlOperationStatus<SpawnAck> & { readonly kind: "spawn" })
+  | (SendControlOperationInput &
+      ControlOperationStatus<SendAck> & { readonly kind: "send" });
 
 export type StoredSession = {
   readonly info: SessionInfo;
@@ -99,6 +114,22 @@ export type ControlStore = {
   }): readonly StoredCommittedEvent[];
   failSpawn(operationKey: StoredOperationKey, error: MachineError): void;
   recordSpawnOutcomeUnknown(
+    operationKey: StoredOperationKey,
+    error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
+  ): void;
+  registerSend(input: SendControlOperationInput): {
+    readonly created: boolean;
+    readonly operation: Extract<ControlOperation, { kind: "send" }>;
+  };
+  markSendDispatched(operationKey: StoredOperationKey): void;
+  commitSend(input: {
+    readonly operationKey: StoredOperationKey;
+    readonly result: SendAck;
+    readonly session: StoredSession;
+    readonly events: readonly DomainEvent[];
+  }): readonly StoredCommittedEvent[];
+  failSend(operationKey: StoredOperationKey, error: MachineError): void;
+  recordSendOutcomeUnknown(
     operationKey: StoredOperationKey,
     error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
   ): void;
@@ -153,7 +184,11 @@ function parseJson<TSchema extends v.GenericSchema>(
 
 function operationFromRow(row: OperationRow): ControlOperation {
   const operationKey = v.parse(operationKeySchema, row.operation_key);
-  const claims = parseOperationKey(operationKey, "spawn");
+  const claims = parseOperationKey(operationKey);
+  if (claims.kind !== "spawn" && claims.kind !== "send")
+    throw new Error(
+      "Stored operation kind is not supported by this control store",
+    );
   const runtimeScopeId = v.parse(runtimeScopeIdSchema, row.runtime_scope_id);
   const consumer = v.parse(consumerContextSchema, row.consumer);
   const generation = v.parse(daemonGenerationSchema, row.generation);
@@ -162,7 +197,7 @@ function operationFromRow(row: OperationRow): ControlOperation {
     claims.consumer !== consumer ||
     claims.generation !== generation
   )
-    throw new Error("Stored spawn operation ownership does not match its key");
+    throw new Error("Stored operation ownership does not match its key");
   const status = v.parse(operationStatusSchema, row.status);
   const resultJson =
     row.result_json === null ? null : v.parse(v.string(), row.result_json);
@@ -170,43 +205,57 @@ function operationFromRow(row: OperationRow): ControlOperation {
     row.error_json === null ? null : v.parse(v.string(), row.error_json);
   if (resultJson !== null && status !== "succeeded")
     throw new Error("Stored spawn operation has inconsistent result fields");
-  const common = {
+  const owner = {
     operationKey,
     runtimeScopeId,
     consumer,
     generation,
-    request: parseJson(spawnParamsSchema, row.request_json),
   };
-  switch (status) {
-    case "pending":
-      if (errorJson !== null)
-        throw new Error("Stored pending operation has an error");
-      return { ...common, status: "pending" };
-    case "dispatched":
-      if (errorJson === null) return { ...common, status: "dispatched" };
-      {
-        const error = parseJson(machineErrorSchema, errorJson);
+  const error =
+    errorJson === null ? undefined : parseJson(machineErrorSchema, errorJson);
+  const statusFields = <Result>(resultSchema: v.GenericSchema) => {
+    switch (status) {
+      case "pending":
+        if (resultJson !== null || error !== undefined)
+          throw new Error(
+            "Stored pending operation has result or error fields",
+          );
+        return { status: "pending" as const };
+      case "dispatched":
+        if (resultJson !== null)
+          throw new Error("Stored dispatched operation has a result");
+        if (error === undefined) return { status: "dispatched" as const };
         if (error.code !== "operation_outcome_unknown")
           throw new Error("Stored dispatched operation has an invalid error");
-        return { ...common, status: "outcome_unknown", error };
-      }
-    case "succeeded":
-      if (resultJson === null || errorJson !== null)
-        throw new Error("Stored successful operation has inconsistent fields");
-      return {
-        ...common,
-        status: "succeeded",
-        result: parseJson(spawnAckSchema, resultJson),
-      };
-    case "failed":
-      if (errorJson === null)
-        throw new Error("Stored failed operation has no error");
-      return {
-        ...common,
-        status: "failed",
-        error: parseJson(machineErrorSchema, errorJson),
-      };
-  }
+        return { status: "outcome_unknown" as const, error };
+      case "succeeded":
+        if (resultJson === null || error !== undefined)
+          throw new Error(
+            "Stored successful operation has inconsistent fields",
+          );
+        return {
+          status: "succeeded" as const,
+          result: parseJson(resultSchema, resultJson) as Result,
+        };
+      case "failed":
+        if (resultJson !== null || error === undefined)
+          throw new Error("Stored failed operation has inconsistent fields");
+        return { status: "failed" as const, error };
+    }
+  };
+  if (claims.kind === "spawn")
+    return {
+      ...owner,
+      kind: "spawn",
+      request: parseJson(spawnParamsSchema, row.request_json),
+      ...statusFields<SpawnAck>(spawnAckSchema),
+    };
+  return {
+    ...owner,
+    kind: "send",
+    request: parseJson(newTurnSendParamsSchema, row.request_json),
+    ...statusFields<SendAck>(sendAckSchema),
+  };
 }
 
 function sessionFromRow(row: SessionRow): StoredSession {
@@ -300,25 +349,32 @@ function createControlStore(database: DatabaseSync): ControlStore {
 
   function validatedOperationKey(
     value: StoredOperationKey,
+    expectedKind?: "spawn" | "send",
   ): StoredOperationKey {
     const operationKey = v.parse(operationKeySchema, value);
-    parseOperationKey(operationKey, "spawn");
+    const claims = parseOperationKey(operationKey);
+    if (
+      (claims.kind !== "spawn" && claims.kind !== "send") ||
+      (expectedKind !== undefined && claims.kind !== expectedKind)
+    )
+      throw new Error("OperationKey kind does not match the stored operation");
     return operationKey;
   }
 
   function validateOperationOwnership(
     operationKey: StoredOperationKey,
+    expectedKind: "spawn" | "send",
     runtimeScopeId: RuntimeScopeId,
     consumer: ConsumerContext,
     generation: DaemonGeneration,
   ): void {
-    const claims = parseOperationKey(operationKey, "spawn");
+    const claims = parseOperationKey(operationKey, expectedKind);
     if (
       claims.runtimeScopeId !== runtimeScopeId ||
       claims.consumer !== consumer ||
       claims.generation !== generation
     )
-      throw new Error("Spawn operation ownership does not match its key");
+      throw new Error("Operation ownership does not match its key");
   }
 
   function validateSessionIdentity(session: StoredSession): StoredSession {
@@ -379,14 +435,14 @@ function createControlStore(database: DatabaseSync): ControlStore {
         .prepare("SELECT * FROM sessions WHERE session_id = ?")
         .get(operation.result.sessionId) as SessionRow | undefined;
       if (sessionRow === undefined)
-        throw new Error("Stored spawn result has no session record");
+        throw new Error("Stored operation result has no session record");
       const session = sessionFromRow(sessionRow);
       if (
         session.runtimeScopeId !== operation.runtimeScopeId ||
         session.consumer !== operation.consumer ||
         session.generation !== operation.generation
       )
-        throw new Error("Stored spawn result and session ownership differ");
+        throw new Error("Stored operation result and session ownership differ");
     }
     return operation;
   }
@@ -417,6 +473,15 @@ function createControlStore(database: DatabaseSync): ControlStore {
     database
       .prepare("UPDATE sessions SET info_json = ? WHERE session_id = ?")
       .run(stableJson(info), sessionId);
+  }
+
+  function readSession(sessionId: SessionId): StoredSession | undefined {
+    assertOpen();
+    sessionId = v.parse(sessionIdSchema, sessionId);
+    const row = database
+      .prepare("SELECT * FROM sessions WHERE session_id = ?")
+      .get(sessionId) as SessionRow | undefined;
+    return row === undefined ? undefined : sessionFromRow(row);
   }
 
   function readEventWindow(sessionId: SessionId): {
@@ -519,7 +584,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
 
   return {
     registerSpawn(input) {
-      const operationKey = validatedOperationKey(input.operationKey);
+      const operationKey = validatedOperationKey(input.operationKey, "spawn");
       const runtimeScopeId = v.parse(
         runtimeScopeIdSchema,
         input.runtimeScopeId,
@@ -528,6 +593,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
       const generation = v.parse(daemonGenerationSchema, input.generation);
       validateOperationOwnership(
         operationKey,
+        "spawn",
         runtimeScopeId,
         consumer,
         generation,
@@ -565,8 +631,57 @@ function createControlStore(database: DatabaseSync): ControlStore {
         throw new Error("Spawn registration disappeared");
       return { created: true, operation };
     },
+    registerSend(input) {
+      const operationKey = validatedOperationKey(input.operationKey, "send");
+      const runtimeScopeId = v.parse(
+        runtimeScopeIdSchema,
+        input.runtimeScopeId,
+      );
+      const consumer = v.parse(consumerContextSchema, input.consumer);
+      const generation = v.parse(daemonGenerationSchema, input.generation);
+      validateOperationOwnership(
+        operationKey,
+        "send",
+        runtimeScopeId,
+        consumer,
+        generation,
+      );
+      const parsedRequest = v.parse(newTurnSendParamsSchema, input.request);
+      const requestJson = stableJson(parsedRequest);
+      const current = readOperation(operationKey);
+      if (current !== undefined) {
+        const row = database
+          .prepare(
+            "SELECT request_json FROM operations WHERE operation_key = ?",
+          )
+          .get(operationKey) as Record<string, unknown> | undefined;
+        const storedRequestJson =
+          row === undefined ? undefined : v.parse(v.string(), row.request_json);
+        if (
+          current.kind !== "send" ||
+          storedRequestJson === undefined ||
+          current.runtimeScopeId !== runtimeScopeId ||
+          current.consumer !== consumer ||
+          current.generation !== generation ||
+          storedRequestJson !== requestJson
+        )
+          throw { code: "operation_key_conflict" };
+        return { created: false, operation: current };
+      }
+      transaction(() => {
+        database
+          .prepare(
+            "INSERT INTO operations(operation_key, runtime_scope_id, consumer, generation, request_json, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+          )
+          .run(operationKey, runtimeScopeId, consumer, generation, requestJson);
+      });
+      const operation = readOperation(operationKey);
+      if (operation === undefined || operation.kind !== "send")
+        throw new Error("Send registration disappeared");
+      return { created: true, operation };
+    },
     markSpawnDispatched(operationKey) {
-      operationKey = validatedOperationKey(operationKey);
+      operationKey = validatedOperationKey(operationKey, "spawn");
       transaction(() => {
         const result = database
           .prepare(
@@ -578,10 +693,11 @@ function createControlStore(database: DatabaseSync): ControlStore {
       });
     },
     commitSpawn(input) {
-      const operationKey = validatedOperationKey(input.operationKey);
+      const operationKey = validatedOperationKey(input.operationKey, "spawn");
       const sessionInput = validateSessionIdentity(input.session);
       validateOperationOwnership(
         operationKey,
+        "spawn",
         sessionInput.runtimeScopeId,
         sessionInput.consumer,
         sessionInput.generation,
@@ -639,8 +755,134 @@ function createControlStore(database: DatabaseSync): ControlStore {
       });
       return committed;
     },
+    markSendDispatched(operationKey) {
+      operationKey = validatedOperationKey(operationKey, "send");
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'dispatched' WHERE operation_key = ? AND status = 'pending'",
+          )
+          .run(operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error("Send operation is not awaiting dispatch");
+      });
+    },
+    commitSend(input) {
+      const operationKey = validatedOperationKey(input.operationKey, "send");
+      const sessionInput = validateSessionIdentity(input.session);
+      validateOperationOwnership(
+        operationKey,
+        "send",
+        sessionInput.runtimeScopeId,
+        sessionInput.consumer,
+        sessionInput.generation,
+      );
+      const parsedResult = v.parse(sendAckSchema, input.result);
+      const parsedSession = sessionInput.info;
+      const events = input.events.map((event) =>
+        v.parse(domainEventSchema, event),
+      );
+      const operation = readOperation(operationKey);
+      if (operation?.kind !== "send")
+        throw new Error("Send operation record is missing");
+      const caller = events[1];
+      if (
+        operation.request.placement !== "new_turn" ||
+        parsedResult.deliveryPoint !== "new_turn" ||
+        parsedResult.sessionId !== operation.request.sessionId ||
+        parsedSession.sessionId !== parsedResult.sessionId ||
+        events.length < 2 ||
+        events[0]?.type !== "turn.started" ||
+        events[0].sessionId !== parsedResult.sessionId ||
+        events[0].turnId !== parsedResult.turnId ||
+        caller?.type !== "message" ||
+        caller.sessionId !== parsedResult.sessionId ||
+        caller.turnId !== parsedResult.turnId ||
+        caller.messageId !== parsedResult.messageId ||
+        caller.role !== "caller" ||
+        (typeof caller.content === "string" &&
+          caller.content !== operation.request.message) ||
+        events.some(
+          (event, index) =>
+            event.sessionId !== parsedResult.sessionId ||
+            (index > 1 &&
+              (event.type === "turn.started" ||
+                event.type === "session.created" ||
+                event.type === "session.killed" ||
+                !("turnId" in event) ||
+                event.turnId !== parsedResult.turnId ||
+                (event.type === "message" && event.role === "caller"))),
+        )
+      )
+        throw new Error("Send events do not match the accepted new turn");
+      const terminalEvents = events.filter(
+        (event) => event.type === "turn.completed",
+      );
+      if (
+        terminalEvents.length > 1 ||
+        (terminalEvents.length === 1 && events.at(-1) !== terminalEvents[0])
+      )
+        throw new Error("Send event batch has an invalid turn completion");
+
+      return transaction(() => {
+        const currentOperation = readOperation(operationKey);
+        if (
+          currentOperation?.kind !== "send" ||
+          currentOperation.status !== "dispatched"
+        )
+          throw new Error("Send operation was not marked dispatched");
+        if (
+          currentOperation.runtimeScopeId !== sessionInput.runtimeScopeId ||
+          currentOperation.consumer !== sessionInput.consumer ||
+          currentOperation.generation !== sessionInput.generation
+        )
+          throw new Error(
+            "Send operation ownership does not match its session",
+          );
+        const existingSession = readSession(parsedResult.sessionId);
+        if (
+          existingSession === undefined ||
+          existingSession.runtimeScopeId !== sessionInput.runtimeScopeId ||
+          existingSession.consumer !== sessionInput.consumer ||
+          existingSession.generation !== sessionInput.generation ||
+          existingSession.info.state !== "idle"
+        )
+          throw new Error("Send target is not the recorded idle session");
+        const lastCompletedTurn = existingSession.info.lastCompletedTurn;
+        if (
+          currentOperation.request.ifLastCompletedTurn !== undefined &&
+          (currentOperation.request.ifLastCompletedTurn.sessionId !==
+            parsedResult.sessionId ||
+            currentOperation.request.ifLastCompletedTurn.turnId !==
+              lastCompletedTurn?.turnId)
+        )
+          throw new Error("Send precondition no longer matches the session");
+        const terminal = terminalEvents[0];
+        if (
+          parsedSession.turns !==
+            existingSession.info.turns + (terminal === undefined ? 0 : 1) ||
+          (terminal === undefined &&
+            (parsedSession.state !== "busy" ||
+              parsedSession.activeTurnId !== parsedResult.turnId)) ||
+          (terminal !== undefined &&
+            (parsedSession.state !== "idle" ||
+              parsedSession.lastCompletedTurn?.turnId !== terminal.turnId ||
+              parsedSession.lastCompletedTurn.stopReason !==
+                terminal.stopReason))
+        )
+          throw new Error("Send session projection does not match its events");
+        commitSessionProjection(parsedResult.sessionId, parsedSession);
+        const entries = events.map(appendEvent);
+        database
+          .prepare(
+            "UPDATE operations SET status = 'succeeded', result_json = ? WHERE operation_key = ? AND status = 'dispatched'",
+          )
+          .run(stableJson(parsedResult), operationKey);
+        return entries;
+      });
+    },
     failSpawn(operationKey, error) {
-      operationKey = validatedOperationKey(operationKey);
+      operationKey = validatedOperationKey(operationKey, "spawn");
       const parsedError = v.parse(machineErrorSchema, error);
       transaction(() => {
         const result = database
@@ -653,7 +895,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
       });
     },
     recordSpawnOutcomeUnknown(operationKey, error) {
-      operationKey = validatedOperationKey(operationKey);
+      operationKey = validatedOperationKey(operationKey, "spawn");
       const parsedError = v.parse(machineErrorSchema, error);
       if (parsedError.code !== "operation_outcome_unknown")
         throw new Error("Spawn outcome error has the wrong code");
@@ -674,6 +916,41 @@ function createControlStore(database: DatabaseSync): ControlStore {
         }
       });
     },
+    failSend(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "send");
+      const parsedError = v.parse(machineErrorSchema, error);
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'failed', error_json = ? WHERE operation_key = ? AND status IN ('pending', 'dispatched') AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error("Send operation is not pending");
+      });
+    },
+    recordSendOutcomeUnknown(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "send");
+      const parsedError = v.parse(machineErrorSchema, error);
+      if (parsedError.code !== "operation_outcome_unknown")
+        throw new Error("Send outcome error has the wrong code");
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET error_json = ? WHERE operation_key = ? AND status = 'dispatched' AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1) {
+          const operation = readOperation(operationKey);
+          if (
+            operation?.status === "outcome_unknown" &&
+            stableJson(operation.error) === stableJson(parsedError)
+          )
+            return;
+          throw new Error("Send operation is not awaiting an unknown outcome");
+        }
+      });
+    },
     recordEvent(event, session) {
       const parsedEvent = v.parse(domainEventSchema, event);
       return transaction(() => {
@@ -691,12 +968,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
       return readOperation(operationKey);
     },
     getSession(sessionId) {
-      assertOpen();
-      sessionId = v.parse(sessionIdSchema, sessionId);
-      const row = database
-        .prepare("SELECT * FROM sessions WHERE session_id = ?")
-        .get(sessionId) as SessionRow | undefined;
-      return row === undefined ? undefined : sessionFromRow(row);
+      return readSession(sessionId);
     },
     listSessions() {
       assertOpen();
