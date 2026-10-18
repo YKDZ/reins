@@ -38,6 +38,8 @@ function fingerprintEvent(event: DomainEvent): unknown {
       };
     case "turn.started":
       return event;
+    case "background.activity":
+      return event;
     case "text.delta":
       return { ...event, deltaHash: sha256(event.delta), delta: undefined };
     case "message":

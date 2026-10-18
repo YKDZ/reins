@@ -16,6 +16,11 @@ import type {
   MessageKey,
   MessageContentPart,
   ToolKey,
+  SessionId,
+  BackgroundActivitySource,
+  BackgroundActivityStatus,
+  TurnOrigin as ProtocolTurnOrigin,
+  AutonomousTurnCause as ProtocolAutonomousTurnCause,
 } from "@reins/protocol";
 import {
   encodePermissionHandle,
@@ -44,6 +49,18 @@ type ToPublicMessageContentPart<TPart> = TPart extends {
   : TPart;
 type PublicMessageContentPart = ToPublicMessageContentPart<MessageContentPart>;
 
+type PublicBackgroundCause = {
+  turnHandle: TurnHandle;
+  toolKey?: ToolKey | undefined;
+};
+type PublicAutonomousTurnCause =
+  | {
+      source: BackgroundActivitySource;
+      causedBy?: PublicBackgroundCause | undefined;
+    }
+  | { source?: undefined; causedBy: PublicBackgroundCause };
+type PublicTurnOrigin = ProtocolTurnOrigin;
+
 type PublicFact<E> = E extends DomainEvent
   ? Omit<
       E,
@@ -52,6 +69,9 @@ type PublicFact<E> = E extends DomainEvent
       | "messageId"
       | "toolCallId"
       | "permissionId"
+      | (E extends { type: "turn.started" } ? "origin" : never)
+      | (E extends { type: "turn.started" } ? "cause" : never)
+      | (E extends { type: "background.activity" } ? "causedBy" : never)
       | (E extends { type: "message" } ? "content" : never)
     > & {
       sessionHandle: SessionHandle;
@@ -63,6 +83,19 @@ type PublicFact<E> = E extends DomainEvent
       (E extends { toolCallId: unknown } ? { toolKey: ToolKey } : {}) &
       (E extends { permissionId: unknown }
         ? { permissionHandle: PermissionHandle }
+        : {}) &
+      (E extends { type: "turn.started" }
+        ? {
+            origin?: PublicTurnOrigin;
+            cause?: PublicAutonomousTurnCause;
+          }
+        : {}) &
+      (E extends { type: "background.activity" }
+        ? {
+            source: BackgroundActivitySource;
+            status: BackgroundActivityStatus;
+            causedBy?: PublicBackgroundCause;
+          }
         : {})
   : never;
 
@@ -88,11 +121,13 @@ export type AgentSubscriptionInitial =
     };
 export type AgentSubscriptionBaseline = {
   session: SessionInfo;
+  activeTurnCause?: PublicAutonomousTurnCause;
   confirmedTerminals: Extract<
     AgentFact,
     { type: "turn.completed" | "session.killed" }
   >[];
   pendingPermissions: Extract<AgentFact, { type: "permission.requested" }>[];
+  backgroundActivities: Extract<AgentFact, { type: "background.activity" }>[];
 };
 
 export function projectAgentSubscriptionInitial(
@@ -112,12 +147,24 @@ export function projectAgentSubscriptionInitial(
     target,
     baseline: {
       session: initial.baseline.session,
+      ...(initial.baseline.activeTurnCause === undefined
+        ? {}
+        : {
+            activeTurnCause: projectAutonomousTurnCause(
+              initial.baseline.activeTurnCause,
+              initial.baseline.session.sessionId,
+              generation,
+            ),
+          }),
       confirmedTerminals: initial.baseline.confirmedTerminals.map(
         projectEvent,
       ) as AgentSubscriptionBaseline["confirmedTerminals"],
       pendingPermissions: initial.baseline.pendingPermissions.map(
         projectEvent,
       ) as AgentSubscriptionBaseline["pendingPermissions"],
+      backgroundActivities: initial.baseline.backgroundActivities.map(
+        projectEvent,
+      ) as AgentSubscriptionBaseline["backgroundActivities"],
     },
   };
 }
@@ -203,9 +250,26 @@ export function createAgentFact(
         };
       })
     : fields.content;
+  const origin = fields.origin as ProtocolTurnOrigin | undefined;
+  const publicOrigin =
+    origin === undefined ? undefined : projectTurnOrigin(origin);
+  const publicTurnCause =
+    event.type === "turn.started" && event.cause !== undefined
+      ? projectAutonomousTurnCause(event.cause, parsedSessionId, generation)
+      : undefined;
+  const publicBackgroundCause =
+    event.type === "background.activity" && event.causedBy !== undefined
+      ? projectBackgroundCause(event.causedBy, parsedSessionId, generation)
+      : undefined;
   const fact = {
     ...fields,
     ...(fields.content === undefined ? {} : { content: publicContent }),
+    ...(publicOrigin === undefined ? {} : { origin: publicOrigin }),
+    ...(publicTurnCause === undefined ? {} : { cause: publicTurnCause }),
+    ...(event.type === "background.activity" &&
+    publicBackgroundCause !== undefined
+      ? { causedBy: publicBackgroundCause }
+      : {}),
     sessionHandle: parsedSessionId,
     ...(parsedTurnId !== undefined
       ? {
@@ -253,4 +317,52 @@ export function createAgentFact(
     ) as AgentFactId,
   };
   return fact as AgentFact;
+}
+
+function projectTurnOrigin(origin: ProtocolTurnOrigin): PublicTurnOrigin {
+  return origin;
+}
+
+function projectBackgroundCause(
+  cause: { turnId: string; toolCallId?: string | undefined },
+  sessionId: SessionId,
+  generation: DaemonGeneration,
+): PublicBackgroundCause {
+  const turnId = v.parse(turnIdSchema, cause.turnId);
+  return {
+    turnHandle: encodeTurnHandle({ sessionId, turnId }),
+    ...(cause.toolCallId === undefined
+      ? {}
+      : {
+          toolKey: encodeToolKey({
+            generation,
+            sessionId,
+            turnId,
+            toolCallId: v.parse(toolCallIdSchema, cause.toolCallId),
+          }),
+        }),
+  };
+}
+
+function projectAutonomousTurnCause(
+  cause: ProtocolAutonomousTurnCause,
+  sessionId: SessionId,
+  generation: DaemonGeneration,
+): PublicAutonomousTurnCause {
+  if (cause.source !== undefined)
+    return {
+      source: cause.source,
+      ...(cause.causedBy === undefined
+        ? {}
+        : {
+            causedBy: projectBackgroundCause(
+              cause.causedBy,
+              sessionId,
+              generation,
+            ),
+          }),
+    };
+  return {
+    causedBy: projectBackgroundCause(cause.causedBy, sessionId, generation),
+  };
 }

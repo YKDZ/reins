@@ -135,6 +135,7 @@ describe("权限与事件", () => {
         {
           sessionId: id,
           turnId: ids.turn("t1"),
+          origin: { kind: "caller" },
           stopReason: "failed",
           failure: {
             failureCategory: "unclassified",
