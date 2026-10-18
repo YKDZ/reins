@@ -165,15 +165,32 @@ export type CodexInboundItem =
       type: "commandExecution";
       id: string;
       status: ToolItemStatus;
+      command?: string;
       output: string | null;
     }
-  | { type: "fileChange"; id: string; status: ToolItemStatus; changes: string }
+  | {
+      type: "fileChange";
+      id: string;
+      status: ToolItemStatus;
+      changes: unknown;
+    }
   | {
       type: "mcpToolCall";
       id: string;
       status: "inProgress" | "completed" | "failed";
-      result: string;
+      arguments?: unknown;
+      result: unknown;
       error: { message: string } | null;
+    }
+  | {
+      type: "dynamicToolCall";
+      id: string;
+      namespace: string | null;
+      tool: string;
+      status: "inProgress" | "completed" | "failed";
+      arguments: unknown;
+      contentItems: unknown[] | null;
+      success: boolean | null;
     };
 
 type TokenCounts = {
@@ -712,7 +729,6 @@ export function createCodexTransport(options: {
     "hookPrompt",
     "plan",
     "reasoning",
-    "dynamicToolCall",
     "collabAgentToolCall",
     "subAgentActivity",
     "webSearch",
@@ -756,6 +772,7 @@ export function createCodexTransport(options: {
       const status = parseToolStatus(value.status);
       if (
         status === null ||
+        (value.command !== undefined && typeof value.command !== "string") ||
         (value.aggregatedOutput !== null &&
           typeof value.aggregatedOutput !== "string")
       )
@@ -766,6 +783,9 @@ export function createCodexTransport(options: {
           type: "commandExecution",
           id: value.id,
           status,
+          ...(typeof value.command === "string"
+            ? { command: value.command }
+            : {}),
           output: value.aggregatedOutput,
         },
       };
@@ -779,7 +799,7 @@ export function createCodexTransport(options: {
           type: "fileChange",
           id: value.id,
           status,
-          changes: JSON.stringify(value.changes),
+          changes: value.changes,
         },
       };
     }
@@ -800,8 +820,37 @@ export function createCodexTransport(options: {
           type: "mcpToolCall",
           id: value.id,
           status,
-          result: JSON.stringify(value.result),
+          ...(Object.hasOwn(value, "arguments")
+            ? { arguments: value.arguments }
+            : {}),
+          result: value.result,
           error: error === null ? null : { message: error.message as string },
+        },
+      };
+    }
+    if (value.type === "dynamicToolCall") {
+      const status = parseToolStatus(value.status);
+      if (
+        status === null ||
+        status === "declined" ||
+        (value.namespace !== null && typeof value.namespace !== "string") ||
+        typeof value.tool !== "string" ||
+        !hasOwn(value, "arguments") ||
+        (value.contentItems !== null && !Array.isArray(value.contentItems)) ||
+        (value.success !== null && typeof value.success !== "boolean")
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "dynamicToolCall",
+          id: value.id,
+          namespace: value.namespace,
+          tool: value.tool,
+          status,
+          arguments: value.arguments,
+          contentItems: value.contentItems,
+          success: value.success,
         },
       };
     }

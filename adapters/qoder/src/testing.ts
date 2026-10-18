@@ -41,7 +41,7 @@ function deriveFixtureFacts(
   const deltasById = new Map<string, string[]>();
   const snapshotsById = new Map<string, string>();
   const toolsById = new Map<string, { name: string }>();
-  const resultsById = new Map<string, { content: string; isError: boolean }>();
+  const resultsById = new Map<string, { content: unknown; isError: boolean }>();
   let terminalUsage: RecordedUsage | undefined;
   let terminalStopReason: string | undefined;
   let resultCount = 0;
@@ -139,7 +139,11 @@ function deriveFixtureFacts(
     }
     return {
       name: tool.name,
-      resultHash: sha256(result.content),
+      resultHash: sha256(
+        typeof result.content === "string"
+          ? result.content
+          : (JSON.stringify(result.content) ?? ""),
+      ),
       isError: result.isError,
     };
   });

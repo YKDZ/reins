@@ -289,6 +289,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: {},
       },
       {
         type: "tool.requested",
@@ -296,6 +297,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c2",
         name: "Read",
+        input: {},
       },
       {
         type: "tool.completed",
@@ -378,6 +380,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.requested",
@@ -385,6 +388,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c2",
         name: "Read",
+        input: {},
       },
       {
         type: "tool.completed",
@@ -827,6 +831,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.completed",
@@ -919,6 +924,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.requested",
@@ -926,6 +932,7 @@ describe("qoder driver 事件映射", () => {
         turnId: secondTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "ls" },
       },
       {
         type: "tool.completed",
@@ -1134,13 +1141,20 @@ describe("qoder driver 事件映射", () => {
     fake.controls.push({
       type: "assistant",
       message: {
+        id: "a3",
         role: "assistant",
         content: [
           {
+            type: "tool_use",
+            id: "tc1",
+            name: "Bash",
+            input: { command: "printf body", options: ["--raw"] },
+          },
+          {
             type: "tool_result",
             tool_use_id: "tc1",
-            content: "ok",
-            is_error: false,
+            content: [{ type: "text", text: "完整返回正文" }],
+            is_error: true,
           },
         ],
       },
@@ -1163,6 +1177,7 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
+        input: { command: "printf body", options: ["--raw"] },
       },
       {
         type: "tool.completed",
@@ -1170,8 +1185,37 @@ describe("qoder driver 事件映射", () => {
         turnId: firstTurnId,
         toolCallId: "c1",
         name: "Bash",
-        result: "ok",
-        isError: false,
+        result: [{ type: "text", text: "完整返回正文" }],
+        isError: true,
+      },
+    ]);
+  });
+
+  test("原生中断标记的消息正文保留截断事实", async () => {
+    const { events, fake } = setup();
+    fake.controls.push({
+      type: "assistant",
+      message: {
+        id: "partial-message",
+        role: "assistant",
+        content: [{ type: "text", text: "响应在字词中" }],
+      },
+      parent_tool_use_id: null,
+      uuid: "partial-message",
+      session_id: "qs",
+      aborted: true,
+    });
+    await flush();
+
+    expect(events.filter((event) => event.type === "message")).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: firstTurnId,
+        messageId: "m1",
+        role: "worker",
+        content: "响应在字词中",
+        nativeTruncated: true,
       },
     ]);
   });

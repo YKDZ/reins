@@ -192,11 +192,17 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   );
   expect(textFacts.map((fact) => fact.delta)).toEqual(["hello ", "world"]);
   expect(textFacts[0]?.messageKey).toBe(workerMessage?.messageKey);
-  expect(workerMessage).toMatchObject({ content: "hello world" });
+  expect(workerMessage).toMatchObject({
+    content: "hello world",
+    nativeTruncated: true,
+  });
 
   const toolRequested = facts.find((fact) => fact.type === "tool.requested");
   const toolCompleted = facts.find((fact) => fact.type === "tool.completed");
-  expect(toolRequested).toMatchObject({ name: "read-file" });
+  expect(toolRequested).toMatchObject({
+    name: "read-file",
+    input: { path: "report.json", options: { raw: true } },
+  });
   if (toolRequested?.type !== "tool.requested")
     throw new Error("missing tool request fact");
   expect(parseToolKey(serializeToolKey(toolRequested.toolKey))).toBe(
@@ -211,7 +217,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   expect(toolRequested?.toolKey).toBe(toolCompleted?.toolKey);
   expect(toolCompleted).toMatchObject({
     name: "native-result-name",
-    result: "file contents",
+    result: { content: "file contents", metadata: { bytes: 13 } },
     isError: false,
   });
 

@@ -162,12 +162,17 @@ describe("工具生命周期事件", () => {
   };
 
   test("tool.requested 取代 tool.started，tool.completed 必须携带 isError", () => {
-    ok(domainEventSchema, { type: "tool.requested", ...base });
+    ok(domainEventSchema, {
+      type: "tool.requested",
+      ...base,
+      input: { command: "ls", options: ["--all"] },
+    });
     bad(domainEventSchema, { type: "tool.started", ...base });
     ok(domainEventSchema, {
       type: "tool.completed",
       ...base,
-      result: null,
+      result: { content: [{ type: "text", text: "done" }] },
+      error: { code: "native_error", message: "partial result" },
       isError: false,
     });
     bad(domainEventSchema, {

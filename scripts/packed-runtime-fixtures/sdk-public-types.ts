@@ -9,6 +9,7 @@ import {
   serializeSessionHandle,
   serializeTurnHandle,
   type AgentTarget,
+  type AgentFact,
   type HarnessId,
   type ModelCatalogFailure,
   type ModelCatalogResult,
@@ -100,6 +101,19 @@ async function inspectModelCatalog(): Promise<
 
 void connect;
 void supportedHarness;
+declare const publicFact: AgentFact;
+if (publicFact.type === "tool.requested") {
+  const completeToolInput: unknown = publicFact.input;
+  void completeToolInput;
+}
+if (publicFact.type === "tool.completed") {
+  const completeToolOutput: unknown = publicFact.result;
+  void completeToolOutput;
+}
+if (publicFact.type === "message") {
+  const nativeTruncation: true | undefined = publicFact.nativeTruncated;
+  void nativeTruncation;
+}
 void invalidHarness;
 void invalidSpawn;
 void inspectModelCatalog;

@@ -66,6 +66,7 @@ function flushPendingText(
   session: TurnJournal,
   state: QoderMappingState,
   nativeId?: string,
+  nativeTruncatedId?: string,
 ): DomainEvent[] {
   if (session.turnId === null) return [];
   let pending: ReadonlyArray<readonly [string, string]>;
@@ -87,6 +88,7 @@ function flushPendingText(
       messageId: session.messageId(id),
       role: "worker",
       content,
+      ...(id === nativeTruncatedId ? { nativeTruncated: true as const } : {}),
     });
   }
   return events;
@@ -106,22 +108,13 @@ function isNonEmptyString(value: unknown): value is string {
   return typeof value === "string" && value.length > 0;
 }
 
-function stringifyToolResult(result: unknown): string | null {
-  if (result === undefined || result === null) return null;
-  if (typeof result === "string") return result;
-  try {
-    return JSON.stringify(result);
-  } catch {
-    return "[unserializable]";
-  }
-}
-
 function requestTool(
   session: TurnJournal,
   state: QoderMappingState,
   turnId: NonNullable<TurnJournal["turnId"]>,
   nativeId: unknown,
   name: unknown,
+  input: unknown,
 ): DomainEvent | null {
   if (
     !isNonEmptyString(nativeId) ||
@@ -138,6 +131,7 @@ function requestTool(
     turnId,
     toolCallId: session.toolCallId(nativeId),
     name,
+    ...(input === undefined ? {} : { input }),
   };
 }
 
@@ -165,7 +159,7 @@ function completeTool(
     turnId,
     toolCallId: session.toolCallId(nativeId),
     name,
-    result: stringifyToolResult(result),
+    result: result ?? null,
     isError,
   };
 }
@@ -237,8 +231,8 @@ function mapStreamEvent(
     block !== undefined &&
     block.type === "tool_use"
   ) {
-    const requested = requestTool(session, state, turnId, block.id, block.name);
-    return requested === null ? [] : [requested];
+    // 工具输入可能还会随 input_json_delta 到达；完整输入以最终 assistant 快照为准。
+    return [];
   }
   return [];
 }
@@ -290,6 +284,7 @@ async function mapAssistant(
         turnId,
         block.id,
         block.name,
+        block.input,
       );
       if (requested !== null) events.push(requested);
       continue;
@@ -323,9 +318,26 @@ async function mapAssistant(
   }
 
   if (message.aborted === true && session.cancelling) {
-    events.push(...flushPendingText(session, state));
+    events.push(
+      ...flushPendingText(
+        session,
+        state,
+        nativeMessageId ?? undefined,
+        nativeMessageId ?? undefined,
+      ),
+    );
     state.currentAssistantId = null;
     events.push(session.endTurn("cancelled"));
+  } else if (message.aborted === true) {
+    events.push(
+      ...flushPendingText(
+        session,
+        state,
+        nativeMessageId ?? undefined,
+        nativeMessageId ?? undefined,
+      ),
+    );
+    state.currentAssistantId = null;
   } else if (message.message.stop_reason === "end_turn") {
     events.push(...flushPendingText(session, state));
     state.currentAssistantId = null;

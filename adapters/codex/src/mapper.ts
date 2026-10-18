@@ -61,13 +61,30 @@ function mapItemStarted(
 ): DomainEvent[] {
   if (item.type === "agentMessage" || session.turnId === null) return [];
   session.toolNames.set(item.id, item.type);
+  const input =
+    item.type === "commandExecution"
+      ? item.command
+      : item.type === "fileChange"
+        ? item.changes
+        : item.type === "mcpToolCall"
+          ? item.arguments
+          : item.type === "dynamicToolCall"
+            ? item.arguments
+            : undefined;
+  const name =
+    item.type === "dynamicToolCall"
+      ? item.namespace === null
+        ? item.tool
+        : `${item.namespace}.${item.tool}`
+      : item.type;
   return [
     {
       type: "tool.requested",
       sessionId: session.sessionId,
       turnId: session.turnId,
       toolCallId: session.toolCallId(item.id),
-      name: item.type,
+      name,
+      ...(input === undefined ? {} : { input }),
     },
   ];
 }
@@ -124,8 +141,24 @@ function mapItemCompleted(
         turnId: session.turnId,
         toolCallId: session.toolCallId(item.id),
         name: session.toolNames.get(item.id) ?? "mcpToolCall",
-        result: item.error?.message ?? item.result,
+        result: item.result,
+        ...(item.error === null ? {} : { error: item.error }),
         isError: isFailedStatus(item.status) || item.error !== null,
+      },
+    ];
+  }
+  if (item.type === "dynamicToolCall") {
+    const name =
+      item.namespace === null ? item.tool : `${item.namespace}.${item.tool}`;
+    return [
+      {
+        type: "tool.completed",
+        sessionId: session.sessionId,
+        turnId: session.turnId,
+        toolCallId: session.toolCallId(item.id),
+        name,
+        result: item.contentItems,
+        isError: isFailedStatus(item.status) || item.success === false,
       },
     ];
   }

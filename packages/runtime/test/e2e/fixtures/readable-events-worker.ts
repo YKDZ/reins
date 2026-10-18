@@ -71,14 +71,20 @@ async function run(input: {
       messageId: "reply",
       role: "worker",
       content: "hello world",
+      nativeTruncated: true,
     });
   }
-  emit({ type: "tool.requested", toolCallId: "read-1", name: "read-file" });
+  emit({
+    type: "tool.requested",
+    toolCallId: "read-1",
+    name: "read-file",
+    input: { path: "report.json", options: { raw: true } },
+  });
   emit({
     type: "tool.completed",
     toolCallId: "read-1",
     name: "native-result-name",
-    result: "file contents",
+    result: { content: "file contents", metadata: { bytes: 13 } },
     isError: false,
   });
   if (task.permission) {

@@ -259,13 +259,21 @@ export type AgentFact =
       messageKey: MessageKey;
       role: "caller" | "worker";
       content: string;
+      /** 仅上游明确报告正文截断时出现。 */
+      nativeTruncated?: true;
     })
-  | (TurnFactBase & { type: "tool.requested"; toolKey: ToolKey; name: string })
+  | (TurnFactBase & {
+      type: "tool.requested";
+      toolKey: ToolKey;
+      name: string;
+      input?: unknown;
+    })
   | (TurnFactBase & {
       type: "tool.completed";
       toolKey: ToolKey;
       name: string;
-      result: string | null;
+      result: unknown;
+      error?: unknown;
       isError: boolean;
     })
   | (TurnFactBase & {

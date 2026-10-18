@@ -639,6 +639,8 @@ export const domainEventSchema = v.union([
     messageId: messageIdSchema,
     role: v.union([v.literal("caller"), v.literal("worker")]),
     content: v.string(),
+    // 仅上游明确报告截断时标记；缺省不表示 Reins 历史存在缺口。
+    nativeTruncated: v.optional(v.literal(true)),
   }),
   v.strictObject({
     type: v.literal("tool.requested"),
@@ -646,6 +648,7 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     toolCallId: toolCallIdSchema,
     name: v.string(),
+    input: v.optional(v.unknown()),
   }),
   v.strictObject({
     type: v.literal("tool.completed"),
@@ -653,7 +656,8 @@ export const domainEventSchema = v.union([
     turnId: turnIdSchema,
     toolCallId: toolCallIdSchema,
     name: v.string(),
-    result: v.nullable(v.string()),
+    result: v.unknown(),
+    error: v.optional(v.unknown()),
     isError: v.boolean(),
   }),
   v.strictObject({

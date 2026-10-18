@@ -238,7 +238,7 @@ describe("Qoder fixture candidate acceptance", () => {
       minimumNativeToolCount: 2,
     });
     expect(JSON.parse(candidate.metadata)).toMatchObject({
-      projectionVersion: 2,
+      projectionVersion: 3,
       sourceSha256: createHash("sha256").update(fixture.raw).digest("hex"),
       artifactSha256: createHash("sha256")
         .update(candidate.jsonl)

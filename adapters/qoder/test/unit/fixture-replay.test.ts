@@ -144,7 +144,7 @@ describe("录制 fixture 回放", () => {
               "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
             artifactSha256:
               "380b7a9d716ce02770f2f35a6976f9e2227eb240388ff47d7679fd20d7d7a9fb",
-            projectionVersion: 2,
+            projectionVersion: 3,
           },
           "two-tools": {
             sourceSha256: fixture.metadata.sourceSha256,
@@ -178,7 +178,7 @@ describe("录制 fixture 回放", () => {
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.25",
       sdkVersion: "1.0.23",
-      projectionVersion: 2,
+      projectionVersion: 3,
       artifactSha256:
         "380b7a9d716ce02770f2f35a6976f9e2227eb240388ff47d7679fd20d7d7a9fb",
       sourceSha256:
@@ -284,7 +284,7 @@ describe("录制 fixture 回放", () => {
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.23",
       sdkVersion: "1.0.23",
-      projectionVersion: 2,
+      projectionVersion: 3,
       artifactSha256:
         "fd22bd2353a3b9651e88a52e057c3dd31ca7de04d811ce8d803826a022096491",
       sourceSha256:

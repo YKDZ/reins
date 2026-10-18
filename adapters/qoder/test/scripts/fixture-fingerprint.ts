@@ -51,9 +51,15 @@ function fingerprintEvent(event: DomainEvent): unknown {
     case "tool.completed":
       return {
         ...event,
-        resultPresent: event.result !== null,
-        resultHash: sha256(event.result ?? ""),
+        resultPresent: event.result !== null && event.result !== undefined,
+        resultHash: sha256(JSON.stringify(event.result ?? null)),
         result: undefined,
+        ...(event.error === undefined
+          ? {}
+          : {
+              errorHash: sha256(JSON.stringify(event.error)),
+              error: undefined,
+            }),
       };
     case "permission.requested":
       return {

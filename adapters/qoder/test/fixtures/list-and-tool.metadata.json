@@ -4,7 +4,7 @@
   "sdkVersion": "1.0.23",
   "qoderCliVersion": "1.1.25",
   "protocolVersion": "1.2.0",
-  "projectionVersion": 2,
+  "projectionVersion": 3,
   "lineCount": 23,
   "uniqueNativeToolCount": 1,
   "artifactSha256": "380b7a9d716ce02770f2f35a6976f9e2227eb240388ff47d7679fd20d7d7a9fb",
