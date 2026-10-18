@@ -1,12 +1,20 @@
 import {
   connect,
   openControl,
+  parseOperationKey,
   parseRuntimeScopeId,
+  parseResumeCursor,
   ReinsSdkError,
+  serializeOperationKey,
+  serializeResumeCursor,
   type ControlByteChannel,
   type ControlChannelOpener,
   type ControlRuntimeTarget,
+  type OperationKey,
   type ReinsConnection,
+  type ResumeCursor,
+  type SessionHandle,
+  type TurnHandle,
 } from "@ykdz/reins-sdk";
 
 declare const process: {
@@ -20,7 +28,9 @@ type ChildInput = {
   write(bytes: Uint8Array, callback: (error?: Error | null) => void): boolean;
   end(callback?: () => void): void;
   once(event: "error", listener: (error: Error) => void): ChildInput;
+  once(event: "drain", listener: () => void): ChildInput;
   removeListener(event: "error", listener: (error: Error) => void): ChildInput;
+  removeListener(event: "drain", listener: () => void): ChildInput;
 };
 
 type ChildProcess = {
@@ -52,17 +62,36 @@ type ChildProcessModule = {
   ): ChildProcess;
 };
 
+type FileSystemModule = {
+  existsSync(path: string): boolean;
+  writeFileSync(path: string, contents: string, encoding: "utf8"): void;
+};
+
+type ChannelAdapterOptions = {
+  readonly env?: Record<string, string | undefined>;
+  readonly dropResponseFor?: string;
+  readonly onRequestWritten?: (method: string) => void;
+  readonly onResponseDropped?: () => void;
+  readonly onWriteBackpressure?: (method: string | undefined) => void;
+  readonly onWriteDrain?: (method: string | undefined) => void;
+};
+
 const childProcess = process.getBuiltinModule(
   "node:child_process",
 ) as ChildProcessModule;
+const fileSystem = process.getBuiltinModule("node:fs") as FileSystemModule;
 const children: ChildProcess[] = [];
 const childTerminations: Promise<{
   exitCode: number | null;
   signal: string | null;
 }>[] = [];
 const channels: ControlByteChannel[] = [];
-const diagnosticTasks = new Map<ControlByteChannel, Promise<number>>();
+const diagnosticTasks = new Map<
+  ControlByteChannel,
+  Promise<{ byteLength: number; text: string }>
+>();
 const connections: ReinsConnection[] = [];
+let fragmentedFrameCount = 0;
 
 function required(name: string): string {
   const value = process.env[name];
@@ -77,21 +106,35 @@ function abortError(): Error {
   return error;
 }
 
-function drainDiagnostics(channel: ControlByteChannel): Promise<number> {
+function drainDiagnostics(
+  channel: ControlByteChannel,
+): Promise<{ byteLength: number; text: string }> {
   return (async () => {
-    let totalBytes = 0;
-    for await (const bytes of channel.diagnostics) totalBytes += bytes.length;
-    return totalBytes;
+    const chunks: Uint8Array[] = [];
+    let byteLength = 0;
+    for await (const bytes of channel.diagnostics) {
+      chunks.push(bytes);
+      byteLength += bytes.length;
+    }
+    const output = new Uint8Array(byteLength);
+    let offset = 0;
+    for (const chunk of chunks) {
+      output.set(chunk, offset);
+      offset += chunk.length;
+    }
+    return { byteLength, text: new TextDecoder().decode(output) };
   })();
 }
 
 async function openTarget(
   target: ControlRuntimeTarget,
   signal: AbortSignal,
+  options: ChannelAdapterOptions = {},
 ): Promise<ControlByteChannel> {
   if (signal.aborted) throw abortError();
+  let droppedRequestId: string | undefined;
   const child = childProcess.spawn(target.command, [...target.args], {
-    env: process.env,
+    env: options.env ?? process.env,
     stdio: ["pipe", "pipe", "pipe"],
   });
   children.push(child);
@@ -130,23 +173,127 @@ async function openTarget(
     if (signal.aborted) onAbort();
   });
   const channel: ControlByteChannel = {
-    readable: child.stdout,
+    readable: (async function* () {
+      let pending = new Uint8Array();
+      const emitFrame = function* (frame: Uint8Array) {
+        for (let offset = 0; offset < frame.length; offset += 7) {
+          const end = Math.min(offset + 7, frame.length);
+          if (end - offset < frame.length) fragmentedFrameCount += 1;
+          yield frame.slice(offset, end);
+        }
+      };
+      for await (const bytes of child.stdout) {
+        const combined = new Uint8Array(pending.length + bytes.length);
+        combined.set(pending);
+        combined.set(bytes, pending.length);
+        pending = combined;
+        let newlineIndex: number;
+        while ((newlineIndex = pending.indexOf(0x0a)) !== -1) {
+          const frame = pending.slice(0, newlineIndex + 1);
+          pending = pending.slice(newlineIndex + 1);
+          let dropped = false;
+          if (droppedRequestId !== undefined) {
+            try {
+              const message = JSON.parse(new TextDecoder().decode(frame)) as {
+                readonly requestId?: string;
+              };
+              if (message.requestId === droppedRequestId) {
+                droppedRequestId = undefined;
+                options.onResponseDropped?.();
+                if (!child.stdin.writableEnded) child.stdin.end();
+                dropped = true;
+              }
+            } catch {
+              // 协议帧由 SDK 校验；消费者适配器只用于丢弃指定请求的响应。
+            }
+          }
+          if (!dropped) yield* emitFrame(frame);
+        }
+      }
+      if (pending.length > 0) yield* emitFrame(pending);
+    })(),
     diagnostics: child.stderr,
     async write(bytes) {
       if (child.stdin.writableEnded)
         throw new Error("The target control input is closed");
-      await new Promise<void>((resolve, reject) => {
+      let requestMethod: string | undefined;
+      if (options.dropResponseFor !== undefined) {
+        try {
+          const request = JSON.parse(new TextDecoder().decode(bytes)) as {
+            readonly requestId?: string;
+            readonly method?: string;
+          };
+          requestMethod = request.method;
+          if (request.method !== undefined)
+            options.onRequestWritten?.(request.method);
+          if (
+            request.method === options.dropResponseFor &&
+            request.requestId !== undefined
+          )
+            droppedRequestId = request.requestId;
+        } catch {
+          // 消费者只检查完整请求；未知字节仍原样交给正式控制入口。
+        }
+      } else {
+        try {
+          const request = JSON.parse(new TextDecoder().decode(bytes)) as {
+            readonly method?: string;
+          };
+          requestMethod = request.method;
+          if (request.method !== undefined)
+            options.onRequestWritten?.(request.method);
+        } catch {
+          // 非请求帧仍原样交给正式控制入口。
+        }
+      }
+      let resolveDrain!: () => void;
+      let rejectDrain!: (error: Error) => void;
+      const drain = new Promise<void>((resolve, reject) => {
+        resolveDrain = resolve;
+        rejectDrain = reject;
+      });
+      const onDrain = (): void => {
+        child.stdin.removeListener("error", onDrainError);
+        resolveDrain();
+      };
+      const onDrainError = (error: Error): void => {
+        child.stdin.removeListener("drain", onDrain);
+        rejectDrain(error);
+      };
+      child.stdin.once("drain", onDrain);
+      child.stdin.once("error", onDrainError);
+      let needsDrain = false;
+      const written = new Promise<void>((resolve, reject) => {
         const onError = (error: Error): void => {
           child.stdin.removeListener("error", onError);
           reject(error);
         };
         child.stdin.once("error", onError);
-        child.stdin.write(bytes, (error) => {
+        let writable: boolean;
+        try {
+          writable = child.stdin.write(bytes, (error) => {
+            child.stdin.removeListener("error", onError);
+            if (error == null) resolve();
+            else reject(error);
+          });
+        } catch (error) {
           child.stdin.removeListener("error", onError);
-          if (error == null) resolve();
-          else reject(error);
-        });
+          child.stdin.removeListener("drain", onDrain);
+          child.stdin.removeListener("error", onDrainError);
+          reject(error instanceof Error ? error : new Error(String(error)));
+          return;
+        }
+        if (writable) {
+          child.stdin.removeListener("drain", onDrain);
+          child.stdin.removeListener("error", onDrainError);
+          resolveDrain();
+        } else {
+          needsDrain = true;
+          options.onWriteBackpressure?.(requestMethod);
+        }
       });
+      await Promise.all([written, drain]);
+      if (needsDrain) options.onWriteDrain?.(requestMethod);
     },
     close() {
       if (child.stdin.writableEnded) return Promise.resolve();
@@ -176,13 +323,14 @@ type ConnectedTarget = {
 
 async function connectTarget(
   target: ControlRuntimeTarget,
+  options?: ChannelAdapterOptions,
 ): Promise<ConnectedTarget> {
   let channel: ControlByteChannel | undefined;
   const openControlChannel: ControlChannelOpener = async (
     runtimeTarget,
     signal,
   ) => {
-    channel = await openTarget(runtimeTarget, signal);
+    channel = await openTarget(runtimeTarget, signal, options);
     return channel;
   };
   const connection = await openControl({
@@ -224,6 +372,327 @@ function deferred<Value>() {
     resolve = accept;
   });
   return { promise, resolve };
+}
+
+async function verifyProcessPipeBackpressure(
+  target: ControlRuntimeTarget,
+): Promise<void> {
+  const pressuredMethods: (string | undefined)[] = [];
+  const drainedMethods: (string | undefined)[] = [];
+  const opened = await connectTarget(target, {
+    onWriteBackpressure: (method) => pressuredMethods.push(method),
+    onWriteDrain: (method) => drainedMethods.push(method),
+  });
+  const gate = required("REINS_PACKED_CHANNEL_BACKPRESSURE_GATE");
+  fileSystem.writeFileSync(gate, "released", "utf8");
+  const spawned = await opened.connection.spawn(
+    {
+      harness: "qoder",
+      sessionLabel: "packed-channel-pipe-backpressure",
+      message: JSON.stringify({
+        gate,
+        messages: 0,
+        reply: "x".repeat(256 * 1024),
+      }),
+      cwd: required("REINS_WORKER_CWD"),
+    },
+    { operationKey: opened.connection.prepareOperation("spawn") },
+  );
+  const completed = await opened.connection.wait({
+    targets: [spawned.turnHandle],
+    completion: "all",
+  });
+  if (
+    !pressuredMethods.includes("spawn") ||
+    !drainedMethods.includes("spawn") ||
+    completed.status !== "satisfied" ||
+    completed.completed[0]?.stopReason !== "end_turn"
+  )
+    throw new Error("实际子进程 stdin 未触发背压、排空并完成正式操作");
+  opened.connection.close();
+  const termination = await waitForExit(opened.channel);
+  if (termination.exitCode !== 0 || termination.signal !== null)
+    throw new Error("实际进程 pipe 背压场景未正常关闭");
+}
+
+async function verifyBridgeFailureDiagnostics(
+  target: ControlRuntimeTarget,
+): Promise<ControlByteChannel> {
+  const failureEnvironment = {
+    ...process.env,
+    REINS_SOCKET: required("REINS_CONTROL_FAILURE_SOCKET"),
+    REINS_STATE_DIR: required("REINS_CONTROL_FAILURE_STATE"),
+    REINS_DAEMON_BIN: "/bin/false",
+  };
+  let failure: unknown;
+  try {
+    await connectTarget(target, { env: failureEnvironment });
+  } catch (error) {
+    failure = error;
+  }
+  const channel = channels.at(-1);
+  if (channel === undefined) throw new Error("失败的控制入口没有打开进程");
+  const termination = await waitForExit(channel);
+  const diagnostic = await diagnosticTasks.get(channel)!;
+  if (
+    !(failure instanceof ReinsSdkError) ||
+    failure.failure.code !== "daemon_disconnected" ||
+    failure.stage !== "handshake" ||
+    termination.exitCode !== 1 ||
+    termination.signal !== null ||
+    diagnostic.byteLength === 0 ||
+    !diagnostic.text.includes("Reins control entry failed")
+  )
+    throw new Error("stdio 控制入口失败未独立送达诊断并收束进程");
+  return channel;
+}
+
+async function verifyOperationAndCursorRecovery(
+  target: ControlRuntimeTarget,
+): Promise<{
+  readonly operationKey: OperationKey<"spawn">;
+  readonly sessionHandle: SessionHandle;
+  readonly turnHandle: TurnHandle;
+  readonly cursor: ResumeCursor;
+}> {
+  const gate = required("REINS_PACKED_CHANNEL_FACT_GATE");
+  if (fileSystem.existsSync(gate))
+    throw new Error("通道恢复事实闸门必须从未释放状态开始");
+  const droppedResponse = deferred<void>();
+  let spawnRequests = 0;
+  const first = await connectTarget(target, {
+    dropResponseFor: "spawn",
+    onRequestWritten(method) {
+      if (method === "spawn") spawnRequests += 1;
+    },
+    onResponseDropped: () => droppedResponse.resolve(undefined),
+  });
+  const operationKey = parseOperationKey(
+    serializeOperationKey(first.connection.prepareOperation("spawn")),
+    "spawn",
+  );
+  const input = {
+    harness: "qoder" as const,
+    sessionLabel: "packed-channel-recovery",
+    message: JSON.stringify({ gate, messages: 2, reply: "channel recovery" }),
+    cwd: required("REINS_WORKER_CWD"),
+  };
+  let unknown: unknown;
+  try {
+    await first.connection.spawn(input, { operationKey });
+  } catch (error) {
+    unknown = error;
+  }
+  await droppedResponse.promise;
+  const termination = await waitForExit(first.channel);
+  if (
+    !(unknown instanceof ReinsSdkError) ||
+    unknown.failure.code !== "operation_outcome_unknown" ||
+    unknown.failure.facts.operationKey !== operationKey ||
+    spawnRequests !== 1 ||
+    termination.exitCode !== 0 ||
+    termination.signal !== null
+  )
+    throw new Error("实际进程丢失 spawn 响应后未保留原操作未知事实");
+
+  const reconnected = await connectTarget(target);
+  const operation = await reconnected.connection.getOperation(operationKey);
+  if (operation.status !== "succeeded")
+    throw new Error("重连未从同一控制存储恢复原 spawn 操作");
+  const spawned = operation.result;
+  const [busy] = await reconnected.connection.list({
+    sessionHandle: spawned.sessionHandle,
+  });
+  if (busy?.state !== "busy")
+    throw new Error("控制入口退出被误报为原生会话停止");
+
+  fileSystem.writeFileSync(gate, "released", "utf8");
+  let completed = false;
+  const deadline = Date.now() + 5_000;
+  while (!completed && Date.now() < deadline) {
+    const [session] = await reconnected.connection.list({
+      sessionHandle: spawned.sessionHandle,
+    });
+    completed = session?.state === "idle";
+    if (!completed)
+      await new Promise<void>((resolve) => setTimeout(resolve, 10));
+  }
+  if (!completed) throw new Error("通道恢复事实场景没有完成");
+
+  const targetTurn = {
+    scope: "turn" as const,
+    turnHandle: spawned.turnHandle,
+  };
+  const subscription = await reconnected.connection.attach(targetTurn, {
+    mode: "history",
+  });
+  const acknowledged: string[] = [];
+  for (let index = 0; index < 2; index += 1) {
+    const item = await subscription.next();
+    if (item.done) throw new Error("游标前缀缺少已提交控制事实");
+    acknowledged.push(item.value.type);
+    subscription.acknowledge(item.value);
+  }
+  const checkpoint = parseResumeCursor(
+    serializeResumeCursor(subscription.checkpoint),
+  );
+  const unacknowledged = await subscription.next();
+  if (
+    unacknowledged.done ||
+    unacknowledged.value.type !== "message" ||
+    JSON.stringify(acknowledged) !== JSON.stringify(["turn.started", "message"])
+  )
+    throw new Error(
+      `游标确认前缀或未确认事实与正式轨迹不符：${JSON.stringify({ acknowledged, unacknowledged })}`,
+    );
+  reconnected.connection.close();
+  const disconnect = await subscription.done.then(
+    () => undefined,
+    (error: unknown) => error,
+  );
+  subscription.close();
+  if (
+    !(disconnect instanceof ReinsSdkError) ||
+    disconnect.failure.code !== "daemon_disconnected" ||
+    disconnect.failure.facts.resumeCursor !== checkpoint
+  )
+    throw new Error("通道断开没有返回最后已确认事实的游标");
+
+  const resumed = await connectTarget(target);
+  const continued = await resumed.connection.attach(targetTurn, {
+    mode: "after",
+    cursor: checkpoint,
+  });
+  const replayed: string[] = [];
+  let replayedUnacknowledged = false;
+  try {
+    for (;;) {
+      const item = await continued.next();
+      if (item.done) break;
+      replayed.push(item.value.type);
+      if (
+        item.value.type === "message" &&
+        item.value.factId === unacknowledged.value.factId
+      )
+        replayedUnacknowledged = true;
+      continued.acknowledge(item.value);
+    }
+    const end = await continued.done;
+    if (
+      end.reason !== "end_turn" ||
+      !replayedUnacknowledged ||
+      JSON.stringify(replayed) !==
+        JSON.stringify(["message", "message", "turn.completed"])
+    )
+      throw new Error(
+        `重连未从确认游标重放相同未确认事实并续接尾部：${JSON.stringify({ end, replayed, replayedUnacknowledged, unacknowledged: unacknowledged.value })}`,
+      );
+  } finally {
+    continued.close();
+    resumed.connection.close();
+  }
+  const resumedTermination = await waitForExit(resumed.channel);
+  if (resumedTermination.exitCode !== 0 || resumedTermination.signal !== null)
+    throw new Error("恢复游标后的控制进程未正常退出");
+  return {
+    operationKey,
+    sessionHandle: spawned.sessionHandle,
+    turnHandle: spawned.turnHandle,
+    cursor: checkpoint,
+  };
+}
+
+async function verifyOtherTargetRejectsOldIdentity(
+  target: ControlRuntimeTarget,
+  recovered: {
+    readonly operationKey: OperationKey<"spawn">;
+    readonly sessionHandle: SessionHandle;
+    readonly turnHandle: TurnHandle;
+    readonly cursor: ResumeCursor;
+  },
+): Promise<void> {
+  const otherTarget = JSON.parse(
+    required("REINS_CONTROL_OTHER_TARGET"),
+  ) as ControlRuntimeTarget;
+  if (
+    otherTarget.runtimeScopeId === target.runtimeScopeId ||
+    otherTarget.command !== target.command ||
+    JSON.stringify(otherTarget.args) !== JSON.stringify(target.args)
+  )
+    throw new Error("错目标场景没有复用相同入口并绑定不同运行作用域");
+  const otherEnvironment = {
+    ...process.env,
+    REINS_SOCKET: required("REINS_CONTROL_OTHER_SOCKET"),
+    REINS_STATE_DIR: required("REINS_CONTROL_OTHER_STATE"),
+    REINS_DAEMON_BIN: required("REINS_CONTROL_OTHER_DAEMON_BIN"),
+  };
+  const other = await connectTarget(otherTarget, { env: otherEnvironment });
+  try {
+    let operationFailure: unknown;
+    try {
+      await other.connection.getOperation(recovered.operationKey);
+    } catch (error) {
+      operationFailure = error;
+    }
+    if (
+      !(operationFailure instanceof ReinsSdkError) ||
+      operationFailure.failure.code !== "operation_key_scope_mismatch"
+    )
+      throw new Error("错目标接受了旧作用域的操作标识");
+
+    let handleFailure: unknown;
+    try {
+      await other.connection.attach(
+        { scope: "session", sessionHandle: recovered.sessionHandle },
+        { mode: "snapshot" },
+      );
+    } catch (error) {
+      handleFailure = error;
+    }
+    if (
+      !(handleFailure instanceof ReinsSdkError) ||
+      handleFailure.failure.code !== "session_not_found"
+    )
+      throw new Error("错目标接受了旧作用域的会话句柄");
+
+    const gate = required("REINS_PACKED_CHANNEL_FACT_GATE");
+    const local = await other.connection.spawn(
+      {
+        harness: "qoder",
+        sessionLabel: "packed-channel-other-target",
+        message: JSON.stringify({ gate, messages: 0, reply: "other target" }),
+        cwd: required("REINS_WORKER_CWD"),
+      },
+      { operationKey: other.connection.prepareOperation("spawn") },
+    );
+    const otherTurn = {
+      scope: "turn" as const,
+      turnHandle: local.turnHandle,
+    };
+    let cursorFailure: unknown;
+    try {
+      await other.connection.attach(otherTurn, {
+        mode: "after",
+        cursor: recovered.cursor,
+      });
+    } catch (error) {
+      cursorFailure = error;
+    }
+    if (
+      !(cursorFailure instanceof ReinsSdkError) ||
+      cursorFailure.failure.code !== "invalid_params"
+    )
+      throw new Error("错目标接受了旧作用域的续接游标");
+    const sessions = await other.connection.list();
+    if (
+      sessions.length !== 1 ||
+      sessions[0]?.sessionHandle !== local.sessionHandle
+    )
+      throw new Error("拒绝错目标身份时影响了本地会话");
+  } finally {
+    other.connection.close();
+    await waitForExit(other.channel);
+  }
 }
 
 function wireResponse(
@@ -665,6 +1134,8 @@ async function main(): Promise<void> {
     )
       throw new Error("The canceled target did not report its termination");
 
+    await verifyProcessPipeBackpressure(target);
+
     const [first, second] = await Promise.all([
       connectTarget(target),
       connectTarget(target),
@@ -681,7 +1152,10 @@ async function main(): Promise<void> {
       {
         harness: "codex",
         sessionLabel: "packed-control-channel-session",
-        message: "control through the public byte channel",
+        message: JSON.stringify({
+          gate: required("REINS_PACKED_CHANNEL_OPEN_GATE"),
+          reply: "control through the public byte channel",
+        }),
         cwd: required("REINS_WORKER_CWD"),
       },
       { operationKey: first.connection.prepareOperation("spawn") },
@@ -733,18 +1207,6 @@ async function main(): Promise<void> {
       throw new Error("The byte-channel session did not complete after kill");
     third.connection.close();
     const thirdTermination = await waitForExit(third.channel);
-    const diagnosticBytes = await Promise.all(
-      channels.map((channel) => diagnosticTasks.get(channel)!),
-    );
-    if (
-      thirdTermination.exitCode !== 0 ||
-      thirdTermination.signal !== null ||
-      diagnosticBytes.some((count) => count !== 0)
-    )
-      throw new Error(
-        "The stdio control entry mixed diagnostics into the protocol",
-      );
-
     const mismatchTarget = {
       ...target,
       runtimeScopeId: parseRuntimeScopeId(
@@ -779,6 +1241,32 @@ async function main(): Promise<void> {
         );
     }
 
+    const failedBridgeChannel = await verifyBridgeFailureDiagnostics(target);
+    const recovery = await verifyOperationAndCursorRecovery(target);
+    await verifyOtherTargetRejectsOldIdentity(target, recovery);
+    const diagnosticResults = await Promise.all(
+      channels.map(async (channel) => ({
+        channel,
+        result: await diagnosticTasks.get(channel)!,
+      })),
+    );
+    if (
+      thirdTermination.exitCode !== 0 ||
+      thirdTermination.signal !== null ||
+      diagnosticResults.some(
+        ({ channel, result }) =>
+          channel !== failedBridgeChannel && result.byteLength !== 0,
+      ) ||
+      !diagnosticResults.some(
+        ({ channel, result }) =>
+          channel === failedBridgeChannel &&
+          result.text.includes("Reins control entry failed"),
+      )
+    )
+      throw new Error("stdio 控制入口没有隔离健康协议与失败诊断字节");
+    if (fragmentedFrameCount === 0)
+      throw new Error("实际进程响应没有按字节分片交付");
+
     process.stdout.write(
       `${JSON.stringify({
         status: "byte-channel-accepted",
@@ -788,6 +1276,10 @@ async function main(): Promise<void> {
         sessionSurvivedReconnect: true,
         scopeMismatch: "handshake",
         diagnosticsWereSeparate: true,
+        fragmentedResponses: fragmentedFrameCount > 0,
+        processPipeBackpressureDrained: true,
+        operationAndCursorRecovered: true,
+        otherTargetRejectedOldIdentity: true,
       })}\n`,
     );
   } finally {
