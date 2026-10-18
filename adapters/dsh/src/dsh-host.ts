@@ -289,6 +289,7 @@ export async function runDshRuntimeHost(): Promise<void> {
   let approvalSubscription: (() => void) | undefined;
   const pendingNativeTurns: NativeTurn[] = [];
   const nativeTurnIds = new Map<number, TurnId>();
+  const rejectedNativeTurnBindings = new Set<number>();
   const pendingNativeTurnBindings = new Map<number, PendingNativeTurnBinding>();
   const nativeMessageTurns = new Map<string, TurnId>();
   const nativeCallerMessageIds = new Map<string, NativeCaller>();
@@ -320,6 +321,7 @@ export async function runDshRuntimeHost(): Promise<void> {
         failures.push(error);
       }
       await rm(profile.profileDirectory, { recursive: true, force: true });
+      rejectedNativeTurnBindings.clear();
       handle = undefined;
       closed = true;
       if (failures.length === 1) throw failures[0];
@@ -412,6 +414,7 @@ export async function runDshRuntimeHost(): Promise<void> {
     nativeTurn: number,
     turnId: TurnId,
   ): boolean => {
+    if (rejectedNativeTurnBindings.has(nativeTurn)) return false;
     const boundary = profile.ctx.sessionProjections.stateOf(
       agent.session,
       "turnBoundary",
@@ -433,8 +436,26 @@ export async function runDshRuntimeHost(): Promise<void> {
   };
 
   function setNativeTurnId(nativeTurn: number, turnId: TurnId): void {
+    if (rejectedNativeTurnBindings.has(nativeTurn)) return;
     nativeTurnIds.set(nativeTurn, turnId);
     settleNativeTurnBinding(nativeTurn, turnId);
+  }
+
+  function rejectNativeTurnBinding(nativeTurn: number): void {
+    const agent = handle?.agent;
+    const boundary =
+      agent === undefined
+        ? undefined
+        : profile.ctx.sessionProjections.stateOf(agent.session, "turnBoundary");
+    if (
+      !nativeTurnIds.has(nativeTurn) &&
+      agent?.status === "running" &&
+      boundary !== undefined &&
+      boundary.openTurnStartSeq !== null &&
+      boundary.lastTurn === nativeTurn
+    )
+      rejectedNativeTurnBindings.add(nativeTurn);
+    settleNativeTurnBinding(nativeTurn, undefined);
   }
 
   function settleNativeTurnBinding(
@@ -457,6 +478,8 @@ export async function runDshRuntimeHost(): Promise<void> {
     if (boundTurnId !== undefined)
       return { status: "bound", turnId: boundTurnId };
     if (signal?.aborted === true) return { status: "cancelled" };
+    if (rejectedNativeTurnBindings.has(nativeTurn))
+      return { status: "unavailable" };
     const agent = handle?.agent;
     const boundary =
       agent === undefined
@@ -705,6 +728,7 @@ export async function runDshRuntimeHost(): Promise<void> {
             settleNativeTurnBinding(event.data.turn, undefined);
             activePreSteps.delete(event.data.turn);
             nativeTurnIds.delete(event.data.turn);
+            rejectedNativeTurnBindings.delete(event.data.turn);
             for (const [
               nativeMessageId,
               pendingCaller,
@@ -881,13 +905,13 @@ export async function runDshRuntimeHost(): Promise<void> {
         send({ id: command.id, type: "bound" });
       else {
         if (!nativeTurnIds.has(command.nativeTurn))
-          settleNativeTurnBinding(command.nativeTurn, undefined);
+          rejectNativeTurnBinding(command.nativeTurn);
         reject(command.id, "not_accepted");
       }
       return;
     }
     if (command.type === "cancel-turn-binding") {
-      settleNativeTurnBinding(command.nativeTurn, undefined);
+      rejectNativeTurnBinding(command.nativeTurn);
       send({ id: command.id, type: "binding-cancelled" });
       return;
     }
