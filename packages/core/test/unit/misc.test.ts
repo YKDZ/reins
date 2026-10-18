@@ -101,7 +101,7 @@ describe("权限与事件", () => {
     });
     const { sessionId: id } = await machine.spawn({
       sessionName: ids.sessionName("fixture-10"),
-      harness: "dsh",
+      harness: "codex",
       message: "跑构建",
       cwd: "/tmp/demo",
     });
@@ -237,7 +237,7 @@ describe("list 过滤与参数校验", () => {
     });
     await machine.spawn({
       sessionName: ids.sessionName("fixture-inline-3"),
-      harness: "dsh",
+      harness: "codex",
       message: "c",
       cwd: "/tmp/demo",
     });
@@ -261,7 +261,7 @@ describe("list 过滤与参数校验", () => {
     await expect(
       machine.spawn({
         sessionName: ids.sessionName("fixture-inline-4"),
-        harness: "",
+        harness: "" as never,
         message: "x",
         cwd: "/tmp/demo",
       }),

@@ -4,13 +4,13 @@ import { access } from "node:fs/promises";
 import type { HarnessAdapter } from "@reins/daemon";
 import type {
   DomainEvent,
-  HarnessCapability,
+  HarnessModelCatalog,
   MessageId,
   WorkerDriver,
 } from "@reins/protocol";
 
-const simulatedCapability: HarnessCapability = {
-  harness: "simulated",
+const simulatedModelCatalog: HarnessModelCatalog = {
+  harness: "codex",
   models: [
     {
       id: "simulated-model",
@@ -97,8 +97,8 @@ const simulatedDriverFactory: HarnessAdapter["driverFactory"] = ({ emit }) => {
 const simulatedRegistryModule = {
   simulated: {
     driverFactory: simulatedDriverFactory,
-    async capabilities(): Promise<HarnessCapability> {
-      return simulatedCapability;
+    async modelCatalog(): Promise<HarnessModelCatalog> {
+      return simulatedModelCatalog;
     },
   } satisfies HarnessAdapter,
 } satisfies Record<string, HarnessAdapter>;

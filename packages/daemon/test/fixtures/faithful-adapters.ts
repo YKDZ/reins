@@ -90,7 +90,7 @@ const qoderFactory: ReturnType<typeof createQoderDriver> = (options) => {
 export default {
   qoder: {
     driverFactory: qoderFactory,
-    capabilities: async () => ({
+    modelCatalog: async () => ({
       harness: "qoder",
       models: [
         {
@@ -112,7 +112,7 @@ export default {
           ],
         }),
     }),
-    capabilities: async () => ({
+    modelCatalog: async () => ({
       harness: "codex",
       models: [
         {

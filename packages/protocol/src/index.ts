@@ -2,6 +2,9 @@ import { createHash } from "node:crypto";
 
 import * as v from "valibot";
 
+export const harnessIdSchema = v.picklist(["codex", "qoder"]);
+export type HarnessId = v.InferOutput<typeof harnessIdSchema>;
+
 // —— 会话与状态 ——
 
 const identifier = <T extends string>(name: T, pattern: RegExp) =>
@@ -136,7 +139,7 @@ export type RequestId = v.InferOutput<typeof requestIdSchema>;
 
 // —— 握手：协议主版本、daemon 世代与消费者绑定 ——
 
-export const REINS_PROTOCOL_MAJOR_VERSION = 1;
+export const REINS_PROTOCOL_MAJOR_VERSION = 2;
 
 // 主版本是兼容性边界；不匹配必须以 protocol_version_mismatch 类型化呈现，
 // 不能被字面量 schema 伪装成参数校验失败（ADR-0033）。
@@ -312,7 +315,7 @@ export function isPermissionResolutionAllowed(
 
 export const spawnParamsSchema = v.strictObject({
   sessionName: sessionNameSchema,
-  harness: v.pipe(v.string(), v.minLength(1)),
+  harness: harnessIdSchema,
   message: v.pipe(v.string(), v.minLength(1)),
   agent: v.optional(v.string()),
   model: v.optional(v.string()),
@@ -467,7 +470,7 @@ export type KillParams = v.InferOutput<typeof killParamsSchema>;
 
 export const listFilterSchema = v.strictObject({
   sessionId: v.optional(sessionIdSchema),
-  harness: v.optional(v.string()),
+  harness: v.optional(harnessIdSchema),
   state: v.optional(sessionStateSchema),
   sessionName: v.optional(sessionNameSchema),
   model: v.optional(v.string()),
@@ -567,7 +570,7 @@ const completedTurnSummarySchema = v.strictObject({
 const sessionInfoFields = {
   sessionId: sessionIdSchema,
   sessionName: sessionNameSchema,
-  harness: v.string(),
+  harness: harnessIdSchema,
   model: v.nullable(v.string()),
   reasoning: v.nullable(v.string()),
   cwd: v.string(),
@@ -596,7 +599,7 @@ export const domainEventSchema = v.union([
   v.strictObject({
     type: v.literal("session.created"),
     sessionId: sessionIdSchema,
-    harness: v.string(),
+    harness: harnessIdSchema,
     model: v.nullable(v.string()),
     reasoning: v.nullable(v.string()),
     cwd: v.string(),
@@ -893,7 +896,7 @@ export const textEvidenceSchema = v.pipe(
 );
 export type TextEvidence = v.InferOutput<typeof textEvidenceSchema>;
 
-const harnessSchema = v.pipe(v.string(), v.minLength(1));
+const harnessSchema = harnessIdSchema;
 const optionalEvidenceEntries = {
   message: v.optional(textEvidenceSchema),
   stack: v.optional(textEvidenceSchema),
@@ -1354,7 +1357,7 @@ const diagnosticDefinitions = [
   defineRequestFailure("interrupt", "interrupt"),
   defineRequestFailure("kill", "terminate"),
   defineRequestFailure("resolve_permission", "resolve"),
-  defineRequestFailure("capabilities", "query"),
+  defineRequestFailure("model_catalog", "query"),
   defineRequestFailure("spawn", "dispatch"),
   defineRequestFailure("send", "dispatch"),
   defineRequestFailure("wait", "dispatch"),
@@ -1364,7 +1367,7 @@ const diagnosticDefinitions = [
   defineRequestFailure("attach", "dispatch"),
   defineRequestFailure("diagnostics", "dispatch"),
   defineRequestFailure("resolve_permission", "dispatch"),
-  defineRequestFailure("capabilities", "dispatch"),
+  defineRequestFailure("model_catalog", "dispatch"),
   defineAdapterSessionDiagnostic(
     {
       kind: v.literal("stream_failure"),
@@ -1812,7 +1815,7 @@ type RequestPair =
   | { operation: "attach"; stage: "dispatch" }
   | { operation: "diagnostics"; stage: "dispatch" }
   | { operation: "resolve_permission"; stage: "resolve" | "dispatch" }
-  | { operation: "capabilities"; stage: "query" | "dispatch" };
+  | { operation: "model_catalog"; stage: "query" | "dispatch" };
 type RequestFailureFact = RequestPair & {
   kind: "request_failure";
   reason: "upstream_error" | "timeout" | "closed" | "rejected";
@@ -2022,7 +2025,7 @@ export type DiagnosticsParams =
     });
 
 const diagnosticFilterEntries = {
-  harness: v.optional(v.pipe(v.string(), v.minLength(1))),
+  harness: v.optional(harnessIdSchema),
   sources: v.optional(v.array(diagnosticSourceSchema)),
   kinds: v.optional(v.array(diagnosticKindSchema)),
   minSeverity: v.optional(diagnosticSeveritySchema),
@@ -2068,17 +2071,6 @@ export const diagnosticsResultSchema = v.union([
 ]);
 export type DiagnosticsResult = v.InferOutput<typeof diagnosticsResultSchema>;
 
-// adapter 能力声明仅作诊断信息，不构成降级许可。
-export const adapterCapabilitiesSchema = v.object({
-  canSendMidTurn: v.boolean(),
-  canInterrupt: v.boolean(),
-  canResume: v.boolean(),
-  isDurable: v.boolean(),
-});
-export type AdapterCapabilities = v.InferOutput<
-  typeof adapterCapabilitiesSchema
->;
-
 // —— 错误码与机器错误（程序化契约；用户文案由调用方映射） ——
 
 export const errorCodeSchema = v.union([
@@ -2096,7 +2088,7 @@ export const errorCodeSchema = v.union([
   v.literal("unknown_harness"),
   v.literal("method_not_found"),
   v.literal("protocol_error"),
-  v.literal("capability_query_failed"),
+  v.literal("model_catalog_query_failed"),
   v.literal("internal_error"),
   v.literal("unsupported_feature"),
   v.literal("diagnostic_not_found"),
@@ -2175,7 +2167,7 @@ export const invalidParamIssueSchema = v.union([
 export type InvalidParamIssue = v.InferOutput<typeof invalidParamIssueSchema>;
 
 type UnexpectedErrorCode =
-  | "capability_query_failed"
+  | "model_catalog_query_failed"
   | "internal_error"
   | "diagnostics_store_corrupt";
 const unexpectedError = <const TCode extends UnexpectedErrorCode>(
@@ -2247,8 +2239,8 @@ export const machineErrorSchema = v.union([
   }),
   v.strictObject({
     code: v.literal("unknown_harness"),
-    harness: v.pipe(v.string(), v.minLength(1)),
-    availableHarnesses: v.array(v.pipe(v.string(), v.minLength(1))),
+    harness: harnessIdSchema,
+    availableHarnesses: v.array(harnessIdSchema),
   }),
   v.strictObject({
     code: v.literal("method_not_found"),
@@ -2285,7 +2277,7 @@ export const machineErrorSchema = v.union([
     head: v.nullable(eventIdSchema),
   }),
   v.strictObject({ code: v.literal("diagnostics_unavailable") }),
-  unexpectedError("capability_query_failed"),
+  unexpectedError("model_catalog_query_failed"),
   unexpectedError("internal_error"),
   unexpectedError("diagnostics_store_corrupt"),
 ]);
@@ -2313,7 +2305,7 @@ export function isDriverFailure(error: unknown): error is DriverFailure {
 export type WorkerSpec = {
   readonly sessionId: SessionId;
   readonly turnId: TurnId;
-  readonly harness: string;
+  readonly harness: HarnessId;
   readonly message: string;
   readonly agent?: string;
   readonly model?: string;
@@ -2360,34 +2352,38 @@ export type AdapterDriverFactory = (context: {
   ) => Promise<DiagnosticId | undefined>;
 }) => WorkerDriver;
 
-// —— capabilities 能力矩阵（实时查询；default 字段不进矩阵，最小干扰原则） ——
+// —— 模型目录（实时查询；default 字段不进目录） ——
 
-export const capabilityModelSchema = v.strictObject({
+export const modelCatalogEntrySchema = v.strictObject({
   id: v.pipe(v.string(), v.minLength(1)),
   displayName: v.pipe(v.string(), v.minLength(1)),
   reasoningEfforts: v.array(v.pipe(v.string(), v.minLength(1))),
 });
-export type CapabilityModel = v.InferOutput<typeof capabilityModelSchema>;
+export type ModelCatalogEntry = v.InferOutput<typeof modelCatalogEntrySchema>;
 
-export const harnessCapabilitySchema = v.strictObject({
-  harness: v.pipe(v.string(), v.minLength(1)),
-  models: v.array(capabilityModelSchema),
+export const harnessModelCatalogSchema = v.strictObject({
+  harness: harnessIdSchema,
+  models: v.array(modelCatalogEntrySchema),
 });
-export type HarnessCapability = v.InferOutput<typeof harnessCapabilitySchema>;
+export type HarnessModelCatalog = v.InferOutput<
+  typeof harnessModelCatalogSchema
+>;
 
-export const capabilityFailureSchema = v.strictObject({
-  harness: v.pipe(v.string(), v.minLength(1)),
-  code: v.literal("capability_query_failed"),
+export const modelCatalogFailureSchema = v.strictObject({
+  harness: harnessIdSchema,
+  code: v.literal("model_catalog_query_failed"),
   failure: harnessFailureSchema,
   diagnosticId: v.optional(diagnosticIdSchema),
 });
-export type CapabilityFailure = v.InferOutput<typeof capabilityFailureSchema>;
+export type ModelCatalogFailure = v.InferOutput<
+  typeof modelCatalogFailureSchema
+>;
 
-export const capabilitiesResultSchema = v.strictObject({
-  capabilities: v.array(harnessCapabilitySchema),
-  failures: v.array(capabilityFailureSchema),
+export const modelCatalogResultSchema = v.strictObject({
+  catalogs: v.array(harnessModelCatalogSchema),
+  failures: v.array(modelCatalogFailureSchema),
 });
-export type CapabilitiesResult = v.InferOutput<typeof capabilitiesResultSchema>;
+export type ModelCatalogResult = v.InferOutput<typeof modelCatalogResultSchema>;
 
 // —— 内部协议 envelope（typed-union，双端 valibot 校验） ——
 
@@ -2401,7 +2397,7 @@ export const protocolMethodSchema = v.union([
   v.literal("list"),
   v.literal("attach"),
   v.literal("resolvePermission"),
-  v.literal("capabilities"),
+  v.literal("modelCatalog"),
   v.literal("diagnostics"),
 ]);
 export type ProtocolMethod = v.InferOutput<typeof protocolMethodSchema>;
@@ -2518,7 +2514,7 @@ const protocolParamsSchemas = {
   list: listFilterSchema,
   attach: attachParamsSchema,
   resolvePermission: resolvePermissionParamsSchema,
-  capabilities: v.strictObject({}),
+  modelCatalog: v.strictObject({}),
   diagnostics: diagnosticsParamsSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;
 
@@ -2542,7 +2538,7 @@ const protocolResultSchemas = {
   list: v.array(sessionInfoSchema),
   attach: attachResultSchema,
   resolvePermission: resolvePermissionAckSchema,
-  capabilities: capabilitiesResultSchema,
+  modelCatalog: modelCatalogResultSchema,
   diagnostics: diagnosticsResultSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;
 

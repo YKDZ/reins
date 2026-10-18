@@ -24,7 +24,7 @@ async function fixture(options?: { deliver?: () => Promise<void> }) {
   };
   let publish!: (event: DomainEvent) => void;
   const adapter: HarnessAdapter = {
-    capabilities: async () => ({ harness: "fake", models: [] }),
+    modelCatalog: async () => ({ harness: "codex", models: [] }),
     driverFactory: ({ emit }) => {
       publish = emit;
       return {
@@ -42,7 +42,7 @@ async function fixture(options?: { deliver?: () => Promise<void> }) {
     },
   };
   const daemon = await openEphemeralDaemonForTest({
-    adapters: new Map([["fake", adapter]]),
+    adapters: new Map([["codex", adapter]]),
   });
   daemons.push(daemon);
   const client = createReinsClient(daemon.connect(), {
@@ -56,7 +56,7 @@ async function fixture(options?: { deliver?: () => Promise<void> }) {
 test("显式 new_turn 在 busy 拒绝，不能改投活动回合", async () => {
   const { client, calls } = await fixture();
   const spawned = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "placement" as SessionName,
     message: "initial caller task",
@@ -81,7 +81,7 @@ test("active_turn 的 ACK 与 caller 事实等待精确原生接受", async () =
   });
   const { client, calls } = await fixture({ deliver: () => accepted });
   const spawned = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "accepted" as SessionName,
     message: "initial caller task",
@@ -145,7 +145,7 @@ test("原生接受先于终态时，caller 事实仍归原回合且在终态之�
   });
   const { client, calls, publish } = await fixture({ deliver: () => accepted });
   const spawned = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "accept-race" as SessionName,
     message: "initial",
@@ -199,7 +199,7 @@ test("idle new_turn 原子预留且等待接受，并发请求不会重复创建
   });
   const { client, calls, publish } = await fixture({ deliver: () => accepted });
   const spawned = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "new-race" as SessionName,
     message: "initial",
@@ -260,13 +260,13 @@ test("idle new_turn 原子预留且等待接受，并发请求不会重复创建
 test("错误父级和已结束目标拒绝，消息不会流入后继回合", async () => {
   const { client, calls, publish } = await fixture();
   const first = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "parent-one" as SessionName,
     message: "one",
   });
   const second = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "parent-two" as SessionName,
     message: "two",
@@ -339,7 +339,7 @@ test("结束先于原生拒绝时，没有 caller 事实或后继回合残留", 
     deliver: () => (++attempts === 1 ? native : Promise.resolve()),
   });
   const spawned = await client.request("spawn", {
-    harness: "fake",
+    harness: "codex",
     cwd: "/tmp",
     sessionName: "end-wins" as SessionName,
     message: "initial",
@@ -406,7 +406,7 @@ test.each(["active_turn", "new_turn"] as const)(
       deliver: () => accepted,
     });
     const spawned = await client.request("spawn", {
-      harness: "fake",
+      harness: "codex",
       cwd: "/tmp",
       sessionName: "kill-race" as SessionName,
       message: "initial",

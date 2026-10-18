@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 
 import {
-  createCodexCapabilities,
+  createCodexModelCatalog,
   createCodexTransport,
   type CodexChild,
 } from "@reins/codex";
@@ -413,7 +413,7 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const { sessionId } = await machine.spawn({
       sessionName: v.parse(sessionNameSchema, "immediate-query"),
-      harness: "fake",
+      harness: "codex",
       message: "start",
       cwd: "/tmp",
     });
@@ -477,7 +477,7 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const { sessionId } = await machine.spawn({
       sessionName: v.parse(sessionNameSchema, "immediate-close"),
-      harness: "fake",
+      harness: "codex",
       message: "start",
       cwd: "/tmp",
     });
@@ -541,10 +541,10 @@ describe("daemon diagnostic error dispatch", () => {
       transport,
       adapters: new Map([
         [
-          "fake",
+          "codex",
           {
             driverFactory,
-            capabilities: async () => ({ harness: "fake", models: [] }),
+            modelCatalog: async () => ({ harness: "codex", models: [] }),
           },
         ],
       ]),
@@ -577,7 +577,7 @@ describe("daemon diagnostic error dispatch", () => {
     const spawn = async (sessionName: string) => {
       const response = await request("spawn", {
         sessionName,
-        harness: "fake",
+        harness: "codex",
         message: "caller-authored",
         cwd: "/tmp",
       });
@@ -590,7 +590,7 @@ describe("daemon diagnostic error dispatch", () => {
       emit({
         type: "session.created",
         sessionId: active,
-        harness: "fake",
+        harness: "codex",
         model: null,
         reasoning: null,
         cwd: "/sentinel-cwd",
@@ -980,8 +980,8 @@ describe("daemon diagnostic error dispatch", () => {
     });
     const adapter: HarnessAdapter = {
       driverFactory,
-      capabilities: async () => ({
-        harness: "fake",
+      modelCatalog: async () => ({
+        harness: "codex",
         models: [],
         authorizationModes: ["allowAll"],
         sandbox: { modes: [] },
@@ -990,7 +990,7 @@ describe("daemon diagnostic error dispatch", () => {
     const transport = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemonForTest({
       transport,
-      adapters: new Map([["fake", adapter]]),
+      adapters: new Map([["codex", adapter]]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
       idleTimeoutMs: 60_000,
@@ -1014,7 +1014,7 @@ describe("daemon diagnostic error dispatch", () => {
         params: {
           sessionName: "failed-worker",
           cwd: "/tmp",
-          harness: "fake",
+          harness: "codex",
           message: "start",
         },
       });
@@ -1076,8 +1076,8 @@ describe("daemon diagnostic error dispatch", () => {
         resolvePermission() {},
         async terminate() {},
       }),
-      capabilities: async () => ({
-        harness: "fake",
+      modelCatalog: async () => ({
+        harness: "codex",
         models: [],
         authorizationModes: ["allowAll"],
         sandbox: { modes: [] },
@@ -1086,7 +1086,7 @@ describe("daemon diagnostic error dispatch", () => {
     const transport = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemon({
       transport,
-      adapters: new Map([["fake", adapter]]),
+      adapters: new Map([["codex", adapter]]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
     });
@@ -1110,7 +1110,7 @@ describe("daemon diagnostic error dispatch", () => {
         params: {
           sessionName: "append-failure",
           cwd: "/tmp",
-          harness: "fake",
+          harness: "codex",
           message: "start",
         },
       });
@@ -1185,9 +1185,9 @@ describe("daemon diagnostic error dispatch", () => {
     }
   });
 
-  test("keeps successful capabilities while linking one failed harness to a real diagnostic", async () => {
+  test("keeps successful catalogs while linking a mismatched harness to a real diagnostic", async () => {
     const root = await mkdtemp(
-      join(tmpdir(), "reins-daemon-capability-diagnostic-"),
+      join(tmpdir(), "reins-daemon-modelCatalog-diagnostic-"),
     );
     directories.push(root);
     const state: DaemonState = {
@@ -1214,33 +1214,17 @@ describe("daemon diagnostic error dispatch", () => {
       transport,
       adapters: new Map([
         [
-          "good",
+          "codex",
           {
             driverFactory,
-            capabilities: async () => ({ harness: "good", models: [] }),
+            modelCatalog: async () => ({ harness: "codex", models: [] }),
           },
         ],
         [
-          "bad",
+          "qoder",
           {
             driverFactory,
-            capabilities: async () => {
-              throw new Error("capability failed");
-            },
-          },
-        ],
-        [
-          "mismatch",
-          {
-            driverFactory,
-            capabilities: async () => ({ harness: "other", models: [] }),
-          },
-        ],
-        [
-          "malformed",
-          {
-            driverFactory,
-            capabilities: async () => JSON.parse('{"harness":"malformed"}'),
+            modelCatalog: async () => ({ harness: "codex", models: [] }),
           },
         ],
       ]),
@@ -1260,26 +1244,23 @@ describe("daemon diagnostic error dispatch", () => {
       });
       client.send({
         kind: "request",
-        requestId: v.parse(requestIdSchema, "capabilities"),
-        method: "capabilities",
+        requestId: v.parse(requestIdSchema, "model-catalog"),
+        method: "modelCatalog",
         params: {},
       });
       const result = await response;
       expect(result).toMatchObject({
         result: {
-          capabilities: [{ harness: "good" }],
-          failures: [
-            { harness: "bad", code: "capability_query_failed" },
-            { harness: "mismatch", code: "capability_query_failed" },
-            { harness: "malformed", code: "capability_query_failed" },
-          ],
+          catalogs: [{ harness: "codex" }],
+          failures: [{ harness: "qoder", code: "model_catalog_query_failed" }],
         },
       });
-      if (!("result" in result)) throw new Error("Expected capability result");
+      if (!("result" in result))
+        throw new Error("Expected modelCatalog result");
       const failure = result.result as {
         failures: Array<{ diagnosticId?: unknown }>;
       };
-      const diagnosticId = failure.failures[1]?.diagnosticId;
+      const diagnosticId = failure.failures[0]?.diagnosticId;
       if (typeof diagnosticId !== "string")
         throw new Error("Expected a diagnostic id");
       await expect(
@@ -1289,8 +1270,8 @@ describe("daemon diagnostic error dispatch", () => {
       ).resolves.toMatchObject({
         record: {
           kind: "request_failure",
-          operation: "capabilities",
-          harness: "mismatch",
+          operation: "model_catalog",
+          harness: "qoder",
         },
       });
     } finally {
@@ -1300,7 +1281,7 @@ describe("daemon diagnostic error dispatch", () => {
     }
   });
 
-  test("Codex malformed model/list does not reuse an unrelated protocol diagnostic for capabilities", async () => {
+  test("Codex malformed model/list does not reuse an unrelated protocol diagnostic for the model catalog", async () => {
     const root = await mkdtemp(join(tmpdir(), "reins-daemon-codex-caps-"));
     directories.push(root);
     const state: DaemonState = {
@@ -1366,7 +1347,7 @@ describe("daemon diagnostic error dispatch", () => {
           "codex",
           {
             driverFactory,
-            capabilities: createCodexCapabilities({
+            modelCatalog: createCodexModelCatalog({
               transportFactory: (options) =>
                 createCodexTransport({
                   ...options,
@@ -1392,12 +1373,13 @@ describe("daemon diagnostic error dispatch", () => {
       });
       client.send({
         kind: "request",
-        requestId: v.parse(requestIdSchema, "codex-capabilities"),
-        method: "capabilities",
+        requestId: v.parse(requestIdSchema, "codex-model-catalog"),
+        method: "modelCatalog",
         params: {},
       });
       const result = await response;
-      if (!("result" in result)) throw new Error("Expected capability result");
+      if (!("result" in result))
+        throw new Error("Expected modelCatalog result");
       const failure = (
         result.result as {
           failures: Array<{ diagnosticId?: unknown }>;
@@ -1415,7 +1397,7 @@ describe("daemon diagnostic error dispatch", () => {
           source: "daemon",
           harness: "codex",
           kind: "request_failure",
-          operation: "capabilities",
+          operation: "model_catalog",
           stage: "query",
         },
       });
@@ -1433,7 +1415,7 @@ describe("daemon diagnostic error dispatch", () => {
       ).resolves.toMatchObject({
         records: [
           expect.objectContaining({
-            operation: "capabilities",
+            operation: "model_catalog",
             stage: "query",
           }),
         ],
@@ -2200,13 +2182,13 @@ describe("daemon diagnostic error dispatch", () => {
         resolvePermission() {},
         async terminate() {},
       }),
-      capabilities: async () => ({ harness: "fake", models: [] }),
+      modelCatalog: async () => ({ harness: "codex", models: [] }),
     };
     let failed = false;
     const transport = createInMemoryTransportServer<ProtocolMessage>();
     const daemon = createDaemonForTest({
       transport,
-      adapters: new Map([["fake", adapter]]),
+      adapters: new Map([["codex", adapter]]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
       onEvent: () => {
@@ -2235,7 +2217,7 @@ describe("daemon diagnostic error dispatch", () => {
         params: {
           sessionName: "listener-failure",
           cwd: "/tmp",
-          harness: "fake",
+          harness: "codex",
           message: "start",
         },
       });
@@ -2288,7 +2270,7 @@ describe("daemon diagnostic error dispatch", () => {
     now = new Date("2026-08-20T00:00:01.000Z");
     await runtime.record({
       source: "adapter",
-      harness: "one",
+      harness: "codex",
       sessionId,
       turnId,
       kind: "lifecycle",
@@ -2298,7 +2280,7 @@ describe("daemon diagnostic error dispatch", () => {
     now = new Date("2026-08-20T00:00:02.000Z");
     const failed = await runtime.record({
       source: "adapter",
-      harness: "two",
+      harness: "qoder",
       sessionId,
       turnId,
       kind: "lifecycle",
@@ -2359,12 +2341,12 @@ describe("daemon diagnostic error dispatch", () => {
       await expect(
         request({ kinds: ["lifecycle"], minSeverity: "error" }),
       ).resolves.toMatchObject({
-        result: { records: [{ harness: "two", severity: "error" }] },
+        result: { records: [{ harness: "qoder", severity: "error" }] },
       });
       await expect(
-        request({ sessionId, turnId, harness: "one" }),
+        request({ sessionId, turnId, harness: "codex" }),
       ).resolves.toMatchObject({
-        result: { records: [{ harness: "one", turnId }] },
+        result: { records: [{ harness: "codex", turnId }] },
       });
       await expect(
         request({
@@ -2373,13 +2355,13 @@ describe("daemon diagnostic error dispatch", () => {
           until: "2026-08-20T00:00:02.000Z",
         }),
       ).resolves.toMatchObject({
-        result: { records: [{ harness: "one" }, { harness: "two" }] },
+        result: { records: [{ harness: "codex" }, { harness: "qoder" }] },
       });
       await expect(
         request({ sources: ["adapter"], limit: 2 }),
       ).resolves.toMatchObject({
         result: {
-          records: [{ harness: "one" }, { harness: "two" }],
+          records: [{ harness: "codex" }, { harness: "qoder" }],
           truncated: false,
         },
       });
@@ -2658,10 +2640,10 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       transport,
       adapters: new Map([
         [
-          "fake",
+          "codex",
           {
             driverFactory,
-            capabilities: async () => ({ harness: "fake", models: [] }),
+            modelCatalog: async () => ({ harness: "codex", models: [] }),
           },
         ],
       ]),
@@ -2673,7 +2655,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
     try {
       const spawned = await request(alpha, "alpha-spawn", "spawn", {
         sessionName: v.parse(sessionNameSchema, "scoped-session"),
-        harness: "fake",
+        harness: "codex",
         message: "start",
         cwd: root,
       });
@@ -2743,10 +2725,10 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       transport,
       adapters: new Map([
         [
-          "fake",
+          "codex",
           {
             driverFactory,
-            capabilities: async () => ({ harness: "fake", models: [] }),
+            modelCatalog: async () => ({ harness: "codex", models: [] }),
           },
         ],
       ]),
@@ -2758,7 +2740,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
     try {
       const spawned = await request(alpha, "alpha-failing-spawn", "spawn", {
         sessionName: v.parse(sessionNameSchema, "failing-session"),
-        harness: "fake",
+        harness: "codex",
         message: "start",
         cwd: root,
       });
@@ -2767,7 +2749,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       const owned = await waitForRecords(alpha, "spawn-owner", {
         kinds: ["harness_stderr"],
       });
-      expect(recordsOf(owned)[0]).toMatchObject({ harness: "fake" });
+      expect(recordsOf(owned)[0]).toMatchObject({ harness: "codex" });
       const ownedId = recordsOf(owned)[0]?.diagnosticId;
 
       const beta = await boundClient(transport, "beta");

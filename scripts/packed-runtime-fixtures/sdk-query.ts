@@ -1,8 +1,8 @@
 import {
   connect,
   ReinsSdkError,
-  type CapabilityFailure,
-  type CapabilitiesResult,
+  type ModelCatalogFailure,
+  type ModelCatalogResult,
   type HarnessFailure,
   type LastCompletedTurn,
   type ReinsConnection,
@@ -36,7 +36,7 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.sessionHandle;
     case "daemon_start_failed":
       return failure.facts.transportCode ?? failure.facts.cause?.kind ?? "";
-    case "capability_query_failed":
+    case "model_catalog_query_failed":
     case "internal_error":
     case "diagnostics_store_corrupt":
       return failure.facts.diagnosticId ?? failure.facts.cause?.kind ?? "";
@@ -80,12 +80,12 @@ function inspectFailure(failure: ReinsFailure): string {
   }
 }
 
-function inspectCapabilities(
-  result: CapabilitiesResult,
+function inspectModelCatalogs(
+  result: ModelCatalogResult,
 ): Array<
   [HarnessFailure["failureCategory"], HarnessFailure["retryDisposition"]]
 > {
-  const typedFailures: CapabilityFailure[] = result.failures;
+  const typedFailures: ModelCatalogFailure[] = result.failures;
   return typedFailures.map(({ failureCategory, retryDisposition }) => [
     failureCategory,
     retryDisposition,
@@ -120,11 +120,11 @@ async function main(): Promise<void> {
 
   const connection = await connect({ socketPath, consumerContext });
   try {
-    const capabilities = await connection.capabilities();
+    const currentModelCatalog = await connection.modelCatalog();
     const sessions = await connection.list();
     if (
-      capabilities.capabilities[0]?.harness !== "fixture" ||
-      inspectCapabilities(capabilities).length !== 0 ||
+      currentModelCatalog.catalogs[0]?.harness !== "codex" ||
+      inspectModelCatalogs(currentModelCatalog).length !== 0 ||
       sessions.length !== 0
     )
       throw new Error("The installed SDK returned unexpected query results");

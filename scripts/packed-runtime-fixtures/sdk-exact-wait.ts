@@ -46,7 +46,7 @@ try {
   const cwd = required("REINS_WORKER_CWD");
   const first = await connection.spawn(
     {
-      harness: "fixture",
+      harness: "codex",
       sessionName: "packed-wait-first",
       message: "first wait target",
       cwd,
@@ -56,7 +56,7 @@ try {
   firstSession = first.sessionHandle;
   const second = await connection.spawn(
     {
-      harness: "fixture",
+      harness: "codex",
       sessionName: "packed-wait-second",
       message: "second wait target",
       cwd,

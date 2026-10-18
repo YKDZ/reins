@@ -20,6 +20,7 @@ import {
   type ReinsConnection,
   type SendInput,
   type SessionHandle,
+  type SpawnInput,
   type TurnHandle,
 } from "@ykdz/reins-sdk";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
@@ -169,11 +170,11 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
   clients.push(first, second);
 
   const spawnInput = {
-    harness: "fake",
+    harness: "codex",
     message: "keep this session after disconnect",
     sessionName: "application-session",
     cwd: process.cwd(),
-  };
+  } satisfies SpawnInput;
   const spawnCredential = first.prepareOperation("spawn");
   const spawned = await first.spawn(spawnInput, spawnCredential);
   const sessionHandle = spawned.sessionHandle;
@@ -267,8 +268,8 @@ test("application startup failure keeps the raw transport code", async () => {
     env,
   });
   clients.push(retried);
-  const capabilities = await retried.capabilities();
-  expect(capabilities).toHaveProperty("capabilities");
+  const modelCatalog = await retried.modelCatalog();
+  expect(modelCatalog).toHaveProperty("catalogs");
   expect((await readFile(daemonSockets, "utf8")).trim().split("\n")).toEqual([
     env.REINS_SOCKET,
   ]);
@@ -322,7 +323,7 @@ test("application reports local startup IO failures and can retry", async () => 
   await mkdir(blockedParent);
   const retried = await connectReins(options);
   clients.push(retried);
-  expect(await retried.capabilities()).toHaveProperty("capabilities");
+  expect(await retried.modelCatalog()).toHaveProperty("catalogs");
   expect((await readFile(daemonPids, "utf8")).trim().split("\n")).toHaveLength(
     1,
   );
@@ -410,7 +411,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
 
   const captured = await connection.spawn(
     {
-      harness: "capture",
+      harness: "codex",
       message: "capture diagnostic evidence",
       sessionName: "capture-stderr",
       cwd: process.cwd(),
@@ -492,7 +493,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
       turnHandle: first.turnHandle as TurnHandle,
     },
     {
-      harness: "capture",
+      harness: "codex",
       sources: ["harness"],
     },
     { kinds: ["harness_stderr"] },
@@ -508,7 +509,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   expect(
     await connection.diagnostics({
       sessionHandle: captured.sessionHandle,
-      harness: "fake",
+      harness: "qoder",
     }),
   ).toEqual({ records: [], truncated: false });
   expect(
@@ -520,7 +521,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     records: [{ diagnosticId: result.records.at(-1)?.diagnosticId }],
     truncated: true,
   });
-  expect(await connection.diagnostics({ harness: "none" })).toEqual({
+  expect(await connection.diagnostics({ harness: "qoder" })).toEqual({
     records: [],
     truncated: false,
   });
@@ -534,7 +535,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   await expect(
     connection.spawn(
       {
-        harness: "fake",
+        harness: "qoder",
         message: "capture is unavailable",
         sessionName: unsupportedSessionName,
         cwd: process.cwd(),
@@ -575,7 +576,7 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
   clients.push(owner);
   const spawned = await owner.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "owned session",
       sessionName: "owned-session",
       cwd: process.cwd(),
@@ -649,7 +650,7 @@ test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
 
   const first = await connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "first",
       sessionName: "reused-name",
       cwd: process.cwd(),
@@ -659,7 +660,7 @@ test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
   await expect(
     connection.spawn(
       {
-        harness: "fake",
+        harness: "codex",
         message: "second",
         sessionName: "reused-name",
         cwd: process.cwd(),
@@ -682,7 +683,7 @@ test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
   await expect(
     connection.spawn(
       {
-        harness: "fake",
+        harness: "codex",
         message: "third",
         sessionName: "reused-name",
         cwd: process.cwd(),
@@ -728,7 +729,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
 
   const active = await connection.spawn(
     {
-      harness: "hang",
+      harness: "codex",
       message: "hold the active turn",
       sessionName: "active-send",
       cwd: process.cwd(),
@@ -815,7 +816,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
 
   const held = await connection.spawn(
     {
-      harness: "hang",
+      harness: "codex",
       message: "hold for interrupt",
       sessionName: "interrupt-target",
       cwd: process.cwd(),

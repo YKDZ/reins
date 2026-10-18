@@ -11,8 +11,8 @@ import type {
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
-import { createCodexCapabilities } from "#/capabilities";
 import { createCodexDriver } from "#/codex-driver";
+import { createCodexModelCatalog } from "#/model-catalog";
 import {
   createCodexTransport,
   ProtocolBoundaryError,
@@ -35,36 +35,36 @@ function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
   return { promise, resolve };
 }
 
-describe("codex capabilities", () => {
+describe("Codex 模型目录", () => {
   test("能力查询与 worker 共用冷 HOME 首次 initialize 协调", async () => {
     const previousHome = process.env.CODEX_HOME;
-    process.env.CODEX_HOME = `/tmp/reins-codex-capabilities-${randomUUID()}`;
+    process.env.CODEX_HOME = `/tmp/reins-codex-model-catalog-${randomUUID()}`;
     const workerFake = createFakeTransport();
-    const capabilitiesFake = createFakeTransport();
+    const modelCatalogFake = createFakeTransport();
     const workerInitialize = deferred<Record<string, never>>();
     workerFake.controls.setResponse("initialize", workerInitialize.promise);
     let workerStarts = 0;
-    let capabilitiesStarts = 0;
+    let modelCatalogStarts = 0;
     workerFake.transport.start = () => {
       workerStarts += 1;
     };
-    capabilitiesFake.transport.start = () => {
-      capabilitiesStarts += 1;
+    modelCatalogFake.transport.start = () => {
+      modelCatalogStarts += 1;
     };
-    const sessionId = "capabilities-worker@g1" as SessionId;
+    const sessionId = "model-catalog-worker@g1" as SessionId;
     const worker = createCodexDriver({
       transportFactory: () => workerFake.transport,
     })({
       emit: () => undefined,
       diagnostics: async () => undefined,
     });
-    let capabilityPromise: Promise<unknown> | undefined;
+    let modelCatalogPromise: Promise<unknown> | undefined;
 
     try {
       worker.start({
         sessionId,
         turnId: "t1" as TurnId,
-        sessionName: "capabilities-worker" as SessionName,
+        sessionName: "model-catalog-worker" as SessionName,
         harness: "codex",
         message: "caller task",
         cwd: "/tmp/demo",
@@ -72,31 +72,31 @@ describe("codex capabilities", () => {
       await flush();
       expect(workerStarts).toBe(1);
 
-      capabilityPromise = createCodexCapabilities({
-        transportFactory: () => capabilitiesFake.transport,
+      modelCatalogPromise = createCodexModelCatalog({
+        transportFactory: () => modelCatalogFake.transport,
       })();
       await flush();
-      expect(capabilitiesStarts).toBe(0);
-      expect(capabilitiesFake.controls.requests()).toEqual([]);
+      expect(modelCatalogStarts).toBe(0);
+      expect(modelCatalogFake.controls.requests()).toEqual([]);
 
       workerInitialize.resolve({});
       await flush();
-      expect(capabilitiesStarts).toBe(1);
-      await expect(capabilityPromise).resolves.toEqual({
+      expect(modelCatalogStarts).toBe(1);
+      await expect(modelCatalogPromise).resolves.toEqual({
         harness: "codex",
         models: [],
       });
     } finally {
       workerInitialize.resolve({});
-      if (capabilityPromise !== undefined)
-        await capabilityPromise.catch(() => {});
+      if (modelCatalogPromise !== undefined)
+        await modelCatalogPromise.catch(() => {});
       await worker.terminate(sessionId);
       if (previousHome === undefined) delete process.env.CODEX_HOME;
       else process.env.CODEX_HOME = previousHome;
     }
   });
 
-  test("model/list 实时查询并映射为能力矩阵", async () => {
+  test("model/list 实时查询并映射为模型目录", async () => {
     const { transport, controls } = createFakeTransport();
     controls.setResponse("model/list", {
       data: [
@@ -118,7 +118,7 @@ describe("codex capabilities", () => {
       ],
     });
 
-    const capability = await createCodexCapabilities({
+    const modelCatalog = await createCodexModelCatalog({
       transportFactory: () => transport,
     })();
 
@@ -127,7 +127,7 @@ describe("codex capabilities", () => {
       "model/list",
     ]);
     expect(controls.closed()).toBe(true);
-    expect(capability).toEqual({
+    expect(modelCatalog).toEqual({
       harness: "codex",
       models: [
         {
@@ -148,7 +148,7 @@ describe("codex capabilities", () => {
       },
     };
     await expect(
-      createCodexCapabilities({ transportFactory: () => failingTransport })(),
+      createCodexModelCatalog({ transportFactory: () => failingTransport })(),
     ).rejects.toThrow("app-server 不可用");
     expect(controls.closed()).toBe(true);
   });
@@ -188,7 +188,7 @@ describe("codex capabilities", () => {
     });
     const diagnostics: DriverDiagnosticFact[] = [];
     const diagnosticId = "d1-098" as DiagnosticId;
-    const query = createCodexCapabilities({
+    const query = createCodexModelCatalog({
       transportFactory: (options) =>
         createCodexTransport({ ...options, spawnChild: () => child }),
     });

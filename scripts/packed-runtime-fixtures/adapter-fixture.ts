@@ -8,7 +8,7 @@ import { fileURLToPath } from "node:url";
 import type { HarnessAdapter } from "@reins/daemon";
 import type {
   AdapterDriverFactory,
-  HarnessCapability,
+  HarnessModelCatalog,
   PermissionId,
   SessionId,
   TurnId,
@@ -22,8 +22,8 @@ type WorkerState = {
   readonly turnId: TurnId;
 };
 
-const fixtureCapabilities: HarnessCapability = {
-  harness: "fixture",
+const fixtureModelCatalog: HarnessModelCatalog = {
+  harness: "codex",
   models: [
     {
       id: "fixture-model",
@@ -34,7 +34,8 @@ const fixtureCapabilities: HarnessCapability = {
 };
 const observationPath = process.env.REINS_PACKED_FIXTURE_OBSERVATIONS;
 const activityPath = process.env.REINS_PACKED_FIXTURE_ACTIVITY;
-const capabilityModePath = process.env.REINS_PACKED_FIXTURE_CAPABILITY_MODE;
+const modelCatalogModePath =
+  process.env.REINS_PACKED_FIXTURE_MODEL_CATALOG_MODE;
 const terminateGatePath = process.env.REINS_PACKED_FIXTURE_TERMINATE_GATE;
 const rejectPermissionPath =
   process.env.REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE;
@@ -48,14 +49,14 @@ function record(value: Record<string, unknown>): void {
   appendFileSync(observationPath, `${JSON.stringify(value)}\n`, "utf8");
 }
 
-function currentCapabilities(): HarnessCapability {
+function currentModelCatalog(): HarnessModelCatalog {
   if (
-    capabilityModePath !== undefined &&
-    capabilityModePath !== "" &&
-    readFileSync(capabilityModePath, "utf8") === "without-model"
+    modelCatalogModePath !== undefined &&
+    modelCatalogModePath !== "" &&
+    readFileSync(modelCatalogModePath, "utf8") === "without-model"
   )
-    return { harness: "fixture", models: [] };
-  return fixtureCapabilities;
+    return { harness: "codex", models: [] };
+  return fixtureModelCatalog;
 }
 
 const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
@@ -249,16 +250,16 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
 };
 
 const registryAdapterModule = {
-  fixture: {
+  codex: {
     driverFactory: fixtureDriverFactory,
-    async capabilities(): Promise<HarnessCapability> {
-      const capabilities = currentCapabilities();
+    async modelCatalog(): Promise<HarnessModelCatalog> {
+      const catalog = currentModelCatalog();
       record({
-        type: "capabilities_queried",
-        harness: capabilities.harness,
-        modelIds: capabilities.models.map(({ id }) => id),
+        type: "model_catalog_queried",
+        harness: catalog.harness,
+        modelIds: catalog.models.map(({ id }) => id),
       });
-      return capabilities;
+      return catalog;
     },
   } satisfies HarnessAdapter,
 } satisfies Record<string, HarnessAdapter>;

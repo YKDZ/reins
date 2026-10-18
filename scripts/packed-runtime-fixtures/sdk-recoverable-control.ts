@@ -85,7 +85,7 @@ async function connectSdk(): Promise<ReinsConnection> {
 function spawnInput(): SpawnInput {
   return {
     sessionName: "packed-recover",
-    harness: "fixture",
+    harness: "codex",
     message: "  exact task\nkeep spacing  ",
     cwd: required("REINS_WORKER_CWD"),
     agent: "fixture-agent",
@@ -160,7 +160,7 @@ async function spawnValidation(): Promise<void> {
     );
     const unknownHarness = await expectFailure(() =>
       connection.spawn(
-        { ...input, harness: "fixture-missing" },
+        { ...input, harness: "qoder" },
         connection.prepareOperation("spawn"),
       ),
     );
@@ -266,7 +266,7 @@ async function spawnWithNewCredential(): Promise<void> {
       connection.spawn(
         {
           ...intent.input,
-          sessionName: "packed-capability-retry",
+          sessionName: "packed-model-catalog-retry",
         },
         connection.prepareOperation("spawn"),
       ),
@@ -278,7 +278,7 @@ async function spawnWithNewCredential(): Promise<void> {
       )
     )
       throw new Error(
-        "A new spawn credential did not revalidate the current model capability",
+        "A new spawn credential did not revalidate the current model catalog",
       );
     process.stdout.write(
       `${JSON.stringify({ code: error.failure.code, path: "model" })}\n`,
@@ -740,7 +740,7 @@ async function spawnPermission(): Promise<void> {
     const result = await connection.spawn(
       {
         sessionName: required("REINS_PERMISSION_SESSION_NAME"),
-        harness: "fixture",
+        harness: "codex",
         message: "packed-permission",
         cwd: required("REINS_WORKER_CWD"),
       },
@@ -1174,7 +1174,7 @@ async function replayWindow(): Promise<void> {
   try {
     const input: SpawnInput = {
       sessionName: "packed-history-window",
-      harness: "simulated",
+      harness: "codex",
       message: JSON.stringify({
         gate: required("REINS_HISTORY_GATE"),
         messages: 1005,

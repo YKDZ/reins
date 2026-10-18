@@ -8,12 +8,13 @@ import type {
   SubscriptionTarget,
   SubscriptionId,
   EventId,
-  CapabilitiesResult,
+  HarnessId,
+  ModelCatalogResult,
   ConsumerContext,
   DaemonDiagnosticFact,
   DomainEvent,
   DiagnosticsParams,
-  HarnessCapability,
+  HarnessModelCatalog,
   InitializeParams,
   InitializeResult,
   InterruptParams,
@@ -40,7 +41,7 @@ import {
   subscriptionIdSchema,
   subscriptionCloseSchema,
   machineErrorSchema,
-  harnessCapabilitySchema,
+  harnessModelCatalogSchema,
   makeErrorCause,
   makeTextEvidence,
   parseTransportFailureFact,
@@ -626,10 +627,10 @@ export function createProtocolServerInternal(
     });
   }
 
-  async function aggregateCapabilities(): Promise<CapabilitiesResult> {
-    async function verifiedCapabilityDiagnostic(
+  async function aggregateModelCatalog(): Promise<ModelCatalogResult> {
+    async function verifiedModelCatalogDiagnostic(
       error: unknown,
-      harness: string,
+      harness: HarnessId,
     ) {
       if (!isAlreadyDiagnosedError(error) || error.diagnosticId === undefined) {
         return undefined;
@@ -644,7 +645,7 @@ export function createProtocolServerInternal(
           record.source === "adapter" &&
           record.harness === harness &&
           record.kind === "request_failure" &&
-          record.operation === "capabilities" &&
+          record.operation === "model_catalog" &&
           record.stage === "query"
           ? error.diagnosticId
           : undefined;
@@ -656,7 +657,7 @@ export function createProtocolServerInternal(
     const entries = Array.from(options.adapters.entries());
     const results = await Promise.allSettled(
       entries.map(async ([harness, adapter]) =>
-        adapter.capabilities(async (input) => {
+        adapter.modelCatalog(async (input) => {
           const unsafe = input as unknown as Record<string, unknown>;
           if ("source" in unsafe || "harness" in unsafe) {
             return undefined;
@@ -669,29 +670,29 @@ export function createProtocolServerInternal(
         }),
       ),
     );
-    const capabilities: HarnessCapability[] = [];
-    const failures: CapabilitiesResult["failures"] = [];
+    const catalogs: HarnessModelCatalog[] = [];
+    const failures: ModelCatalogResult["failures"] = [];
     for (const [index, result] of results.entries()) {
       const harness = entries[index]?.[0];
       if (harness === undefined) continue;
       if (result.status === "fulfilled") {
-        const parsed = v.safeParse(harnessCapabilitySchema, result.value);
+        const parsed = v.safeParse(harnessModelCatalogSchema, result.value);
         if (parsed.success && parsed.output.harness === harness) {
-          capabilities.push(parsed.output);
+          catalogs.push(parsed.output);
           continue;
         }
-        const reason = new Error("Capability result did not match its harness");
+        const reason = new Error("Model catalog did not match its harness");
         const diagnosticId = await recordDiagnostic({
           harness,
           kind: "request_failure",
-          operation: "capabilities",
+          operation: "model_catalog",
           stage: "query",
           reason: "upstream_error",
           message: makeTextEvidence(String(reason)),
         });
         failures.push({
           harness,
-          code: "capability_query_failed",
+          code: "model_catalog_query_failed",
           failure: {
             failureCategory: "unclassified",
             retryDisposition: "unknown",
@@ -699,7 +700,7 @@ export function createProtocolServerInternal(
           ...(diagnosticId === undefined ? {} : { diagnosticId }),
         });
       } else {
-        const suppliedDiagnosticId = await verifiedCapabilityDiagnostic(
+        const suppliedDiagnosticId = await verifiedModelCatalogDiagnostic(
           result.reason,
           harness,
         );
@@ -707,7 +708,7 @@ export function createProtocolServerInternal(
           suppliedDiagnosticId ??
           (await recordDiagnostic({
             kind: "request_failure",
-            operation: "capabilities",
+            operation: "model_catalog",
             stage: "query",
             reason: "upstream_error",
             harness,
@@ -715,7 +716,7 @@ export function createProtocolServerInternal(
           }));
         failures.push({
           harness,
-          code: "capability_query_failed",
+          code: "model_catalog_query_failed",
           failure: {
             failureCategory: "unclassified",
             retryDisposition: "unknown",
@@ -724,7 +725,7 @@ export function createProtocolServerInternal(
         });
       }
     }
-    return { capabilities, failures };
+    return { catalogs, failures };
   }
 
   async function attach(
@@ -891,8 +892,8 @@ export function createProtocolServerInternal(
           daemonGeneration: options.diagnostics.generation,
         } satisfies InitializeResult;
       }
-      case "capabilities":
-        return await aggregateCapabilities();
+      case "modelCatalog":
+        return await aggregateModelCatalog();
       case "spawn":
         const spawnParams = request.params as SpawnParams;
         try {
@@ -922,11 +923,7 @@ export function createProtocolServerInternal(
             feature: "capture_harness_stderr",
           } satisfies MachineError;
         }
-        const currentCapabilities = await aggregateCapabilities();
-        const knownHarnesses = new Set([
-          ...currentCapabilities.capabilities.map(({ harness }) => harness),
-          ...currentCapabilities.failures.map(({ harness }) => harness),
-        ]);
+        const knownHarnesses = new Set(options.adapters.keys());
         if (!knownHarnesses.has(spawnParams.harness)) {
           throw {
             code: "unknown_harness",
@@ -934,20 +931,22 @@ export function createProtocolServerInternal(
             availableHarnesses: [...knownHarnesses],
           } satisfies MachineError;
         }
-        const capability = currentCapabilities.capabilities.find(
-          ({ harness }) => harness === spawnParams.harness,
-        );
-        if (capability !== undefined && spawnParams.model !== undefined) {
-          const model = capability.models.find(
+        if (spawnParams.model !== undefined) {
+          const currentModelCatalog = await aggregateModelCatalog();
+          const catalog = currentModelCatalog.catalogs.find(
+            ({ harness }) => harness === spawnParams.harness,
+          );
+          const model = catalog?.models.find(
             ({ id }) => id === spawnParams.model,
           );
-          if (model === undefined) {
+          if (catalog !== undefined && model === undefined) {
             throw {
               code: "invalid_params",
               issues: [{ issue: "invalid_value", path: "model" }],
             } satisfies MachineError;
           }
           if (
+            model !== undefined &&
             spawnParams.reasoning !== undefined &&
             !model.reasoningEfforts.includes(spawnParams.reasoning)
           ) {

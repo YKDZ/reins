@@ -10,7 +10,7 @@ import type {
   SpawnParams,
   WaitResult,
 } from "@reins/protocol";
-import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
+import { createQoderModelCatalog, createQoderDriver } from "@reins/qoder";
 import {
   createQoderFixtureSdk,
   loadRecordedQoderFixture,
@@ -109,7 +109,7 @@ async function runFixture(
         "qoder",
         {
           driverFactory: createQoderDriver({ sdk }),
-          capabilities: createQoderCapabilities(sdk),
+          modelCatalog: createQoderModelCatalog(sdk),
         },
       ],
     ]),

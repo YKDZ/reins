@@ -1,6 +1,7 @@
 import type {
   CoreDiagnosticFact,
   DomainEvent,
+  SpawnParams,
   SessionId,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
@@ -62,7 +63,7 @@ describe("spawn", () => {
       harness: "codex",
       message: "first",
       cwd: "/tmp/demo",
-    };
+    } satisfies SpawnParams;
 
     await machine.spawn(params);
     await expect(
@@ -95,7 +96,7 @@ describe("spawn", () => {
       harness: "codex",
       message: "first",
       cwd: "/tmp/demo",
-    };
+    } satisfies SpawnParams;
 
     await expect(machine.spawn(params)).rejects.toMatchObject({
       code: "internal_error",

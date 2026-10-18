@@ -28,11 +28,11 @@ async function main(): Promise<void> {
     env: process.env,
   });
   try {
-    const capabilities = await connection.capabilities();
+    const currentModelCatalog = await connection.modelCatalog();
     const sessions = await connection.list();
     if (
-      capabilities.capabilities[0]?.harness !== "fixture" ||
-      capabilities.failures.length !== 0 ||
+      currentModelCatalog.catalogs[0]?.harness !== "codex" ||
+      currentModelCatalog.failures.length !== 0 ||
       sessions.length !== 0
     ) {
       throw new Error("The installed application returned unexpected data");
@@ -40,7 +40,7 @@ async function main(): Promise<void> {
 
     const spawned = await connection.spawn(
       {
-        harness: "fixture",
+        harness: "codex",
         sessionName: "packed-application-session",
         message: "programmatic runtime consumption",
         cwd: process.env.REINS_WORKER_CWD ?? process.cwd(),
@@ -125,7 +125,7 @@ async function main(): Promise<void> {
     process.stdout.write(
       `${JSON.stringify({
         status: "queried",
-        capabilityHarness: capabilities.capabilities[0]?.harness,
+        modelCatalogHarness: currentModelCatalog.catalogs[0]?.harness,
         sessionCount: sessions.length,
         failureCode: queryFailure.code,
         failureStage: queryFailure.stage,

@@ -69,7 +69,7 @@ test("failed cleanup rejects connections and retries without reopening", async (
   const daemon = await openEphemeralDaemonForTest({
     adapters: new Map([
       [
-        "failing",
+        "codex",
         {
           driverFactory: () => ({
             start() {},
@@ -83,8 +83,8 @@ test("failed cleanup rejects connections and retries without reopening", async (
               }
             },
           }),
-          async capabilities() {
-            return { harness: "failing", models: [] };
+          async modelCatalog() {
+            return { harness: "codex", models: [] };
           },
         },
       ],
@@ -109,7 +109,7 @@ test("failed cleanup rejects connections and retries without reopening", async (
       method: "spawn",
       params: {
         sessionName: "failure" as never,
-        harness: "failing",
+        harness: "codex",
         message: "start",
         cwd: "/tmp",
       },
