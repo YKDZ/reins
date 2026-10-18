@@ -716,10 +716,12 @@ function createControlStore(database: DatabaseSync): ControlStore {
 
   function requestTarget(request: ResolvePermissionParams): {
     sessionId: SessionId;
+    turnId: TurnId;
     permissionId: ResolvePermissionParams["permissionId"];
   } {
     return {
       sessionId: request.sessionId,
+      turnId: request.turnId,
       permissionId: request.permissionId,
     };
   }

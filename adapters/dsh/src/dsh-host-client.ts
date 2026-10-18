@@ -46,6 +46,8 @@ function acceptanceAfterSend(
     type === "deliver" ||
     type === "interrupt" ||
     type === "bind-turn" ||
+    type === "cancel-turn-binding" ||
+    type === "resolve-approval" ||
     type === "close"
     ? "unknown"
     : "not_accepted";
@@ -338,7 +340,8 @@ export class DshHostClient {
       this.failPending(error);
     } else if (
       message.type === "session-event" ||
-      message.type === "assistant-stream"
+      message.type === "assistant-stream" ||
+      message.type === "approval-requested"
     ) {
       for (const listener of this.listeners) listener(message);
     }

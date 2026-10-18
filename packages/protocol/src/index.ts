@@ -2652,11 +2652,13 @@ export const machineErrorSchema = v.union([
   v.strictObject({
     code: v.literal("permission_not_pending"),
     sessionId: sessionIdSchema,
+    turnId: v.optional(turnIdSchema),
     permissionId: permissionIdSchema,
   }),
   v.strictObject({
     code: v.literal("permission_resolution_mismatch"),
     sessionId: sessionIdSchema,
+    turnId: v.optional(turnIdSchema),
     permissionId: permissionIdSchema,
   }),
   v.strictObject({
@@ -2832,12 +2834,12 @@ export interface WorkerDriver {
   // resolve 表示原生已接受 interrupt；WorkerInterruptFailure 区分未接受与接受未知。
   // 实际回合终态仍由 turn.completed 事件确认。
   interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;
-  // 同步返回表示 adapter 已把授权决议交给原生；不确定时必须抛 WorkerPermissionFailure。
+  // 返回（同步或异步）表示原生已确认授权决议；不确定时必须抛 WorkerPermissionFailure。
   resolvePermission(
     sessionId: SessionId,
     permissionId: PermissionId,
     resolution: PermissionResolution,
-  ): void;
+  ): void | Promise<void>;
   // 终止 worker 进程；会话的 session.killed 事件由 core 发出。
   // 只有底层 worker 及其进程树已经终止后才 resolve；失败必须 reject。
   terminate(sessionId: SessionId): Promise<void>;

@@ -4,6 +4,7 @@ import type {
   PermissionOption,
   SessionId,
 } from "@reins/protocol";
+import { WorkerPermissionFailure } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { createSessionMachine } from "#/session-machine";
@@ -360,5 +361,118 @@ describe("resolvePermission", () => {
       "permission.resolved",
       "text.delta",
     ]);
+  });
+
+  test("等待原生授权决议期间缓冲本会话事实，确认后才提交 resolved", async () => {
+    let workerSessionId: SessionId | undefined;
+    let resolveNative!: () => void;
+    const nativeAccepted = new Promise<void>((resolve) => {
+      resolveNative = resolve;
+    });
+    const fake = createFakeDriver({
+      async start(spec) {
+        workerSessionId = spec.sessionId;
+      },
+      async resolvePermission() {
+        if (workerSessionId === undefined)
+          throw new Error("worker session was not started");
+        fake.controls.emit({
+          type: "text.delta",
+          sessionId: workerSessionId,
+          turnId: ids.turn("t1"),
+          messageId: ids.message("m2"),
+          delta: "原生授权已追加",
+        });
+        await nativeAccepted;
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const { sessionId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("fixture-17"),
+      harness: "codex",
+      message: "审查这个 PR",
+      cwd: "/tmp/demo",
+      authorizationMode: "interactive",
+    });
+    request(fake, sessionId, [{ outcome: "allow", scope: "once" }]);
+
+    let resolved = false;
+    const pending = machine
+      .resolvePermission({
+        turnId: ids.turn("t1"),
+        sessionId,
+        permissionId: ids.permission("p1"),
+        resolution: { outcome: "allow", scope: "once" },
+      })
+      .then(() => {
+        resolved = true;
+      });
+    await Promise.resolve();
+
+    expect(resolved).toBe(false);
+    expect(events.some((event) => event.type === "permission.resolved")).toBe(
+      false,
+    );
+    expect(events.some((event) => event.type === "text.delta")).toBe(false);
+
+    resolveNative();
+    await pending;
+
+    expect(events.map((event) => event.type).slice(-2)).toEqual([
+      "permission.resolved",
+      "text.delta",
+    ]);
+  });
+
+  test("原生授权明确未接受时允许同一待决请求重试", async () => {
+    let calls = 0;
+    const fake = createFakeDriver({
+      async resolvePermission() {
+        calls += 1;
+        if (calls === 1)
+          throw new WorkerPermissionFailure(
+            "native approval was withdrawn",
+            "not_accepted",
+          );
+      },
+    });
+    const machine = createSessionMachine({
+      driverFactory: fake.factory,
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+    });
+    const events: DomainEvent[] = [];
+    machine.subscribe((event) => events.push(event));
+    const { sessionId } = await machine.spawn({
+      sessionLabel: ids.sessionLabel("fixture-18"),
+      harness: "codex",
+      message: "审查这个 PR",
+      cwd: "/tmp/demo",
+      authorizationMode: "interactive",
+    });
+    request(fake, sessionId, [{ outcome: "allow", scope: "once" }]);
+    const params = {
+      turnId: ids.turn("t1"),
+      sessionId,
+      permissionId: ids.permission("p1"),
+      resolution: { outcome: "allow", scope: "once" } as const,
+    };
+
+    await expect(machine.resolvePermission(params)).rejects.toMatchObject({
+      code: "internal_error",
+    });
+    expect(events.some((event) => event.type === "permission.resolved")).toBe(
+      false,
+    );
+    await machine.resolvePermission(params);
+    expect(
+      events.filter((event) => event.type === "permission.resolved"),
+    ).toHaveLength(1);
   });
 });

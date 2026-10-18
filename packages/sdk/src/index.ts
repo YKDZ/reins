@@ -1694,9 +1694,23 @@ function projectFailure(
       };
     case "permission_not_pending":
     case "permission_resolution_mismatch":
-      return permissionHandle === undefined
-        ? { code: "unexpected_failure", facts: { remoteCode: failure.code } }
-        : { code: failure.code, facts: { permissionHandle } };
+      if (failure.turnId === undefined) {
+        return permissionHandle === undefined
+          ? { code: "unexpected_failure", facts: { remoteCode: failure.code } }
+          : { code: failure.code, facts: { permissionHandle } };
+      }
+      return {
+        code: failure.code,
+        facts: {
+          permissionHandle: parsePermissionHandle(
+            encodePermissionHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.turnId,
+              permissionId: failure.permissionId,
+            }),
+          ),
+        },
+      };
     case "diagnostic_not_found":
       return {
         code: failure.code,

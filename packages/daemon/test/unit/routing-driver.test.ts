@@ -312,15 +312,19 @@ describe("routing driver invariants", () => {
         throw new Error("Expected permissions from both sessions");
       }
       expect(permissionA.permissionId).toBe(permissionB.permissionId);
-      driver.resolvePermission(alpha.sessionId, permissionA.permissionId, {
-        outcome: "allow",
-        scope: "once",
-      });
+      await driver.resolvePermission(
+        alpha.sessionId,
+        permissionA.permissionId,
+        {
+          outcome: "allow",
+          scope: "once",
+        },
+      );
       expect(workerA.controls.responded()).toEqual([
         { id: 7, result: { decision: "accept" } },
       ]);
       expect(workerB.controls.responded()).toEqual([]);
-      driver.resolvePermission(beta.sessionId, permissionB.permissionId, {
+      await driver.resolvePermission(beta.sessionId, permissionB.permissionId, {
         outcome: "deny",
       });
       expect(workerB.controls.responded()).toEqual([

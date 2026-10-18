@@ -15,15 +15,20 @@ live("qoder live smoke", () => {
       resolveTurn = resolve;
     });
     const events: DomainEvent[] = [];
+    const permissionResolutions: Promise<void>[] = [];
     const factory = createQoderDriver({ sdk: createRealQoderSdk() });
     const driver = factory({
       emit: (event) => {
         events.push(event);
         if (event.type === "permission.requested") {
-          driver.resolvePermission(event.sessionId, event.permissionId, {
-            outcome: "allow",
-            scope: "once",
-          });
+          permissionResolutions.push(
+            Promise.resolve(
+              driver.resolvePermission(event.sessionId, event.permissionId, {
+                outcome: "allow",
+                scope: "once",
+              }),
+            ),
+          );
         }
         if (event.type === "turn.completed" && resolveTurn !== null) {
           resolveTurn(event);
@@ -44,6 +49,7 @@ live("qoder live smoke", () => {
     });
 
     const completed = await turnDone;
+    await Promise.all(permissionResolutions);
     expect(completed.stopReason).toBe("end_turn");
     expect(events.some((event) => event.type === "text.delta")).toBe(true);
     expect(events.some((event) => event.type === "tool.completed")).toBe(true);

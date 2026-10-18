@@ -10,6 +10,12 @@ export type DshSafeFailure = {
   readonly requestId?: string;
 };
 
+export type DshApprovalOutcome =
+  | "allowed-once"
+  | "rejected"
+  | "cancelled"
+  | "unavailable";
+
 export type DshHostCommand =
   | {
       readonly id: number;
@@ -42,6 +48,17 @@ export type DshHostCommand =
       readonly nativeTurn: number;
       readonly turnId: TurnId;
     }
+  | {
+      readonly id: number;
+      readonly type: "cancel-turn-binding";
+      readonly nativeTurn: number;
+    }
+  | {
+      readonly id: number;
+      readonly type: "resolve-approval";
+      readonly approvalId: string;
+      readonly outcome: "allowed-once" | "rejected" | "unavailable";
+    }
   | { readonly id: number; readonly type: "close" }
   | { readonly id: number; readonly type: "catalog" };
 
@@ -60,6 +77,15 @@ export type DshHostEvent =
       readonly frame: AssistantStreamFrame;
       readonly nativeTurn?: number;
       readonly turnId?: TurnId;
+    }
+  | {
+      readonly type: "approval-requested";
+      readonly approvalId: string;
+      readonly nativeTurn: number;
+      readonly turnId: TurnId;
+      readonly toolName: string;
+      readonly callId?: string;
+      readonly reason?: string;
     };
 
 export type DshTurnEnd =
@@ -79,6 +105,13 @@ export type DshHostResponse =
     }
   | { readonly id: number; readonly type: "interrupted" }
   | { readonly id: number; readonly type: "bound" }
+  | { readonly id: number; readonly type: "binding-cancelled" }
+  | {
+      readonly id: number;
+      readonly type: "approval-decided";
+      readonly approvalId: string;
+      readonly outcome: DshApprovalOutcome;
+    }
   | {
       readonly id: number;
       readonly type: "catalog";
