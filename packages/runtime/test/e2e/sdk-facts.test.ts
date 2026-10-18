@@ -16,7 +16,7 @@ import {
   connect,
   parseAgentFactId,
   parseMessageKey,
-  parseOperationCredential,
+  parseOperationKey,
   parsePermissionHandle,
   parseResumeCursor,
   parseRuntimeScopeId,
@@ -26,7 +26,7 @@ import {
   ReinsSdkError,
   serializeAgentFactId,
   serializeMessageKey,
-  serializeOperationCredential,
+  serializeOperationKey,
   serializePermissionHandle,
   serializeResumeCursor,
   serializeSessionHandle,
@@ -253,18 +253,12 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
       "eventId",
     ])
       expect(fact).not.toHaveProperty(key);
-  const credential = control.prepareOperation("spawn");
+  const operationKey = control.prepareOperation("spawn");
   expect(
-    parseOperationCredential(
-      "spawn",
-      serializeOperationCredential("spawn", credential),
-    ),
-  ).toBe(credential);
+    parseOperationKey(serializeOperationKey(operationKey), "spawn"),
+  ).toMatchObject({ kind: "spawn", consumer: expect.any(String) });
   expect(() =>
-    parseOperationCredential(
-      "send",
-      serializeOperationCredential("spawn", credential),
-    ),
+    parseOperationKey(serializeOperationKey(operationKey), "send"),
   ).toThrow();
   expect(parseAgentFactId(serializeAgentFactId(callerMessage.factId))).toBe(
     callerMessage.factId,

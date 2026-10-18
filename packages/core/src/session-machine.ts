@@ -40,6 +40,7 @@ import {
   type WorkerDriver,
   type WorkerDriverFactory,
   type WorkerEventRejection,
+  WorkerStartFailure,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -74,10 +75,12 @@ type TurnScope = {
 type PendingSpawn = {
   readonly token: symbol;
   readonly turn: TurnScope;
+  readonly events: DomainEvent[];
+  readonly lateEvents: DomainEvent[];
   readonly permissionIds: Set<PermissionId>;
   readonly pendingPermissions: SessionRecord["pendingPermissions"];
   completedTurnId: TurnId | null;
-  accepting: boolean;
+  phase: "accepting" | "committing" | "closing";
 };
 
 type IngressProjection = {
@@ -258,7 +261,13 @@ function toInfo(session: SessionRecord): SessionInfo {
 }
 
 export type SessionMachine = {
-  spawn(params: SpawnParams): Promise<SpawnAck>;
+  spawn(
+    params: SpawnParams,
+    commit?: (
+      result: SpawnAck,
+      events: readonly DomainEvent[],
+    ) => void | Promise<void>,
+  ): Promise<SpawnAck>;
   send(params: SendParams): Promise<SendAck>;
   wait(params: WaitParams): Promise<WaitResult>;
   interrupt(params: InterruptParams): Promise<InterruptAck>;
@@ -267,7 +276,51 @@ export type SessionMachine = {
   list(filter?: ListFilter): SessionInfo[];
   assertTurnTarget(target: TurnTarget): void;
   subscribe(listener: (event: DomainEvent) => void): () => void;
+  pendingSpawnIds(): SessionId[];
+  terminatePendingSpawns(): Promise<void>;
 };
+
+export class SpawnCommitFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly result: SpawnAck;
+  readonly commitError: unknown;
+  readonly terminationError: unknown | undefined;
+
+  constructor(
+    sessionId: SessionId,
+    result: SpawnAck,
+    commitError: unknown,
+    terminationError: unknown | undefined,
+  ) {
+    super("Spawn was accepted but its control record could not be committed");
+    this.name = "SpawnCommitFailure";
+    this.sessionId = sessionId;
+    this.result = result;
+    this.commitError = commitError;
+    this.terminationError = terminationError;
+  }
+}
+
+export class SpawnStartFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly acceptance: "not_accepted" | "unknown";
+  readonly failure: MachineError;
+  readonly terminationError: unknown | undefined;
+
+  constructor(
+    sessionId: SessionId,
+    acceptance: "not_accepted" | "unknown",
+    failure: MachineError,
+    terminationError: unknown | undefined,
+  ) {
+    super("Worker start did not reach a known accepted state");
+    this.name = "SpawnStartFailure";
+    this.sessionId = sessionId;
+    this.acceptance = acceptance;
+    this.failure = failure;
+    this.terminationError = terminationError;
+  }
+}
 
 export type SessionIdentity = {
   session(): SessionId;
@@ -542,7 +595,8 @@ export function createSessionMachine(options: {
     const spawning =
       current === undefined ? pendingSpawns.get(event.sessionId) : undefined;
     const eventTurnId = "turnId" in event ? event.turnId : undefined;
-    if (current === undefined && spawning?.accepting !== true)
+    if (spawning?.phase === "closing") return { status: "accepted" };
+    if (current === undefined && spawning === undefined)
       return {
         status: "rejected",
         rejection: {
@@ -769,10 +823,10 @@ export function createSessionMachine(options: {
         decision satisfies never;
     }
     const projection = activeProjection(event.sessionId);
+    const spawning = pendingSpawns.get(event.sessionId);
     if (projection !== undefined) projectEvent(projection, event);
     else {
-      const spawning = pendingSpawns.get(event.sessionId);
-      if (spawning?.accepting === true) {
+      if (spawning !== undefined && spawning.phase !== "closing") {
         if (event.type === "text.delta")
           spawning.turn.messages.set(event.messageId, "streaming");
         else if (event.type === "message")
@@ -794,6 +848,12 @@ export function createSessionMachine(options: {
           spawning.pendingPermissions.clear();
         }
       }
+    }
+    if (spawning !== undefined) {
+      if (spawning.phase === "accepting") spawning.events.push(event);
+      else if (spawning.phase === "committing")
+        spawning.lateEvents.push(event);
+      return;
     }
     const delivering = pendingDeliveries.get(event.sessionId);
     if (delivering === undefined) bus.publish(event);
@@ -868,7 +928,7 @@ export function createSessionMachine(options: {
   }
 
   return {
-    async spawn(params) {
+    async spawn(params, commit) {
       const parsed = v.safeParse(spawnParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -880,63 +940,48 @@ export function createSessionMachine(options: {
       const spawnScope: PendingSpawn = {
         token: Symbol(sessionId),
         turn: createTurnScope(turnId),
+        events: [],
+        lateEvents: [],
         permissionIds: new Set(),
         pendingPermissions: new Map(),
         completedTurnId: null,
-        accepting: true,
+        phase: "accepting",
       };
       pendingSpawns.set(sessionId, spawnScope);
       try {
-        bus.transaction(
-          [
-            {
-              type: "session.created",
-              sessionId,
-              harness: spec.harness,
-              model: spec.model ?? null,
-              reasoning: spec.reasoning ?? null,
-              cwd,
-              ...(spec.sessionLabel === undefined
-                ? {}
-                : { sessionLabel: spec.sessionLabel }),
-              spawnedAt: new Date().toISOString(),
-            },
-            { type: "turn.started", sessionId, turnId },
-          ],
-          () => {
-            try {
-              driver.start({
-                sessionId,
-                turnId,
-                harness: spec.harness,
-                message: spec.message,
-                cwd,
-                ...(spec.authorizationMode === undefined
-                  ? {}
-                  : { authorizationMode: spec.authorizationMode }),
-                ...(spec.agent === undefined ? {} : { agent: spec.agent }),
-                ...(spec.model === undefined ? {} : { model: spec.model }),
-                ...(spec.reasoning === undefined
-                  ? {}
-                  : { reasoning: spec.reasoning }),
-                ...(spec.sandbox === undefined
-                  ? {}
-                  : { sandbox: spec.sandbox }),
-                ...(spec.captureHarnessStderr === undefined
-                  ? {}
-                  : { captureHarnessStderr: spec.captureHarnessStderr }),
-              });
-            } finally {
-              spawnScope.accepting = false;
-            }
-          },
-        );
+        await driver.start({
+          sessionId,
+          turnId,
+          harness: spec.harness,
+          message: spec.message,
+          cwd,
+          ...(spec.authorizationMode === undefined
+            ? {}
+            : { authorizationMode: spec.authorizationMode }),
+          ...(spec.agent === undefined ? {} : { agent: spec.agent }),
+          ...(spec.model === undefined ? {} : { model: spec.model }),
+          ...(spec.reasoning === undefined
+            ? {}
+            : { reasoning: spec.reasoning }),
+          ...(spec.sandbox === undefined ? {} : { sandbox: spec.sandbox }),
+          ...(spec.captureHarnessStderr === undefined
+            ? {}
+            : { captureHarnessStderr: spec.captureHarnessStderr }),
+        });
       } catch (error) {
-        spawnScope.accepting = false;
-        if (pendingSpawns.get(sessionId)?.token === spawnScope.token) {
-          pendingSpawns.delete(sessionId);
+        spawnScope.phase = "closing";
+        let terminationError: unknown;
+        try {
+          await driver.terminate(sessionId);
+          if (pendingSpawns.get(sessionId)?.token === spawnScope.token)
+            pendingSpawns.delete(sessionId);
+        } catch (cleanupError) {
+          terminationError = cleanupError;
         }
-        throw await unexpectedFailure(options.diagnostics, error, {
+        const knownError = v.safeParse(machineErrorSchema, error);
+        const workerFailure =
+          error instanceof WorkerStartFailure ? error : undefined;
+        const failure = await unexpectedFailure(options.diagnostics, error, {
           sessionId,
           turnId,
           kind: "request_failure",
@@ -945,11 +990,58 @@ export function createSessionMachine(options: {
           reason: "upstream_error",
           message: evidence(error),
         });
+        throw new SpawnStartFailure(
+          sessionId,
+          workerFailure?.acceptance ??
+            (knownError.success ? "not_accepted" : "unknown"),
+          failure,
+          terminationError,
+        );
       }
-      if (pendingSpawns.get(sessionId)?.token === spawnScope.token) {
+      const result = { sessionId, turnId, cwd };
+      const events: DomainEvent[] = [
+        {
+          type: "session.created",
+          sessionId,
+          harness: spec.harness,
+          model: spec.model ?? null,
+          reasoning: spec.reasoning ?? null,
+          cwd,
+          ...(spec.sessionLabel === undefined
+            ? {}
+            : { sessionLabel: spec.sessionLabel }),
+          spawnedAt: new Date().toISOString(),
+        },
+        { type: "turn.started", sessionId, turnId },
+        ...spawnScope.events,
+      ];
+      // 固定创建提交的截点。原生在异步提交期间产生的事件只进入 lateEvents，
+      // 会在创建事实提交并发布后逐批走普通记录路径。
+      const initialBatch = Object.freeze([...events]);
+      spawnScope.phase = "committing";
+      try {
+        await commit?.(result, initialBatch);
+      } catch (error) {
+        spawnScope.phase = "closing";
+        let stopError: unknown;
+        try {
+          await driver.terminate(sessionId);
+        } catch (terminationError) {
+          stopError = terminationError;
+        }
+        if (stopError === undefined && pendingSpawns.get(sessionId)?.token === spawnScope.token)
+          pendingSpawns.delete(sessionId);
+        throw new SpawnCommitFailure(sessionId, result, error, stopError);
+      }
+      bus.publish(initialBatch);
+      while (spawnScope.lateEvents.length > 0) {
+        const batch = spawnScope.lateEvents.splice(0);
+        bus.publish(batch);
+      }
+      spawnScope.phase = "closing";
+      if (pendingSpawns.get(sessionId)?.token === spawnScope.token)
         pendingSpawns.delete(sessionId);
-      }
-      return { sessionId, turnId, cwd };
+      return result;
     },
     async send(params) {
       const parsed = v.safeParse(sendParamsSchema, params);
@@ -1268,6 +1360,24 @@ export function createSessionMachine(options: {
       }
       await termination;
       return { sessionId: id, status: "killed" };
+    },
+    pendingSpawnIds() {
+      return [...pendingSpawns.keys()];
+    },
+    async terminatePendingSpawns() {
+      const results = await Promise.allSettled(
+        [...pendingSpawns.entries()].map(async ([sessionId, pending]) => {
+          pending.phase = "closing";
+          await driver.terminate(sessionId);
+          if (pendingSpawns.get(sessionId)?.token === pending.token)
+            pendingSpawns.delete(sessionId);
+        }),
+      );
+      const failures = results
+        .filter((result): result is PromiseRejectedResult => result.status === "rejected")
+        .map((result) => result.reason);
+      if (failures.length > 0)
+        throw new AggregateError(failures, "Pending worker cleanup failed");
     },
     list(filter) {
       const matches =

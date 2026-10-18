@@ -328,7 +328,7 @@ describe("routing driver invariants", () => {
     }));
     const adapter: HarnessAdapter = {
       driverFactory: () => ({
-        start() {},
+        async start() {},
         async deliver() {},
         async interrupt() {},
         resolvePermission() {},
@@ -431,7 +431,7 @@ describe("routing driver invariants", () => {
       }));
       const adapter: HarnessAdapter = {
         driverFactory: () => ({
-          start() {},
+          async start() {},
           async deliver() {},
           async interrupt() {},
           resolvePermission() {},
@@ -608,7 +608,7 @@ describe("routing driver invariants", () => {
       driverFactory: ({ diagnostics }) => {
         sink = diagnostics;
         return {
-          start() {},
+          async start() {},
           async deliver() {},
           async interrupt() {},
           resolvePermission() {},
@@ -677,7 +677,7 @@ describe("routing driver invariants", () => {
     let accepted: ReturnType<typeof runtime.record> | undefined;
     const adapter: HarnessAdapter = {
       driverFactory: ({ diagnostics }) => ({
-        start() {
+        async start() {
           accepted = diagnostics({
             kind: "mapping_gap",
             operation: "spawn",
@@ -747,7 +747,7 @@ describe("routing driver invariants", () => {
     );
   });
 
-  test("does not retain failed starts and retains failed termination for retry", async () => {
+  test("retains failed-start cleanup routing and failed termination for retry", async () => {
     const workers: ReturnType<typeof createNativeWorker>[] = [];
     const codexDriverFactory = createCodexDriver({
       transportFactory() {
@@ -757,17 +757,20 @@ describe("routing driver invariants", () => {
       },
     });
     let starts = 0;
+    let failedStartTerminations = 0;
     const adapter: HarnessAdapter = {
       driverFactory(context) {
         if (starts++ !== 0) return codexDriverFactory(context);
         return {
-          start() {
+          async start() {
             throw new Error("start failed");
           },
           async deliver() {},
           async interrupt() {},
           resolvePermission() {},
-          async terminate() {},
+          async terminate() {
+            failedStartTerminations += 1;
+          },
         };
       },
       modelCatalog: async () => ({ harness: "codex", models: [] }),
@@ -791,7 +794,10 @@ describe("routing driver invariants", () => {
       authorizationMode: "allowAll",
     };
     try {
-      expect(() => driver.start(spec)).toThrow("start failed");
+      await expect(driver.start(spec)).rejects.toThrow("start failed");
+      expect(failedStartTerminations).toBe(0);
+      await expect(driver.terminate(sessionId)).resolves.toBeUndefined();
+      expect(failedStartTerminations).toBe(1);
       await expect(
         driver.deliver(sessionId, spec.turnId, "message", "active_turn"),
       ).rejects.toThrow("No routing entry");

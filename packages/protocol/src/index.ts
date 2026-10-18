@@ -109,11 +109,6 @@ export const messageIdSchema = opaqueIdentity("MessageId");
 export type MessageId = v.InferOutput<typeof messageIdSchema>;
 export const toolCallIdSchema = opaqueIdentity("ToolCallId");
 export type ToolCallId = v.InferOutput<typeof toolCallIdSchema>;
-export const commandIdSchema = identifier(
-  "CommandId",
-  /^[a-z0-9]+:[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$/,
-);
-export type CommandId = v.InferOutput<typeof commandIdSchema>;
 export const sideEffectMethodSchema = v.picklist([
   "spawn",
   "send",
@@ -221,6 +216,58 @@ export const consumerContextSchema = v.pipe(
   v.brand<string, "ConsumerContext">("ConsumerContext"),
 );
 export type ConsumerContext = v.InferOutput<typeof consumerContextSchema>;
+
+declare const operationKeyKindBrand: unique symbol;
+export type OperationKey<Kind extends SideEffectMethod = SideEffectMethod> =
+  v.InferOutput<typeof operationKeySchema> & {
+    readonly [operationKeyKindBrand]: Kind;
+  };
+export const operationKeyClaimsSchema = v.strictObject({
+  runtimeScopeId: runtimeScopeIdSchema,
+  consumer: consumerContextSchema,
+  kind: sideEffectMethodSchema,
+  generation: daemonGenerationSchema,
+  nonce: identifier(
+    "OperationKeyNonce",
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+  ),
+});
+export type OperationKeyClaims<
+  Kind extends SideEffectMethod = SideEffectMethod,
+> = Omit<v.InferOutput<typeof operationKeyClaimsSchema>, "kind"> & {
+  readonly kind: Kind;
+};
+export const operationKeySchema = v.pipe(
+  v.string(),
+  v.check((value) => {
+    try {
+      decodeIdentity("operation1_", operationKeyClaimsSchema, value);
+      return true;
+    } catch {
+      return false;
+    }
+  }),
+  v.brand("OperationKey"),
+);
+
+export function serializeOperationKey<Kind extends SideEffectMethod>(
+  claims: OperationKeyClaims<Kind>,
+): OperationKey<Kind> {
+  return v.parse(
+    operationKeySchema,
+    encodeIdentity("operation1_", operationKeyClaimsSchema, claims),
+  ) as OperationKey<Kind>;
+}
+
+export function parseOperationKey<Kind extends SideEffectMethod = SideEffectMethod>(
+  value: string,
+  expectedKind?: Kind,
+): OperationKeyClaims<Kind> {
+  const claims = decodeIdentity("operation1_", operationKeyClaimsSchema, value);
+  if (expectedKind !== undefined && claims.kind !== expectedKind)
+    throw new Error("OperationKey kind does not match the expected operation");
+  return claims as OperationKeyClaims<Kind>;
+}
 
 export function makeDiagnosticId(
   generation: string,
@@ -2111,8 +2158,12 @@ export const errorCodeSchema = v.union([
   v.literal("protocol_version_mismatch"),
   v.literal("runtime_scope_mismatch"),
   v.literal("consumer_context_required"),
-  v.literal("command_id_conflict"),
-  v.literal("stale_command_id"),
+  v.literal("operation_key_conflict"),
+  v.literal("operation_key_scope_mismatch"),
+  v.literal("stale_operation_key"),
+  v.literal("operation_pending"),
+  v.literal("operation_outcome_unknown"),
+  v.literal("control_store_unavailable"),
   v.literal("daemon_timeout"),
   v.literal("invalid_daemon_response"),
   v.literal("daemon_start_failed"),
@@ -2217,8 +2268,26 @@ export const machineErrorSchema = v.union([
     code: v.literal("turn_not_active"),
     ...turnTargetSchema.entries,
   }),
-  v.strictObject({ code: v.literal("command_id_conflict") }),
-  v.strictObject({ code: v.literal("stale_command_id") }),
+  v.strictObject({ code: v.literal("operation_key_conflict") }),
+  v.strictObject({ code: v.literal("operation_key_scope_mismatch") }),
+  v.strictObject({ code: v.literal("stale_operation_key") }),
+  v.strictObject({
+    code: v.literal("operation_pending"),
+    operationKey: operationKeySchema,
+  }),
+  v.strictObject({
+    code: v.literal("operation_outcome_unknown"),
+    operationKey: operationKeySchema,
+  }),
+  v.strictObject({
+    code: v.literal("control_store_unavailable"),
+    operationKey: operationKeySchema,
+    stage: v.picklist(["register", "dispatch", "commit", "failure"]),
+    acceptance: v.picklist(["not_dispatched", "unknown", "accepted"]),
+    cause: errorCauseSchema,
+    acceptedResult: v.optional(spawnAckSchema),
+    cleanupCause: v.optional(errorCauseSchema),
+  }),
   v.strictObject({
     code: v.literal("session_not_found"),
     sessionId: sessionIdSchema,
@@ -2310,6 +2379,20 @@ export class DriverFailure extends Error {
   }
 }
 
+export class WorkerStartFailure extends Error {
+  readonly acceptance: "not_accepted" | "unknown";
+
+  constructor(
+    message: string,
+    acceptance: "not_accepted" | "unknown",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "WorkerStartFailure";
+    this.acceptance = acceptance;
+  }
+}
+
 export function isDriverFailure(error: unknown): error is DriverFailure {
   return (
     error instanceof DriverFailure &&
@@ -2332,8 +2415,8 @@ export type WorkerSpec = {
 };
 
 export interface WorkerDriver {
-  // 启动 worker 进程/会话；worker 内容事件通过 emit 回调流入 core。
-  start(spec: WorkerSpec): void;
+  // 等到原生确认创建请求已接受后才完成；内容事件通过 emit 流入 core。
+  start(spec: WorkerSpec): Promise<void>;
   // 把消息交给 worker；turnId 标识它所属的回合。
   deliver(
     sessionId: SessionId,
@@ -2411,6 +2494,7 @@ export const protocolMethodSchema = v.union([
   v.literal("list"),
   v.literal("attach"),
   v.literal("resolvePermission"),
+  v.literal("getOperation"),
   v.literal("modelCatalog"),
   v.literal("diagnostics"),
 ]);
@@ -2420,7 +2504,7 @@ export const protocolRequestSchema = v.strictObject({
   kind: v.literal("request"),
   requestId: requestIdSchema,
   method: protocolMethodSchema,
-  commandId: v.optional(commandIdSchema),
+  operationKey: v.optional(operationKeySchema),
   params: v.unknown(),
 });
 export type ProtocolRequest = v.InferOutput<typeof protocolRequestSchema>;
@@ -2519,6 +2603,31 @@ export const attachResultSchema = v.strictObject({
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 
+export const operationRecordSchema = v.union([
+  v.strictObject({ status: v.literal("unknown"), operationKey: operationKeySchema }),
+  v.strictObject({ status: v.literal("unavailable"), operationKey: operationKeySchema }),
+  v.strictObject({ status: v.literal("pending"), operationKey: operationKeySchema }),
+  v.strictObject({ status: v.literal("outcome_unknown"), operationKey: operationKeySchema }),
+  v.strictObject({
+    status: v.literal("succeeded"),
+    operationKey: operationKeySchema,
+    result: spawnAckSchema,
+  }),
+  v.strictObject({
+    status: v.literal("failed"),
+    operationKey: operationKeySchema,
+    error: machineErrorSchema,
+  }),
+  v.strictObject({
+    status: v.literal("accepted_uncommitted"),
+    operationKey: operationKeySchema,
+    result: spawnAckSchema,
+    cause: errorCauseSchema,
+    cleanupCause: v.optional(errorCauseSchema),
+  }),
+]);
+export type OperationRecord = v.InferOutput<typeof operationRecordSchema>;
+
 // 每个方法的参数 / 结果 schema 由方法名静态确定，双端共用同一契约。
 const protocolParamsSchemas = {
   initialize: initializeParamsSchema,
@@ -2530,6 +2639,7 @@ const protocolParamsSchemas = {
   list: listFilterSchema,
   attach: attachParamsSchema,
   resolvePermission: resolvePermissionParamsSchema,
+  getOperation: v.strictObject({ operationKey: operationKeySchema }),
   modelCatalog: v.strictObject({}),
   diagnostics: diagnosticsParamsSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;
@@ -2554,6 +2664,7 @@ const protocolResultSchemas = {
   list: v.array(sessionInfoSchema),
   attach: attachResultSchema,
   resolvePermission: resolvePermissionAckSchema,
+  getOperation: operationRecordSchema,
   modelCatalog: modelCatalogResultSchema,
   diagnostics: diagnosticsResultSchema,
 } as const satisfies Record<ProtocolMethod, v.GenericSchema>;

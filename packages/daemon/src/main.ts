@@ -12,6 +12,7 @@ import {
 } from "@reins/codex";
 import type { HarnessId, ProtocolMessage } from "@reins/protocol";
 import { harnessIdSchema, makeErrorCause } from "@reins/protocol";
+import { openControlStore } from "@reins/event-journal";
 import {
   createQoderModelCatalog,
   createQoderDriver,
@@ -39,7 +40,10 @@ function builtInAdapters(): Map<HarnessId, HarnessAdapter> {
     [
       "qoder",
       {
-        driverFactory: createQoderDriver({ sdk: qoderSdk }),
+        driverFactory: createQoderDriver({
+          sdk: qoderSdk,
+          expectedCliVersion: "1.1.65",
+        }),
         modelCatalog: createQoderModelCatalog(qoderSdk),
         canCaptureHarnessStderr: false,
       },
@@ -134,6 +138,7 @@ async function main(): Promise<void> {
   let diagnosticsRuntime:
     | Awaited<ReturnType<typeof openDiagnosticsRuntime>>
     | undefined;
+  let controlStore: Awaited<ReturnType<typeof openControlStore>> | undefined;
   let lifecycleOwnsRuntime = false;
   try {
     const flags = parseFlags(process.argv.slice(2));
@@ -146,6 +151,9 @@ async function main(): Promise<void> {
       path: socketPath,
     });
     diagnosticsRuntime = await openDiagnosticsRuntime(state);
+    controlStore = await openControlStore({
+      directory: join(state.directory, "control"),
+    });
     const openedDiagnosticsRuntime = diagnosticsRuntime;
     const daemon = createDaemonInternal(
       {
@@ -154,6 +162,7 @@ async function main(): Promise<void> {
         identity: { session: () => openedDiagnosticsRuntime.sessionId() },
         diagnostics: openedDiagnosticsRuntime,
         runtimeScopeId: state.runtimeScopeId,
+        controlStore,
         idleTimeoutMs: idleTimeoutFromEnv(process.env),
       },
       {},
@@ -188,6 +197,7 @@ async function main(): Promise<void> {
     );
   } catch (error) {
     if (!lifecycleOwnsRuntime) {
+      controlStore?.close();
       await diagnosticsRuntime?.close().catch(() => undefined);
       await writerLease.close().catch(() => undefined);
     }

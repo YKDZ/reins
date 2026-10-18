@@ -1,9 +1,6 @@
 import {
   createReinsClient,
   AgentSubscriptionError,
-  isCommandOutcomeUnknown,
-  OperationCredentialError,
-  parseRetryToken,
   ReinsClientError,
   type ReinsClient as ControlClient,
   type AgentFact as ClientAgentFact,
@@ -17,6 +14,8 @@ import type {
   ProtocolMessage,
   ProtocolParams,
   ProtocolResult,
+  OperationKey as ProtocolOperationKey,
+  OperationRecord as ProtocolOperationRecord,
   RuntimeScopeId as ProtocolRuntimeScopeId,
   SideEffectMethod,
   SessionInfo as ProtocolSessionInfo,
@@ -34,6 +33,7 @@ import {
   encodeTurnHandle,
   messageKeySchema,
   permissionHandleSchema,
+  parseOperationKey as parseProtocolOperationKey,
   REINS_PROTOCOL_MAJOR_VERSION,
   resumeCursorSchema,
   sessionIdSchema,
@@ -50,8 +50,9 @@ import {
   type DiagnosticRecord,
   type DiagnosticsQuery,
   type DiagnosticsResult,
-  type OperationCredential,
+  type OperationKey,
   type OperationKind,
+  type OperationRecord,
   type ReinsConnection,
   type ReinsFailure,
   type RuntimeScopeId,
@@ -111,8 +112,9 @@ export type {
   InterruptInput,
   InterruptResult,
   HarnessId,
-  OperationCredential,
+  OperationKey,
   OperationKind,
+  OperationRecord,
   HarnessModelCatalog,
   HarnessFailure,
   LastCompletedTurn,
@@ -193,19 +195,18 @@ export function parseResumeCursor(value: unknown): ResumeCursor {
 export function serializeResumeCursor(cursor: ResumeCursor): string {
   return v.parse(resumeCursorSchema, cursor);
 }
-export function parseOperationCredential<Kind extends OperationKind>(
-  kind: Kind,
+export function parseOperationKey<Kind extends OperationKind = OperationKind>(
   value: unknown,
-): OperationCredential<Kind> {
-  if (typeof value !== "string" || parseRetryToken(value).method !== kind)
-    throw new Error("Invalid operation credential");
-  return value as OperationCredential<Kind>;
+  kind?: Kind,
+): OperationKey<Kind> {
+  if (typeof value !== "string") throw new Error("Invalid OperationKey");
+  parseProtocolOperationKey(value, kind);
+  return value as OperationKey<Kind>;
 }
-export function serializeOperationCredential<Kind extends OperationKind>(
-  kind: Kind,
-  credential: OperationCredential<NoInfer<Kind>>,
+export function serializeOperationKey<Kind extends OperationKind>(
+  operationKey: OperationKey<NoInfer<Kind>>,
 ): string {
-  return parseOperationCredential(kind, credential);
+  return parseOperationKey<Kind>(operationKey);
 }
 export function parseAgentFactId(value: unknown): AgentFactId {
   if (typeof value !== "string" || !/^fact1_[A-Za-z0-9_-]+$/u.test(value))
@@ -412,7 +413,7 @@ export async function connect(
       },
       prepareOperation(kind) {
         try {
-          return client!.prepareOperation(kind) as OperationCredential<
+          return client!.prepareOperation(kind) as unknown as OperationKey<
             typeof kind
           >;
         } catch (error) {
@@ -427,20 +428,22 @@ export async function connect(
           );
         }
       },
-      async spawn(input, credential) {
-        const result = await perform(client!, "spawn", input, credential);
-        return {
-          sessionHandle: parseSessionHandle(result.sessionId),
-          turnHandle: parseTurnHandle(
-            encodeTurnHandle({
-              sessionId: result.sessionId,
-              turnId: result.turnId,
-            }),
-          ),
-          cwd: result.cwd,
-        };
+      async getOperation<Kind extends OperationKind>(
+        operationKey: OperationKey<Kind>,
+      ) {
+        const result = await query(client!, "getOperation", {
+          operationKey: serializeOperationKey(
+            operationKey,
+          ) as ProtocolOperationKey,
+        });
+        return projectOperationRecord<Kind>(result);
       },
-      async kill(input, credential) {
+      async spawn(input, operationKey) {
+        return projectSpawnResult(
+          await perform(client!, "spawn", input, operationKey),
+        );
+      },
+      async kill(input, operationKey) {
         const result = await perform(
           client!,
           "kill",
@@ -450,14 +453,14 @@ export async function connect(
               "sessionHandle",
             ),
           },
-          credential,
+          operationKey,
         );
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
           status: result.status,
         };
       },
-      async resolvePermission(permissionHandle, resolution, credential) {
+      async resolvePermission(permissionHandle, resolution, operationKey) {
         let target: ReturnType<typeof decodePermissionHandle>;
         try {
           target = decodePermissionHandle(
@@ -478,7 +481,7 @@ export async function connect(
           client!,
           "resolvePermission",
           { ...target, resolution },
-          credential,
+          operationKey,
           permissionHandle,
         );
         return {
@@ -488,7 +491,7 @@ export async function connect(
           status: "resolved",
         };
       },
-      async send(input: SendInput, credential) {
+      async send(input: SendInput, operationKey) {
         if (
           typeof input !== "object" ||
           input === null ||
@@ -513,7 +516,7 @@ export async function connect(
             message: input.message,
           };
         }
-        const result = await perform(client!, "send", params, credential);
+        const result = await perform(client!, "send", params, operationKey);
         return {
           sessionHandle: parseSessionHandle(result.sessionId),
           turnHandle: parseTurnHandle(
@@ -567,9 +570,9 @@ export async function connect(
           ),
         } satisfies WaitResult;
       },
-      async interrupt(input: InterruptInput, credential) {
+      async interrupt(input: InterruptInput, operationKey) {
         const target = targetFromHandle(input.turnHandle, "turnHandle");
-        await perform(client!, "interrupt", target, credential);
+        await perform(client!, "interrupt", target, operationKey);
         return {
           turnHandle: input.turnHandle,
           status: "accepted",
@@ -660,11 +663,15 @@ async function perform<M extends SideEffectMethod>(
   client: ControlClient,
   method: M,
   params: ProtocolParams<M>,
-  credential: OperationCredential<M & OperationKind>,
+  operationKey: OperationKey<M & OperationKind>,
   permissionHandle?: PermissionHandle,
 ): Promise<ProtocolResult<M>> {
   try {
-    const response = await client.executeOperation(method, params, credential);
+    const response = await client.executeOperation(
+      method,
+      params,
+      operationKey as unknown as ProtocolOperationKey<M>,
+    );
     if ("error" in response)
       throw new ReinsSdkError(
         projectFailure(response.error, permissionHandle),
@@ -673,11 +680,6 @@ async function perform<M extends SideEffectMethod>(
     return response.result;
   } catch (error) {
     if (error instanceof ReinsSdkError) throw error;
-    if (error instanceof OperationCredentialError)
-      throw new ReinsSdkError(
-        { code: "operation_credential_invalid", facts: {} },
-        "operation",
-      );
     if (error instanceof ReinsClientError)
       throw new ReinsSdkError(projectClientFailure(error.failure), "operation");
     throw new ReinsSdkError(
@@ -688,7 +690,7 @@ async function perform<M extends SideEffectMethod>(
 }
 
 async function query<
-  M extends "modelCatalog" | "list" | "diagnostics" | "wait",
+  M extends "modelCatalog" | "list" | "diagnostics" | "wait" | "getOperation",
 >(
   client: ControlClient,
   method: M,
@@ -845,26 +847,59 @@ function projectCompletedTurn(
   } as import("./contracts.ts").CompletedTurn;
 }
 
+function projectSpawnResult(
+  result: ProtocolResult<"spawn">,
+): import("./contracts.ts").SpawnResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    turnHandle: parseTurnHandle(
+      encodeTurnHandle({
+        sessionId: result.sessionId,
+        turnId: result.turnId,
+      }),
+    ),
+    cwd: result.cwd,
+  };
+}
+
+function projectOperationRecord<Kind extends OperationKind>(
+  record: ProtocolOperationRecord,
+): OperationRecord<Kind> {
+  const operationKey = parseOperationKey(record.operationKey) as OperationKey<Kind>;
+  switch (record.status) {
+    case "unknown":
+    case "unavailable":
+    case "pending":
+    case "outcome_unknown":
+      return { status: record.status, operationKey } as OperationRecord<Kind>;
+    case "succeeded":
+      return {
+        status: "succeeded",
+        operationKey,
+        result: projectSpawnResult(record.result),
+      } as OperationRecord<Kind>;
+    case "failed":
+      return {
+        status: "failed",
+        operationKey,
+        error: projectFailure(record.error),
+      } as OperationRecord<Kind>;
+    case "accepted_uncommitted":
+      return {
+        status: "accepted_uncommitted",
+        operationKey,
+        result: projectSpawnResult(record.result),
+        cause: record.cause,
+        ...(record.cleanupCause === undefined
+          ? {}
+          : { cleanupCause: record.cleanupCause }),
+      } as OperationRecord<Kind>;
+  }
+}
+
 function projectClientFailure(
   failure: ReinsClientError["failure"],
 ): ReinsFailure {
-  if (isCommandOutcomeUnknown(failure)) {
-    if (
-      failure.method !== "spawn" &&
-      failure.method !== "send" &&
-      failure.method !== "interrupt" &&
-      failure.method !== "kill" &&
-      failure.method !== "resolvePermission"
-    )
-      return {
-        code: "unexpected_failure",
-        facts: { remoteCode: failure.code },
-      };
-    return {
-      code: "command_outcome_unknown",
-      facts: { cause: failure.cause, operation: failure.method },
-    };
-  }
   return projectFailure(failure);
 }
 
@@ -887,9 +922,32 @@ function projectFailure(
         code: failure.code,
         facts: { oldest: failure.oldest, head: failure.head },
       };
-    case "command_id_conflict":
-    case "stale_command_id":
+    case "operation_key_conflict":
+    case "operation_key_scope_mismatch":
+    case "stale_operation_key":
       return { code: failure.code, facts: {} };
+    case "operation_pending":
+    case "operation_outcome_unknown":
+      return {
+        code: failure.code,
+        facts: { operationKey: parseOperationKey(failure.operationKey) },
+      };
+    case "control_store_unavailable":
+      return {
+        code: failure.code,
+        facts: {
+          operationKey: parseOperationKey(failure.operationKey),
+          stage: failure.stage,
+          acceptance: failure.acceptance,
+          cause: failure.cause,
+          ...(failure.acceptedResult === undefined
+            ? {}
+            : { acceptedResult: projectSpawnResult(failure.acceptedResult) }),
+          ...(failure.cleanupCause === undefined
+            ? {}
+            : { cleanupCause: failure.cleanupCause }),
+        },
+      };
     case "protocol_version_mismatch":
       return {
         code: failure.code,

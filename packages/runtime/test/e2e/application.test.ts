@@ -962,7 +962,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
       retryCredential,
     ),
   ).rejects.toMatchObject({
-    failure: { code: "command_id_conflict" },
+    failure: { code: "operation_key_conflict" },
   });
   const independent = await connection.spawn(
     { ...retryInput, message: "different operation, same label" },

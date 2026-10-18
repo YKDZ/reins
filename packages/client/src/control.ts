@@ -15,13 +15,13 @@ import { randomUUID } from "node:crypto";
 
 import type {
   ConsumerContext,
-  CommandId,
   DaemonGeneration,
   DomainEvent,
   EventId,
   AttachEnded,
   ResumeCursor,
   SideEffectMethod,
+  OperationKey,
   MachineError,
   ProtocolMessage,
   ProtocolMethod,
@@ -32,12 +32,11 @@ import type {
   RuntimeScopeId,
 } from "@reins/protocol";
 import {
-  commandIdSchema,
   encodeResumeCursor,
   decodeResumeCursor,
-  daemonGenerationSchema,
-  sideEffectMethodSchema,
-  sessionIdSchema,
+  operationKeyClaimsSchema,
+  parseOperationKey,
+  serializeOperationKey,
   isSideEffectMethod,
   protocolNotificationSchema,
   protocolResponseSchema,
@@ -72,18 +71,19 @@ export type ReinsClient = {
     params: ProtocolParams<M>,
     timeoutMs?: number,
   ): Promise<ProtocolResponseFor<M>>;
-  retry(
-    token: string,
-    params: unknown,
-    timeoutMs?: number,
-  ): Promise<ProtocolResponseFor<SideEffectMethod>>;
-  prepareOperation(method: SideEffectMethod): string;
+  prepareOperation<Kind extends SideEffectMethod>(
+    method: Kind,
+  ): OperationKey<Kind>;
   executeOperation<M extends SideEffectMethod>(
     method: M,
     params: ProtocolParams<M>,
-    token: string,
+    operationKey: OperationKey<M>,
     timeoutMs?: number,
   ): Promise<ProtocolResponseFor<M>>;
+  getOperation(
+    operationKey: OperationKey,
+    timeoutMs?: number,
+  ): Promise<ProtocolResponseFor<"getOperation">>;
   onNotification(listener: NotificationListener): () => void;
   onClosed(listener: (reason: MachineError) => void): () => void;
   subscribeFacts: SubscribeFacts;
@@ -102,56 +102,7 @@ export class AgentSubscriptionError extends Error {
   }
 }
 
-// 仅保留原目标的目录事实；敏感任务文本、模型输入与授权反馈由调用方重带。
-const spawnContextSchema = v.strictObject({
-  cwd: v.optional(v.string()),
-  cwdIdentity: v.optional(
-    v.strictObject({
-      device: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
-      inode: v.pipe(v.string(), v.regex(/^[0-9]+$/u)),
-    }),
-  ),
-});
-const retryIdentitySchema = v.strictObject({
-  method: sideEffectMethodSchema,
-  commandId: commandIdSchema,
-  daemonGeneration: daemonGenerationSchema,
-  spawnContext: v.optional(spawnContextSchema),
-});
-export function parseRetryToken(
-  token: string,
-): v.InferOutput<typeof retryIdentitySchema> {
-  if (!/^retry1_[A-Za-z0-9_-]+$/.test(token))
-    throw new Error("Invalid RetryToken");
-  const identity = v.parse(
-    retryIdentitySchema,
-    JSON.parse(Buffer.from(token.slice(7), "base64url").toString("utf8")),
-  );
-  if (identity.commandId.split(":")[0] !== identity.daemonGeneration)
-    throw new Error("Invalid RetryToken generation");
-  if (identity.spawnContext !== undefined && identity.method !== "spawn")
-    throw new Error("Invalid RetryToken context");
-  return identity;
-}
-export const commandOutcomeUnknownSchema = v.strictObject({
-  code: v.literal("command_outcome_unknown"),
-  cause: v.picklist(["timeout", "disconnected", "invalid_daemon_response"]),
-  method: sideEffectMethodSchema,
-  commandId: commandIdSchema,
-  daemonGeneration: daemonGenerationSchema,
-  retryToken: v.string(),
-  targets: v.optional(v.array(sessionIdSchema)),
-});
-export type CommandOutcomeUnknown = v.InferOutput<
-  typeof commandOutcomeUnknownSchema
->;
-export function isCommandOutcomeUnknown(
-  value: unknown,
-): value is CommandOutcomeUnknown {
-  return v.safeParse(commandOutcomeUnknownSchema, value).success;
-}
-
-export type ReinsClientFailure = MachineError | CommandOutcomeUnknown;
+export type ReinsClientFailure = MachineError;
 export class ReinsClientError extends Error {
   readonly failure: ReinsClientFailure;
 
@@ -159,13 +110,6 @@ export class ReinsClientError extends Error {
     super(JSON.stringify(failure));
     this.name = "ReinsClientError";
     this.failure = failure;
-  }
-}
-
-export class OperationCredentialError extends Error {
-  constructor() {
-    super("Invalid operation credential");
-    this.name = "OperationCredentialError";
   }
 }
 
@@ -192,12 +136,13 @@ export function createReinsClient(
 ): ReinsClient {
   let seq = 0;
   let generation: DaemonGeneration | undefined;
+  let runtimeScopeId: RuntimeScopeId | undefined;
   const pending = new Map<
     string,
     {
       resolve: (response: ProtocolResponse) => void;
       reject: (error: Error) => void;
-      unknown?: (cause: CommandOutcomeUnknown["cause"]) => Error;
+      unknown?: () => Error;
     }
   >();
   const cancelledResponses = new Map<
@@ -215,15 +160,27 @@ export function createReinsClient(
     const error = new ReinsClientError(reason);
     for (const entry of pending.values())
       entry.reject(
-        entry.unknown?.(
-          reason.code === "invalid_daemon_response"
-            ? "invalid_daemon_response"
-            : "disconnected",
-        ) ?? error,
+        entry.unknown?.() ?? error,
       );
     pending.clear();
     cancelledResponses.clear();
     for (const listener of Array.from(closedListeners)) listener(reason);
+  };
+
+  const createOperationKey = <Kind extends SideEffectMethod>(
+    method: Kind,
+  ): OperationKey<Kind> => {
+    if (generation === undefined || runtimeScopeId === undefined)
+      throw new ReinsClientError({ code: "protocol_error" });
+    return serializeOperationKey(
+      v.parse(operationKeyClaimsSchema, {
+        runtimeScopeId,
+        consumer: options.consumerContext,
+        kind: method,
+        generation,
+        nonce: randomUUID(),
+      }),
+    ) as OperationKey<Kind>;
   };
   const unsubscribe = connection.onEvent((event) => {
     if (event.kind === "message") {
@@ -262,8 +219,7 @@ export function createReinsClient(
     method: M,
     params: ProtocolParams<M>,
     timeoutMs = 30_000,
-    originalId?: CommandId,
-    originalRetryToken?: string,
+    operationKey?: OperationKey,
     signal?: AbortSignal,
     onCancelledResponse?: (response: ProtocolResponse) => void,
   ): Promise<ProtocolResponseFor<M>> => {
@@ -276,56 +232,15 @@ export function createReinsClient(
     const effect = isSideEffectMethod(method);
     if (effect && generation === undefined)
       return Promise.reject(new ReinsClientError({ code: "protocol_error" }));
-    const commandId = effect
-      ? (originalId ??
-        v.parse(commandIdSchema, generation + ":" + randomUUID()))
+    const requestOperationKey = effect
+      ? (operationKey ?? createOperationKey(method))
       : undefined;
-    const supplied = params as Record<string, unknown>;
-    const targets = v.safeParse(
-      v.array(sessionIdSchema),
-      supplied.sessionId === undefined
-        ? (supplied.ids ?? [])
-        : [supplied.sessionId],
-    );
-    const spawnContext =
-      method === "spawn"
-        ? v.safeParse(spawnContextSchema, {
-            ...(supplied.cwd === undefined ? {} : { cwd: supplied.cwd }),
-            ...(supplied.cwdIdentity === undefined
-              ? {}
-              : { cwdIdentity: supplied.cwdIdentity }),
-          })
-        : undefined;
-    const unknown = (
-      cause: CommandOutcomeUnknown["cause"],
-    ): ReinsClientError => {
-      const identity = {
-        method,
-        commandId,
-        daemonGeneration: commandId?.split(":")[0],
-      };
-      const retryToken =
-        originalRetryToken ??
-        "retry1_" +
-          Buffer.from(
-            JSON.stringify({
-              ...identity,
-              ...(spawnContext?.success &&
-              Object.keys(spawnContext.output).length > 0
-                ? { spawnContext: spawnContext.output }
-                : {}),
-            }),
-          ).toString("base64url");
+    const unknown = (): ReinsClientError => {
       return new ReinsClientError(
-        v.parse(commandOutcomeUnknownSchema, {
-          code: "command_outcome_unknown",
-          cause,
-          ...identity,
-          retryToken,
-          ...(targets.success && targets.output.length > 0
-            ? { targets: targets.output }
-            : {}),
-        }),
+        {
+          code: "operation_outcome_unknown",
+          operationKey: requestOperationKey!,
+        },
       );
     };
     seq += 1;
@@ -349,9 +264,9 @@ export function createReinsClient(
           : setTimeout(() => {
               settle(() =>
                 reject(
-                  commandId === undefined
+                  requestOperationKey === undefined
                     ? new ReinsClientError(clientMachineError("daemon_timeout"))
-                    : unknown("timeout"),
+                    : unknown(),
                 ),
               );
             }, timeoutMs);
@@ -364,7 +279,7 @@ export function createReinsClient(
         };
       }
       pending.set(requestId, {
-        ...(commandId === undefined ? {} : { unknown }),
+        ...(requestOperationKey === undefined ? {} : { unknown }),
         resolve: (response) => {
           if ("error" in response) {
             settle(() => resolve(response));
@@ -379,9 +294,11 @@ export function createReinsClient(
             return;
           }
           settle(() => {
-            if (method === "initialize")
-              generation = (parsed.output as ProtocolResult<"initialize">)
-                .daemonGeneration;
+            if (method === "initialize") {
+              const initialized = parsed.output as ProtocolResult<"initialize">;
+              generation = initialized.daemonGeneration;
+              runtimeScopeId = initialized.runtimeScopeId;
+            }
             resolve({ ...response, result: parsed.output });
           });
         },
@@ -399,8 +316,10 @@ export function createReinsClient(
           kind: "request",
           requestId,
           method,
+          ...(requestOperationKey === undefined
+            ? {}
+            : { operationKey: requestOperationKey }),
           params,
-          ...(commandId === undefined ? {} : { commandId }),
         });
       } catch {
         terminate(clientMachineError("daemon_disconnected"));
@@ -502,7 +421,6 @@ export function createReinsClient(
         "attach",
         params,
         30_000,
-        undefined,
         undefined,
         signal,
         (lateResponse) => {
@@ -705,41 +623,40 @@ export function createReinsClient(
     },
     request,
     subscribeFacts,
-    retry(token, params, timeoutMs) {
-      const identity = parseRetryToken(token);
-      const restored =
-        identity.spawnContext !== undefined &&
-        params !== null &&
-        typeof params === "object" &&
-        !Array.isArray(params)
-          ? { ...identity.spawnContext, ...params }
-          : params;
-      return request(
-        identity.method,
-        restored as ProtocolParams<SideEffectMethod>,
-        timeoutMs,
-        identity.commandId,
-      );
+    prepareOperation<Kind extends SideEffectMethod>(
+      method: Kind,
+    ): OperationKey<Kind> {
+      return createOperationKey(method);
     },
-    prepareOperation(method) {
-      if (generation === undefined)
-        throw new ReinsClientError({ code: "protocol_error" });
-      const identity = {
-        method,
-        commandId: v.parse(commandIdSchema, generation + ":" + randomUUID()),
-        daemonGeneration: generation,
-      };
-      return `retry1_${Buffer.from(JSON.stringify(identity)).toString("base64url")}`;
-    },
-    executeOperation(method, params, token, timeoutMs) {
-      let identity: ReturnType<typeof parseRetryToken>;
+    executeOperation(method, params, key, timeoutMs) {
+      let claims: ReturnType<typeof parseOperationKey>;
       try {
-        identity = parseRetryToken(token);
+        claims = parseOperationKey(key, method);
       } catch {
-        throw new OperationCredentialError();
+        throw new ReinsClientError({ code: "operation_key_conflict" });
       }
-      if (identity.method !== method) throw new OperationCredentialError();
-      return request(method, params, timeoutMs, identity.commandId, token);
+      if (
+        claims.runtimeScopeId !== runtimeScopeId ||
+        claims.consumer !== options.consumerContext
+      )
+        throw new ReinsClientError({ code: "operation_key_scope_mismatch" });
+      if (claims.generation !== generation)
+        throw new ReinsClientError({ code: "stale_operation_key" });
+      return request(method, params, timeoutMs, key);
+    },
+    getOperation(key, timeoutMs) {
+      let claims: ReturnType<typeof parseOperationKey>;
+      try {
+        claims = parseOperationKey(key);
+      } catch {
+        throw new ReinsClientError({ code: "operation_key_conflict" });
+      }
+      if (
+        claims.runtimeScopeId !== runtimeScopeId ||
+        claims.consumer !== options.consumerContext
+      )
+        throw new ReinsClientError({ code: "operation_key_scope_mismatch" });
+      return request("getOperation", { operationKey: key }, timeoutMs);
     },
     onNotification(listener) {
       listeners.add(listener);

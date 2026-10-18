@@ -26,7 +26,7 @@ export type {
   SDKUserMessage,
 };
 
-export type QoderQuery = AsyncIterable<SDKMessage> & {
+export type QoderQuery = AsyncIterable<unknown> & {
   interrupt(): Promise<unknown>;
   close(): Promise<void>;
 };

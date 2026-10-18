@@ -1,4 +1,8 @@
 import type { SessionMachine } from "@reins/core";
+import {
+  createInMemoryControlStore,
+  type ControlStore,
+} from "@reins/event-journal";
 import type {
   AttachParams,
   AttachResult,
@@ -10,6 +14,7 @@ import type {
   DomainEvent,
   InitializeParams,
   InitializeResult,
+  OperationKey,
   MachineError,
   ProtocolMessage,
   ProtocolRequest,
@@ -112,6 +117,7 @@ type PublicProtocolServerOptions = {
   adapters: AdapterRegistry;
   diagnostics: DiagnosticsRuntime;
   runtimeScopeId: RuntimeScopeId;
+  controlStore?: ControlStore;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 };
@@ -124,7 +130,10 @@ type ProtocolServerTestingOptions = {
 export function createProtocolServer(
   options: PublicProtocolServerOptions,
 ): ProtocolServer {
-  const consumerScope = createConsumerScope();
+  const controlStore = options.controlStore ?? createInMemoryControlStore();
+  const consumerScope = createConsumerScope((sessionId) =>
+    controlStore.getSession(sessionId)?.consumer,
+  );
   const diagnostics = orderDiagnosticsAcceptance(
     options.diagnostics,
     consumerScope,
@@ -134,6 +143,8 @@ export function createProtocolServer(
     adapters: options.adapters,
     diagnostics,
     consumerScope,
+    controlStore,
+    runtimeScopeId: options.runtimeScopeId,
     ...(options.eventLogLimit === undefined
       ? {}
       : { eventLogLimit: options.eventLogLimit }),
@@ -212,9 +223,9 @@ export function createProtocolServerInternal(
       {
         method: request.method,
         params: request.params,
-        ...(request.commandId === undefined
+        ...(request.operationKey === undefined
           ? {}
-          : { commandId: request.commandId }),
+          : { operationKey: request.operationKey as OperationKey }),
       },
       consumer,
       perform,
@@ -687,10 +698,12 @@ export function createProtocolServerInternal(
       case "kill":
       case "list":
       case "resolvePermission":
+      case "getOperation":
         return await options.control.dispatch(
           request.method,
           request.params,
           consumer,
+          request.operationKey as OperationKey | undefined,
         );
       case "diagnostics":
         testing.onDiagnosticsQueryAccepted?.();
@@ -698,6 +711,7 @@ export function createProtocolServerInternal(
           request.method,
           request.params,
           consumer,
+          request.operationKey as OperationKey | undefined,
         );
       case "attach":
         return attach(
