@@ -304,6 +304,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       }
     | { readonly status: "outcome_unknown"; readonly error: MachineError }
   >();
+  const interruptRequestFingerprints = new Map<string, string>();
   let eventWriteFailure: unknown;
   const eventWriteFailures = new Map<SessionId, DomainEvent>();
   const eventOperationFailures = new Map<
@@ -3120,18 +3121,26 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         generation: options.diagnostics.generation,
         request: parsed,
       };
-      const previous = interruptResults.get(operationKey);
+      const requestFingerprint = canonical(registrationInput);
+      const previousFingerprint =
+        interruptRequestFingerprints.get(operationKey);
       if (
+        previousFingerprint !== undefined &&
+        previousFingerprint !== requestFingerprint
+      )
+        return { error: { code: "operation_key_conflict" } };
+      const previous = interruptResults.get(operationKey);
+      const knownFailure =
         previous?.status === "failed" ||
         previous?.status === "not_accepted_uncommitted" ||
         previous?.status === "not_accepted_unconfirmed" ||
-        previous?.status === "outcome_unknown"
-      )
+        previous?.status === "outcome_unknown";
+      if (previousFingerprint !== undefined && knownFailure)
         return { error: previous.error };
-      if (
+      const knownAcceptedFailure =
         previous?.status === "accepted_uncommitted" ||
-        previous?.status === "accepted_unconfirmed"
-      )
+        previous?.status === "accepted_unconfirmed";
+      if (previousFingerprint !== undefined && knownAcceptedFailure)
         return {
           error: storeUnavailable(
             operationKey,
@@ -3178,6 +3187,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           };
         }
       }
+
+      interruptRequestFingerprints.set(operationKey, requestFingerprint);
 
       if (registration !== undefined && !registration.created) {
         const known = interruptResults.get(operationKey);
