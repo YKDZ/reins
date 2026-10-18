@@ -18,6 +18,8 @@ import {
   type MessageKey,
   type OperationRecord,
   type OperationKey,
+  type PermissionHandle,
+  type ResolvePermissionResult,
   type ReinsConnection,
   type ReinsFailure,
   type ResumeCursor,
@@ -67,6 +69,8 @@ const newTurnSend: SendInput = {
 };
 const sendOperationKey = connection.prepareOperation("send");
 const interruptOperationKey = connection.prepareOperation("interrupt");
+const resolvePermissionOperationKey =
+  connection.prepareOperation("resolvePermission");
 const generatedSend = connection.send(newTurnSend);
 const keyedSend = connection.send(newTurnSend, {
   operationKey: sendOperationKey,
@@ -75,7 +79,21 @@ const sendOperationQuery: Promise<OperationRecord<"send">> =
   connection.getOperation(sendOperationKey);
 const interruptOperationQuery: Promise<OperationRecord<"interrupt">> =
   connection.getOperation(interruptOperationKey);
+const permissionOperationQuery: Promise<OperationRecord<"resolvePermission">> =
+  connection.getOperation(resolvePermissionOperationKey);
 void interruptOperationQuery;
+void permissionOperationQuery;
+async function inspectPermissionOperation(): Promise<
+  PermissionHandle | undefined
+> {
+  const operation = await connection.getOperation(
+    resolvePermissionOperationKey,
+  );
+  if (operation.status !== "succeeded") return undefined;
+  const result: ResolvePermissionResult = operation.result;
+  return result.permissionHandle;
+}
+void inspectPermissionOperation;
 function inspectUncommittedSendFailure(record: OperationRecord<"send">): void {
   if (
     record.status !== "not_accepted_uncommitted" &&

@@ -15,6 +15,8 @@ import {
   sessionIdSchema,
   type DomainEvent,
   type InterruptAck,
+  type ResolvePermissionAck,
+  type ResolvePermissionParams,
   type SendAck,
   type SpawnAck,
   type SpawnParams,
@@ -39,7 +41,9 @@ const request: SpawnParams = {
   cwd: "/tmp",
 };
 
-function operationKey(kind: "spawn" | "send" | "interrupt" = "spawn") {
+function operationKey(
+  kind: "spawn" | "send" | "interrupt" | "resolvePermission" = "spawn",
+) {
   return serializeOperationKey(
     v.parse(operationKeyClaimsSchema, {
       runtimeScopeId,
@@ -52,6 +56,154 @@ function operationKey(kind: "spawn" | "send" | "interrupt" = "spawn") {
 }
 
 describe("SQLite控制存储", () => {
+  test("授权决议将请求、结果与事实原子持久化并阻止新键重复决议", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
+    let store = await openControlStore({ directory });
+    const spawnKey = operationKey();
+    const turnId = "permission-turn" as never;
+    const spawnResult: SpawnAck = { sessionId, turnId, cwd: "/tmp" };
+    const session = {
+      info: {
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: "2026-10-18T00:00:00.000Z",
+        turns: 0,
+        state: "busy" as const,
+        activeTurnId: turnId,
+      },
+      runtimeScopeId,
+      consumer,
+      generation,
+    };
+    const spawnEvents: DomainEvent[] = [
+      {
+        type: "session.created",
+        sessionId,
+        sessionLabel: request.sessionLabel,
+        harness: request.harness,
+        model: null,
+        reasoning: null,
+        cwd: request.cwd,
+        spawnedAt: session.info.spawnedAt,
+      },
+      { type: "turn.started", sessionId, turnId },
+    ];
+    store.registerSpawn({
+      operationKey: spawnKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request,
+    });
+    store.markSpawnDispatched(spawnKey);
+    store.commitSpawn({
+      operationKey: spawnKey,
+      result: spawnResult,
+      session,
+      events: spawnEvents,
+    });
+    const requested: DomainEvent = {
+      type: "permission.requested",
+      sessionId,
+      turnId,
+      permissionId: "permission-1" as never,
+      kind: "tool:Bash",
+      options: [{ outcome: "allow", scope: "once" }],
+    };
+    store.recordEvent(requested);
+    const resolveRequest: ResolvePermissionParams = {
+      sessionId,
+      turnId,
+      permissionId: "permission-1" as never,
+      resolution: { outcome: "allow", scope: "once" },
+    };
+    const resolveKey = operationKey("resolvePermission");
+    const registrationInput = {
+      operationKey: resolveKey,
+      runtimeScopeId,
+      consumer,
+      generation,
+      request: resolveRequest,
+    };
+    expect(store.registerResolvePermission(registrationInput)).toMatchObject({
+      created: true,
+      operation: { kind: "resolvePermission", status: "pending" },
+    });
+    expect(
+      store.registerResolvePermission({
+        ...registrationInput,
+        operationKey: operationKey("resolvePermission"),
+      }),
+    ).toMatchObject({
+      created: true,
+      operation: {
+        status: "failed",
+        error: { code: "operation_pending", operationKey: resolveKey },
+      },
+    });
+    store.markResolvePermissionDispatched(resolveKey);
+    const result: ResolvePermissionAck = {
+      sessionId,
+      turnId,
+      permissionId: resolveRequest.permissionId,
+    };
+    const resolved: DomainEvent = {
+      type: "permission.resolved",
+      ...resolveRequest,
+    };
+    expect(
+      store.commitResolvePermission({
+        operationKey: resolveKey,
+        result,
+        event: resolved,
+      }),
+    ).toEqual({ event: resolved, eventId: 4 });
+    expect(store.registerResolvePermission(registrationInput)).toMatchObject({
+      created: false,
+      operation: { status: "succeeded", request: resolveRequest, result },
+    });
+    expect(() =>
+      store.registerResolvePermission({
+        ...registrationInput,
+        request: {
+          ...resolveRequest,
+          resolution: { outcome: "deny", feedback: "different decision" },
+        },
+      }),
+    ).toThrow(expect.objectContaining({ code: "operation_key_conflict" }));
+    expect(
+      store.registerResolvePermission({
+        ...registrationInput,
+        operationKey: operationKey("resolvePermission"),
+      }),
+    ).toMatchObject({
+      created: true,
+      operation: {
+        status: "failed",
+        error: { code: "permission_not_pending" },
+      },
+    });
+    store.close();
+
+    store = await openControlStore({ directory });
+    expect(store.getOperation(resolveKey)).toMatchObject({
+      kind: "resolvePermission",
+      status: "succeeded",
+      request: resolveRequest,
+      result,
+    });
+    expect(store.sessionEvents(sessionId).at(-1)).toEqual({
+      event: resolved,
+      eventId: 4,
+    });
+    store.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+
   test("重开后仍原子读取操作结果、会话归属与创建事件", async () => {
     const directory = await mkdtemp(join(tmpdir(), "reins-control-store-"));
     let store = await openControlStore({ directory });

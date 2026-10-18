@@ -19,6 +19,7 @@ import {
   type PermissionId,
   type PermissionOption,
   permissionResolutionSchemaFor,
+  type ResolvePermissionAck,
   type ResolvePermissionParams,
   resolvePermissionParamsSchema,
   type SendAck,
@@ -43,6 +44,7 @@ import {
   WorkerStartFailure,
   WorkerDeliveryFailure,
   WorkerInterruptFailure,
+  WorkerPermissionFailure,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -305,7 +307,16 @@ export type SessionMachine = {
       readonly commit?: (result: InterruptAck) => void | Promise<void>;
     },
   ): Promise<InterruptAck>;
-  resolvePermission(params: ResolvePermissionParams): Promise<void>;
+  resolvePermission(
+    params: ResolvePermissionParams,
+    hooks?: {
+      readonly beforeDispatch?: () => void;
+      readonly commit?: (
+        result: ResolvePermissionAck,
+        event: Extract<DomainEvent, { type: "permission.resolved" }>,
+      ) => void;
+    },
+  ): Promise<ResolvePermissionAck>;
   kill(params: KillParams): Promise<KillResult>;
   list(filter?: ListFilter): SessionInfo[];
   assertTurnTarget(target: TurnTarget): void;
@@ -431,6 +442,44 @@ export class InterruptRequestFailure extends Error {
     this.name = "InterruptRequestFailure";
     this.sessionId = sessionId;
     this.turnId = turnId;
+    this.acceptance = acceptance;
+    this.failure = failure;
+  }
+}
+
+export class PermissionResolutionCommitFailure extends Error {
+  readonly result: ResolvePermissionAck;
+  readonly commitError: unknown;
+
+  constructor(result: ResolvePermissionAck, commitError: unknown) {
+    super(
+      "Permission resolution was accepted natively but its control record failed to commit",
+    );
+    this.name = "PermissionResolutionCommitFailure";
+    this.result = result;
+    this.commitError = commitError;
+  }
+}
+
+export class PermissionResolutionRequestFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly turnId: TurnId;
+  readonly permissionId: PermissionId;
+  readonly acceptance: "not_accepted" | "unknown";
+  readonly failure: MachineError;
+
+  constructor(
+    sessionId: SessionId,
+    turnId: TurnId,
+    permissionId: PermissionId,
+    acceptance: "not_accepted" | "unknown",
+    failure: MachineError,
+  ) {
+    super("Permission resolution did not receive native acceptance");
+    this.name = "PermissionResolutionRequestFailure";
+    this.sessionId = sessionId;
+    this.turnId = turnId;
+    this.permissionId = permissionId;
     this.acceptance = acceptance;
     this.failure = failure;
   }
@@ -1710,7 +1759,7 @@ export function createSessionMachine(options: {
         interruptingTurns.delete(targetKey);
       }
     },
-    async resolvePermission(params) {
+    async resolvePermission(params, hooks) {
       const parsed = v.safeParse(resolvePermissionParamsSchema, params);
       if (!parsed.success) {
         throw invalidParamsError(parsed.issues);
@@ -1748,25 +1797,37 @@ export function createSessionMachine(options: {
           permissionId,
         });
       }
-      // 转交抛错时整个帧回滚：不产生 resolved、未决请求保留可重试。
+      const result: ResolvePermissionAck = {
+        sessionId,
+        turnId: pending.turnId,
+        permissionId,
+      };
+      const event = {
+        type: "permission.resolved",
+        sessionId,
+        turnId: pending.turnId,
+        permissionId,
+        resolution,
+      } as const;
+      const phase: {
+        value: "beforeDispatch" | "native" | "commit";
+      } = { value: "beforeDispatch" };
       try {
         driverTransaction(
-          [
-            {
-              type: "permission.resolved",
-              sessionId,
-              turnId: pending.turnId,
-              permissionId,
-              resolution,
-            },
-          ],
+          [event],
           new Map([[sessionId, projectSession(sessionId)]]),
           () => {
+            hooks?.beforeDispatch?.();
+            phase.value = "native";
             driver.resolvePermission(sessionId, permissionId, resolution);
+            phase.value = "commit";
+            hooks?.commit?.(result, event);
           },
         );
       } catch (error) {
-        throw await unexpectedFailure(options.diagnostics, error, {
+        if (phase.value === "commit")
+          throw new PermissionResolutionCommitFailure(result, error);
+        const failure = await unexpectedFailure(options.diagnostics, error, {
           sessionId,
           turnId: pending.turnId,
           kind: "authorization_failure",
@@ -1775,8 +1836,22 @@ export function createSessionMachine(options: {
           reason: "upstream_rejected",
           permissionId,
         });
+        if (hooks === undefined) throw failure;
+        throw new PermissionResolutionRequestFailure(
+          sessionId,
+          turnId,
+          permissionId,
+          phase.value === "beforeDispatch"
+            ? "not_accepted"
+            : error instanceof WorkerPermissionFailure
+              ? error.acceptance
+              : v.safeParse(machineErrorSchema, error).success
+                ? "not_accepted"
+                : "unknown",
+          failure,
+        );
       }
-      session.pendingPermissions.delete(permissionId);
+      return result;
     },
     async kill(params) {
       const parsed = v.safeParse(killParamsSchema, params);

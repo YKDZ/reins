@@ -35,6 +35,7 @@ declare const turnHandle: TurnHandle;
 declare const spawnOperationKey: OperationKey<"spawn">;
 declare const sendOperationKey: OperationKey<"send">;
 declare const interruptOperationKey: OperationKey<"interrupt">;
+declare const resolvePermissionOperationKey: OperationKey<"resolvePermission">;
 declare const resumeCursor: ResumeCursor;
 declare const completed: CompletedTurn;
 declare const diagnosticId: DiagnosticId;
@@ -154,6 +155,30 @@ declare const interruptRecord: OperationRecord<"interrupt">;
 // @ts-expect-error interrupt 操作记录不能被当作 send 查询记录。
 const wrongInterruptRecord: OperationRecord<"send"> = interruptRecord;
 void wrongInterruptRecord;
+declare const resolvePermissionRecord: OperationRecord<"resolvePermission">;
+// @ts-expect-error 授权决议操作记录不能伪装成 spawn 查询记录。
+const wrongPermissionRecord: OperationRecord<"spawn"> = resolvePermissionRecord;
+void wrongPermissionRecord;
+async function inspectResolvePermissionRecord(): Promise<void> {
+  const operation = await connection.getOperation(
+    resolvePermissionOperationKey,
+  );
+  if (operation.status !== "succeeded") return;
+  const permissionHandle: PermissionHandle = operation.result.permissionHandle;
+  // @ts-expect-error 授权决议结果只暴露其公开授权句柄与成功状态。
+  const cwd: string = operation.result.cwd;
+  void permissionHandle;
+  void cwd;
+}
+void inspectResolvePermissionRecord;
+void connection.resolvePermission(
+  permissionHandle,
+  { outcome: "allow", scope: "once" },
+  {
+    // @ts-expect-error resolvePermission 只能使用授权决议操作键。
+    operationKey: sendOperationKey,
+  },
+);
 // @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
 parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
 async function inspectSendRecordKind(): Promise<void> {

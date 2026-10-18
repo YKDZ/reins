@@ -2465,7 +2465,12 @@ export const machineErrorSchema = v.union([
     acceptance: v.picklist(["not_dispatched", "unknown", "accepted"]),
     cause: errorCauseSchema,
     acceptedResult: v.optional(
-      v.union([spawnAckSchema, sendAckSchema, interruptAckSchema]),
+      v.union([
+        spawnAckSchema,
+        sendAckSchema,
+        interruptAckSchema,
+        resolvePermissionAckSchema,
+      ]),
     ),
     cleanupCause: v.optional(errorCauseSchema),
     effect: v.optional(operationEffectSchema),
@@ -2663,6 +2668,20 @@ export class WorkerInterruptFailure extends Error {
   }
 }
 
+export class WorkerPermissionFailure extends Error {
+  readonly acceptance: "not_accepted" | "unknown";
+
+  constructor(
+    message: string,
+    acceptance: "not_accepted" | "unknown",
+    options?: ErrorOptions,
+  ) {
+    super(message, options);
+    this.name = "WorkerPermissionFailure";
+    this.acceptance = acceptance;
+  }
+}
+
 export function isDriverFailure(error: unknown): error is DriverFailure {
   return (
     error instanceof DriverFailure &&
@@ -2700,7 +2719,7 @@ export interface WorkerDriver {
   // resolve 表示原生已接受 interrupt；WorkerInterruptFailure 区分未接受与接受未知。
   // 实际回合终态仍由 turn.completed 事件确认。
   interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;
-  // 把控制面的授权决议交还 adapter，翻译为 harness 原生回答。
+  // 同步返回表示 adapter 已把授权决议交给原生；不确定时必须抛 WorkerPermissionFailure。
   resolvePermission(
     sessionId: SessionId,
     permissionId: PermissionId,
@@ -2936,12 +2955,17 @@ export const attachResultSchema = v.strictObject({
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 
-export type RecoverableOperationKind = "spawn" | "send" | "interrupt";
+export type RecoverableOperationKind =
+  | "spawn"
+  | "send"
+  | "interrupt"
+  | "resolvePermission";
 
 type RecoverableOperationResult = {
   spawn: SpawnAck;
   send: SendAck;
   interrupt: InterruptAck;
+  resolvePermission: ResolvePermissionAck;
 };
 
 export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
@@ -3024,7 +3048,9 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       ? spawnAckSchema
       : kind === "send"
         ? sendAckSchema
-        : interruptAckSchema;
+        : kind === "interrupt"
+          ? interruptAckSchema
+          : resolvePermissionAckSchema;
   const partialEffectSchema = v.strictObject({
     status: v.picklist([
       "partial_effect_uncommitted",
@@ -3102,6 +3128,7 @@ export const operationRecordSchema = v.union([
   operationRecordSchemaFor("spawn"),
   operationRecordSchemaFor("send"),
   operationRecordSchemaFor("interrupt"),
+  operationRecordSchemaFor("resolvePermission"),
 ]);
 export type OperationRecord = v.InferOutput<typeof operationRecordSchema>;
 
