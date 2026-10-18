@@ -37,6 +37,5 @@ catalog:
   "valibot": ^1.4.2
   "vitest": ^4.1.10
   "@types/semver": ^7.7.1
-  "npm": 12.2.0
   "semver": ^7.8.5
   "smol-toml": ^1.8.0

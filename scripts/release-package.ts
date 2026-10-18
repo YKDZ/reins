@@ -71,7 +71,8 @@ export function parseReleaseNotes(
     releaseDate === undefined
       ? undefined
       : new Date(`${releaseDate}T00:00:00.000Z`);
-  const notes = section?.slice(section.indexOf("\n") + 1).trim();
+  const bodyStart = section?.indexOf("\n") ?? -1;
+  const notes = bodyStart < 0 ? "" : section?.slice(bodyStart + 1).trim();
   if (
     sections.length !== 1 ||
     releaseDate === undefined ||
