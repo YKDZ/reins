@@ -351,12 +351,12 @@ describe("typed identifiers", () => {
     }
   });
 
-  test("session identities include a runtime scope and positive counter", () => {
+  test("会话身份携带运行作用域和正计数器", () => {
     bad(sessionIdSchema, "session:g7:1");
     bad(sessionIdSchema, "session:00000000-0000-4000-8000-000000000000:g7:0");
   });
 
-  test("session and diagnostic identities reject each other's encoding", () => {
+  test("会话与诊断身份拒绝彼此的编码", () => {
     bad(sessionIdSchema, diagnosticId);
     bad(diagnosticIdSchema, sessionId);
     ok(sessionIdSchema, sessionId);
