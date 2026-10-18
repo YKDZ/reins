@@ -156,6 +156,7 @@ async function main(): Promise<void> {
             openedDiagnosticsRuntime.sessionId(sessionName),
         },
         diagnostics: openedDiagnosticsRuntime,
+        runtimeScopeId: state.runtimeScopeId,
         idleTimeoutMs: idleTimeoutFromEnv(process.env),
       },
       {},

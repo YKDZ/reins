@@ -61,7 +61,10 @@ const socketPath = required("REINS_SOCKET");
 const ownerContext = required("REINS_CONSUMER_CONTEXT");
 const observationPath = required("REINS_PACKED_FIXTURE_OBSERVATIONS");
 const activityPath = required("REINS_PACKED_FIXTURE_ACTIVITY");
-const owner = await connect({ socketPath, consumerContext: ownerContext });
+const owner = await connect({
+  socketPath,
+  consumerContext: ownerContext,
+});
 let foreign: ReinsConnection | undefined;
 let recovery: ReinsConnection | undefined;
 let firstSession: SessionHandle | undefined;
@@ -187,7 +190,10 @@ try {
   process.kill(secondWorker.descendantPid, 0);
 
   owner.close();
-  recovery = await connect({ socketPath, consumerContext: ownerContext });
+  recovery = await connect({
+    socketPath,
+    consumerContext: ownerContext,
+  });
   const afterClientClose = await recovery.list({
     sessionHandle: secondSession,
   });

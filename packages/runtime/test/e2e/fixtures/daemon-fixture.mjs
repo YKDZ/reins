@@ -147,7 +147,11 @@ if (mode === "cold-launch-barrier") {
             `${encodeMessage({
               kind: "response",
               requestId: request.requestId,
-              result: { protocolMajorVersion: 1, daemonGeneration: "gfixture" },
+              result: {
+                protocolMajorVersion: 1,
+                daemonGeneration: "gfixture",
+                runtimeScopeId: request.params.runtimeScopeId,
+              },
             })}\n`,
           );
           continue;
@@ -200,7 +204,11 @@ const server = createServer((socket) => {
           `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
-            result: { protocolMajorVersion: 1, daemonGeneration: "gfixture" },
+            result: {
+              protocolMajorVersion: 1,
+              daemonGeneration: "gfixture",
+              runtimeScopeId: request.params.runtimeScopeId,
+            },
           })}\n`,
         );
         continue;

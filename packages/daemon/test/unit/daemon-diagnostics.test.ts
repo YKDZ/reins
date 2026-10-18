@@ -33,6 +33,7 @@ import {
   sessionNameSchema,
   turnIdSchema,
   REINS_PROTOCOL_MAJOR_VERSION,
+  runtimeScopeIdSchema,
   type WorkerEventRejection,
 } from "@reins/protocol";
 import {
@@ -60,6 +61,10 @@ import type { HarnessAdapter } from "../../src/registry.ts";
 import type { DaemonState } from "../../src/state.ts";
 
 const directories: string[] = [];
+const testRuntimeScopeId = v.parse(
+  runtimeScopeIdSchema,
+  "00000000-0000-4000-8000-000000000000",
+);
 
 async function waitForDaemonLifecycle(
   runtime: DiagnosticsRuntime,
@@ -105,6 +110,7 @@ async function bindConsumer(
     params: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext,
+      runtimeScopeId: testRuntimeScopeId,
     },
   });
   const settled = await response;
@@ -119,16 +125,24 @@ async function bindConsumer(
   client.send = (message) =>
     send(
       message.kind === "request" &&
-        isSideEffectMethod(message.method) &&
-        message.commandId === undefined
+        message.method === "initialize" &&
+        typeof message.params === "object" &&
+        message.params !== null
         ? {
             ...message,
-            commandId: v.parse(
-              commandIdSchema,
-              generation + ":" + randomUUID(),
-            ),
+            params: { runtimeScopeId: testRuntimeScopeId, ...message.params },
           }
-        : message,
+        : message.kind === "request" &&
+            isSideEffectMethod(message.method) &&
+            message.commandId === undefined
+          ? {
+              ...message,
+              commandId: v.parse(
+                commandIdSchema,
+                generation + ":" + randomUUID(),
+              ),
+            }
+          : message,
     );
 }
 
@@ -146,6 +160,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -165,6 +180,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: state.runtimeScopeId,
     });
     const running = daemon.start();
     await waitForDaemonLifecycle(runtime);
@@ -383,6 +399,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -446,6 +463,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -516,6 +534,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -550,6 +569,7 @@ describe("daemon diagnostic error dispatch", () => {
       ]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -879,6 +899,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -910,6 +931,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -959,6 +981,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -993,6 +1016,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map([["codex", adapter]]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
     });
     const running = daemon.start();
@@ -1052,6 +1076,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1089,6 +1114,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map([["codex", adapter]]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -1134,6 +1160,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1155,6 +1182,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -1193,6 +1221,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1230,6 +1259,7 @@ describe("daemon diagnostic error dispatch", () => {
       ]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -1287,6 +1317,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1359,6 +1390,7 @@ describe("daemon diagnostic error dispatch", () => {
       ]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -1435,6 +1467,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1480,6 +1513,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -1504,6 +1538,7 @@ describe("daemon diagnostic error dispatch", () => {
         params: {
           protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
           consumerContext: "test-consumer",
+          runtimeScopeId: testRuntimeScopeId,
         },
       });
       await ready;
@@ -1550,6 +1585,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1718,6 +1754,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1772,6 +1809,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     await Promise.resolve();
@@ -1788,6 +1826,7 @@ describe("daemon diagnostic error dispatch", () => {
           params: {
             protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
             consumerContext: "test-consumer",
+            runtimeScopeId: testRuntimeScopeId,
           },
         },
       });
@@ -1898,6 +1937,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -1922,6 +1962,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
 
     try {
@@ -1979,6 +2020,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -2088,6 +2130,7 @@ describe("daemon diagnostic error dispatch", () => {
           params: {
             protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
             consumerContext: "test-consumer",
+            runtimeScopeId: testRuntimeScopeId,
           },
         },
       });
@@ -2164,6 +2207,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -2191,6 +2235,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map([["codex", adapter]]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
       onEvent: () => {
         if (!failed) {
           failed = true;
@@ -2244,6 +2289,7 @@ describe("daemon diagnostic error dispatch", () => {
     const state: DaemonState = {
       directory: root,
       diagnosticsDirectory: join(root, "diagnostics"),
+      runtimeScopeId: testRuntimeScopeId,
       durable: true,
       retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
     };
@@ -2294,6 +2340,7 @@ describe("daemon diagnostic error dispatch", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const client = transport.connect();
@@ -2389,6 +2436,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       resolveState: async (): Promise<DaemonState> => ({
         directory,
         diagnosticsDirectory: join(directory, "diagnostics"),
+        runtimeScopeId: testRuntimeScopeId,
         durable: true,
         retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
       }),
@@ -2415,6 +2463,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       adapters: new Map(),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     return { daemon, running: daemon.start() };
   }
@@ -2442,7 +2491,10 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       kind: "request",
       requestId,
       method,
-      params,
+      params:
+        method === "initialize" && typeof params === "object" && params !== null
+          ? { runtimeScopeId: testRuntimeScopeId, ...params }
+          : params,
     } as unknown as ProtocolMessage);
     return await response;
   }
@@ -2649,6 +2701,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       ]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const alpha = await boundClient(transport, "alpha");
@@ -2734,6 +2787,7 @@ describe("daemon 消费者诊断归属（01 票第 2、3 项）", () => {
       ]),
       identity: { session: (name) => runtime.sessionId(name) },
       diagnostics: runtime,
+      runtimeScopeId: testRuntimeScopeId,
     });
     const running = daemon.start();
     const alpha = await boundClient(transport, "alpha");

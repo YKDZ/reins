@@ -70,6 +70,9 @@ function inspectFailure(failure: ReinsFailure): string {
     case "unexpected_failure":
       return failure.facts.remoteCode ?? "";
     case "consumer_context_required":
+    case "runtime_scope_invalid":
+    case "runtime_scope_mismatch":
+    case "runtime_scope_unavailable":
     case "protocol_error":
     case "daemon_timeout":
     case "invalid_daemon_response":
@@ -114,11 +117,12 @@ async function main(): Promise<void> {
   const socketPath = process.env.REINS_SOCKET;
   const consumerContext = process.env.REINS_CONSUMER_CONTEXT;
   if (socketPath === undefined || consumerContext === undefined)
-    throw new Error(
-      "The installed SDK query fixture needs socket and consumer context",
-    );
+    throw new Error("The installed SDK query fixture needs socket and context");
 
-  const connection = await connect({ socketPath, consumerContext });
+  const connection = await connect({
+    socketPath,
+    consumerContext,
+  });
   try {
     const currentModelCatalog = await connection.modelCatalog();
     const sessions = await connection.list();

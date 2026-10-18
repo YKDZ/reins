@@ -53,6 +53,7 @@ async function fixture(interrupt: () => Promise<void>) {
   daemons.push(daemon);
   const client = createReinsClient(daemon.connect(), {
     consumerContext: "interrupt-consumer" as ConsumerContext,
+    runtimeScopeId: daemon.runtimeScopeId,
   });
   clients.push(client);
   await client.initialize();

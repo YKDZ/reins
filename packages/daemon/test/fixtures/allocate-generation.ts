@@ -1,3 +1,6 @@
+import { runtimeScopeIdSchema } from "@reins/protocol";
+import * as v from "valibot";
+
 import { acquireGenerationAllocator } from "../../src/generation.ts";
 import type { DaemonState } from "../../src/state.ts";
 
@@ -7,6 +10,10 @@ if (directory === undefined) throw new Error("Missing state directory");
 const state: DaemonState = {
   directory,
   diagnosticsDirectory: `${directory}/diagnostics`,
+  runtimeScopeId: v.parse(
+    runtimeScopeIdSchema,
+    "00000000-0000-4000-8000-000000000000",
+  ),
   durable: true,
   retention: { maxAgeMs: 1, maxBytes: 1 },
 };

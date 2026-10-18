@@ -15,6 +15,7 @@ import type {
   ProtocolMessage,
   ProtocolParams,
   ProtocolResult,
+  RuntimeScopeId as ProtocolRuntimeScopeId,
   SideEffectMethod,
   SessionInfo as ProtocolSessionInfo,
   SessionId,
@@ -29,6 +30,7 @@ import {
   encodeTurnHandle,
   REINS_PROTOCOL_MAJOR_VERSION,
   sessionIdSchema,
+  runtimeScopeIdSchema,
   turnHandleSchema,
 } from "@reins/protocol";
 import { createUnixSocketClient, isTransportError } from "@reins/transport";
@@ -44,6 +46,7 @@ import {
   type OperationKind,
   type ReinsConnection,
   type ReinsFailure,
+  type RuntimeScopeId,
   type AgentFact,
   type AgentSubscriptionEnd,
   type AgentTarget,
@@ -62,6 +65,14 @@ import {
   type InterruptResult,
 } from "./contracts.ts";
 import { ReinsSdkError } from "./errors.ts";
+
+export function parseRuntimeScopeId(value: string): RuntimeScopeId {
+  return v.parse(runtimeScopeIdSchema, value) as unknown as RuntimeScopeId;
+}
+
+export function serializeRuntimeScopeId(value: RuntimeScopeId): string {
+  return v.parse(runtimeScopeIdSchema, value);
+}
 
 export { ReinsSdkError } from "./errors.ts";
 export type { ReinsSdkErrorStage } from "./errors.ts";
@@ -98,6 +109,7 @@ export type {
   ReinsFailure,
   ReinsFailureCode,
   ReinsHandshake,
+  RuntimeScopeId,
   SessionFilter,
   SessionHandle,
   SessionInfo,
@@ -139,11 +151,26 @@ export async function connect(
         },
         stage,
       );
+    let runtimeScopeId: RuntimeScopeId | undefined;
+    if (options.runtimeScopeId !== undefined) {
+      const parsed = v.safeParse(runtimeScopeIdSchema, options.runtimeScopeId);
+      if (!parsed.success)
+        throw new ReinsSdkError(
+          { code: "runtime_scope_invalid", facts: {} },
+          stage,
+        );
+      runtimeScopeId = parsed.output as unknown as RuntimeScopeId;
+    }
     const transport = await createUnixSocketClient<ProtocolMessage>(
       options.socketPath,
     );
     client = createReinsClient(transport, {
       consumerContext: consumerContext.output,
+      ...(runtimeScopeId === undefined
+        ? {}
+        : {
+            runtimeScopeId: runtimeScopeId as unknown as ProtocolRuntimeScopeId,
+          }),
     });
     stage = "handshake";
     const handshakeResponse = await client.initialize(options.timeoutMs);
@@ -167,6 +194,8 @@ export async function connect(
     const handshake = {
       protocolMajorVersion: handshakeResponse.result.protocolMajorVersion,
       daemonGeneration: handshakeResponse.result.daemonGeneration,
+      runtimeScopeId: handshakeResponse.result
+        .runtimeScopeId as unknown as RuntimeScopeId,
     };
 
     return {
@@ -700,6 +729,16 @@ function projectFailure(
         facts: {
           requestedProtocolMajorVersion: failure.requestedProtocolMajorVersion,
           supportedProtocolMajorVersion: failure.supportedProtocolMajorVersion,
+        },
+      };
+    case "runtime_scope_mismatch":
+      return {
+        code: failure.code,
+        facts: {
+          requestedRuntimeScopeId:
+            failure.requestedRuntimeScopeId as unknown as RuntimeScopeId,
+          actualRuntimeScopeId:
+            failure.actualRuntimeScopeId as unknown as RuntimeScopeId,
         },
       };
     case "invalid_params":

@@ -10,6 +10,7 @@ import type {
 import {
   diagnosticRecordSchema,
   makeDiagnosticId,
+  runtimeScopeIdSchema,
   sessionNameSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -30,6 +31,10 @@ import type { DaemonState } from "../../src/state.ts";
 const state: DaemonState = {
   directory: "/state",
   diagnosticsDirectory: "/state/diagnostics",
+  runtimeScopeId: v.parse(
+    runtimeScopeIdSchema,
+    "00000000-0000-4000-8000-000000000000",
+  ),
   durable: true,
   retention: { maxAgeMs: 1, maxBytes: 1 },
 };
@@ -502,6 +507,7 @@ describe("DiagnosticsRuntime", () => {
     const localState: DaemonState = {
       directory: root,
       diagnosticsDirectory,
+      runtimeScopeId: state.runtimeScopeId,
       durable: true,
       retention: { maxAgeMs: 1000, maxBytes: 1 },
     };

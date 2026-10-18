@@ -5,6 +5,7 @@ import {
   type CoreDiagnosticFact,
   type DomainEvent,
   type ProtocolMessage,
+  type RuntimeScopeId,
   type SessionId,
 } from "@reins/protocol";
 import type { TransportServer } from "@reins/transport";
@@ -51,6 +52,7 @@ export function createDaemon(options: {
   adapters: AdapterRegistry;
   identity: SessionIdentity;
   diagnostics: DiagnosticsRuntime;
+  runtimeScopeId: RuntimeScopeId;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 }): Daemon {
@@ -63,6 +65,7 @@ export function createDaemonInternal(
     adapters: AdapterRegistry;
     identity: SessionIdentity;
     diagnostics: DiagnosticsRuntime;
+    runtimeScopeId: RuntimeScopeId;
     idleTimeoutMs?: number;
     eventLogLimit?: number;
   },
@@ -109,6 +112,7 @@ export function createDaemonInternal(
       control,
       diagnostics,
       consumerScope,
+      runtimeScopeId: options.runtimeScopeId,
       ...(options.idleTimeoutMs === undefined
         ? {}
         : { idleTimeoutMs: options.idleTimeoutMs }),

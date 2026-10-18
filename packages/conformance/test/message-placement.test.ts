@@ -47,6 +47,7 @@ async function fixture(options?: { deliver?: () => Promise<void> }) {
   daemons.push(daemon);
   const client = createReinsClient(daemon.connect(), {
     consumerContext: "placement-consumer" as ConsumerContext,
+    runtimeScopeId: daemon.runtimeScopeId,
   });
   clients.push(client);
   await client.initialize();

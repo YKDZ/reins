@@ -116,6 +116,7 @@ async function runFixture(
   });
   const client = createReinsClient(daemon.connect(), {
     consumerContext: "conformance" as ConsumerContext,
+    runtimeScopeId: daemon.runtimeScopeId,
   });
   const events: DomainEvent[] = [];
   let resolveEnded!: (

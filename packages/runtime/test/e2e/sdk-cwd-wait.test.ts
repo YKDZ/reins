@@ -4,9 +4,11 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveDaemonState } from "@reins/daemon/state";
 import { decodeTurnHandle, encodeTurnHandle } from "@reins/protocol";
 import {
   connect,
+  parseRuntimeScopeId,
   ReinsSdkError,
   type ReinsConnection,
   type TurnHandle,
@@ -80,12 +82,16 @@ async function fixture(adapterFile = adapters) {
     expect(daemon.exitCode, stderr.join("")).toBeNull();
     expect((await stat(env.REINS_SOCKET)).isSocket()).toBe(true);
   });
+  const runtimeScopeId = parseRuntimeScopeId(
+    (await resolveDaemonState({ env })).runtimeScopeId,
+  );
   const connection = await connect({
     socketPath: env.REINS_SOCKET,
     consumerContext: env.REINS_CONSUMER_CONTEXT,
+    runtimeScopeId,
   });
   clients.push(connection);
-  return { directory, firstCwd, secondCwd, env, connection };
+  return { directory, firstCwd, secondCwd, env, connection, runtimeScopeId };
 }
 
 test("SDK validates worker cwd and preserves exact busy, idle, and killed snapshots", async () => {
@@ -306,6 +312,7 @@ test("SDK any and all waits report the exact target set across out-of-order comp
   const foreign = await connect({
     socketPath: f.env.REINS_SOCKET,
     consumerContext: "other-sdk-cwd-wait-consumer",
+    runtimeScopeId: f.runtimeScopeId,
   });
   clients.push(foreign);
   await expect(

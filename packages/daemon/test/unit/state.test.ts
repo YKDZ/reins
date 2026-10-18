@@ -1,10 +1,11 @@
-import { chmod, mkdtemp, mkdir, rm, stat } from "node:fs/promises";
+import { chmod, mkdtemp, mkdir, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { afterEach, describe, expect, test } from "vitest";
 
 import {
+  RuntimeScopeUnavailableError,
   StateConfigurationError,
   resolveDaemonState,
 } from "../../src/state.ts";
@@ -59,6 +60,45 @@ describe("daemon state", () => {
     expect(xdgState.directory).toBe(join(xdg, "reins"));
     const homeState = await resolveDaemonState({ env: { HOME: home } });
     expect(homeState.directory).toBe(join(home, ".local", "state", "reins"));
+  });
+
+  test("assigns one persistent runtime scope to concurrent resolutions of a state root", async () => {
+    const root = await temporaryDirectory();
+    const stateRoot = join(root, "state");
+    const simultaneous = await Promise.all(
+      Array.from({ length: 8 }, () =>
+        resolveDaemonState({ env: { REINS_STATE_DIR: stateRoot } }),
+      ),
+    );
+    const first = simultaneous[0]!;
+    const reopened = await resolveDaemonState({
+      env: { REINS_STATE_DIR: stateRoot },
+    });
+    const otherTarget = await resolveDaemonState({
+      env: { REINS_STATE_DIR: join(root, "other-state") },
+    });
+
+    expect(first.runtimeScopeId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    );
+    expect(
+      new Set(simultaneous.map(({ runtimeScopeId }) => runtimeScopeId)).size,
+    ).toBe(1);
+    expect(reopened.runtimeScopeId).toBe(first.runtimeScopeId);
+    expect(otherTarget.runtimeScopeId).not.toBe(first.runtimeScopeId);
+  });
+
+  test("fails closed when an existing runtime scope identity is malformed", async () => {
+    const root = await temporaryDirectory();
+    const stateRoot = join(root, "state");
+    const state = await resolveDaemonState({
+      env: { REINS_STATE_DIR: stateRoot },
+    });
+    await writeFile(join(state.directory, "runtime-scope-id"), "not-a-scope\n");
+
+    await expect(
+      resolveDaemonState({ env: { REINS_STATE_DIR: stateRoot } }),
+    ).rejects.toBeInstanceOf(RuntimeScopeUnavailableError);
   });
 
   test("fails when no stable state root is available", async () => {

@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
-import type { ProtocolMessage } from "@reins/protocol";
+import type { ProtocolMessage, RuntimeScopeId } from "@reins/protocol";
 import {
   protocolResponseSchema,
   REINS_PROTOCOL_MAJOR_VERSION,
@@ -22,6 +22,7 @@ import type { AdapterRegistry } from "./registry.ts";
 import { resolveDaemonState } from "./state.ts";
 
 export type EphemeralDaemon = {
+  readonly runtimeScopeId: RuntimeScopeId;
   connect(): TransportConnection<ProtocolMessage>;
   close(): Promise<void>;
 };
@@ -29,6 +30,7 @@ export type EphemeralDaemon = {
 async function waitUntilReady(
   connection: TransportConnection<ProtocolMessage>,
   startPromise: Promise<void>,
+  runtimeScopeId: RuntimeScopeId,
 ): Promise<void> {
   const requestId = v.parse(requestIdSchema, "testing-ready");
   await new Promise<void>((resolve, reject) => {
@@ -61,6 +63,7 @@ async function waitUntilReady(
       params: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
         consumerContext: "daemon-readiness",
+        runtimeScopeId,
       },
     });
   });
@@ -94,6 +97,7 @@ export async function openEphemeralDaemonForTest(options: {
       adapters: options.adapters,
       identity: { session: (name) => openedRuntime.sessionId(name) },
       diagnostics: openedRuntime,
+      runtimeScopeId: state.runtimeScopeId,
       idleTimeoutMs: 60_000,
     });
     daemon = createdDaemon;
@@ -102,7 +106,7 @@ export async function openEphemeralDaemonForTest(options: {
     const readinessConnection = transport.connect();
     connections.add(readinessConnection);
     try {
-      await waitUntilReady(readinessConnection, started);
+      await waitUntilReady(readinessConnection, started, state.runtimeScopeId);
     } finally {
       readinessConnection.close();
       connections.delete(readinessConnection);
@@ -111,6 +115,7 @@ export async function openEphemeralDaemonForTest(options: {
     let lifecycle: "open" | "closing" | "cleanup_failed" | "closed" = "open";
     let closePromise: Promise<void> | undefined;
     return {
+      runtimeScopeId: state.runtimeScopeId,
       connect() {
         if (lifecycle !== "open") {
           throw new Error(

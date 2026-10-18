@@ -99,6 +99,7 @@ test("failed cleanup rejects connections and retries without reopening", async (
       params: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
         consumerContext: "test-consumer",
+        runtimeScopeId: daemon.runtimeScopeId,
       },
     }),
   ).resolves.toMatchObject({ kind: "response", result: expect.any(Object) });

@@ -2,6 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
+import { runtimeScopeIdSchema } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -31,6 +32,10 @@ async function realRuntime(): Promise<{
   const state: DaemonState = {
     directory: root,
     diagnosticsDirectory: join(root, "diagnostics"),
+    runtimeScopeId: v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000000",
+    ),
     durable: true,
     retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
   };

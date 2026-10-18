@@ -201,12 +201,18 @@ describe("per-method 参数与结果 schema", () => {
       protocolMajorVersion: 1,
       consumerContext: "alpha",
     });
+    ok(protocolParamsSchemaFor("initialize"), {
+      protocolMajorVersion: 1,
+      consumerContext: "alpha",
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
+    });
     bad(protocolParamsSchemaFor("initialize"), {});
     bad(protocolParamsSchemaFor("initialize"), { protocolMajorVersion: 1 });
     bad(protocolParamsSchemaFor("initialize"), { consumerContext: "alpha" });
     ok(protocolResultSchemaFor("initialize"), {
       protocolMajorVersion: 1,
       daemonGeneration: "ab12cd",
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     });
     bad(protocolResultSchemaFor("initialize"), {});
     bad(protocolResultSchemaFor("initialize"), { protocolMajorVersion: 1 });

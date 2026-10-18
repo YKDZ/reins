@@ -29,6 +29,7 @@ import type {
   ProtocolParams,
   ProtocolResponse,
   ProtocolResult,
+  RuntimeScopeId,
 } from "@reins/protocol";
 import {
   commandIdSchema,
@@ -60,6 +61,7 @@ export type ProtocolResponseFor<M extends ProtocolMethod> =
 export type ReinsClientOptions = {
   // 消费者绑定由调用方（launcher / 显式 client binding）给出，客户端不猜默认值。
   consumerContext: ConsumerContext;
+  runtimeScopeId?: RuntimeScopeId;
 };
 
 export type ReinsClient = {
@@ -694,6 +696,9 @@ export function createReinsClient(
         {
           protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
           consumerContext: options.consumerContext,
+          ...(options.runtimeScopeId === undefined
+            ? {}
+            : { runtimeScopeId: options.runtimeScopeId }),
         },
         timeoutMs,
       );

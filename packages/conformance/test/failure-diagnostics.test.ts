@@ -46,6 +46,7 @@ test("模型目录保留部分成功，私有失败文本只在有限诊断查�
   });
   const client = createReinsClient(daemon.connect(), {
     consumerContext: "reins-wrr19-model-catalog" as ConsumerContext,
+    runtimeScopeId: daemon.runtimeScopeId,
   });
   try {
     await client.initialize();
@@ -149,6 +150,7 @@ test.each(["rejected", "hung", "late"] as const)(
     });
     const client = createReinsClient(daemon.connect(), {
       consumerContext: ("reins-wrr19-diagnostic-" + mode) as ConsumerContext,
+      runtimeScopeId: daemon.runtimeScopeId,
     });
     try {
       await client.initialize();
@@ -238,6 +240,7 @@ test("结构化限流优先于含额度字样的正文，诊断引用在返回�
   });
   const client = createReinsClient(daemon.connect(), {
     consumerContext: "reins-wrr19-classified" as ConsumerContext,
+    runtimeScopeId: daemon.runtimeScopeId,
   });
   try {
     await client.initialize();
@@ -327,6 +330,7 @@ test("原生失败经 daemon 与 client wait 保留未知原因和显式重试�
   });
   const client = createReinsClient(daemon.connect(), {
     consumerContext: "reins-wrr19-failure" as ConsumerContext,
+    runtimeScopeId: daemon.runtimeScopeId,
   });
   try {
     await client.initialize();

@@ -13,6 +13,7 @@ import type {
   MachineError,
   ProtocolMessage,
   ProtocolRequest,
+  RuntimeScopeId,
   RequestId,
   SessionId,
   StopReason,
@@ -101,6 +102,7 @@ type ProtocolServerOptions = {
   control: ControlPlane;
   diagnostics: OrderedDiagnosticsRuntime;
   consumerScope: ConsumerScope;
+  runtimeScopeId: RuntimeScopeId;
   idleTimeoutMs?: number;
 };
 
@@ -109,6 +111,7 @@ type PublicProtocolServerOptions = {
   machine: SessionMachine;
   adapters: AdapterRegistry;
   diagnostics: DiagnosticsRuntime;
+  runtimeScopeId: RuntimeScopeId;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
 };
@@ -141,6 +144,7 @@ export function createProtocolServer(
       control,
       consumerScope,
       diagnostics,
+      runtimeScopeId: options.runtimeScopeId,
       ...(options.idleTimeoutMs === undefined
         ? {}
         : { idleTimeoutMs: options.idleTimeoutMs }),
@@ -654,6 +658,16 @@ export function createProtocolServerInternal(
             supportedProtocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
           } satisfies MachineError;
         }
+        if (
+          params.runtimeScopeId !== undefined &&
+          params.runtimeScopeId !== options.runtimeScopeId
+        ) {
+          throw {
+            code: "runtime_scope_mismatch",
+            requestedRuntimeScopeId: params.runtimeScopeId,
+            actualRuntimeScopeId: options.runtimeScopeId,
+          } satisfies MachineError;
+        }
         const bound = consumerBindings.get(connection);
         if (bound !== undefined && bound !== params.consumerContext) {
           throw { code: "protocol_error" } satisfies MachineError;
@@ -662,6 +676,7 @@ export function createProtocolServerInternal(
         return {
           protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
           daemonGeneration: options.diagnostics.generation,
+          runtimeScopeId: options.runtimeScopeId,
         } satisfies InitializeResult;
       }
       case "modelCatalog":

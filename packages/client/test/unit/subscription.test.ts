@@ -51,7 +51,11 @@ async function fixture(autoAck = true) {
       pair.server.send({
         kind: "response",
         requestId: request.requestId,
-        result: { protocolMajorVersion: 1, daemonGeneration: "gtest" },
+        result: {
+          protocolMajorVersion: 2,
+          daemonGeneration: "gtest",
+          runtimeScopeId: "00000000-0000-4000-8000-000000000000",
+        },
       });
     else if (request.method === "attach") {
       attach = request;

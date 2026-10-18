@@ -14,6 +14,7 @@ import type {
   ProtocolMessage,
   ProtocolMethod,
   ProtocolResponse,
+  RuntimeScopeId,
   StopReason,
   SessionId,
   TurnId,
@@ -30,6 +31,7 @@ import {
   machineErrorSchema,
   makeDiagnosticId,
   REINS_PROTOCOL_MAJOR_VERSION,
+  runtimeScopeIdSchema,
   sessionIdSchema,
 } from "@reins/protocol";
 import {
@@ -75,6 +77,10 @@ async function waitFor(
 }
 
 const daemons: Daemon[] = [];
+const testRuntimeScopeId: RuntimeScopeId = v.parse(
+  runtimeScopeIdSchema,
+  "00000000-0000-4000-8000-000000000000",
+);
 
 const testIdentity = {
   session: (sessionName: string) =>
@@ -123,6 +129,7 @@ function startDaemon(
     adapters,
     identity: testIdentity,
     diagnostics: testDiagnostics,
+    runtimeScopeId: testRuntimeScopeId,
     idleTimeoutMs: options?.idleTimeoutMs ?? 60_000,
     ...(options?.eventLogLimit === undefined
       ? {}
@@ -188,7 +195,11 @@ function makeRequester(
           params:
             method === "spawn" && typeof params === "object" && params !== null
               ? { cwd: "/tmp", ...params }
-              : params,
+              : method === "initialize" &&
+                  typeof params === "object" &&
+                  params !== null
+                ? { runtimeScopeId: testRuntimeScopeId, ...params }
+                : params,
           ...(isSideEffectMethod(method)
             ? { commandId: v.parse(commandIdSchema, "test:" + randomUUID()) }
             : {}),
@@ -199,6 +210,7 @@ function makeRequester(
     handshake ??= request("initialize", {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       consumerContext,
+      runtimeScopeId: testRuntimeScopeId,
     });
     return handshake.then(() => send());
   };
@@ -452,6 +464,7 @@ describe("daemon 公共接口", () => {
       machine,
       adapters,
       diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
       beforeAttachReplay: () => {
         replayHookCalls += 1;
@@ -522,6 +535,7 @@ describe("daemon 协议面（缝 C）", () => {
             : testDiagnostics.record(input);
         },
       },
+      runtimeScopeId: testRuntimeScopeId,
     });
     daemons.push(daemon);
     void daemon.start();
@@ -561,6 +575,7 @@ describe("daemon 协议面（缝 C）", () => {
       result: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
         daemonGeneration: "test",
+        runtimeScopeId: testRuntimeScopeId,
       },
     });
   });
@@ -582,6 +597,40 @@ describe("daemon 协议面（缝 C）", () => {
         supportedProtocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       },
     });
+  });
+
+  test("initialize 拒绝世代相同但运行作用域不同的连接", async () => {
+    const { server } = startDaemon(new Map());
+    const client = server.connect();
+    const requester = makeRequester(client);
+    const requestedRuntimeScopeId = v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000001",
+    );
+
+    await expect(
+      requester.request("initialize", {
+        protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+        consumerContext: "test-consumer",
+        runtimeScopeId: requestedRuntimeScopeId,
+      }),
+    ).resolves.toMatchObject({
+      error: {
+        code: "runtime_scope_mismatch",
+        requestedRuntimeScopeId,
+        actualRuntimeScopeId: testRuntimeScopeId,
+      },
+    });
+    await expect(
+      requester.request("initialize", {
+        protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+        consumerContext: "test-consumer",
+        runtimeScopeId: testRuntimeScopeId,
+      }),
+    ).resolves.toMatchObject({
+      result: { daemonGeneration: "test", runtimeScopeId: testRuntimeScopeId },
+    });
+    client.close();
   });
 
   test("initialize 缺少消费者上下文按参数校验拒绝，不采用默认绑定", async () => {
@@ -671,6 +720,7 @@ describe("daemon 协议面（缝 C）", () => {
       result: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
         daemonGeneration: "test",
+        runtimeScopeId: testRuntimeScopeId,
       },
     });
   });
@@ -2010,6 +2060,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map(),
       identity: testIdentity,
       diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 100,
     });
     const started = daemon.start();
@@ -2032,6 +2083,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 100,
     });
     const started = daemon.start();
@@ -2093,6 +2145,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
       onEvent: (event) => events.push(event),
     });
@@ -2162,6 +2215,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map(),
       identity: testIdentity,
       diagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
     });
 
@@ -2205,6 +2259,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
     });
     const startup = daemon.start();
@@ -2251,6 +2306,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map(),
       identity: testIdentity,
       diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
     });
 
@@ -2309,6 +2365,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map(),
       identity: testIdentity,
       diagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
     });
     const lifetime = daemon.start();
@@ -2342,6 +2399,7 @@ describe("daemon 空闲退出", () => {
       adapters: new Map([["codex", fake.adapter]]),
       identity: testIdentity,
       diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
       idleTimeoutMs: 60_000,
       onEvent: (event) => events.push(event),
     });
@@ -3208,6 +3266,7 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
     adapters: new Map([["codex", fake.adapter]]),
     identity: testIdentity,
     diagnostics: testDiagnostics,
+    runtimeScopeId: testRuntimeScopeId,
     idleTimeoutMs: 60_000,
   });
   daemons.push(daemon);

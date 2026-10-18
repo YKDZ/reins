@@ -30,6 +30,11 @@
       "types": "./dist/testing.d.ts",
       "default": "./dist/testing.js"
     },
+    "./state": {
+      "source": "./src/state.ts",
+      "types": "./dist/state.d.ts",
+      "default": "./dist/state.js"
+    },
     "./testing/fixture": "./test/fixtures/daemon-fixture.mjs"
   },
   "scripts": {

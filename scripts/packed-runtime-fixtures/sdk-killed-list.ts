@@ -17,7 +17,10 @@ async function main(): Promise<void> {
     throw new Error("The SDK list fixture needs socket, context, and handle");
   }
 
-  const connection = await connect({ socketPath, consumerContext });
+  const connection = await connect({
+    socketPath,
+    consumerContext,
+  });
   try {
     const sessions = await connection.list({
       sessionHandle: sessionHandle as SessionHandle,

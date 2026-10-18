@@ -7,6 +7,7 @@ declare const resumeCursorBrand: unique symbol;
 declare const operationCredentialBrand: unique symbol;
 declare const permissionHandleBrand: unique symbol;
 declare const diagnosticIdBrand: unique symbol;
+declare const runtimeScopeIdBrand: unique symbol;
 
 export type SessionHandle = string & {
   readonly [sessionHandleBrand]: "SessionHandle";
@@ -27,6 +28,9 @@ export type PermissionHandle = string & {
 };
 export type DiagnosticId = string & {
   readonly [diagnosticIdBrand]: "DiagnosticId";
+};
+export type RuntimeScopeId = string & {
+  readonly [runtimeScopeIdBrand]: "RuntimeScopeId";
 };
 export type OperationKind =
   | "spawn"
@@ -361,6 +365,14 @@ export type ErrorCause = {
 
 type FailureFactsByCode = {
   consumer_context_required: Record<never, never>;
+  runtime_scope_invalid: Record<never, never>;
+  runtime_scope_mismatch: {
+    requestedRuntimeScopeId: RuntimeScopeId;
+    actualRuntimeScopeId: RuntimeScopeId;
+  };
+  runtime_scope_unavailable: {
+    reason: "state_root" | "scope_identity";
+  };
   protocol_version_mismatch: {
     requestedProtocolMajorVersion: number;
     supportedProtocolMajorVersion: number;
@@ -416,10 +428,12 @@ export type ReinsFailureCode = ReinsFailure["code"];
 export type ReinsHandshake = {
   protocolMajorVersion: number;
   daemonGeneration: string;
+  runtimeScopeId: RuntimeScopeId;
 };
 export type ConnectOptions = {
   socketPath: string;
   consumerContext: string;
+  runtimeScopeId?: RuntimeScopeId;
   timeoutMs?: number;
 };
 export type ReinsConnection = {

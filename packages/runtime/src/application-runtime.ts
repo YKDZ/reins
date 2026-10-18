@@ -5,10 +5,15 @@ import { dirname } from "node:path";
 import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
+import {
+  resolveDaemonState,
+  RuntimeScopeUnavailableError,
+} from "@reins/daemon/state";
 import type {
   ConsumerContext,
   ErrorCause,
   MachineError,
+  RuntimeScopeId,
 } from "@reins/protocol";
 import { consumerContextSchema, makeErrorCause } from "@reins/protocol";
 import {
@@ -83,6 +88,7 @@ export function isReinsStartupTransportFailure(
 type ConnectionFactory<T> = (
   socketPath: string,
   consumerContext: ConsumerContext,
+  runtimeScopeId: RuntimeScopeId,
   timeoutMs: number,
 ) => Promise<T>;
 
@@ -97,6 +103,23 @@ export async function connectWithStartup<T>(
   if (!parsedConsumerContext.success)
     throw { code: "consumer_context_required" } satisfies MachineError;
   const env = options.env ?? process.env;
+  let runtimeScopeId: RuntimeScopeId;
+  try {
+    runtimeScopeId = (await resolveDaemonState({ env })).runtimeScopeId;
+  } catch (error) {
+    throw new ReinsSdkError(
+      {
+        code: "runtime_scope_unavailable",
+        facts: {
+          reason:
+            error instanceof RuntimeScopeUnavailableError
+              ? "scope_identity"
+              : "state_root",
+        },
+      },
+      "connect",
+    );
+  }
   const socketPath = resolveReinsSocketPath({ env });
   await mkdir(dirname(socketPath), { recursive: true, mode: 0o700 });
   let spawnError: Error | undefined;
@@ -113,6 +136,7 @@ export async function connectWithStartup<T>(
       connect,
       socketPath,
       parsedConsumerContext.output,
+      runtimeScopeId,
       deadline,
     );
     if (attempt !== null) {
@@ -166,6 +190,7 @@ export async function connectWithStartup<T>(
           connect,
           socketPath,
           parsedConsumerContext.output,
+          runtimeScopeId,
           deadline,
         );
         if (winner !== null) {
@@ -248,6 +273,7 @@ async function tryConnect<T>(
   connect: ConnectionFactory<T>,
   socketPath: string,
   consumerContext: ConsumerContext,
+  runtimeScopeId: RuntimeScopeId,
   deadline: number,
 ): Promise<{ connection: T } | { error: unknown } | null> {
   try {
@@ -255,6 +281,7 @@ async function tryConnect<T>(
       connection: await connect(
         socketPath,
         consumerContext,
+        runtimeScopeId,
         Math.max(1, deadline - Date.now()),
       ),
     };

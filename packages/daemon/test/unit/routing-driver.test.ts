@@ -13,6 +13,7 @@ import {
   sessionIdSchema,
   sessionNameSchema,
   turnIdSchema,
+  runtimeScopeIdSchema,
   type DomainEvent,
   type WorkerSpec,
 } from "@reins/protocol";
@@ -24,6 +25,11 @@ import { openDiagnosticsStore } from "../../src/diagnostics-store.ts";
 import { daemonGenerationSchema } from "../../src/generation.ts";
 import type { HarnessAdapter } from "../../src/registry.ts";
 import { createRoutingDriverFactory } from "../../src/routing-driver.ts";
+
+const testRuntimeScopeId = v.parse(
+  runtimeScopeIdSchema,
+  "00000000-0000-4000-8000-000000000000",
+);
 
 function createNativeWorker(threadId: string) {
   const stdin = new PassThrough();
@@ -466,6 +472,7 @@ describe("routing driver invariants", () => {
       resolveState: async () => ({
         directory: root,
         diagnosticsDirectory: join(root, "diagnostics"),
+        runtimeScopeId: testRuntimeScopeId,
         durable: true,
         retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
       }),
@@ -648,6 +655,7 @@ describe("routing driver invariants", () => {
       resolveState: async () => ({
         directory: root,
         diagnosticsDirectory: join(root, "diagnostics"),
+        runtimeScopeId: testRuntimeScopeId,
         durable: true,
         retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
       }),

@@ -13,8 +13,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveDaemonState } from "@reins/daemon/state";
 import {
   connect as connectSdk,
+  parseRuntimeScopeId,
   type AgentFact,
   type ReinsConnection,
   type SessionHandle,
@@ -128,10 +130,14 @@ async function fixture() {
     expect(daemon.exitCode, errors.join("")).toBeNull();
     await access(env.REINS_SOCKET);
   });
+  const runtimeScopeId = parseRuntimeScopeId(
+    (await resolveDaemonState({ env })).runtimeScopeId,
+  );
   async function sdk() {
     const connection = await connectSdk({
       socketPath: env.REINS_SOCKET,
       consumerContext: env.REINS_CONSUMER_CONTEXT,
+      runtimeScopeId,
     });
     cleanup.push(async () => connection.close());
     return connection;

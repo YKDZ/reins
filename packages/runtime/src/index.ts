@@ -1,6 +1,7 @@
 import { machineErrorSchema, makeErrorCause } from "@reins/protocol";
 import {
   connect as connectSdk,
+  parseRuntimeScopeId,
   ReinsSdkError,
   type ReinsConnection,
   type ReinsFailure,
@@ -22,8 +23,13 @@ export async function openLocal(
   try {
     return await connectWithStartup(
       options,
-      (socketPath, consumerContext, timeoutMs) =>
-        connectSdk({ socketPath, consumerContext, timeoutMs }),
+      (socketPath, consumerContext, runtimeScopeId, timeoutMs) =>
+        connectSdk({
+          socketPath,
+          consumerContext,
+          runtimeScopeId: parseRuntimeScopeId(runtimeScopeId),
+          timeoutMs,
+        }),
     );
   } catch (error) {
     const failure = startupSdkFailure(error);

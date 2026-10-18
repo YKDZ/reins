@@ -1,6 +1,13 @@
 import type { SessionIdentity } from "@reins/core";
-import type { DomainEvent, ProtocolMessage, SessionId } from "@reins/protocol";
+import {
+  runtimeScopeIdSchema,
+  type DomainEvent,
+  type ProtocolMessage,
+  type RuntimeScopeId,
+  type SessionId,
+} from "@reins/protocol";
 import type { TransportServer } from "@reins/transport";
+import * as v from "valibot";
 
 import { createDaemonInternal, type Daemon } from "./daemon.ts";
 import type { DiagnosticsRuntime } from "./diagnostics-recorder.ts";
@@ -11,6 +18,7 @@ export function createDaemonForTest(options: {
   adapters: AdapterRegistry;
   identity: SessionIdentity;
   diagnostics: DiagnosticsRuntime;
+  runtimeScopeId?: RuntimeScopeId;
   idleTimeoutMs?: number;
   eventLogLimit?: number;
   beforeAttachReplay?: (sessionId: SessionId) => void;
@@ -23,10 +31,16 @@ export function createDaemonForTest(options: {
     onDiagnosticsQueryAccepted,
     onEvent,
     assertWriterLease,
+    runtimeScopeId,
     ...productionOptions
   } = options;
   return createDaemonInternal(
-    productionOptions,
+    {
+      ...productionOptions,
+      runtimeScopeId:
+        runtimeScopeId ??
+        v.parse(runtimeScopeIdSchema, "00000000-0000-4000-8000-000000000000"),
+    },
     {
       ...(beforeAttachReplay === undefined ? {} : { beforeAttachReplay }),
       ...(onDiagnosticsQueryAccepted === undefined

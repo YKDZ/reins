@@ -16,6 +16,7 @@ import { consumerContextSchema } from "@reins/protocol";
 import { openLocal } from "@ykdz/reins";
 import {
   connect,
+  parseRuntimeScopeId,
   type DiagnosticId,
   type DiagnosticsQuery,
   type ReinsConnection,
@@ -171,7 +172,10 @@ test("openLocal fails without a stable state root before any harness dispatch", 
     }),
   ).rejects.toMatchObject({
     stage: "connect",
-    failure: { code: "daemon_start_failed" },
+    failure: {
+      code: "runtime_scope_unavailable",
+      facts: { reason: "state_root" },
+    },
   });
   await expect(access(requestsFile)).rejects.toMatchObject({ code: "ENOENT" });
   await expect(access(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
@@ -311,6 +315,9 @@ test("an in-flight spawn keeps the shared daemon alive after its client closes",
 
   const reconnected = await openLocal({ ...options, timeoutMs: 1_000 });
   clients.push(reconnected);
+  expect(reconnected.handshake.runtimeScopeId).toBe(
+    connection.handshake.runtimeScopeId,
+  );
   expect((await readFile(daemonPids, "utf8")).trim().split("\n")).toHaveLength(
     1,
   );
@@ -345,6 +352,7 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
     openLocal(options),
   ]);
   clients.push(first, second);
+  expect(second.handshake.runtimeScopeId).toBe(first.handshake.runtimeScopeId);
 
   const spawnInput = {
     harness: "codex",
@@ -374,6 +382,9 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
 
   const reconnected = await openLocal(options);
   clients.push(reconnected);
+  expect(reconnected.handshake.runtimeScopeId).toBe(
+    first.handshake.runtimeScopeId,
+  );
   const observedAfterReconnect = await reconnected.list({
     sessionHandle: sessionHandle as unknown as SessionHandle,
   });
@@ -765,6 +776,25 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
     consumerContext: "scope-foreign",
   });
   clients.push(foreign);
+  expect(foreign.handshake.runtimeScopeId).toBe(owner.handshake.runtimeScopeId);
+
+  await expect(
+    connect({
+      socketPath: env.REINS_SOCKET!,
+      consumerContext: "wrong-target",
+      runtimeScopeId: parseRuntimeScopeId(
+        "00000000-0000-4000-8000-000000000001",
+      ),
+    }),
+  ).rejects.toMatchObject({
+    stage: "handshake",
+    failure: {
+      code: "runtime_scope_mismatch",
+      facts: {
+        actualRuntimeScopeId: owner.handshake.runtimeScopeId,
+      },
+    },
+  });
 
   expect(await foreign.list()).toEqual([]);
   expect(

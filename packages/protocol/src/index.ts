@@ -155,6 +155,15 @@ export const daemonGenerationSchema = identifier(
 );
 export type DaemonGeneration = v.InferOutput<typeof daemonGenerationSchema>;
 
+export const runtimeScopeIdSchema = v.pipe(
+  v.string(),
+  v.regex(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+  ),
+  v.brand<string, "RuntimeScopeId">("RuntimeScopeId"),
+);
+export type RuntimeScopeId = v.InferOutput<typeof runtimeScopeIdSchema>;
+
 // 消费者上下文是 initialize 必填的内部路由事实；
 // 不作为 agent 参数、成功输出或第四类句柄（ADR-0037）。
 export const consumerContextSchema = v.pipe(
@@ -2096,6 +2105,7 @@ export const errorCodeSchema = v.union([
   v.literal("diagnostics_store_corrupt"),
   v.literal("session_name_conflict"),
   v.literal("protocol_version_mismatch"),
+  v.literal("runtime_scope_mismatch"),
   v.literal("consumer_context_required"),
   v.literal("command_id_conflict"),
   v.literal("stale_command_id"),
@@ -2255,6 +2265,11 @@ export const machineErrorSchema = v.union([
     code: v.literal("protocol_version_mismatch"),
     requestedProtocolMajorVersion: v.pipe(v.number(), v.integer()),
     supportedProtocolMajorVersion: v.pipe(v.number(), v.integer()),
+  }),
+  v.strictObject({
+    code: v.literal("runtime_scope_mismatch"),
+    requestedRuntimeScopeId: runtimeScopeIdSchema,
+    actualRuntimeScopeId: runtimeScopeIdSchema,
   }),
   v.strictObject({ code: v.literal("consumer_context_required") }),
   v.strictObject({
@@ -2485,12 +2500,14 @@ export type ProtocolMessage = v.InferOutput<typeof protocolMessageSchema>;
 export const initializeParamsSchema = v.strictObject({
   protocolMajorVersion: protocolMajorVersionSchema,
   consumerContext: consumerContextSchema,
+  runtimeScopeId: v.optional(runtimeScopeIdSchema),
 });
 export type InitializeParams = v.InferOutput<typeof initializeParamsSchema>;
 
 export const initializeResultSchema = v.strictObject({
   protocolMajorVersion: protocolMajorVersionSchema,
   daemonGeneration: daemonGenerationSchema,
+  runtimeScopeId: runtimeScopeIdSchema,
 });
 export type InitializeResult = v.InferOutput<typeof initializeResultSchema>;
 

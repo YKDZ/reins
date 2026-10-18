@@ -4,8 +4,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveDaemonState } from "@reins/daemon/state";
 import { daemonGenerationSchema } from "@reins/protocol";
-import { connect, type ReinsConnection } from "@ykdz/reins-sdk";
+import {
+  connect,
+  parseRuntimeScopeId,
+  type ReinsConnection,
+} from "@ykdz/reins-sdk";
 import * as v from "valibot";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -66,9 +71,13 @@ async function stopDaemon(
 }
 
 async function connectSdk(env: NodeJS.ProcessEnv): Promise<ReinsConnection> {
+  const runtimeScopeId = parseRuntimeScopeId(
+    (await resolveDaemonState({ env })).runtimeScopeId,
+  );
   const connection = await connect({
     socketPath: env.REINS_SOCKET ?? "",
     consumerContext: env.REINS_CONSUMER_CONTEXT ?? "",
+    runtimeScopeId,
   });
   clients.push(connection);
   return connection;
@@ -101,6 +110,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   const second = await startDaemon(env);
   const secondPid = second.daemon.pid ?? -1;
   const secondClient = await connectSdk(env);
+  const runtimeScopeId = secondClient.handshake.runtimeScopeId;
   const secondSpawn = await secondClient.spawn(
     {
       sessionName: "foo",
@@ -132,6 +142,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   const third = await startDaemon(env);
   const thirdPid = third.daemon.pid ?? -1;
   const thirdClient = await connectSdk(env);
+  expect(thirdClient.handshake.runtimeScopeId).toBe(runtimeScopeId);
   const current = await thirdClient.spawn(
     {
       sessionName: "foo",

@@ -4,8 +4,10 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
+import { resolveDaemonState } from "@reins/daemon/state";
 import {
   connect,
+  parseRuntimeScopeId,
   type AgentFact,
   type PermissionResolution,
   type ReinsConnection,
@@ -83,9 +85,13 @@ async function fixture() {
     expect(daemon.exitCode, stderr.join("")).toBeNull();
     expect((await stat(env.REINS_SOCKET)).isSocket()).toBe(true);
   });
+  const runtimeScopeId = parseRuntimeScopeId(
+    (await resolveDaemonState({ env })).runtimeScopeId,
+  );
   const connection = await connect({
     socketPath: env.REINS_SOCKET,
     consumerContext: env.REINS_CONSUMER_CONTEXT,
+    runtimeScopeId,
   });
   clients.push(connection);
   return { directory, callerCwd, env, connection };

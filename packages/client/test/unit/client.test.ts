@@ -4,7 +4,10 @@ import { expect, test, vi } from "vitest";
 
 import { createReinsClient } from "../../src/index.ts";
 
-const binding = { consumerContext: "alpha" as const };
+const binding = {
+  consumerContext: "alpha" as const,
+  runtimeScopeId: "00000000-0000-4000-8000-000000000000" as never,
+};
 
 test("initialize 以必填消费者上下文与协议主版本握手并交出 daemon 世代", async () => {
   const pair = createInMemoryTransportPair();
@@ -16,6 +19,7 @@ test("initialize 以必填消费者上下文与协议主版本握手并交出 da
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd" as never,
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     },
   });
 
@@ -25,6 +29,7 @@ test("initialize 以必填消费者上下文与协议主版本握手并交出 da
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     },
   });
   client.close();
@@ -44,6 +49,7 @@ test("握手请求携带消费者绑定而非领域参数", async () => {
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd" as never,
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     },
   });
   await handshake;
@@ -56,6 +62,7 @@ test("握手请求携带消费者绑定而非领域参数", async () => {
       params: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
         consumerContext: "alpha",
+        runtimeScopeId: "00000000-0000-4000-8000-000000000000",
       },
     },
   ]);
@@ -232,6 +239,7 @@ test("副作用超时保留命令身份、不泄露原参，也不自动重发",
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     },
   });
   await handshake;
@@ -299,6 +307,7 @@ test.each([
       result: {
         protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
         daemonGeneration: "ab12cd",
+        runtimeScopeId: "00000000-0000-4000-8000-000000000000",
       },
     });
     await initialized;
@@ -364,6 +373,7 @@ test("显式恢复保留原目录事实，不要求调用方重填目录对象�
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     },
   });
   await initialized;
@@ -418,6 +428,7 @@ test("损坏 ACK 终止连接时，已发送副作用保留恢复身份，只读
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     },
   });
   await initialized;
@@ -468,6 +479,7 @@ test("副作用已知机器错误仍原样返回且连接继续接收已知成�
     result: {
       protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
       daemonGeneration: "ab12cd",
+      runtimeScopeId: "00000000-0000-4000-8000-000000000000",
     },
   });
   await initialized;
