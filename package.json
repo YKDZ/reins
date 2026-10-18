@@ -14,7 +14,7 @@
     "reins": "node --conditions=source scripts/run-development-cli.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
     "release:build": "node --conditions=source scripts/build-distribution.ts",
-    "release:verify": "node --conditions=source scripts/validate-release-package.ts",
+    "release:verify": "node --conditions=source scripts/check-packed-runtime.ts",
     "check:heavy": "node --conditions=source scripts/task-gates.ts check:heavy",
     "check:full": "node --conditions=source scripts/task-gates.ts check:full",
     "test": "node --test --conditions=source scripts/test/*.test.ts",
