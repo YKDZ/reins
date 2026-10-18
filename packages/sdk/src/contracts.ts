@@ -435,12 +435,45 @@ export type ReinsHandshake = {
   daemonGeneration: string;
   runtimeScopeId: RuntimeScopeId;
 };
-export type ConnectOptions = {
-  socketPath: string;
+export type ControlRuntimeTarget = {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly runtimeScopeId: RuntimeScopeId;
+};
+export type ControlChannelTermination = {
+  readonly exitCode: number | null;
+  readonly signal: string | null;
+};
+export type ControlByteChannel = {
+  readonly readable: AsyncIterable<Uint8Array>;
+  readonly diagnostics: AsyncIterable<Uint8Array>;
+  write(bytes: Uint8Array): Promise<void>;
+  close(): Promise<void>;
+  readonly terminated: Promise<ControlChannelTermination>;
+};
+export type ControlChannelOpener = (
+  target: ControlRuntimeTarget,
+  signal: AbortSignal,
+) => Promise<ControlByteChannel>;
+type ConnectBaseOptions = {
   consumerContext: string;
-  runtimeScopeId?: RuntimeScopeId;
   timeoutMs?: number;
 };
+export type ConnectOptions =
+  | (ConnectBaseOptions & {
+      socketPath: string;
+      runtimeScopeId?: RuntimeScopeId;
+      runtimeTarget?: never;
+      openControlChannel?: never;
+      signal?: never;
+    })
+  | (ConnectBaseOptions & {
+      socketPath?: never;
+      runtimeScopeId?: never;
+      runtimeTarget: ControlRuntimeTarget;
+      openControlChannel: ControlChannelOpener;
+      signal?: AbortSignal;
+    });
 export type ReinsConnection = {
   readonly handshake: ReinsHandshake;
   modelCatalog(): Promise<ModelCatalogResult>;

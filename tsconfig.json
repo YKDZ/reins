@@ -7,7 +7,8 @@
       "@reins/daemon": ["./packages/daemon/src/index.ts"],
       "@reins/protocol": ["./packages/protocol/src/index.ts"],
       "@ykdz/reins-sdk": ["./packages/sdk/src/index.ts"],
-      "@ykdz/reins": ["./packages/runtime/src/index.ts"]
+      "@ykdz/reins": ["./packages/runtime/src/index.ts"],
+      "@ykdz/reins/control-entry": ["./packages/runtime/src/control-entry.ts"]
     }
   },
   "include": ["*.config.ts", "scripts/**/*.ts"]

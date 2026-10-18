@@ -1826,6 +1826,97 @@ async function runInstalledApplicationAcceptance(options: {
   }
 }
 
+async function runControlChannelAcceptance(options: {
+  readonly sdkConsumer: string;
+  readonly runtimeConsumer: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "installed-control-channel");
+  mkdirSync(directory, { recursive: true });
+  const socketPath = join(directory, "reins.sock");
+  const pidPath = join(directory, "daemon.pid");
+  const launchLogPath = join(directory, "daemon-launches.log");
+  const workerCwd = join(directory, "workspace");
+  mkdirSync(workerCwd, { recursive: true });
+  const daemonPath = join(
+    options.runtimeConsumer,
+    "node_modules",
+    ".bin",
+    "reins-daemon",
+  );
+  const launcherPath = join(directory, "daemon-launcher");
+  writeFileSync(
+    launcherPath,
+    `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(pidPath)}\nprintf '%s\\n' launch >> ${shellQuote(launchLogPath)}\nexec ${shellQuote(daemonPath)} "$@"\n`,
+    { mode: 0o700 },
+  );
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_DAEMON_BIN: launcherPath,
+    REINS_ADAPTERS_MODULE: join(
+      options.runtimeConsumer,
+      "fixtures",
+      "adapter-fixture.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: join(directory, "observations.ndjson"),
+    REINS_PACKED_FIXTURE_ACTIVITY: join(directory, "activity.ndjson"),
+    REINS_WORKER_CWD: workerCwd,
+  };
+  try {
+    const targetResult = await runFixture(
+      options.runtimeConsumer,
+      "runtime-control-target.ts",
+      env,
+      options.logsDirectory,
+      "installed-control-target",
+    );
+    const target = readLastJsonRecord("control target", targetResult.stdout);
+    assert(
+      typeof target.command === "string" &&
+        Array.isArray(target.args) &&
+        target.args.length === 1 &&
+        typeof target.args[0] === "string" &&
+        existsSync(target.args[0]) &&
+        typeof target.runtimeScopeId === "string",
+      "安装运行包没有从目标部署材料描述控制入口",
+    );
+    const result = await runFixture(
+      options.sdkConsumer,
+      "sdk-control-channel.ts",
+      {
+        ...env,
+        REINS_CONTROL_RUNTIME_TARGET: JSON.stringify(target),
+      },
+      options.logsDirectory,
+      "installed-sdk-control-channel",
+      [],
+      90_000,
+    );
+    const value = readLastJsonRecord(
+      "installed SDK byte channel",
+      result.stdout,
+    );
+    const launchAttempts = readFileSync(launchLogPath, "utf8")
+      .split("\n")
+      .filter(Boolean);
+    assert(
+      value.status === "byte-channel-accepted" &&
+        value.sessionSurvivedClose === true &&
+        value.sessionSurvivedReconnect === true &&
+        value.scopeMismatch === "handshake" &&
+        value.diagnosticsWereSeparate === true &&
+        launchAttempts.length === 1,
+      "已安装 SDK 没有经正式 stdio byte 通道完成握手、会话复用与清理",
+    );
+  } finally {
+    await stopInstalledDaemon(pidPath);
+  }
+}
+
 async function main(): Promise<void> {
   const rootManifest = readJsonObject(join(repository, "package.json"));
   const rootEngines = rootManifest.engines;
@@ -1876,6 +1967,8 @@ async function main(): Promise<void> {
       [
         join(sdkConsumer, "fixtures", "sdk-public-types.ts"),
         join(sdkConsumer, "fixtures", "sdk-public-types-negative.ts"),
+        join(sdkConsumer, "fixtures", "sdk-control-channel-types.ts"),
+        join(sdkConsumer, "fixtures", "sdk-control-channel-types-negative.ts"),
         join(sdkConsumer, "fixtures", "sdk-recoverable-control.ts"),
         join(sdkConsumer, "fixtures", "sdk-exact-wait.ts"),
       ],
@@ -1925,11 +2018,12 @@ async function main(): Promise<void> {
     const runtimeBins = installedRuntime.bin;
     assert(
       isRecord(runtimeExports) &&
-        JSON.stringify(Object.keys(runtimeExports)) === JSON.stringify(["."]) &&
+        JSON.stringify(Object.keys(runtimeExports)) ===
+          JSON.stringify([".", "./control-entry"]) &&
         isRecord(runtimeBins) &&
-        JSON.stringify(Object.keys(runtimeBins)) ===
-          JSON.stringify(["reins-daemon"]),
-      "运行包没有公开 openLocal 与 daemon 入口",
+        JSON.stringify(Object.keys(runtimeBins).sort()) ===
+          JSON.stringify(["reins-control-entry", "reins-daemon"]),
+      "运行包没有公开应用 API、daemon 与 stdio 控制入口",
     );
     const daemonPath = join(
       runtimeConsumer,
@@ -1938,9 +2032,19 @@ async function main(): Promise<void> {
       "reins-daemon",
     );
     assert(existsSync(daemonPath), "真实安装没有提供 reins-daemon 机器入口");
+    const controlEntryPath = join(
+      runtimeConsumer,
+      "node_modules",
+      ".bin",
+      "reins-control-entry",
+    );
+    assert(existsSync(controlEntryPath), "真实安装没有提供 stdio 控制入口");
     await typecheckConsumer(
       runtimeConsumer,
-      [join(runtimeConsumer, "fixtures", "application-public-types.ts")],
+      [
+        join(runtimeConsumer, "fixtures", "application-public-types.ts"),
+        join(runtimeConsumer, "fixtures", "runtime-control-target.ts"),
+      ],
       logsDirectory,
       "runtime-application-types",
     );
@@ -1948,6 +2052,12 @@ async function main(): Promise<void> {
     await runInstalledApplicationAcceptance({
       runtimeConsumer,
       daemonPath,
+      temporaryRoot,
+      logsDirectory,
+    });
+    await runControlChannelAcceptance({
+      sdkConsumer,
+      runtimeConsumer,
       temporaryRoot,
       logsDirectory,
     });

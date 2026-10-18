@@ -370,6 +370,10 @@ export function createReleaseStagingManifest(
       types: "./dist/index.d.ts",
       default: "./dist/index.js",
     },
+    "./control-entry": {
+      types: "./dist/control-entry.d.ts",
+      default: "./dist/control-entry.js",
+    },
   };
   return manifest;
 }

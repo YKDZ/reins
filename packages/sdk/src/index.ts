@@ -46,6 +46,7 @@ import * as v from "valibot";
 
 import {
   type ConnectOptions,
+  type ControlByteChannel,
   type DiagnosticId,
   type DiagnosticRecord,
   type DiagnosticsQuery,
@@ -75,6 +76,7 @@ import {
   type InterruptInput,
   type InterruptResult,
 } from "./contracts.ts";
+import { createControlByteTransport } from "./control-channel.ts";
 import { ReinsSdkError } from "./errors.ts";
 
 export function parseRuntimeScopeId(value: string): RuntimeScopeId {
@@ -85,6 +87,52 @@ export function serializeRuntimeScopeId(value: RuntimeScopeId): string {
   return v.parse(runtimeScopeIdSchema, value);
 }
 
+function abortError(signal: AbortSignal): Error {
+  if (signal.reason instanceof Error && signal.reason.name === "AbortError")
+    return signal.reason;
+  const error =
+    signal.reason === undefined
+      ? new Error("The operation was aborted")
+      : new Error("The operation was aborted", { cause: signal.reason });
+  error.name = "AbortError";
+  return error;
+}
+
+function raceWithAbort<T>(
+  promise: Promise<T>,
+  signal: AbortSignal,
+): Promise<T> {
+  if (signal.aborted) return Promise.reject(abortError(signal));
+  return new Promise((resolve, reject) => {
+    const cleanup = (): void => signal.removeEventListener("abort", onAbort);
+    const onAbort = (): void => {
+      cleanup();
+      reject(abortError(signal));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+    promise.then(
+      (value) => {
+        cleanup();
+        resolve(value);
+      },
+      (error: unknown) => {
+        cleanup();
+        reject(error);
+      },
+    );
+  });
+}
+
+function invalidConnectInput(path: string): ReinsSdkError {
+  return new ReinsSdkError(
+    {
+      code: "invalid_params",
+      facts: { issues: [{ issue: "invalid_value", path }] },
+    },
+    "connect",
+  );
+}
+
 export { ReinsSdkError } from "./errors.ts";
 export type { ReinsSdkErrorStage } from "./errors.ts";
 export type {
@@ -92,6 +140,10 @@ export type {
   ModelCatalogFailure,
   ModelCatalogEntry,
   ConnectOptions,
+  ControlByteChannel,
+  ControlChannelOpener,
+  ControlChannelTermination,
+  ControlRuntimeTarget,
   DiagnosticId,
   DiagnosticKind,
   DiagnosticRecord,
@@ -247,6 +299,12 @@ export async function connect(
   options: ConnectOptions,
 ): Promise<ReinsConnection> {
   let client: ControlClient | undefined;
+  let byteTransport: ReturnType<typeof createControlByteTransport> | undefined;
+  let openedChannel: ControlByteChannel | undefined;
+  let openingChannel: Promise<ControlByteChannel> | undefined;
+  let openingAbort: AbortController | undefined;
+  let removeAbortListener: (() => void) | undefined;
+  let connectionSignal: AbortSignal | undefined;
   let stage: "connect" | "handshake" = "connect";
   try {
     const consumerContext = v.safeParse(
@@ -261,9 +319,30 @@ export async function connect(
         },
         stage,
       );
+    if (options.socketPath === undefined) {
+      openingAbort = new AbortController();
+      connectionSignal = openingAbort.signal;
+      const externalSignal = options.signal;
+      if (externalSignal !== undefined) {
+        const forwardAbort = (): void =>
+          openingAbort?.abort(externalSignal.reason);
+        if (externalSignal.aborted) forwardAbort();
+        else {
+          externalSignal.addEventListener("abort", forwardAbort, {
+            once: true,
+          });
+          removeAbortListener = () =>
+            externalSignal.removeEventListener("abort", forwardAbort);
+        }
+      }
+    }
+    const injected = options.socketPath === undefined;
+    const configuredScopeId = injected
+      ? options.runtimeTarget.runtimeScopeId
+      : options.runtimeScopeId;
     let runtimeScopeId: RuntimeScopeId | undefined;
-    if (options.runtimeScopeId !== undefined) {
-      const parsed = v.safeParse(runtimeScopeIdSchema, options.runtimeScopeId);
+    if (configuredScopeId !== undefined) {
+      const parsed = v.safeParse(runtimeScopeIdSchema, configuredScopeId);
       if (!parsed.success)
         throw new ReinsSdkError(
           { code: "runtime_scope_invalid", facts: {} },
@@ -271,9 +350,29 @@ export async function connect(
         );
       runtimeScopeId = parsed.output as unknown as RuntimeScopeId;
     }
-    const transport = await createUnixSocketClient<ProtocolMessage>(
-      options.socketPath,
-    );
+    let transport: import("@reins/transport").TransportConnection<ProtocolMessage>;
+    if (options.socketPath === undefined) {
+      const target = options.runtimeTarget;
+      if (typeof target.command !== "string" || target.command.length === 0)
+        throw invalidConnectInput("runtimeTarget.command");
+      if (
+        !Array.isArray(target.args) ||
+        !target.args.every((argument) => typeof argument === "string")
+      )
+        throw invalidConnectInput("runtimeTarget.args");
+      const signal = connectionSignal!;
+      if (signal.aborted) throw abortError(signal);
+      openingChannel = Promise.resolve().then(() =>
+        options.openControlChannel(target, signal),
+      );
+      openedChannel = await raceWithAbort(openingChannel, signal);
+      byteTransport = createControlByteTransport(openedChannel);
+      transport = byteTransport.connection;
+    } else {
+      transport = await createUnixSocketClient<ProtocolMessage>(
+        options.socketPath,
+      );
+    }
     client = createReinsClient(transport, {
       consumerContext: consumerContext.output,
       ...(runtimeScopeId === undefined
@@ -283,7 +382,11 @@ export async function connect(
           }),
     });
     stage = "handshake";
-    const handshakeResponse = await client.initialize(options.timeoutMs);
+    const initialization = client.initialize(options.timeoutMs);
+    const handshakeResponse =
+      connectionSignal === undefined
+        ? await initialization
+        : await raceWithAbort(initialization, connectionSignal);
     if ("error" in handshakeResponse)
       throw new ReinsSdkError(projectFailure(handshakeResponse.error), stage);
     if (
@@ -307,6 +410,7 @@ export async function connect(
       runtimeScopeId: handshakeResponse.result
         .runtimeScopeId as unknown as RuntimeScopeId,
     };
+    removeAbortListener?.();
 
     return {
       handshake,
@@ -580,7 +684,17 @@ export async function connect(
       },
     };
   } catch (error) {
+    openingAbort?.abort(error);
     client?.close();
+    await byteTransport?.closeAndWait().catch(() => undefined);
+    if (openedChannel === undefined && openingChannel !== undefined) {
+      void openingChannel.then(
+        (channel) => channel.close().catch(() => undefined),
+        () => undefined,
+      );
+    }
+    removeAbortListener?.();
+    if (error instanceof Error && error.name === "AbortError") throw error;
     if (error instanceof ReinsSdkError) throw error;
     if (error instanceof ReinsClientError)
       throw new ReinsSdkError(projectClientFailure(error.failure), stage);

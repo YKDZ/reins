@@ -19,6 +19,7 @@
     "url": "git+https://github.com/YKDZ/reins.git"
   },
   "bin": {
+    "reins-control-entry": "./dist/stdio-main.js",
     "reins-daemon": "./dist/reins-daemon.js"
   },
   "files": [
@@ -36,6 +37,11 @@
       "source": "./src/index.ts",
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./control-entry": {
+      "source": "./src/control-entry.ts",
+      "types": "./dist/control-entry.d.ts",
+      "default": "./dist/control-entry.js"
     }
   },
   "publishConfig": {
