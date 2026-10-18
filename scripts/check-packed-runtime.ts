@@ -121,6 +121,7 @@ function createConsumer(
   directory: string,
   name: string,
   dependencies: Record<string, string>,
+  packageManager: string,
   localSdkTarball?: string,
 ): void {
   mkdirSync(directory, { recursive: true });
@@ -132,6 +133,7 @@ function createConsumer(
         version: "0.0.0",
         private: true,
         type: "module",
+        packageManager,
         dependencies,
       },
       null,
@@ -2177,6 +2179,11 @@ async function runDshRuntimeAcceptance(options: {
 
 async function main(): Promise<void> {
   const rootManifest = readJsonObject(join(repository, "package.json"));
+  const packageManager = rootManifest.packageManager;
+  assert(
+    typeof packageManager === "string",
+    "根 manifest 必须声明正式消费者使用的包管理器版本",
+  );
   const rootEngines = rootManifest.engines;
   assert(
     isRecord(rootEngines) &&
@@ -2211,9 +2218,14 @@ async function main(): Promise<void> {
   let primaryFailure: unknown;
   let cleanupFailure: unknown;
   try {
-    createConsumer(sdkConsumer, "reins-packed-sdk-consumer", {
-      "@ykdz/reins-sdk": `file:${sdkArtifact.path}`,
-    });
+    createConsumer(
+      sdkConsumer,
+      "reins-packed-sdk-consumer",
+      {
+        "@ykdz/reins-sdk": `file:${sdkArtifact.path}`,
+      },
+      packageManager,
+    );
     copyFixtures(join(sdkConsumer, "fixtures"));
     await installConsumer(sdkConsumer, logsDirectory, "sdk-only-install");
     assert(
@@ -2241,6 +2253,7 @@ async function main(): Promise<void> {
         "@ykdz/reins": `file:${runtimeArtifact.path}`,
         "@ykdz/reins-sdk": `file:${sdkArtifact.path}`,
       },
+      packageManager,
       sdkArtifact.path,
     );
     copyFixtures(join(runtimeConsumer, "fixtures"));

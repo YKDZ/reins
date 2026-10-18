@@ -97,7 +97,9 @@ function verifyBundle(
   // 官方 profile 会按插件名动态加载依赖，打包器无法静态发现这些外部包；
   // release:verify 会在真实 tgz 安装后启动完整 profile 验证其运行闭包。
   if (undeclared.length > 0)
-    throw new Error(`Runtime externals are undeclared: ${undeclared.join(", ")}`);
+    throw new Error(
+      `Runtime externals are undeclared: ${undeclared.join(", ")}`,
+    );
 }
 
 function filesRecursively(directory: string): string[] {
