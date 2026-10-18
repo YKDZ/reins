@@ -42,6 +42,7 @@ import {
   type WorkerEventRejection,
   WorkerStartFailure,
   WorkerDeliveryFailure,
+  WorkerInterruptFailure,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -297,7 +298,13 @@ export type SessionMachine = {
     },
   ): Promise<SendAck>;
   wait(params: WaitParams): Promise<WaitResult>;
-  interrupt(params: InterruptParams): Promise<InterruptAck>;
+  interrupt(
+    params: InterruptParams,
+    hooks?: {
+      readonly beforeDispatch?: () => void | Promise<void>;
+      readonly commit?: (result: InterruptAck) => void | Promise<void>;
+    },
+  ): Promise<InterruptAck>;
   resolvePermission(params: ResolvePermissionParams): Promise<void>;
   kill(params: KillParams): Promise<KillResult>;
   list(filter?: ListFilter): SessionInfo[];
@@ -384,13 +391,48 @@ export class SendDeliveryFailure extends Error {
     failure: MachineError,
     terminationError: unknown,
   ) {
-    super("New turn delivery did not produce a confirmed receipt");
+    super("Send delivery did not produce a confirmed receipt");
     this.name = "SendDeliveryFailure";
     this.sessionId = sessionId;
     this.turnId = turnId;
     this.acceptance = acceptance;
     this.failure = failure;
     this.terminationError = terminationError;
+  }
+}
+
+export class InterruptCommitFailure extends Error {
+  readonly result: InterruptAck;
+  readonly commitError: unknown;
+
+  constructor(result: InterruptAck, commitError: unknown) {
+    super(
+      "Interrupt was accepted natively but the control record failed to commit",
+    );
+    this.name = "InterruptCommitFailure";
+    this.result = result;
+    this.commitError = commitError;
+  }
+}
+
+export class InterruptRequestFailure extends Error {
+  readonly sessionId: SessionId;
+  readonly turnId: TurnId;
+  readonly acceptance: "not_accepted" | "unknown";
+  readonly failure: MachineError;
+
+  constructor(
+    sessionId: SessionId,
+    turnId: TurnId,
+    acceptance: "not_accepted" | "unknown",
+    failure: MachineError,
+  ) {
+    super("Interrupt request did not receive an acceptance response");
+    this.name = "InterruptRequestFailure";
+    this.sessionId = sessionId;
+    this.turnId = turnId;
+    this.acceptance = acceptance;
+    this.failure = failure;
   }
 }
 
@@ -417,6 +459,8 @@ export function createSessionMachine(options: {
   const terminations = new Map<SessionId, Promise<void>>();
   const ingressActions: IngressActionFrame[] = [];
   const uncertainDeliveries = new Set<SessionId>();
+  const interruptingTurns = new Set<string>();
+  const acceptedInterrupts = new Set<string>();
   // 接受响应与终态通知可能在同一轮到达；只暂存本会话事件，
   // 保证已接受 caller 事实先于该回合终态，拒绝后仍释放真实终态。
   const pendingDeliveries = new Map<SessionId, PendingDelivery>();
@@ -424,6 +468,10 @@ export function createSessionMachine(options: {
   let bus: EventBus;
   let driver: WorkerDriver;
   let ingestDriverEvent: (event: DomainEvent) => void = () => undefined;
+
+  function turnTargetKey(sessionId: SessionId, turnId: TurnId): string {
+    return `${sessionId}/${turnId}`;
+  }
 
   driver = options.driverFactory((event) => ingestDriverEvent(event));
 
@@ -488,6 +536,8 @@ export function createSessionMachine(options: {
           session.activeTurn = null;
           session.pendingPermissions.clear();
         }
+        interruptingTurns.delete(turnTargetKey(event.sessionId, event.turnId));
+        acceptedInterrupts.delete(turnTargetKey(event.sessionId, event.turnId));
         break;
       case "session.killed":
         if (session !== undefined) {
@@ -1391,40 +1441,130 @@ export function createSessionMachine(options: {
           issues: [{ issue: "invalid_value", path: "turnId" }],
         });
       }
+      if (
+        interruptingTurns.has(turnTargetKey(sessionId, turnId)) ||
+        acceptedInterrupts.has(turnTargetKey(sessionId, turnId))
+      )
+        throw machineError({ code: "session_busy", sessionId });
       const delivery =
         pendingDeliveries.get(sessionId) ??
         createPendingDelivery(projectSession(sessionId), false);
       delivery.count += 1;
       pendingDeliveries.set(sessionId, delivery);
       try {
-        await driver.deliver(
-          sessionId,
-          turnId,
-          message,
-          "active_turn",
-          messageId,
-        );
+        await hooks?.beforeDispatch?.();
+        try {
+          await driver.deliver(
+            sessionId,
+            turnId,
+            message,
+            "active_turn",
+            messageId,
+          );
+        } catch (error) {
+          const known = v.safeParse(machineErrorSchema, error);
+          const definitelyNotAccepted =
+            (error instanceof WorkerDeliveryFailure &&
+              error.acceptance === "not_accepted") ||
+            (known.success &&
+              [
+                "turn_not_active",
+                "unsupported_feature",
+                "session_not_found",
+                "session_killed",
+                "session_terminating",
+                "session_busy",
+                "invalid_params",
+              ].includes(known.output.code));
+          const acceptance =
+            error instanceof WorkerDeliveryFailure
+              ? error.acceptance
+              : definitelyNotAccepted
+                ? "not_accepted"
+                : "unknown";
+          const failure = await unexpectedFailure(options.diagnostics, error, {
+            sessionId,
+            turnId,
+            kind: "request_failure",
+            operation: "send",
+            stage: "steer",
+            reason: "upstream_error",
+            message: evidence(error),
+          });
+          const effect =
+            error instanceof WorkerDeliveryFailure ? error.effect : undefined;
+          const describedFailure: MachineError =
+            effect === undefined
+              ? failure
+              : {
+                  code: "internal_error",
+                  cause:
+                    failure.code === "internal_error"
+                      ? failure.cause
+                      : makeErrorCause(
+                          "upstream",
+                          "Active-turn continuation failed",
+                        ),
+                  ...(failure.code === "internal_error" &&
+                  failure.diagnosticId !== undefined
+                    ? { diagnosticId: failure.diagnosticId }
+                    : {}),
+                  effect,
+                };
+          let terminationError: unknown;
+          if (acceptance === "unknown") {
+            try {
+              await driver.terminate(sessionId);
+              bus.publish({ type: "session.killed", sessionId });
+            } catch (stopError) {
+              terminationError = stopError;
+              uncertainDeliveries.add(sessionId);
+            }
+          }
+          if (hooks === undefined) throw describedFailure;
+          throw new SendDeliveryFailure(
+            sessionId,
+            turnId,
+            acceptance,
+            describedFailure,
+            terminationError,
+          );
+        }
         const selected = selectCallerMessage(delivery.events, callerMessage);
         delivery.events.splice(
           0,
           delivery.events.length,
           ...selected.remainder,
         );
+        const ack: SendAck = {
+          sessionId,
+          turnId,
+          messageId,
+          deliveryPoint: "active_turn",
+        };
+        try {
+          await hooks?.commit?.(ack, [selected.caller]);
+        } catch (commitError) {
+          let terminationError: unknown;
+          try {
+            await driver.terminate(sessionId);
+            bus.publish({ type: "session.killed", sessionId });
+          } catch (stopError) {
+            terminationError = stopError;
+            uncertainDeliveries.add(sessionId);
+          }
+          throw new SendCommitFailure(
+            sessionId,
+            ack,
+            commitError,
+            terminationError,
+          );
+        }
         bus.publish(selected.caller);
         if (selected.caller === callerMessage)
           sessions
             .get(sessionId)
             ?.activeTurn?.nativeCallerCompletions.add(messageId);
-      } catch (error) {
-        throw await unexpectedFailure(options.diagnostics, error, {
-          sessionId,
-          turnId,
-          kind: "request_failure",
-          operation: "send",
-          stage: "steer",
-          reason: "upstream_error",
-          message: evidence(error),
-        });
       } finally {
         delivery.count -= 1;
         if (delivery.count === 0) {
@@ -1481,7 +1621,7 @@ export function createSessionMachine(options: {
         observeDeadline();
       });
     },
-    async interrupt(params) {
+    async interrupt(params, hooks) {
       const parsed = v.safeParse(interruptParamsSchema, params);
       if (!parsed.success) throw invalidParamsError(parsed.issues);
       const { sessionId, turnId } = parsed.output;
@@ -1505,20 +1645,70 @@ export function createSessionMachine(options: {
           issues: [{ issue: "invalid_value", path: "turnId" }],
         });
       }
+      const targetKey = turnTargetKey(sessionId, turnId);
+      if (interruptingTurns.has(targetKey))
+        throw machineError({ code: "session_busy", sessionId });
+      interruptingTurns.add(targetKey);
       try {
-        await driver.interrupt(sessionId, turnId);
-      } catch (error) {
-        throw await unexpectedFailure(options.diagnostics, error, {
-          sessionId,
-          turnId,
-          kind: "request_failure",
-          operation: "interrupt",
-          stage: "interrupt",
-          reason: "upstream_error",
-          message: evidence(error),
-        });
+        await pendingDeliveries.get(sessionId)?.settled;
+        const afterDelivery =
+          activeProjection(sessionId) ?? sessions.get(sessionId);
+        if (afterDelivery?.currentTurnId !== turnId)
+          throw machineError({ code: "turn_not_active", sessionId, turnId });
+        await hooks?.beforeDispatch?.();
+        try {
+          await driver.interrupt(sessionId, turnId);
+        } catch (error) {
+          const known = v.safeParse(machineErrorSchema, error);
+          const definitelyNotAccepted =
+            (error instanceof WorkerInterruptFailure &&
+              error.acceptance === "not_accepted") ||
+            (known.success &&
+              [
+                "turn_not_active",
+                "unsupported_feature",
+                "session_not_found",
+                "session_killed",
+                "session_terminating",
+                "session_busy",
+                "invalid_params",
+              ].includes(known.output.code));
+          const acceptance =
+            error instanceof WorkerInterruptFailure
+              ? error.acceptance
+              : definitelyNotAccepted
+                ? "not_accepted"
+                : "unknown";
+          const failure = await unexpectedFailure(options.diagnostics, error, {
+            sessionId,
+            turnId,
+            kind: "request_failure",
+            operation: "interrupt",
+            stage: "interrupt",
+            reason: "upstream_error",
+            message: evidence(error),
+          });
+          if (acceptance === "unknown") acceptedInterrupts.add(targetKey);
+          if (hooks === undefined) throw failure;
+          throw new InterruptRequestFailure(
+            sessionId,
+            turnId,
+            acceptance,
+            failure,
+          );
+        }
+        if (sessions.get(sessionId)?.currentTurnId === turnId)
+          acceptedInterrupts.add(targetKey);
+        const result = { sessionId, turnId };
+        try {
+          await hooks?.commit?.(result);
+        } catch (commitError) {
+          throw new InterruptCommitFailure(result, commitError);
+        }
+        return result;
+      } finally {
+        interruptingTurns.delete(targetKey);
       }
-      return { sessionId, turnId };
     },
     async resolvePermission(params) {
       const parsed = v.safeParse(resolvePermissionParamsSchema, params);

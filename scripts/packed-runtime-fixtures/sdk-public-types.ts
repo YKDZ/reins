@@ -66,16 +66,22 @@ const newTurnSend: SendInput = {
   message: "next turn",
 };
 const sendOperationKey = connection.prepareOperation("send");
+const interruptOperationKey = connection.prepareOperation("interrupt");
 const generatedSend = connection.send(newTurnSend);
 const keyedSend = connection.send(newTurnSend, {
   operationKey: sendOperationKey,
 });
 const sendOperationQuery: Promise<OperationRecord<"send">> =
   connection.getOperation(sendOperationKey);
+const interruptOperationQuery: Promise<OperationRecord<"interrupt">> =
+  connection.getOperation(interruptOperationKey);
+void interruptOperationQuery;
 function inspectUncommittedSendFailure(record: OperationRecord<"send">): void {
   if (
     record.status !== "not_accepted_uncommitted" &&
-    record.status !== "not_accepted_unconfirmed"
+    record.status !== "not_accepted_unconfirmed" &&
+    record.status !== "partial_effect_uncommitted" &&
+    record.status !== "partial_effect_unconfirmed"
   )
     return;
   if (record.cause.kind === "io") {
@@ -84,6 +90,15 @@ function inspectUncommittedSendFailure(record: OperationRecord<"send">): void {
   }
   const failureCode: ReinsFailure["code"] = record.error.code;
   void failureCode;
+  if (
+    record.status === "partial_effect_uncommitted" ||
+    record.status === "partial_effect_unconfirmed"
+  ) {
+    const phase: "execution_phase_cancelled" = record.error.facts.effect.kind;
+    const target: TurnHandle = record.error.facts.effect.turnHandle;
+    void phase;
+    void target;
+  }
 }
 void inspectUncommittedSendFailure;
 const target: AgentTarget = { scope: "turn", turnHandle };
@@ -130,6 +145,14 @@ async function inspectSendOperation(): Promise<MessageKey | undefined> {
   const result: SendResult = operation.result;
   return result.messageKey;
 }
+
+async function inspectInterruptOperation(): Promise<"accepted" | undefined> {
+  const operation = await connection.getOperation(interruptOperationKey);
+  if (operation.status !== "succeeded") return undefined;
+  const result = operation.result;
+  return result.status;
+}
+void inspectInterruptOperation;
 
 function inspectUnknownSpawnFailure(
   failure: ReinsFailure,

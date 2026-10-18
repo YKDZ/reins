@@ -6,6 +6,10 @@ import {
   modelCatalogResultSchema,
   modelCatalogEntrySchema,
   domainEventSchema,
+  operationKeyClaimsSchema,
+  operationRecordSchemaFor,
+  serializeOperationKey,
+  consumerContextSchema,
   harnessModelCatalogSchema,
   machineErrorSchema,
   protocolMessageSchema,
@@ -15,7 +19,9 @@ import {
   protocolResponseSchema,
   protocolParamsSchemaFor,
   protocolResultSchemaFor,
+  runtimeScopeIdSchema,
   sessionIdSchema,
+  daemonGenerationSchema,
   turnIdSchema,
   turnCompletedSchema,
 } from "../../src/index.ts";
@@ -70,6 +76,39 @@ test("failed 与其他终态严格区分，事件和 wait 共用失败事实", (
     stopReason: "end_turn",
     failure,
   });
+});
+
+test("部分取消效果只属于 send 操作记录", () => {
+  const baseClaims = {
+    runtimeScopeId: v.parse(
+      runtimeScopeIdSchema,
+      "00000000-0000-4000-8000-000000000000",
+    ),
+    consumer: v.parse(consumerContextSchema, "protocol-test"),
+    generation: v.parse(daemonGenerationSchema, "protocoltest"),
+    nonce: "00000000-0000-4000-8000-000000000001",
+  };
+  const operationKey = serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, { ...baseClaims, kind: "send" }),
+  );
+  const record = {
+    status: "partial_effect_uncommitted",
+    operationKey,
+    error: {
+      code: "internal_error",
+      effect: {
+        kind: "execution_phase_cancelled",
+        sessionId: v.parse(
+          sessionIdSchema,
+          "session:00000000-0000-4000-8000-000000000000:protocoltest:1",
+        ),
+        turnId: v.parse(turnIdSchema, "t1"),
+      },
+    },
+    cause: { kind: "io", message: "record unavailable" },
+  };
+  ok(operationRecordSchemaFor("send"), record);
+  bad(operationRecordSchemaFor("interrupt"), record);
 });
 
 describe("协议 envelope", () => {

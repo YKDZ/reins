@@ -14,6 +14,7 @@ import {
   type TurnId,
   type MachineError,
   WorkerDeliveryFailure,
+  WorkerInterruptFailure,
   WorkerStartFailure,
 } from "@reins/protocol";
 
@@ -483,7 +484,17 @@ export function createCodexDriver(deps: {
               sessionId,
               turnId,
             } satisfies MachineError;
-          throw error;
+          if (error instanceof CodexRequestError)
+            throw new WorkerInterruptFailure(
+              "Codex rejected the interrupt request",
+              "not_accepted",
+              { cause: error },
+            );
+          throw new WorkerInterruptFailure(
+            "Codex interrupt acceptance is unknown",
+            "unknown",
+            { cause: error },
+          );
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {

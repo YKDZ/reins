@@ -34,6 +34,7 @@ declare const sessionHandle: SessionHandle;
 declare const turnHandle: TurnHandle;
 declare const spawnOperationKey: OperationKey<"spawn">;
 declare const sendOperationKey: OperationKey<"send">;
+declare const interruptOperationKey: OperationKey<"interrupt">;
 declare const resumeCursor: ResumeCursor;
 declare const completed: CompletedTurn;
 declare const diagnosticId: DiagnosticId;
@@ -149,6 +150,10 @@ void invalidActiveTurnSend;
 declare const sendRecord: OperationRecord<"send">;
 // @ts-expect-error send 查询记录不能伪装成 spawn 查询记录。
 const wrongSendRecord: OperationRecord<"spawn"> = sendRecord;
+declare const interruptRecord: OperationRecord<"interrupt">;
+// @ts-expect-error interrupt 操作记录不能被当作 send 查询记录。
+const wrongInterruptRecord: OperationRecord<"send"> = interruptRecord;
+void wrongInterruptRecord;
 // @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
 parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
 async function inspectSendRecordKind(): Promise<void> {
@@ -268,6 +273,14 @@ void wrongToolKey;
 void wrongOperation;
 void wrongSendRecord;
 void inspectSendRecordKind;
+async function inspectInterruptRecordKind(): Promise<void> {
+  const operation = await connection.getOperation(interruptOperationKey);
+  if (operation.status !== "succeeded") return;
+  // @ts-expect-error interrupt 结果只有精确中断确认，不包含 send 的 messageKey。
+  const messageKey: MessageKey = operation.result.messageKey;
+  void messageKey;
+}
+void inspectInterruptRecordKind;
 void wrongSpawnOperationKey;
 void invalidSend;
 void invalidReplay;

@@ -2326,6 +2326,21 @@ export const errorCauseSchema = v.strictObject({
 });
 export type ErrorCause = v.InferOutput<typeof errorCauseSchema>;
 
+export const sessionClosedEffectSchema = v.strictObject({
+  kind: v.literal("session_closed"),
+  sessionId: sessionIdSchema,
+});
+export const executionPhaseCancelledEffectSchema = v.strictObject({
+  kind: v.literal("execution_phase_cancelled"),
+  sessionId: sessionIdSchema,
+  turnId: turnIdSchema,
+});
+export const operationEffectSchema = v.union([
+  sessionClosedEffectSchema,
+  executionPhaseCancelledEffectSchema,
+]);
+export type OperationEffect = v.InferOutput<typeof operationEffectSchema>;
+
 // 统一在协议生产边界按 UTF-8 字节数截断，避免各调用方各自截断并切断多字节字符。
 export function makeErrorCause(
   kind: ErrorCause["kind"],
@@ -2435,6 +2450,7 @@ export const machineErrorSchema = v.union([
     cause: v.optional(errorCauseSchema),
     cleanupCause: v.optional(errorCauseSchema),
     diagnosticId: v.optional(diagnosticIdSchema),
+    effect: v.optional(operationEffectSchema),
   }),
   v.strictObject({
     code: v.literal("control_store_unavailable"),
@@ -2442,8 +2458,11 @@ export const machineErrorSchema = v.union([
     stage: v.picklist(["register", "dispatch", "commit", "failure"]),
     acceptance: v.picklist(["not_dispatched", "unknown", "accepted"]),
     cause: errorCauseSchema,
-    acceptedResult: v.optional(v.union([spawnAckSchema, sendAckSchema])),
+    acceptedResult: v.optional(
+      v.union([spawnAckSchema, sendAckSchema, interruptAckSchema]),
+    ),
     cleanupCause: v.optional(errorCauseSchema),
+    effect: v.optional(operationEffectSchema),
   }),
   v.strictObject({
     code: v.literal("control_store_unavailable"),
@@ -2571,6 +2590,7 @@ export const machineErrorSchema = v.union([
     cause: v.optional(errorCauseSchema),
     diagnosticId: v.optional(diagnosticIdSchema),
     cleanupCause: v.optional(errorCauseSchema),
+    effect: v.optional(operationEffectSchema),
   }),
   unexpectedError("diagnostics_store_corrupt"),
 ]);
@@ -2604,6 +2624,23 @@ export class WorkerStartFailure extends Error {
 
 export class WorkerDeliveryFailure extends Error {
   readonly acceptance: "not_accepted" | "unknown";
+  readonly effect: OperationEffect | undefined;
+
+  constructor(
+    message: string,
+    acceptance: "not_accepted" | "unknown",
+    options?: ErrorOptions,
+    effect?: OperationEffect,
+  ) {
+    super(message, options);
+    this.name = "WorkerDeliveryFailure";
+    this.acceptance = acceptance;
+    this.effect = effect;
+  }
+}
+
+export class WorkerInterruptFailure extends Error {
+  readonly acceptance: "not_accepted" | "unknown";
 
   constructor(
     message: string,
@@ -2611,7 +2648,7 @@ export class WorkerDeliveryFailure extends Error {
     options?: ErrorOptions,
   ) {
     super(message, options);
-    this.name = "WorkerDeliveryFailure";
+    this.name = "WorkerInterruptFailure";
     this.acceptance = acceptance;
   }
 }
@@ -2650,7 +2687,8 @@ export interface WorkerDriver {
     placement: SendParams["placement"],
     messageId?: MessageId,
   ): Promise<void>;
-  // 向 worker 发出停止当前回合的指令；worker 随后以 turn.completed(cancelled) 事件确认。
+  // resolve 表示原生已接受 interrupt；WorkerInterruptFailure 区分未接受与接受未知。
+  // 实际回合终态仍由 turn.completed 事件确认。
   interrupt(sessionId: SessionId, turnId: TurnId): Promise<void>;
   // 把控制面的授权决议交还 adapter，翻译为 harness 原生回答。
   resolvePermission(
@@ -2829,9 +2867,13 @@ export const attachResultSchema = v.strictObject({
 });
 export type AttachResult = v.InferOutput<typeof attachResultSchema>;
 
-export type RecoverableOperationKind = "spawn" | "send";
+export type RecoverableOperationKind = "spawn" | "send" | "interrupt";
 
-type RecoverableOperationResult = { spawn: SpawnAck; send: SendAck };
+type RecoverableOperationResult = {
+  spawn: SpawnAck;
+  send: SendAck;
+  interrupt: InterruptAck;
+};
 
 export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
@@ -2844,6 +2886,7 @@ export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       readonly cause?: ErrorCause;
       readonly cleanupCause?: ErrorCause;
       readonly diagnosticId?: DiagnosticId;
+      readonly effect?: OperationEffect;
     }
   | {
       readonly status: "succeeded";
@@ -2867,7 +2910,22 @@ export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
       readonly result: RecoverableOperationResult[Kind];
       readonly cause: ErrorCause;
       readonly cleanupCause?: ErrorCause;
-    };
+    }
+  | (Kind extends "send"
+      ? {
+          readonly status:
+            | "partial_effect_uncommitted"
+            | "partial_effect_unconfirmed";
+          readonly operationKey: OperationKey<Kind>;
+          readonly error: Extract<MachineError, { code: "internal_error" }> & {
+            readonly effect: Extract<
+              OperationEffect,
+              { readonly kind: "execution_phase_cancelled" }
+            >;
+          };
+          readonly cause: ErrorCause;
+        }
+      : never);
 
 export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
   kind: Kind,
@@ -2882,7 +2940,37 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       }
     }),
   );
-  const resultSchema = kind === "spawn" ? spawnAckSchema : sendAckSchema;
+  const sendKeySchema = v.pipe(
+    operationKeySchema,
+    v.check((operationKey) => {
+      try {
+        return parseOperationKey(operationKey).kind === "send";
+      } catch {
+        return false;
+      }
+    }),
+  );
+  const resultSchema =
+    kind === "spawn"
+      ? spawnAckSchema
+      : kind === "send"
+        ? sendAckSchema
+        : interruptAckSchema;
+  const partialEffectSchema = v.strictObject({
+    status: v.picklist([
+      "partial_effect_uncommitted",
+      "partial_effect_unconfirmed",
+    ]),
+    operationKey: sendKeySchema,
+    error: v.strictObject({
+      code: v.literal("internal_error"),
+      cause: v.optional(errorCauseSchema),
+      diagnosticId: v.optional(diagnosticIdSchema),
+      cleanupCause: v.optional(errorCauseSchema),
+      effect: executionPhaseCancelledEffectSchema,
+    }),
+    cause: errorCauseSchema,
+  });
   return v.union([
     v.strictObject({
       status: v.literal("unknown"),
@@ -2902,6 +2990,7 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       cause: v.optional(errorCauseSchema),
       cleanupCause: v.optional(errorCauseSchema),
       diagnosticId: v.optional(diagnosticIdSchema),
+      effect: v.optional(operationEffectSchema),
     }),
     v.strictObject({
       status: v.literal("succeeded"),
@@ -2936,12 +3025,14 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       cause: errorCauseSchema,
       cleanupCause: v.optional(errorCauseSchema),
     }),
+    ...(kind === "send" ? [partialEffectSchema] : []),
   ]) as unknown as v.GenericSchema<unknown, OperationRecordForKind<Kind>>;
 }
 
 export const operationRecordSchema = v.union([
   operationRecordSchemaFor("spawn"),
   operationRecordSchemaFor("send"),
+  operationRecordSchemaFor("interrupt"),
 ]);
 export type OperationRecord = v.InferOutput<typeof operationRecordSchema>;
 
