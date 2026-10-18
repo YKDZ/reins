@@ -185,7 +185,7 @@ test("kill commits exactly one killed turn before the session terminal", async (
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {
@@ -235,7 +235,7 @@ test("kill stops the actual writer and its held FD while another session survive
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   let statesAtTerminal: string[] | undefined;
   let pids: { parent: number; writer: number } | undefined;
@@ -332,7 +332,7 @@ test.each(["complete during kill", "complete naturally"])(
     );
     const subscription = await connection.attach(
       { scope: "session", sessionHandle: spawned.sessionHandle },
-      { mode: "available" },
+      { mode: "history" },
     );
     const events: AgentFact[] = [];
     const collect = (async () => {
@@ -388,7 +388,7 @@ test("failed termination leaves the real writer and original turn alive for a fr
   );
   const subscription = await connection.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const events: AgentFact[] = [];
   const collect = (async () => {

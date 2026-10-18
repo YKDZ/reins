@@ -426,17 +426,27 @@ function createControlStore(database: DatabaseSync): ControlStore {
     assertOpen();
     const row = database
       .prepare(
-        "SELECT head, (SELECT min(event_id) FROM session_events WHERE session_id = ?) AS oldest FROM session_heads WHERE session_id = ?",
+        "SELECT (SELECT head FROM session_heads WHERE session_id = ?) AS head, (SELECT min(event_id) FROM session_events WHERE session_id = ?) AS oldest, (SELECT max(event_id) FROM session_events WHERE session_id = ?) AS latest, (SELECT count(*) FROM session_events WHERE session_id = ?) AS count",
       )
-      .get(sessionId, sessionId) as
-      | { head: number; oldest: number | null }
-      | undefined;
+      .get(sessionId, sessionId, sessionId, sessionId) as {
+      head: number | null;
+      oldest: number | null;
+      latest: number | null;
+      count: number;
+    };
+    if (
+      row.head === null
+        ? row.count !== 0
+        : row.head !== row.count ||
+          (row.head > 0 && (row.oldest !== 1 || row.latest !== row.head))
+    )
+      throw new Error("Session event history is incomplete");
     return {
       head:
-        row === undefined || row.head === 0
+        row.head === null || row.head === 0
           ? null
           : v.parse(eventIdSchema, row.head),
-      oldest: row?.oldest == null ? null : v.parse(eventIdSchema, row.oldest),
+      oldest: row.oldest == null ? null : v.parse(eventIdSchema, row.oldest),
     };
   }
 

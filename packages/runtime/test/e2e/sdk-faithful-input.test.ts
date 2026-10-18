@@ -133,7 +133,7 @@ async function permissionFact(
 }> {
   const subscription = await connection.attach(
     { scope: "turn", turnHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   for (;;) {
     const item = await subscription.next();

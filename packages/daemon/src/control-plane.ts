@@ -15,6 +15,7 @@ import type {
 } from "@reins/event-journal";
 import type {
   AttachParams,
+  AttachInitial,
   ConsumerContext,
   DaemonDiagnosticFact,
   DiagnosticsParams,
@@ -30,6 +31,7 @@ import type {
   RuntimeScopeId,
   SessionId,
   SessionInfo,
+  StopReason,
   SpawnAck,
   SpawnParams,
   SubscriptionTarget,
@@ -39,7 +41,7 @@ import type {
 } from "@reins/protocol";
 import {
   decodeResumeCursor,
-  eventIdSchema,
+  encodeResumeCursor,
   harnessModelCatalogSchema,
   isSideEffectMethod,
   makeErrorCause,
@@ -55,7 +57,7 @@ import type { ConsumerScope } from "./consumer-scope.ts";
 import type { OrderedDiagnosticsRuntime } from "./diagnostics-acceptance.ts";
 import type { AdapterRegistry } from "./registry.ts";
 
-const ATTACH_REPLAY_PAGE_SIZE = 128;
+const ATTACH_HISTORY_PAGE_SIZE = 128;
 
 function errorMessage(error: unknown): string {
   if (error instanceof Error) return error.message;
@@ -106,13 +108,13 @@ type SessionProjectionBase = Pick<
   >;
 };
 
-export type AttachReplay = {
+export type AttachSubscriptionStart = {
   readonly target: SubscriptionTarget;
   readonly firstPage: SessionEventsPage;
-  readonly head: EventId | null;
-  readonly oldest: EventId | null;
-  readonly truncated: boolean;
-  readonly lastEventId: EventId | null;
+  readonly initial: AttachInitial;
+  readonly startEventId: number;
+  readonly follow: boolean;
+  readonly endReason?: StopReason | "session_killed" | "control_unavailable";
 };
 
 export type ControlPlane = {
@@ -139,7 +141,10 @@ export type ControlPlane = {
     filter: Parameters<SessionMachine["list"]>[0],
     consumer?: ConsumerContext,
   ): SessionInfo[];
-  attachReplay(params: AttachParams, consumer?: ConsumerContext): AttachReplay;
+  attachInitial(
+    params: AttachParams,
+    consumer?: ConsumerContext,
+  ): AttachSubscriptionStart;
   readAttachPage(
     target: SubscriptionTarget,
     afterEventId: number,
@@ -1243,7 +1248,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         const pageInput = {
           sessionId: target.sessionId,
           afterEventId: 0,
-          limit: ATTACH_REPLAY_PAGE_SIZE,
+          limit: ATTACH_HISTORY_PAGE_SIZE,
           turnId: target.turnId,
         } as const;
         const firstPage = options.controlStore.sessionEventsPage(pageInput);
@@ -1398,22 +1403,43 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     });
   }
 
-  function attachReplay(
+  function attachHistoryReadFailure(
+    sessionId: SessionId,
+    error: unknown,
+  ): MachineError {
+    const parsed = v.safeParse(machineErrorSchema, error);
+    return parsed.success
+      ? parsed.output
+      : { code: "event_history_unavailable", sessionId };
+  }
+
+  function attachInitial(
     params: AttachParams,
     consumer?: ConsumerContext,
-  ): AttachReplay {
+  ): AttachSubscriptionStart {
     assertSessionScope(params.sessionId, consumer);
-    const storedSession = options.controlStore.getSession(params.sessionId);
+    let storedSession: StoredSession | undefined;
+    let sessionInfo: SessionInfo | undefined;
+    let head: EventId | null;
+    let oldest: EventId | null;
+    try {
+      storedSession = options.controlStore.getSession(params.sessionId);
+      if (storedSession !== undefined)
+        sessionInfo = list({ sessionId: params.sessionId }, consumer)[0];
+      ({ head, oldest } = options.controlStore.eventWindow(params.sessionId));
+    } catch (error) {
+      throw attachHistoryReadFailure(params.sessionId, error);
+    }
     if (storedSession === undefined)
       throw {
         code: "session_not_found",
         sessionId: params.sessionId,
       } satisfies MachineError;
-    if (params.scope === "turn")
-      options.machine.assertTurnTarget({
+    if (sessionInfo === undefined)
+      throw {
+        code: "session_not_found",
         sessionId: params.sessionId,
-        turnId: params.turnId,
-      });
+      } satisfies MachineError;
     const target: SubscriptionTarget =
       params.scope === "turn"
         ? {
@@ -1422,12 +1448,17 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
             turnId: params.turnId,
           }
         : { scope: "session", sessionId: params.sessionId };
-    const { head, oldest } = options.controlStore.eventWindow(params.sessionId);
+    const window = {
+      truncated: head !== null && (oldest === null || oldest > 1),
+      oldest,
+      head,
+    };
     let after = 0;
-    if (params.replay.mode === "after") {
-      const cursor = decodeResumeCursor(params.replay.cursor);
+    if (params.start.mode === "after") {
+      const cursor = decodeResumeCursor(params.start.cursor);
       if (
-        cursor.daemonGeneration !== options.diagnostics.generation ||
+        cursor.runtimeScopeId !== options.runtimeScopeId ||
+        cursor.daemonGeneration !== storedSession.generation ||
         cursor.target.scope !== target.scope ||
         cursor.target.sessionId !== target.sessionId ||
         (target.scope === "turn" &&
@@ -1437,35 +1468,210 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       )
         throw {
           code: "invalid_params",
-          issues: [{ issue: "invalid_value", path: "replay.cursor" }],
+          issues: [{ issue: "invalid_value", path: "start.cursor" }],
         } satisfies MachineError;
-      if (
-        (oldest === null || oldest > 1) &&
-        cursor.eventId < (oldest ?? (head ?? 0) + 1)
-      )
+      if (cursor.eventId < (oldest === null ? (head ?? 0) : oldest - 1))
         throw {
           code: "event_cursor_expired",
           oldest,
           head,
         } satisfies MachineError;
       after = cursor.eventId;
-    } else if (params.replay.mode === "none") {
+    } else if (params.start.mode === "snapshot") {
       after = head ?? 0;
+    } else if (oldest !== null && oldest > 1) {
+      throw {
+        code: "event_cursor_expired",
+        oldest,
+        head,
+      } satisfies MachineError;
     }
-    const firstPage = options.controlStore.sessionEventsPage({
-      sessionId: params.sessionId,
-      afterEventId: after,
-      throughEventId: head,
-      limit: ATTACH_REPLAY_PAGE_SIZE,
-      ...(target.scope === "turn" ? { turnId: target.turnId } : {}),
+    let firstPage: SessionEventsPage;
+    try {
+      firstPage = options.controlStore.sessionEventsPage({
+        sessionId: params.sessionId,
+        afterEventId: after,
+        throughEventId: head,
+        limit: ATTACH_HISTORY_PAGE_SIZE,
+        ...(target.scope === "turn" ? { turnId: target.turnId } : {}),
+      });
+    } catch (error) {
+      throw attachHistoryReadFailure(params.sessionId, error);
+    }
+    let turnTerminal: StopReason | undefined;
+    if (target.scope === "turn") {
+      try {
+        const facts = readWaitFacts({
+          targets: [target],
+          completion: "all",
+        });
+        if (facts.completed[0] !== undefined)
+          turnTerminal = facts.completed[0].stopReason;
+      } catch (error) {
+        throw attachHistoryReadFailure(params.sessionId, error);
+      }
+    }
+    const cursor = encodeResumeCursor({
+      target,
+      runtimeScopeId: storedSession.runtimeScopeId,
+      daemonGeneration: storedSession.generation,
+      eventId: after,
     });
+    let initial: AttachInitial;
+    if (params.start.mode === "snapshot") {
+      let baseline: Extract<AttachInitial, { mode: "snapshot" }>["baseline"];
+      try {
+        baseline = readAttachBaseline(storedSession, sessionInfo, target, head);
+      } catch (error) {
+        throw attachHistoryReadFailure(params.sessionId, error);
+      }
+      initial = {
+        mode: "snapshot",
+        target,
+        cursor,
+        window,
+        baseline,
+      };
+    } else {
+      initial = {
+        mode: params.start.mode,
+        target,
+        cursor,
+        window,
+        replayed: firstPage.total,
+      };
+    }
+    const liveSession = options.machine.list({
+      sessionId: params.sessionId,
+    })[0];
+    const canFollow =
+      storedSession.generation === options.diagnostics.generation &&
+      liveSession !== undefined &&
+      sessionInfo.state !== "unreachable" &&
+      sessionInfo.state !== "killed";
+    const endReason: AttachSubscriptionStart["endReason"] =
+      sessionInfo.state === "killed"
+        ? "session_killed"
+        : (turnTerminal ?? (canFollow ? undefined : "control_unavailable"));
     return {
       target,
       firstPage,
-      head,
-      oldest,
-      truncated: head !== null && (oldest === null || oldest > 1),
-      lastEventId: after === 0 ? null : v.parse(eventIdSchema, after),
+      initial,
+      startEventId: after,
+      follow: endReason === undefined,
+      ...(endReason === undefined ? {} : { endReason }),
+    };
+  }
+
+  function readAttachBaseline(
+    storedSession: StoredSession,
+    sessionInfo: SessionInfo,
+    target: SubscriptionTarget,
+    head: EventId | null,
+  ): {
+    session: SessionInfo;
+    confirmedTerminals: {
+      eventId: EventId;
+      event: Extract<
+        DomainEvent,
+        { type: "turn.completed" | "session.killed" }
+      >;
+    }[];
+    pendingPermissions: {
+      eventId: EventId;
+      event: Extract<DomainEvent, { type: "permission.requested" }>;
+    }[];
+  } {
+    const confirmedTerminals: {
+      eventId: EventId;
+      event: Extract<
+        DomainEvent,
+        { type: "turn.completed" | "session.killed" }
+      >;
+    }[] = [];
+    const pendingPermissions = new Map<
+      string,
+      {
+        eventId: EventId;
+        event: Extract<DomainEvent, { type: "permission.requested" }>;
+      }
+    >();
+    const input = {
+      sessionId: target.sessionId,
+      afterEventId: 0,
+      throughEventId: head,
+      limit: ATTACH_HISTORY_PAGE_SIZE,
+    } as const;
+    let page = options.controlStore.sessionEventsPage(input);
+    let expectedEventId = 1;
+    for (;;) {
+      for (const entry of page.entries) {
+        if (entry.eventId !== expectedEventId)
+          throw new Error("Session event history contains a gap");
+        expectedEventId += 1;
+        const event = entry.event;
+        if (
+          event.type === "turn.completed" &&
+          (target.scope === "session" || event.turnId === target.turnId)
+        )
+          confirmedTerminals.push({
+            eventId: entry.eventId,
+            event: event as Extract<
+              DomainEvent,
+              { type: "turn.completed" | "session.killed" }
+            >,
+          });
+        else if (event.type === "session.killed")
+          confirmedTerminals.push({
+            eventId: entry.eventId,
+            event: event as Extract<
+              DomainEvent,
+              { type: "turn.completed" | "session.killed" }
+            >,
+          });
+
+        if (event.type === "permission.requested")
+          pendingPermissions.set(event.permissionId, {
+            eventId: entry.eventId,
+            event: event as Extract<
+              DomainEvent,
+              { type: "permission.requested" }
+            >,
+          });
+        else if (event.type === "permission.resolved")
+          pendingPermissions.delete(event.permissionId);
+        else if (
+          event.type === "turn.completed" ||
+          event.type === "session.killed"
+        )
+          pendingPermissions.clear();
+      }
+      if (!page.hasMore) break;
+      page = options.controlStore.sessionEventsPage({
+        ...input,
+        afterEventId: page.nextAfter,
+      });
+    }
+    if (expectedEventId !== (head ?? 0) + 1)
+      throw new Error("Session event history ended before its committed head");
+
+    const currentGeneration =
+      storedSession.generation === options.diagnostics.generation;
+    const activeTurnId =
+      sessionInfo.state === "busy" ? sessionInfo.activeTurnId : undefined;
+    const effectivePermissions =
+      currentGeneration && activeTurnId !== undefined
+        ? Array.from(pendingPermissions.values()).filter(
+            ({ event }) =>
+              event.type === "permission.requested" &&
+              event.turnId === activeTurnId &&
+              (target.scope === "session" || event.turnId === target.turnId),
+          )
+        : [];
+    return {
+      session: sessionInfo,
+      confirmedTerminals,
+      pendingPermissions: effectivePermissions,
     };
   }
 
@@ -1478,7 +1684,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       sessionId: target.sessionId,
       afterEventId,
       ...(throughEventId === undefined ? {} : { throughEventId }),
-      limit: ATTACH_REPLAY_PAGE_SIZE,
+      limit: ATTACH_HISTORY_PAGE_SIZE,
       ...(target.scope === "turn" ? { turnId: target.turnId } : {}),
     });
   }
@@ -1945,7 +2151,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     },
     assertSessionScope,
     list,
-    attachReplay,
+    attachInitial,
     readAttachPage,
     async waitForAttachTurn(target) {
       const result = await waitForCommittedTargets({

@@ -124,6 +124,90 @@ async function fixture() {
   return { directory, env, sdk, spawnSession };
 }
 
+test("快照初始切面包含可决议授权，确认事实应用后才推进游标", async () => {
+  const f = await fixture();
+  const control = await f.sdk();
+  const gate = join(f.directory, "release-snapshot");
+  const completionGate = join(f.directory, "complete-snapshot");
+  const spawned = await f.spawnSession(
+    control,
+    JSON.stringify({
+      gate,
+      completionGate,
+      reply: "snapshot complete",
+      permission: true,
+    }),
+    "snapshot-baseline",
+  );
+  const observer = await f.sdk();
+  const target = {
+    scope: "turn" as const,
+    turnHandle: spawned.turnHandle,
+  };
+  const subscription = await observer.attach(target, { mode: "snapshot" });
+
+  expect(subscription.initial).toMatchObject({
+    mode: "snapshot",
+    target,
+    baseline: {
+      session: { state: "busy", activeTurn: spawned.turnHandle },
+      confirmedTerminals: [],
+      pendingPermissions: [],
+    },
+  });
+  const initialCursor = subscription.initial.cursor;
+  await expect(
+    observer.attach(target, {
+      mode: "snapshot",
+      cursor: initialCursor,
+    } as never),
+  ).rejects.toMatchObject({ failure: { code: "invalid_params" } });
+  expect(parseResumeCursor(serializeResumeCursor(initialCursor))).toBe(
+    initialCursor,
+  );
+  expect(subscription.checkpoint).toBe(initialCursor);
+
+  await writeFile(gate, "release");
+  let item = await subscription.next();
+  expect(item.done).toBe(false);
+  if (item.done) throw new Error("Snapshot follow did not receive a fact");
+  expect(subscription.checkpoint).toBe(initialCursor);
+  subscription.acknowledge(item.value);
+  expect(subscription.checkpoint).not.toBe(initialCursor);
+
+  let requested: Extract<AgentFact, { type: "permission.requested" }> | null =
+    item.value.type === "permission.requested" ? item.value : null;
+  while (requested === null) {
+    item = await subscription.next();
+    if (item.done) throw new Error("Permission request was not emitted");
+    if (item.value.type === "permission.requested") requested = item.value;
+    else subscription.acknowledge(item.value);
+  }
+
+  const authorization = await observer.attach(target, { mode: "snapshot" });
+  expect(authorization.initial).toMatchObject({
+    baseline: {
+      pendingPermissions: [
+        {
+          type: "permission.requested",
+          permissionHandle: requested.permissionHandle,
+          kind: "write",
+        },
+      ],
+    },
+  });
+  authorization.close();
+  subscription.acknowledge(requested);
+  await observer.resolvePermission(
+    requested.permissionHandle,
+    { outcome: "deny", feedback: "snapshot accepted" },
+    { operationKey: observer.prepareOperation("resolvePermission") },
+  );
+  await writeFile(completionGate, "complete");
+  for await (const fact of subscription) subscription.acknowledge(fact);
+  expect(await subscription.done).toMatchObject({ reason: "end_turn" });
+});
+
 test("SDK facts preserve message, tool, authorization, and replay identity", async () => {
   const f = await fixture();
   const control = await f.sdk();
@@ -139,7 +223,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   const spawned = await f.spawnSession(control, spawnMessage);
   const observer = await f.sdk();
   const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
-  const live = await observer.attach(target, { mode: "available" });
+  const live = await observer.attach(target, { mode: "history" });
   const initialCursor = live.checkpoint;
   expect(parseResumeCursor(serializeResumeCursor(initialCursor))).toBe(
     initialCursor,
@@ -155,6 +239,7 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
           { operationKey: observer.prepareOperation("resolvePermission") },
         );
       }
+      live.acknowledge(fact);
     }
   })();
 
@@ -299,9 +384,12 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
     parseResumeCursor(serializeSessionHandle(spawned.sessionHandle)),
   ).toThrow();
 
-  const available = await observer.attach(target, { mode: "available" });
+  const available = await observer.attach(target, { mode: "history" });
   const availableFacts: AgentFact[] = [];
-  for await (const fact of available) availableFacts.push(fact);
+  for await (const fact of available) {
+    availableFacts.push(fact);
+    available.acknowledge(fact);
+  }
   expect(await available.done).toMatchObject({ reason: "end_turn" });
   expect(availableFacts[0]).toMatchObject({ type: "turn.started" });
   expect(availableFacts.slice(-facts.length)).toEqual(facts);
@@ -311,7 +399,10 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
     cursor: initialCursor,
   });
   const resumedFacts: AgentFact[] = [];
-  for await (const fact of resumed) resumedFacts.push(fact);
+  for await (const fact of resumed) {
+    resumedFacts.push(fact);
+    resumed.acknowledge(fact);
+  }
   expect(await resumed.done).toMatchObject({ reason: "end_turn" });
   expect(resumedFacts).toEqual(facts);
 
@@ -336,12 +427,14 @@ test("SDK resumes after a disconnected observer from its last delivered fact", a
     sessionHandle: spawned.sessionHandle,
   };
   const observer = await f.sdk();
-  const live = await observer.attach(target, { mode: "none" });
+  const live = await observer.attach(target, { mode: "snapshot" });
   const firstPromise = live.next();
   await writeFile(gate, "release");
   const first = await firstPromise;
   expect(first.done).toBe(false);
   if (first.done) throw new Error("missing first fact");
+  expect(live.checkpoint).toBe(live.initial.cursor);
+  live.acknowledge(first.value);
   const cursor = live.checkpoint;
 
   observer.close();
@@ -368,15 +461,17 @@ test("SDK resumes after a disconnected observer from its last delivered fact", a
   const resumedFacts: AgentFact[] = [];
   for await (const fact of resumed) {
     resumedFacts.push(fact);
+    resumed.acknowledge(fact);
     if (fact.type === "turn.completed") break;
   }
   resumed.close();
   expect(await resumed.done).toMatchObject({ reason: "closed" });
 
-  const full = await recovery.attach(target, { mode: "available" });
+  const full = await recovery.attach(target, { mode: "history" });
   const fullFacts: AgentFact[] = [];
   for await (const fact of full) {
     fullFacts.push(fact);
+    full.acknowledge(fact);
     if (fact.type === "turn.completed") break;
   }
   full.close();
@@ -400,19 +495,25 @@ test("turn observation ends at its target while session history crosses and resu
   const observer = await f.sdk();
   const turn = await observer.attach(
     { scope: "turn", turnHandle: spawned.turnHandle },
-    { mode: "none" },
+    { mode: "snapshot" },
   );
   const session = await observer.attach(
     { scope: "session", sessionHandle: spawned.sessionHandle },
-    { mode: "none" },
+    { mode: "snapshot" },
   );
   const turnFacts: AgentFact[] = [];
   const sessionFacts: AgentFact[] = [];
   const turnDrain = (async () => {
-    for await (const fact of turn) turnFacts.push(fact);
+    for await (const fact of turn) {
+      turnFacts.push(fact);
+      turn.acknowledge(fact);
+    }
   })();
   const sessionDrain = (async () => {
-    for await (const fact of session) sessionFacts.push(fact);
+    for await (const fact of session) {
+      sessionFacts.push(fact);
+      session.acknowledge(fact);
+    }
   })();
 
   await writeFile(firstGate, "release first");
@@ -456,6 +557,7 @@ test("turn observation ends at its target while session history crosses and resu
   const resumedFacts: AgentFact[] = [];
   for await (const fact of resumed) {
     resumedFacts.push(fact);
+    resumed.acknowledge(fact);
     if (fact.type === "turn.completed" && fact.turnHandle === second.turnHandle)
       break;
   }
@@ -489,12 +591,15 @@ test("SDK observers independently receive the same stable fact history", async (
   const [firstObserver, secondObserver] = await Promise.all([f.sdk(), f.sdk()]);
   const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
   const [first, second] = await Promise.all([
-    firstObserver.attach(target, { mode: "none" }),
-    secondObserver.attach(target, { mode: "none" }),
+    firstObserver.attach(target, { mode: "snapshot" }),
+    secondObserver.attach(target, { mode: "snapshot" }),
   ]);
   const collect = async (subscription: typeof first) => {
     const facts: AgentFact[] = [];
-    for await (const fact of subscription) facts.push(fact);
+    for await (const fact of subscription) {
+      facts.push(fact);
+      subscription.acknowledge(fact);
+    }
     return facts;
   };
   const histories = Promise.all([collect(first), collect(second)]);
@@ -524,13 +629,13 @@ test("SDK abort closes observation without cancelling the exact turn", async () 
   const preAborted = new AbortController();
   preAborted.abort();
   await expect(
-    observer.attach(target, { mode: "none" }, preAborted.signal),
+    observer.attach(target, { mode: "snapshot" }, preAborted.signal),
   ).rejects.toMatchObject({ name: "AbortError" });
 
   const controller = new AbortController();
   const subscription = await observer.attach(
     target,
-    { mode: "none" },
+    { mode: "snapshot" },
     controller.signal,
   );
   controller.abort();
@@ -563,11 +668,14 @@ test.each(["failed", "cancelled"] as const)(
     const observer = await f.sdk();
     const subscription = await observer.attach(
       { scope: "turn", turnHandle: spawned.turnHandle },
-      { mode: "none" },
+      { mode: "snapshot" },
     );
     await writeFile(gate, "complete");
     const facts: AgentFact[] = [];
-    for await (const fact of subscription) facts.push(fact);
+    for await (const fact of subscription) {
+      facts.push(fact);
+      subscription.acknowledge(fact);
+    }
     expect(await subscription.done).toMatchObject({ reason: stopReason });
     const terminal = facts.find((fact) => fact.type === "turn.completed");
     expect(terminal).toMatchObject({
@@ -598,24 +706,30 @@ test("active replay preserves complete history before a permission-blocked turn 
     scope: "session" as const,
     sessionHandle: spawned.sessionHandle,
   };
-  const live = await observer.attach(target, { mode: "none" });
+  const live = await observer.attach(target, { mode: "snapshot" });
   const permission = (async () => {
     for (;;) {
       const item = await live.next();
       if (item.done) throw new Error("Permission request was not emitted");
       if (item.value.type === "permission.requested") return item.value;
+      live.acknowledge(item.value);
     }
   })();
   await writeFile(gate, "release");
   const requested = await permission;
-  const available = await observer.attach(target, { mode: "available" });
-  expect(available.establishment.window).toMatchObject({ truncated: false });
-  expect(available.establishment.replayed).toBeGreaterThan(1_000);
+  const available = await observer.attach(target, { mode: "history" });
+  if (available.initial.mode !== "history")
+    throw new Error("Expected history initial state");
+  expect(available.initial.window).toMatchObject({ truncated: false });
+  expect(available.initial.replayed).toBeGreaterThan(1_000);
   const replayed: AgentFact[] = [];
-  for (let index = 0; index < available.establishment.replayed; index += 1) {
+  for (let index = 0; index < available.initial.replayed; index += 1) {
     const item = await available.next();
     expect(item.done).toBe(false);
-    if (!item.done) replayed.push(item.value);
+    if (!item.done) {
+      replayed.push(item.value);
+      available.acknowledge(item.value);
+    }
   }
   available.close();
   expect(await available.done).toMatchObject({ reason: "closed" });
@@ -629,11 +743,13 @@ test("active replay preserves complete history before a permission-blocked turn 
     { outcome: "deny", feedback: "finish active replay test" },
     { operationKey: observer.prepareOperation("resolvePermission") },
   );
+  live.acknowledge(requested);
   const terminal: AgentFact[] = [];
   for (;;) {
     const item = await live.next();
     if (item.done) break;
     terminal.push(item.value);
+    live.acknowledge(item.value);
     if (
       item.value.type === "turn.completed" &&
       item.value.turnHandle === spawned.turnHandle
@@ -671,7 +787,7 @@ test("SDK cursors remain bound to their exact scope and session", async () => {
     scope: "session" as const,
     sessionHandle: first.sessionHandle,
   };
-  const initial = await observer.attach(sessionTarget, { mode: "none" });
+  const initial = await observer.attach(sessionTarget, { mode: "snapshot" });
   const cursor = initial.checkpoint;
   initial.close();
   expect(await initial.done).toMatchObject({ reason: "closed" });
@@ -700,7 +816,7 @@ test("SDK replays complete history and keeps an earlier cursor valid", async () 
   );
   const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
   const observer = await f.sdk();
-  const before = await observer.attach(target, { mode: "none" });
+  const before = await observer.attach(target, { mode: "snapshot" });
   const staleCursor = before.checkpoint;
   before.close();
   expect(await before.done).toMatchObject({ reason: "closed" });
@@ -714,8 +830,8 @@ test("SDK replays complete history and keeps an earlier cursor valid", async () 
     }),
   ).toMatchObject({ status: "satisfied" });
 
-  const available = await observer.attach(target, { mode: "available" });
-  const window = available.establishment.window;
+  const available = await observer.attach(target, { mode: "history" });
+  const window = available.initial.window;
   expect(window).toMatchObject({
     truncated: false,
     oldest: expect.any(Number),
@@ -723,7 +839,10 @@ test("SDK replays complete history and keeps an earlier cursor valid", async () 
   });
   expect(window.oldest).toBe(1);
   const facts: AgentFact[] = [];
-  for await (const fact of available) facts.push(fact);
+  for await (const fact of available) {
+    facts.push(fact);
+    available.acknowledge(fact);
+  }
   expect(await available.done).toMatchObject({ reason: "end_turn" });
   expect(facts.length).toBeGreaterThan(1_000);
 
@@ -732,7 +851,10 @@ test("SDK replays complete history and keeps an earlier cursor valid", async () 
     cursor: staleCursor,
   });
   const afterFacts: AgentFact[] = [];
-  for await (const fact of after) afterFacts.push(fact);
+  for await (const fact of after) {
+    afterFacts.push(fact);
+    after.acknowledge(fact);
+  }
   expect(await after.done).toMatchObject({ reason: "end_turn" });
   expect(afterFacts.length).toBeGreaterThan(1_000);
 });

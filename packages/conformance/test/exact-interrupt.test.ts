@@ -84,7 +84,7 @@ test("精确 interrupt 等原生接受才 ACK，取消独立观察且保留会�
   await client.request("attach", {
     scope: "session",
     sessionId,
-    replay: { mode: "available" },
+    start: { mode: "history" },
   });
   let settled = false;
   const pending = client

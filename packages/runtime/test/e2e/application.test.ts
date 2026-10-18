@@ -441,6 +441,15 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   await expect(
     original.wait({ targets: [completed.turnHandle], completion: "all" }),
   ).resolves.toMatchObject({ status: "satisfied" });
+  const previousHistory = await original.attach(
+    { scope: "session", sessionHandle: completed.sessionHandle },
+    { mode: "history" },
+  );
+  const previousCursor = previousHistory.initial.cursor;
+  previousHistory.close();
+  await expect(previousHistory.done).resolves.toMatchObject({
+    reason: "closed",
+  });
 
   const active = await original.spawn({
     harness: "codex",
@@ -462,6 +471,19 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   const reconnected = await openLocal(options);
   clients.push(reconnected);
   expect(reconnected.handshake.daemonGeneration).not.toBe(originalGeneration);
+  const resumedHistory = await reconnected.attach(
+    { scope: "session", sessionHandle: completed.sessionHandle },
+    { mode: "after", cursor: previousCursor },
+  );
+  const resumedFactTypes: string[] = [];
+  for await (const fact of resumedHistory) {
+    resumedFactTypes.push(fact.type);
+    resumedHistory.acknowledge(fact);
+  }
+  expect(resumedFactTypes).toContain("turn.completed");
+  await expect(resumedHistory.done).resolves.toMatchObject({
+    reason: "control_unavailable",
+  });
   expect(await reconnected.list()).toEqual([]);
   expect(
     await reconnected.list({ sessionHandle: completed.sessionHandle }),
@@ -1163,7 +1185,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   const activeMessage = "  exact active input\nkeep spacing  ";
   const subscription = await connection.attach(
     { scope: "turn", turnHandle: active.turnHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const callerFactPromise = (async () => {
     for await (const fact of subscription) {

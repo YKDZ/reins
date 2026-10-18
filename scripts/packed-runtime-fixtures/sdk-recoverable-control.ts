@@ -806,7 +806,7 @@ async function observePermission(): Promise<void> {
   const connection = await connectSdk();
   const subscription = await connection.attach(
     { scope: "session", sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   try {
     for await (const fact of subscription) {
@@ -819,6 +819,7 @@ async function observePermission(): Promise<void> {
           options: fact.options,
         })}\n`,
       );
+      subscription.acknowledge(fact);
       return;
     }
     throw new Error("The installed SDK observed no permission request");
@@ -1098,12 +1099,13 @@ async function replayFacts(): Promise<void> {
   const checkpoints: ResumeCursor[] = [];
   let endReason: string | undefined;
   try {
-    const subscription = await connection.attach(target, { mode: "available" });
+    const subscription = await connection.attach(target, { mode: "history" });
     try {
       for (;;) {
         const item = await subscription.next();
         if (item.done) break;
         facts.push(item.value);
+        subscription.acknowledge(item.value);
         checkpoints.push(subscription.checkpoint);
       }
       endReason = (await subscription.done).reason;
@@ -1128,7 +1130,7 @@ async function replayFacts(): Promise<void> {
     disconnectedCheckpoint !== checkpoint
   )
     throw new Error(
-      "The disconnect checkpoint did not identify the last delivered fact",
+      "The disconnect checkpoint did not identify the last acknowledged fact",
     );
 
   const resumedConnection = await connectSdk();
@@ -1139,9 +1141,14 @@ async function replayFacts(): Promise<void> {
       mode: "after",
       cursor: parseResumeCursor(disconnectedCheckpoint ?? checkpoint),
     });
-    replayed = subscription.establishment.replayed;
+    if (subscription.initial.mode === "snapshot")
+      throw new Error("The installed SDK returned the wrong initial mode");
+    replayed = subscription.initial.replayed;
     try {
-      for await (const fact of subscription) resumedFacts.push(fact);
+      for await (const fact of subscription) {
+        resumedFacts.push(fact);
+        subscription.acknowledge(fact);
+      }
       await subscription.done;
     } finally {
       subscription.close();
@@ -1173,11 +1180,12 @@ async function disconnectAfterFirstFact(): Promise<void> {
   const connection = await connectSdk();
   const subscription = await connection.attach(
     { scope: "session", sessionHandle },
-    { mode: "available" },
+    { mode: "history" },
   );
   const first = await subscription.next();
   if (first.done) throw new Error("The installed SDK received no first fact");
   const deliveredFacts = [first.value];
+  subscription.acknowledge(first.value);
   connection.close();
   let disconnected: ReinsSdkError | undefined;
   try {
@@ -1234,7 +1242,7 @@ async function replayWindow(): Promise<void> {
       scope: "turn" as const,
       turnHandle: spawned.turnHandle,
     };
-    const live = await connection.attach(target, { mode: "none" });
+    const live = await connection.attach(target, { mode: "snapshot" });
     const staleCursor = live.checkpoint;
     live.close();
     await live.done;
@@ -1261,11 +1269,14 @@ async function replayWindow(): Promise<void> {
       await new Promise<void>((resolve) => setTimeout(resolve, 10));
     }
 
-    const available = await connection.attach(target, { mode: "available" });
-    const window = available.establishment.window;
+    const available = await connection.attach(target, { mode: "history" });
+    const window = available.initial.window;
     const facts: AgentFact[] = [];
     try {
-      for await (const fact of available) facts.push(fact);
+      for await (const fact of available) {
+        facts.push(fact);
+        available.acknowledge(fact);
+      }
       const end = await available.done;
       if (end.reason !== "end_turn")
         throw new Error("The truncated turn replay had the wrong end reason");
@@ -1278,7 +1289,10 @@ async function replayWindow(): Promise<void> {
     });
     const resumedFacts: AgentFact[] = [];
     try {
-      for await (const fact of resumed) resumedFacts.push(fact);
+      for await (const fact of resumed) {
+        resumedFacts.push(fact);
+        resumed.acknowledge(fact);
+      }
       const end = await resumed.done;
       if (end.reason !== "end_turn")
         throw new Error("The old cursor replay had the wrong end reason");

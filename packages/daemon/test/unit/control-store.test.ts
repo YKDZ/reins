@@ -195,6 +195,28 @@ describe("SQLite控制存储", () => {
       "Stored session ownership does not match its identity",
     );
     corrupted.close();
+
+    const missingEventDatabase = new DatabaseSync(
+      join(directory, "control.sqlite"),
+    );
+    missingEventDatabase
+      .prepare(
+        "DELETE FROM session_events WHERE session_id = ? AND event_id = ?",
+      )
+      .run(sessionId, 3);
+    missingEventDatabase.close();
+    const missingHistory = await openControlStore({ directory });
+    expect(() => missingHistory.eventWindow(sessionId)).toThrow(
+      "Session event history is incomplete",
+    );
+    expect(() =>
+      missingHistory.sessionEventsPage({
+        sessionId,
+        afterEventId: 0,
+        limit: 1,
+      }),
+    ).toThrow("Session event history is incomplete");
+    missingHistory.close();
     await rm(directory, { recursive: true, force: true });
   });
 

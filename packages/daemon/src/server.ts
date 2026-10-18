@@ -36,6 +36,7 @@ import {
   protocolRequestSchema,
   REINS_PROTOCOL_MAJOR_VERSION,
   requestIdSchema,
+  eventIdSchema,
 } from "@reins/protocol";
 import {
   createTransportError,
@@ -469,7 +470,7 @@ export function createProtocolServerInternal(
 
   function endAttach(
     subscription: AttachSubscription,
-    reason: StopReason | "session_killed" | "closed",
+    reason: StopReason | "session_killed" | "control_unavailable" | "closed",
   ): void {
     if (!subscription.active) return;
     subscription.active = false;
@@ -526,14 +527,13 @@ export function createProtocolServerInternal(
     }
   }
 
-  async function replayAndFollow(
+  async function followAttach(
     subscription: AttachSubscription,
-    firstPage: ReturnType<ControlPlane["readAttachPage"]>,
-    terminal: StopReason | undefined,
+    prepared: ReturnType<ControlPlane["attachInitial"]>,
   ): Promise<void> {
-    let page = firstPage;
-    let afterEventId = 0;
-    const snapshotThrough = firstPage.throughEventId;
+    let page = prepared.firstPage;
+    let afterEventId = prepared.startEventId;
+    const snapshotThrough = prepared.initial.window.head;
 
     while (subscription.active) {
       for (const entry of page.entries)
@@ -571,7 +571,8 @@ export function createProtocolServerInternal(
     }
 
     if (!subscription.active) return;
-    if (terminal !== undefined) endAttach(subscription, terminal);
+    if (!prepared.follow && prepared.endReason !== undefined)
+      endAttach(subscription, prepared.endReason);
     else if (options.control.isSessionKilled(subscription.sessionId))
       endAttach(subscription, "session_killed");
   }
@@ -662,8 +663,8 @@ export function createProtocolServerInternal(
     request: ProtocolRequest,
     consumer: ConsumerContext | undefined,
   ): Promise<AttachResult> {
-    const replay = options.control.attachReplay(params, consumer);
-    const { target } = replay;
+    const prepared = options.control.attachInitial(params, consumer);
+    const { target } = prepared;
     const subscription: AttachSubscription = {
       sessionId: params.sessionId,
       target,
@@ -671,23 +672,18 @@ export function createProtocolServerInternal(
         subscriptionIdSchema,
         "subscription-" + ++subscriptionSequence,
       ),
-      lastEventId: replay.lastEventId,
+      lastEventId:
+        prepared.startEventId === 0
+          ? null
+          : v.parse(eventIdSchema, prepared.startEventId),
       connection,
       replaying: true,
       active: true,
     };
     // 先完整验证再注册；注册后到 ACK 释放之间的事件进入同一队列。
     attachSubscriptions.add(subscription);
-    let terminal: StopReason | undefined;
     try {
       testing.beforeAttachReplay?.(params.sessionId);
-      if (target.scope === "turn") {
-        const snapshot = await options.control.waitForAttachTurn({
-          sessionId: target.sessionId,
-          turnId: target.turnId,
-        });
-        terminal = snapshot.completed[0]?.stopReason;
-      }
     } catch (error) {
       subscription.active = false;
       attachSubscriptions.delete(subscription);
@@ -695,22 +691,13 @@ export function createProtocolServerInternal(
     }
     afterAttachAck.set(request, () => {
       if (!subscription.active) return;
-      void replayAndFollow(subscription, replay.firstPage, terminal).catch(
-        () => {
-          if (subscription.active) endAttach(subscription, "closed");
-        },
-      );
+      void followAttach(subscription, prepared).catch(() => {
+        if (subscription.active) endAttach(subscription, "control_unavailable");
+      });
     });
     return {
-      sessionId: params.sessionId,
       subscriptionId: subscription.subscriptionId,
-      target,
-      window: {
-        truncated: replay.truncated,
-        oldest: replay.oldest,
-        head: replay.head,
-      },
-      replayed: replay.firstPage.total,
+      initial: prepared.initial,
     };
   }
 

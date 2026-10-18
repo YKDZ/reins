@@ -23,7 +23,10 @@ async function collect(
 ): Promise<AgentFact[]> {
   const facts: AgentFact[] = [];
   try {
-    for await (const fact of subscription) facts.push(fact);
+    for await (const fact of subscription) {
+      facts.push(fact);
+      subscription.acknowledge(fact);
+    }
     return facts;
   } finally {
     subscription.close();
@@ -53,7 +56,7 @@ try {
     { operationKey: connection.prepareOperation("spawn") },
   );
   const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
-  const live = await connection.attach(target, { mode: "none" });
+  const live = await connection.attach(target, { mode: "snapshot" });
   const initialCursor = live.checkpoint;
   const facts: AgentFact[] = [];
   const consuming = (async () => {
@@ -66,6 +69,7 @@ try {
           { operationKey: connection.prepareOperation("resolvePermission") },
         );
       }
+      live.acknowledge(fact);
     }
   })();
 
@@ -147,7 +151,7 @@ try {
     cursor: initialCursor,
   });
   const resumedFacts = await collect(resumed);
-  const available = await connection.attach(target, { mode: "available" });
+  const available = await connection.attach(target, { mode: "history" });
   const availableFacts = await collect(available);
   assert(
     JSON.stringify(resumedFacts) === JSON.stringify(facts),

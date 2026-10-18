@@ -4,7 +4,9 @@ import type {
   DomainEvent,
   EventId,
   AttachEnded,
-  AttachResult,
+  AttachInitial,
+  ResumeCursor,
+  SessionInfo,
   SubscriptionTarget,
   AttachParams,
   PermissionHandle,
@@ -20,6 +22,7 @@ import {
   encodeMessageKey,
   encodeToolKey,
   encodeTurnHandle,
+  decodeResumeCursor,
   messageIdSchema,
   permissionHandleSchema,
   permissionIdSchema,
@@ -68,11 +71,57 @@ export type AgentFact = PublicFact<DomainEvent> & { factId: AgentFactId };
 export type AgentTarget =
   | { scope: "session"; sessionHandle: SessionHandle }
   | { scope: "turn"; turnHandle: TurnHandle };
-export type AgentEstablishment = {
-  target: AgentTarget;
-  window: AttachResult["window"];
-  replayed: number;
+export type AgentSubscriptionInitial =
+  | {
+      mode: "snapshot";
+      target: AgentTarget;
+      cursor: ResumeCursor;
+      window: AttachInitial["window"];
+      baseline: AgentSubscriptionBaseline;
+    }
+  | {
+      mode: "history" | "after";
+      target: AgentTarget;
+      cursor: ResumeCursor;
+      window: AttachInitial["window"];
+      replayed: number;
+    };
+export type AgentSubscriptionBaseline = {
+  session: SessionInfo;
+  confirmedTerminals: Extract<
+    AgentFact,
+    { type: "turn.completed" | "session.killed" }
+  >[];
+  pendingPermissions: Extract<AgentFact, { type: "permission.requested" }>[];
 };
+
+export function projectAgentSubscriptionInitial(
+  initial: AttachInitial,
+): AgentSubscriptionInitial {
+  const target = projectSubscriptionTarget(initial.target);
+  if (initial.mode !== "snapshot")
+    return {
+      ...initial,
+      target,
+    };
+  const generation = decodeResumeCursor(initial.cursor).daemonGeneration;
+  const projectEvent = (entry: { event: DomainEvent; eventId: EventId }) =>
+    createAgentFact(entry.event, entry.eventId, generation);
+  return {
+    ...initial,
+    target,
+    baseline: {
+      session: initial.baseline.session,
+      confirmedTerminals: initial.baseline.confirmedTerminals.map(
+        projectEvent,
+      ) as AgentSubscriptionBaseline["confirmedTerminals"],
+      pendingPermissions: initial.baseline.pendingPermissions.map(
+        projectEvent,
+      ) as AgentSubscriptionBaseline["pendingPermissions"],
+    },
+  };
+}
+
 export type FactSubscriptionEnd = {
   target: AgentTarget;
   reason: AttachEnded["reason"];
@@ -91,9 +140,10 @@ export function projectSubscriptionTarget(
       };
 }
 export type FactSubscription = AsyncIterableIterator<AgentFact> & {
-  readonly establishment: AgentEstablishment;
+  readonly initial: AgentSubscriptionInitial;
   readonly done: Promise<FactSubscriptionEnd>;
-  readonly checkpoint: string;
+  readonly checkpoint: ResumeCursor;
+  acknowledge(fact: AgentFact): void;
   close(): void;
 };
 export type SubscribeFacts = (

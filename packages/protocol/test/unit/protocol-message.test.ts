@@ -18,6 +18,9 @@ import {
   sessionIdSchema,
   turnIdSchema,
   turnCompletedSchema,
+  encodeResumeCursor,
+  daemonGenerationSchema,
+  runtimeScopeIdSchema,
 } from "../../src/index.ts";
 
 const ok = (schema: v.GenericSchema, input: unknown): void => {
@@ -293,7 +296,30 @@ describe("per-method 参数与结果 schema", () => {
     ok(protocolParamsSchemaFor("attach"), {
       sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       scope: "session",
-      replay: { mode: "none" },
+      start: { mode: "snapshot" },
+    });
+    const conflictingStart = {
+      mode: "snapshot",
+      cursor: encodeResumeCursor({
+        target: {
+          scope: "session",
+          sessionId: v.parse(
+            sessionIdSchema,
+            "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+          ),
+        },
+        runtimeScopeId: v.parse(
+          runtimeScopeIdSchema,
+          "00000000-0000-4000-8000-000000000000",
+        ),
+        daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+        eventId: 0,
+      }),
+    };
+    bad(protocolParamsSchemaFor("attach"), {
+      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      scope: "session",
+      start: conflictingStart,
     });
     ok(protocolParamsSchemaFor("resolvePermission"), {
       sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
@@ -379,33 +405,47 @@ describe("per-method 参数与结果 schema", () => {
     bad(protocolResultSchemaFor("list"), [
       { ...snapshot, state: "killed", activeTurnId: "t1" },
     ]);
+    const sessionId = v.parse(
+      sessionIdSchema,
+      "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+    );
+    const target = { scope: "session" as const, sessionId };
+    const cursor = encodeResumeCursor({
+      target,
+      runtimeScopeId: v.parse(
+        runtimeScopeIdSchema,
+        "00000000-0000-4000-8000-000000000000",
+      ),
+      daemonGeneration: v.parse(daemonGenerationSchema, "test"),
+      eventId: 0,
+    });
     ok(protocolResultSchemaFor("attach"), {
-      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       subscriptionId: "subscription-1",
-      target: {
-        scope: "session",
-        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      initial: {
+        mode: "history",
+        target,
+        cursor,
+        window: { oldest: null, head: null, truncated: false },
+        replayed: 0,
       },
-      window: { oldest: null, head: null, truncated: false },
-      replayed: 0,
     });
     bad(protocolResultSchemaFor("attach"), {
-      sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
       subscriptionId: "subscription-1",
-      target: {
-        scope: "session",
-        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
+      initial: {
+        mode: "history",
+        target,
+        cursor,
+        window: { oldest: null, head: null, truncated: false },
+        replayed: 0,
+        replayPrefixes: [
+          {
+            turnId: "t1",
+            messageId: "m1",
+            prefix: "missing",
+            sessionId,
+          },
+        ],
       },
-      window: { oldest: null, head: null, truncated: false },
-      replayed: 0,
-      replayPrefixes: [
-        {
-          turnId: "t1",
-          messageId: "m1",
-          prefix: "missing",
-          sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
-        },
-      ],
     });
     ok(protocolResultSchemaFor("resolvePermission"), {
       sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
