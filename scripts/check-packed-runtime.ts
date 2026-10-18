@@ -9,6 +9,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { createServer, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -1917,6 +1918,231 @@ async function runControlChannelAcceptance(options: {
   }
 }
 
+function dshMessagesResponse(
+  messageId: string,
+  block: JsonRecord,
+  stopReason: "end_turn" | "tool_use",
+): string {
+  const events: JsonRecord[] = [
+    {
+      type: "message_start",
+      message: {
+        id: messageId,
+        model: "deepseek-flash",
+        usage: { input_tokens: 2, output_tokens: 0 },
+      },
+    },
+    { type: "content_block_start", index: 0, content_block: block },
+    { type: "content_block_stop", index: 0 },
+    {
+      type: "message_delta",
+      delta: { stop_reason: stopReason },
+      usage: { output_tokens: 1 },
+    },
+    { type: "message_stop" },
+  ];
+  return events
+    .map(
+      (event) =>
+        `event: ${String(event.type)}\ndata: ${JSON.stringify(event)}\n\n`,
+    )
+    .join("");
+}
+
+async function startDshProviderFixture(): Promise<{
+  readonly baseUrl: string;
+  readonly requests: JsonRecord[];
+  readonly scenarios: string[];
+  close(): Promise<void>;
+}> {
+  const requests: JsonRecord[] = [];
+  const scenarios: string[] = [];
+  let firstRequestStarted!: () => void;
+  const firstRequest = new Promise<void>((resolve) => {
+    firstRequestStarted = resolve;
+  });
+  let releaseFirstRequest!: () => void;
+  const releaseFirst = new Promise<void>((resolve) => {
+    releaseFirstRequest = resolve;
+  });
+  const server: Server = createServer((request, response) => {
+    if (request.method === "GET" && request.url === "/wait-first") {
+      void firstRequest.then(() => {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("ready");
+      });
+      return;
+    }
+    if (request.method === "GET" && request.url === "/release-first") {
+      releaseFirstRequest();
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("released");
+      return;
+    }
+    if (request.method !== "POST") {
+      response.writeHead(404);
+      response.end();
+      return;
+    }
+    let body = "";
+    request.setEncoding("utf8");
+    request.on("data", (chunk: string) => {
+      body += chunk;
+    });
+    request.on("end", () => {
+      void (async () => {
+        const parsed: unknown = JSON.parse(body);
+        assert(isRecord(parsed), "DSH provider 请求不是对象");
+        requests.push(parsed);
+        const messages = JSON.stringify(parsed.messages ?? null);
+        const scenario = messages.includes(
+          "Generate the session title from this JSON array",
+        )
+          ? "session-title"
+          : messages.includes("DSH_NEW_TURN_CONFIRMED")
+            ? "new-turn"
+            : messages.includes("OFFICIAL_TOOL_READ_ONCE")
+              ? "tool-result"
+              : messages.includes("Read evidence.txt")
+                ? "initial"
+                : "unknown";
+        scenarios.push(scenario);
+        assert(scenario !== "unknown", "官方 DSH 发出了未分类模型请求");
+        if (scenario === "initial") {
+          firstRequestStarted();
+          await releaseFirst;
+        }
+        const toolCall = scenario === "initial";
+        const text =
+          scenario === "session-title"
+            ? "DSH_TITLE_CONFIRMED"
+            : scenario === "tool-result"
+              ? "DSH_READ_CONFIRMED"
+              : "DSH_NEW_TURN_CONFIRMED";
+        response.writeHead(200, { "content-type": "text/event-stream" });
+        response.end(
+          dshMessagesResponse(
+            `packed-dsh-${requests.length}`,
+            toolCall
+              ? {
+                  type: "tool_use",
+                  id: "packed-dsh-read-once",
+                  name: "read",
+                  input: { file_path: "evidence.txt" },
+                }
+              : {
+                  type: "text",
+                  text,
+                },
+            toolCall ? "tool_use" : "end_turn",
+          ),
+        );
+      })().catch(() => response.destroy());
+    });
+  });
+  await new Promise<void>((resolve, reject) => {
+    server.once("error", reject);
+    server.listen(0, "127.0.0.1", () => {
+      server.off("error", reject);
+      resolve();
+    });
+  });
+  const address = server.address();
+  assert(
+    address !== null && typeof address !== "string",
+    "DSH 验收服务未能绑定 TCP 端口",
+  );
+  return {
+    baseUrl: `http://127.0.0.1:${address.port}`,
+    requests,
+    scenarios,
+    async close() {
+      releaseFirstRequest();
+      server.closeAllConnections();
+      await new Promise<void>((resolve, reject) => {
+        server.close((error) =>
+          error === undefined ? resolve() : reject(error),
+        );
+      });
+    },
+  };
+}
+
+async function runDshRuntimeAcceptance(options: {
+  readonly runtimeConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "dsh-official-profile");
+  const socketPath = join(directory, "reins.sock");
+  const pidPath = join(directory, "daemon.pid");
+  const workerCwd = join(directory, "workspace");
+  const launcherPath = join(directory, "daemon-launcher");
+  mkdirSync(workerCwd, { recursive: true });
+  writeFileSync(join(workerCwd, "evidence.txt"), "OFFICIAL_TOOL_READ_ONCE\n");
+  writeFileSync(
+    launcherPath,
+    `#!/bin/sh\nprintf '%s\\n' "$" > ${shellQuote(pidPath)}\nexec ${shellQuote(options.daemonPath)} "$@"\n`,
+    { mode: 0o700 },
+  );
+  const provider = await startDshProviderFixture();
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-dsh-runtime",
+    REINS_DAEMON_BIN: launcherPath,
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_DSH_WORKSPACE: workerCwd,
+    REINS_DSH_FIXTURE_BASE_URL: provider.baseUrl,
+    DSH_HOME: join(directory, "dsh-home"),
+    DSH_PERMISSION_MODE: "danger-full-access",
+    DSH_TELEMETRY_DISABLED: "1",
+    DEEPSEEK_API_KEY: "LOCAL_FIXTURE_NO_VENDOR_CALL",
+    DEEPSEEK_BASE_URL: provider.baseUrl,
+  };
+  delete env.REINS_ADAPTERS_MODULE;
+  try {
+    await runFixture(
+      options.runtimeConsumer,
+      "sdk-dsh-runtime.ts",
+      env,
+      options.logsDirectory,
+      "sdk-dsh-official-profile",
+      [],
+      180_000,
+    );
+    const requestFor = (scenario: string): JsonRecord | undefined => {
+      const index = provider.scenarios.indexOf(scenario);
+      return index < 0 ? undefined : provider.requests[index];
+    };
+    const serializedRequest = (scenario: string): string =>
+      JSON.stringify(requestFor(scenario)) ?? "";
+    assert(
+      provider.requests.length === 4 &&
+        provider.scenarios.filter((scenario) => scenario === "initial")
+          .length === 1 &&
+        provider.scenarios.filter((scenario) => scenario === "session-title")
+          .length === 1 &&
+        provider.scenarios.filter((scenario) => scenario === "tool-result")
+          .length === 1 &&
+        provider.scenarios.filter((scenario) => scenario === "new-turn")
+          .length === 1 &&
+        serializedRequest("initial").includes('"name":"read"') &&
+        serializedRequest("tool-result").includes("OFFICIAL_TOOL_READ_ONCE") &&
+        serializedRequest("new-turn").includes("DSH_NEW_TURN_CONFIRMED"),
+      "完整官方 DSH profile 未完成标题、原生 Read 工具及同会话后续回合",
+    );
+  } finally {
+    try {
+      await stopInstalledDaemon(pidPath);
+    } finally {
+      await provider.close();
+    }
+  }
+}
+
 async function main(): Promise<void> {
   const rootManifest = readJsonObject(join(repository, "package.json"));
   const rootEngines = rootManifest.engines;
@@ -2044,6 +2270,7 @@ async function main(): Promise<void> {
       [
         join(runtimeConsumer, "fixtures", "application-public-types.ts"),
         join(runtimeConsumer, "fixtures", "runtime-control-target.ts"),
+        join(runtimeConsumer, "fixtures", "sdk-dsh-runtime.ts"),
       ],
       logsDirectory,
       "runtime-application-types",
@@ -2058,6 +2285,12 @@ async function main(): Promise<void> {
     await runControlChannelAcceptance({
       sdkConsumer,
       runtimeConsumer,
+      temporaryRoot,
+      logsDirectory,
+    });
+    await runDshRuntimeAcceptance({
+      runtimeConsumer,
+      daemonPath,
       temporaryRoot,
       logsDirectory,
     });

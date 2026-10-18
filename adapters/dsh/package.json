@@ -25,11 +25,39 @@
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false"
   },
   "dependencies": {
+    "@deepseek-ai/cordis-plugin-group": "catalog:",
+    "@deepseek-ai/dsh": "catalog:",
+    "@deepseek-ai/dsh-agent": "catalog:",
+    "@deepseek-ai/dsh-anonymous-user-id": "catalog:",
+    "@deepseek-ai/dsh-app-boot": "catalog:",
+    "@deepseek-ai/dsh-bash-local": "catalog:",
+    "@deepseek-ai/dsh-compaction": "catalog:",
+    "@deepseek-ai/dsh-deepseek-account": "catalog:",
+    "@deepseek-ai/dsh-fs": "catalog:",
+    "@deepseek-ai/dsh-jobs": "catalog:",
+    "@deepseek-ai/dsh-launch-environment": "catalog:",
+    "@deepseek-ai/dsh-llm": "catalog:",
+    "@deepseek-ai/dsh-llm-deepseek": "catalog:",
+    "@deepseek-ai/dsh-output-retention": "catalog:",
+    "@deepseek-ai/dsh-ptc-runtime": "catalog:",
+    "@deepseek-ai/dsh-sandbox": "catalog:",
+    "@deepseek-ai/dsh-session": "catalog:",
+    "@deepseek-ai/dsh-session-persistence": "catalog:",
+    "@deepseek-ai/dsh-session-query": "catalog:",
+    "@deepseek-ai/dsh-session-title-llm": "catalog:",
+    "@deepseek-ai/dsh-shell": "catalog:",
+    "@deepseek-ai/dsh-spill": "catalog:",
+    "@deepseek-ai/dsh-util-time": "catalog:",
+    "@deepseek-ai/dsh-workflow": "catalog:",
+    "@reins/adapter-kit": "workspace:*",
     "@reins/protocol": "workspace:*",
     "valibot": "catalog:"
   },
   "devDependencies": {
+    "@deepseek-ai/dsh-attachment": "catalog:",
+    "@deepseek-ai/dsh-scope": "catalog:",
     "@reins/typescript-config": "workspace:*",
+    "@types/js-yaml": "catalog:",
     "@types/node": "catalog:",
     "oxfmt": "catalog:",
     "oxlint": "catalog:",
@@ -38,6 +66,9 @@
   },
   "dependenciesMeta": {
     "@reins/protocol": {
+      "injected": false
+    },
+    "@reins/adapter-kit": {
       "injected": false
     }
   },

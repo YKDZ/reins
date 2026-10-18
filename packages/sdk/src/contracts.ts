@@ -42,7 +42,7 @@ export type OperationCredential<Kind extends OperationKind> = string & {
   readonly [operationCredentialBrand]: Kind;
 };
 
-export type HarnessId = "codex" | "qoder";
+export type HarnessId = "codex" | "dsh" | "qoder";
 
 export type SpawnInput = {
   sessionLabel?: string;

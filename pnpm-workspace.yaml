@@ -20,8 +20,13 @@ minimumReleaseAgeExclude:
   - "@ykdz/template"
 
 allowBuilds:
+  "@deepseek-ai/dsh-subprocess-local": true
+  "@google/genai": false
   "@qodercn-ai/qodercn-agent-sdk": true
   esbuild: true
+  koffi: true
+  node-pty: true
+  protobufjs: false
 
 catalog:
   "@qodercn-ai/qodercn-agent-sdk": ^1.0.23
@@ -35,7 +40,34 @@ catalog:
   "turbo": 2.11.7
   "typescript-7": npm:typescript@^7.0.2
   "valibot": ^1.4.2
+  "@deepseek-ai/dsh-attachment": 0.2.1-rc.2
+  "@deepseek-ai/dsh": 0.2.1-rc.2
+  "@deepseek-ai/dsh-util-time": 0.2.1-rc.2
+  "@deepseek-ai/dsh-bash-local": 0.2.1-rc.2
+  "@deepseek-ai/dsh-llm-deepseek": 0.2.1-rc.2
+  "@deepseek-ai/dsh-spill": 0.2.1-rc.2
+  "@deepseek-ai/dsh-workflow": 0.2.1-rc.2
+  "@deepseek-ai/dsh-ptc-runtime": 0.2.1-rc.2
+  "@deepseek-ai/dsh-compaction": 0.2.1-rc.2
+  "@deepseek-ai/dsh-anonymous-user-id": 0.2.1-rc.2
+  "@deepseek-ai/dsh-fs": 0.2.1-rc.2
+  "@deepseek-ai/dsh-output-retention": 0.2.1-rc.2
+  "@deepseek-ai/dsh-shell": 0.2.1-rc.2
+  "@deepseek-ai/dsh-sandbox": 0.2.1-rc.2
+  "@deepseek-ai/dsh-session-query": 0.2.1-rc.2
+  "@deepseek-ai/dsh-session-persistence": 0.2.1-rc.2
+  "@deepseek-ai/dsh-deepseek-account": 0.2.1-rc.2
+  "@deepseek-ai/dsh-jobs": 0.2.1-rc.2
+  "@deepseek-ai/dsh-session-title-llm": 0.2.1-rc.2
+  "@deepseek-ai/cordis-plugin-group": 1.0.5
+  "@deepseek-ai/dsh-agent": 0.2.1-rc.2
+  "@deepseek-ai/dsh-app-boot": 0.2.1-rc.2
+  "@deepseek-ai/dsh-launch-environment": 0.2.1-rc.2
+  "@deepseek-ai/dsh-llm": 0.2.1-rc.2
+  "@deepseek-ai/dsh-scope": 0.2.1-rc.2
+  "@deepseek-ai/dsh-session": 0.2.1-rc.2
   "vitest": ^4.1.10
   "@types/semver": ^7.7.1
+  "@types/js-yaml": ^4.0.9
   "semver": ^7.8.5
   "smol-toml": ^1.8.0

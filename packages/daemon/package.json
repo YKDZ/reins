@@ -51,6 +51,7 @@
     "@reins/adapter-kit": "workspace:*",
     "@reins/codex": "workspace:*",
     "@reins/core": "workspace:*",
+    "@reins/dsh": "workspace:*",
     "@reins/event-journal": "workspace:*",
     "@reins/protocol": "workspace:*",
     "@reins/qoder": "workspace:*",
@@ -76,6 +77,9 @@
       "injected": false
     },
     "@reins/core": {
+      "injected": false
+    },
+    "@reins/dsh": {
       "injected": false
     },
     "@reins/event-journal": {

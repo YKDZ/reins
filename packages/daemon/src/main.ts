@@ -10,6 +10,11 @@ import {
   createCodexDriver,
   createCodexTransport,
 } from "@reins/codex";
+import {
+  createDshDriver,
+  createDshModelCatalog,
+  runDshHostProcess,
+} from "@reins/dsh";
 import type { HarnessId, ProtocolMessage } from "@reins/protocol";
 import { harnessIdSchema, makeErrorCause } from "@reins/protocol";
 import {
@@ -52,6 +57,14 @@ function builtInAdapters(): Map<HarnessId, HarnessAdapter> {
         }),
         modelCatalog: createCodexModelCatalog(),
         canCaptureHarnessStderr: true,
+      },
+    ],
+    [
+      "dsh",
+      {
+        driverFactory: createDshDriver(),
+        modelCatalog: createDshModelCatalog(),
+        canCaptureHarnessStderr: false,
       },
     ],
   ]);
@@ -125,6 +138,19 @@ function installCrashHandlers(): void {
 }
 
 async function main(): Promise<void> {
+  if (process.argv[2] === "--reins-dsh-runtime-host") {
+    try {
+      await runDshHostProcess();
+    } catch {
+      process.send?.({
+        type: "fatal",
+        failure: { code: "DSH_PROFILE_UNAVAILABLE" },
+      });
+      process.exitCode = 1;
+      process.disconnect?.();
+    }
+    return;
+  }
   installCrashHandlers();
   const state = await resolveDaemonState();
   const writerLease = await acquireAdvisoryFileLease(
