@@ -7,6 +7,7 @@ import type {
   CapabilitiesResult,
   ConsumerContext,
   DaemonDiagnosticFact,
+  DiagnosticsParams,
   DomainEvent,
   EventId,
   HarnessCapability,
@@ -353,6 +354,26 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           permissionId: params.permissionId,
           turnId: params.turnId,
         };
+      }
+      case "diagnostics": {
+        if (options.diagnostics.health().status === "degraded")
+          throw { code: "diagnostics_unavailable" } satisfies MachineError;
+        const diagnosticsParams = rawParams as DiagnosticsParams;
+        try {
+          return await options.diagnostics.query(diagnosticsParams);
+        } catch (error) {
+          if (
+            error instanceof Error &&
+            "code" in error &&
+            error.code === "diagnostic_not_found" &&
+            "diagnosticId" in diagnosticsParams
+          )
+            throw {
+              code: "diagnostic_not_found",
+              diagnosticId: diagnosticsParams.diagnosticId,
+            } satisfies MachineError;
+          throw { code: "diagnostics_unavailable" } satisfies MachineError;
+        }
       }
       default:
         throw new Error(`unexpected control method: ${method}`);

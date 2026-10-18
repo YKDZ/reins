@@ -8,7 +8,6 @@ import type {
   ConsumerContext,
   DaemonDiagnosticFact,
   DomainEvent,
-  DiagnosticsParams,
   InitializeParams,
   InitializeResult,
   MachineError,
@@ -95,7 +94,6 @@ export type ProtocolServer = {
   start(): Promise<void>;
   quiesce(): void;
   stop(): Promise<void>;
-  forwardEvent(event: DomainEvent): void;
 };
 
 type ProtocolServerOptions = {
@@ -494,10 +492,6 @@ export function createProtocolServerInternal(
     }
   }
 
-  function forwardEvent(event: DomainEvent): void {
-    void options.control.acceptEvent(event).catch(() => undefined);
-  }
-
   const unsubscribeControlEvents = options.control.subscribeEvents(
     forwardCommittedEvent,
   );
@@ -667,6 +661,13 @@ export function createProtocolServerInternal(
           request.params,
           consumer,
         );
+      case "diagnostics":
+        testing.onDiagnosticsQueryAccepted?.();
+        return await options.control.dispatch(
+          request.method,
+          request.params,
+          consumer,
+        );
       case "attach":
         return attach(
           connection,
@@ -674,29 +675,6 @@ export function createProtocolServerInternal(
           request,
           consumer,
         );
-      case "diagnostics":
-        testing.onDiagnosticsQueryAccepted?.();
-        if (options.diagnostics.health().status === "degraded") {
-          throw { code: "diagnostics_unavailable" } satisfies MachineError;
-        }
-        const diagnosticsParams = request.params as DiagnosticsParams;
-        try {
-          return await options.diagnostics.query(diagnosticsParams);
-        } catch (error) {
-          if (
-            error instanceof Error &&
-            "code" in error &&
-            error.code === "diagnostic_not_found"
-          ) {
-            if ("diagnosticId" in diagnosticsParams) {
-              throw {
-                code: "diagnostic_not_found",
-                diagnosticId: diagnosticsParams.diagnosticId,
-              } satisfies MachineError;
-            }
-          }
-          throw { code: "diagnostics_unavailable" } satisfies MachineError;
-        }
       default:
         return unsupportedProtocolMethod(request.method);
     }
@@ -830,6 +808,5 @@ export function createProtocolServerInternal(
     async stop() {
       await shutdown("stopped");
     },
-    forwardEvent,
   };
 }
