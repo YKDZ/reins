@@ -3,7 +3,7 @@ import {
   type AdapterDiagnosticSink,
   type DiagnosticSink,
 } from "@reins/adapter-kit";
-import type { HarnessCapability } from "@reins/protocol";
+import type { HarnessModelCatalog } from "@reins/protocol";
 
 import { initializeCodexTransport } from "./initialization.ts";
 import {
@@ -28,12 +28,12 @@ function mapModel(model: CodexModel): {
 }
 
 // 实时查询 app-server 的 model/list；defaultReasoningEffort / isDefault
-// 不进矩阵（最小干扰原则）。
-export function createCodexCapabilities(options?: {
+// 不属于模型目录。
+export function createCodexModelCatalog(options?: {
   transportFactory?: (options: {
     diagnostics: DiagnosticSink;
   }) => CodexTransport;
-}): (diagnostics?: AdapterDiagnosticSink) => Promise<HarnessCapability> {
+}): (diagnostics?: AdapterDiagnosticSink) => Promise<HarnessModelCatalog> {
   return async (diagnostics = noopDiagnosticSink) => {
     const transportDiagnostics: DiagnosticSink = async (input) =>
       input.kind === "harness_stderr" ? undefined : await diagnostics(input);

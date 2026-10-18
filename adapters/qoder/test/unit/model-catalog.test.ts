@@ -1,11 +1,11 @@
 import { describe, expect, test } from "vitest";
 
-import { createQoderCapabilities } from "#/capabilities";
+import { createQoderModelCatalog } from "#/model-catalog";
 
 import { createFakeSdk } from "../helpers/fake-sdk.ts";
 
-describe("qoder capabilities", () => {
-  test("实时查询并把模型目录映射为能力矩阵", async () => {
+describe("Qoder 模型目录", () => {
+  test("实时查询并映射为模型目录", async () => {
     const { sdk, controls } = createFakeSdk();
     controls.setAvailableModels([
       {
@@ -30,10 +30,10 @@ describe("qoder capabilities", () => {
       },
     ]);
 
-    const capability = await createQoderCapabilities(sdk)();
+    const modelCatalog = await createQoderModelCatalog(sdk)();
 
     expect(controls.modelsCalls()).toBe(1);
-    expect(capability).toEqual({
+    expect(modelCatalog).toEqual({
       harness: "qoder",
       models: [
         {
@@ -59,7 +59,7 @@ describe("qoder capabilities", () => {
         throw new Error("cli 未登录");
       },
     };
-    await expect(createQoderCapabilities(failingSdk)()).rejects.toThrow(
+    await expect(createQoderModelCatalog(failingSdk)()).rejects.toThrow(
       "cli 未登录",
     );
   });

@@ -207,7 +207,10 @@ export function createDaemonIdFactory(
   return {
     session() {
       sessionCounter += 1;
-      return v.parse(sessionIdSchema, `session:${generation}:${sessionCounter}`);
+      return v.parse(
+        sessionIdSchema,
+        `session:${generation}:${sessionCounter}`,
+      );
     },
     diagnostic() {
       diagnosticCounter += 1;

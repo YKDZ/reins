@@ -77,9 +77,9 @@ import { ReinsSdkError } from "./errors.ts";
 export { ReinsSdkError } from "./errors.ts";
 export type { ReinsSdkErrorStage } from "./errors.ts";
 export type {
-  CapabilitiesResult,
-  CapabilityFailure,
-  CapabilityModel,
+  ModelCatalogResult,
+  ModelCatalogFailure,
+  ModelCatalogEntry,
   ConnectOptions,
   DiagnosticId,
   DiagnosticKind,
@@ -99,9 +99,10 @@ export type {
   CompletedTurn,
   InterruptInput,
   InterruptResult,
+  HarnessId,
   OperationCredential,
   OperationKind,
-  HarnessCapability,
+  HarnessModelCatalog,
   HarnessFailure,
   LastCompletedTurn,
   ReinsConnection,
@@ -280,15 +281,17 @@ export async function connect(
 
     return {
       handshake,
-      async capabilities() {
-        const result = await query(client!, "capabilities", {});
+      async modelCatalog() {
+        const result = await query(client!, "modelCatalog", {});
         return {
-          capabilities: result.capabilities,
+          catalogs: result.catalogs,
           failures: result.failures.map(
             ({ code: _code, diagnosticId, failure, harness }) => ({
               harness,
               ...failure,
-              ...(diagnosticId === undefined ? {} : { diagnosticId }),
+              ...(diagnosticId === undefined
+                ? {}
+                : { diagnosticId: parseDiagnosticId(diagnosticId) }),
             }),
           ),
         };
@@ -656,7 +659,7 @@ async function perform<M extends SideEffectMethod>(
 }
 
 async function query<
-  M extends "capabilities" | "list" | "diagnostics" | "wait",
+  M extends "modelCatalog" | "list" | "diagnostics" | "wait",
 >(
   client: ControlClient,
   method: M,
@@ -789,7 +792,9 @@ function projectCompletedTurn(
     ...fields,
     turnHandle: parseTurnHandle(encodeTurnHandle({ sessionId, turnId })),
     ...(usage === undefined ? {} : { usage }),
-    ...(diagnosticId === undefined ? {} : { diagnosticId }),
+    ...(diagnosticId === undefined
+      ? {}
+      : { diagnosticId: parseDiagnosticId(diagnosticId) }),
   } as import("./contracts.ts").CompletedTurn;
 }
 
@@ -914,7 +919,7 @@ function projectFailure(
           ),
         },
       };
-    case "capability_query_failed":
+    case "model_catalog_query_failed":
     case "internal_error":
     case "diagnostics_store_corrupt":
       return {

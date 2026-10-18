@@ -143,7 +143,7 @@ describe("send", () => {
     });
     const { sessionId: id } = await machine.spawn({
       sessionLabel: ids.sessionLabel("fixture-20"),
-      harness: "dsh",
+      harness: "codex",
       message: "临时",
       cwd: "/tmp/demo",
     });

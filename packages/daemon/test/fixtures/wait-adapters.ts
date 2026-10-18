@@ -71,6 +71,6 @@ const driverFactory: AdapterDriverFactory = ({ emit }) => {
 export default {
   codex: {
     driverFactory,
-    capabilities: async () => ({ harness: "codex", models: [] }),
+    modelCatalog: async () => ({ harness: "codex", models: [] }),
   },
 };

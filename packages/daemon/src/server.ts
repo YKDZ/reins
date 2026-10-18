@@ -648,7 +648,7 @@ export function createProtocolServerInternal(
           daemonGeneration: options.diagnostics.generation,
         } satisfies InitializeResult;
       }
-      case "capabilities":
+      case "modelCatalog":
       case "spawn":
       case "send":
       case "wait":

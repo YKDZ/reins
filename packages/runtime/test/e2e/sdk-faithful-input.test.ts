@@ -156,7 +156,7 @@ test.each([
   { harness: "qoder", field: "agent", input: { agent: "caller-agent" } },
   { harness: "qoder", field: "sandbox", input: { sandbox: "caller-policy" } },
   { harness: "qoder", field: "reasoning", input: { reasoning: "high" } },
-])(
+] as const)(
   "SDK rejects unsupported $harness $field before native work",
   async ({ harness, input }) => {
     const f = await fixture();

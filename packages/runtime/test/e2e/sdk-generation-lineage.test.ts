@@ -104,7 +104,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   const secondSpawn = await secondClient.spawn(
     {
       sessionLabel: "foo",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
       cwd: directory,
     },
@@ -135,7 +135,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   const current = await thirdClient.spawn(
     {
       sessionLabel: "foo",
-      harness: "fake",
+      harness: "codex",
       message: "hello",
       cwd: directory,
     },

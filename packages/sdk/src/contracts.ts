@@ -38,9 +38,11 @@ export type OperationCredential<Kind extends OperationKind> = string & {
   readonly [operationCredentialBrand]: Kind;
 };
 
+export type HarnessId = "codex" | "qoder";
+
 export type SpawnInput = {
   sessionLabel?: string;
-  harness: string;
+  harness: HarnessId;
   message: string;
   cwd: string;
   agent?: string;
@@ -86,7 +88,7 @@ export type CompletedTurn = {
   turnHandle: TurnHandle;
   finalReply: string | null;
   usage?: Record<string, unknown>;
-  diagnosticId?: string;
+  diagnosticId?: DiagnosticId;
   stopReason: StopReason;
 } & (
   | { stopReason: "failed"; failure: HarnessFailure }
@@ -124,22 +126,22 @@ export type HarnessFailure = {
     | "unknown";
 };
 
-export type CapabilityModel = {
+export type ModelCatalogEntry = {
   id: string;
   displayName: string;
   reasoningEfforts: string[];
 };
-export type HarnessCapability = {
-  harness: string;
-  models: CapabilityModel[];
+export type HarnessModelCatalog = {
+  harness: HarnessId;
+  models: ModelCatalogEntry[];
 };
-export type CapabilityFailure = HarnessFailure & {
-  harness: string;
-  diagnosticId?: string;
+export type ModelCatalogFailure = HarnessFailure & {
+  harness: HarnessId;
+  diagnosticId?: DiagnosticId;
 };
-export type CapabilitiesResult = {
-  capabilities: HarnessCapability[];
-  failures: CapabilityFailure[];
+export type ModelCatalogResult = {
+  catalogs: HarnessModelCatalog[];
+  failures: ModelCatalogFailure[];
 };
 
 export type AgentTarget =
@@ -195,7 +197,7 @@ export type DiagnosticTextEvidence = {
   originalBytes: number;
 };
 export type DiagnosticsFilter = {
-  harness?: string;
+  harness?: HarnessId;
   sources?: DiagnosticSource[];
   kinds?: DiagnosticKind[];
   minSeverity?: DiagnosticSeverity;
@@ -219,7 +221,7 @@ export type DiagnosticRecord = {
   recordedAt: string;
   severity: DiagnosticSeverity;
   source: DiagnosticSource;
-  harness?: string;
+  harness?: HarnessId;
   sessionHandle?: SessionHandle;
   turnHandle?: TurnHandle;
   kind: DiagnosticKind;
@@ -235,7 +237,7 @@ export type DiagnosticsResult =
 export type AgentFact =
   | (FactBase & {
       type: "session.created";
-      harness: string;
+      harness: HarnessId;
       model: string | null;
       reasoning: string | null;
       cwd: string;
@@ -299,7 +301,7 @@ export type FactSubscription = AsyncIterableIterator<AgentFact> & {
 
 export type SessionFilter = {
   sessionHandle?: SessionHandle;
-  harness?: string;
+  harness?: HarnessId;
   state?: SessionState;
   sessionLabel?: string;
   model?: string;
@@ -311,7 +313,7 @@ export type LastCompletedTurn = {
 type SessionInfoFields = {
   sessionHandle: SessionHandle;
   sessionLabel?: string;
-  harness: string;
+  harness: HarnessId;
   model: string | null;
   reasoning: string | null;
   cwd: string;
@@ -382,16 +384,22 @@ type FailureFactsByCode = {
   permission_resolution_mismatch: { permissionHandle: PermissionHandle };
   diagnostic_not_found: { diagnosticId: DiagnosticId };
   diagnostics_unavailable: Record<never, never>;
-  unknown_harness: { harness: string; availableHarnesses: string[] };
+  unknown_harness: { harness: HarnessId; availableHarnesses: HarnessId[] };
   unsupported_feature: { feature: string };
   session_busy: { sessionHandle: SessionHandle };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
   turn_not_active: { turnHandle: TurnHandle };
-  capability_query_failed: { cause?: ErrorCause; diagnosticId?: string };
-  internal_error: { cause?: ErrorCause; diagnosticId?: string };
-  diagnostics_store_corrupt: { cause?: ErrorCause; diagnosticId?: string };
+  model_catalog_query_failed: {
+    cause?: ErrorCause;
+    diagnosticId?: DiagnosticId;
+  };
+  internal_error: { cause?: ErrorCause; diagnosticId?: DiagnosticId };
+  diagnostics_store_corrupt: {
+    cause?: ErrorCause;
+    diagnosticId?: DiagnosticId;
+  };
   daemon_start_failed: {
     cause?: ErrorCause;
     systemCode?: string;
@@ -421,7 +429,7 @@ export type ConnectOptions = {
 };
 export type ReinsConnection = {
   readonly handshake: ReinsHandshake;
-  capabilities(): Promise<CapabilitiesResult>;
+  modelCatalog(): Promise<ModelCatalogResult>;
   list(filter?: SessionFilter): Promise<SessionInfo[]>;
   attach(
     target: AgentTarget,

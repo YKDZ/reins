@@ -156,7 +156,7 @@ if (mode === "cold-launch-barrier") {
           `${encodeMessage({
             kind: "response",
             requestId: request.requestId,
-            result: { capabilities: [], failures: [] },
+            result: { catalogs: [], failures: [] },
           })}\n`,
         );
         served += 1;

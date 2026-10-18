@@ -326,7 +326,7 @@ describe("DiagnosticsRuntime", () => {
     ).toBeUndefined();
     const diagnosticId = await runtime.record(input());
 
-    expect(diagnosticId).toMatch(/^da-2/);
+    expect(diagnosticId).toMatch(/^diagnostic:a:2$/u);
     await runtime.close();
   });
 

@@ -9,7 +9,7 @@ import type {
   ProtocolNotification,
   WaitResult,
 } from "@reins/protocol";
-import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
+import { createQoderModelCatalog, createQoderDriver } from "@reins/qoder";
 import {
   createQoderFixtureSdk,
   loadRecordedQoderFixture,
@@ -108,7 +108,7 @@ async function runFixture(
         "qoder",
         {
           driverFactory: createQoderDriver({ sdk }),
-          capabilities: createQoderCapabilities(sdk),
+          modelCatalog: createQoderModelCatalog(sdk),
         },
       ],
     ]),
@@ -181,6 +181,9 @@ function assertPublicLifecycle(
   events: readonly DomainEvent[],
   facts: RecordedQoderFixtureFacts,
 ): void {
+  const sessionId = events[0]?.sessionId;
+  if (sessionId === undefined) throw new Error("Session event is missing");
+  expect(sessionId).toMatch(/^session:test:\d+$/u);
   const deltas = events.filter((event) => event.type === "text.delta");
   const snapshots = events.filter((event) => event.type === "message");
   expect(deltas).toHaveLength(facts.textDeltaCount);
@@ -212,7 +215,7 @@ function assertPublicLifecycle(
     const toolCallId = `c${index + 1}`;
     expect(toolEvents[index * 2]).toEqual({
       type: "tool.requested",
-      sessionId: "session:conformance:gtest",
+      sessionId,
       turnId: "t1",
       toolCallId,
       name: fact.name,
@@ -232,7 +235,7 @@ function assertPublicLifecycle(
         : completed,
     ).toEqual({
       type: "tool.completed",
-      sessionId: "session:conformance:gtest",
+      sessionId,
       turnId: "t1",
       toolCallId,
       name: fact.name,
@@ -287,6 +290,8 @@ describe("Qoder ingress conformance", () => {
     expect(completed).toHaveLength(1);
     const terminal = completed[0];
     if (terminal === undefined) throw new Error("Terminal event is missing");
+    const sessionId = result.events[0]?.sessionId;
+    if (sessionId === undefined) throw new Error("Session event is missing");
     expect({
       type: terminal.type,
       sessionId: terminal.sessionId,
@@ -294,7 +299,7 @@ describe("Qoder ingress conformance", () => {
       stopReason: terminal.stopReason,
     }).toEqual({
       type: "turn.completed",
-      sessionId: "session:conformance:gtest",
+      sessionId,
       turnId: "t1",
       stopReason: fixture.facts.terminal.stopReason,
     });

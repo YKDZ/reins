@@ -72,7 +72,7 @@ try {
   const cwd = required("REINS_WORKER_CWD");
   const first = await owner.spawn(
     {
-      harness: "fixture",
+      harness: "codex",
       sessionLabel: "packed-session-a",
       message: "session A",
       cwd,
@@ -83,7 +83,7 @@ try {
   firstTurn = first.turnHandle;
   const second = await owner.spawn(
     {
-      harness: "fixture",
+      harness: "codex",
       sessionLabel: "packed-session-b",
       message: "session B",
       cwd,
@@ -196,8 +196,8 @@ try {
     "closing the SDK client ended its still-live session",
   );
   assert(
-    (await recovery.capabilities()).capabilities.some(
-      ({ harness }) => harness === "fixture",
+    (await recovery.modelCatalog()).catalogs.some(
+      ({ harness }) => harness === "codex",
     ),
     "closing the SDK client stopped the shared daemon",
   );

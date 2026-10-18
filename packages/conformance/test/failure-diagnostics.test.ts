@@ -1,23 +1,23 @@
 import { createReinsClient, type AgentFact } from "@reins/client";
 import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
 import type { ConsumerContext } from "@reins/protocol";
-import { createQoderCapabilities, createQoderDriver } from "@reins/qoder";
+import { createQoderModelCatalog, createQoderDriver } from "@reins/qoder";
 import {
   createQoderFixtureSdk,
   loadRecordedQoderFixture,
 } from "@reins/qoder/testing";
 import { expect, test } from "vitest";
 
-test("capabilities 保留部分成功，私有失败文本只在有限诊断查询中出现", async () => {
+test("模型目录保留部分成功，私有失败文本只在有限诊断查询中出现", async () => {
   const sdk = createQoderFixtureSdk([]);
   const daemon = await openEphemeralDaemonForTest({
     adapters: new Map([
       [
-        "working",
+        "codex",
         {
           driverFactory: createQoderDriver({ sdk }),
-          capabilities: async () => ({
-            harness: "working",
+          modelCatalog: async () => ({
+            harness: "codex",
             models: [
               {
                 id: "explicit-model",
@@ -32,7 +32,7 @@ test("capabilities 保留部分成功，私有失败文本只在有限诊断查�
         "qoder",
         {
           driverFactory: createQoderDriver({ sdk }),
-          capabilities: createQoderCapabilities({
+          modelCatalog: createQoderModelCatalog({
             ...sdk,
             async getAvailableModels() {
               throw new Error(
@@ -45,16 +45,14 @@ test("capabilities 保留部分成功，私有失败文本只在有限诊断查�
     ]),
   });
   const client = createReinsClient(daemon.connect(), {
-    consumerContext: "reins-wrr19-capabilities" as ConsumerContext,
+    consumerContext: "reins-wrr19-model-catalog" as ConsumerContext,
   });
   try {
     await client.initialize();
-    const result = await client.request("capabilities", {});
+    const result = await client.request("modelCatalog", {});
     expect(result).toMatchObject({
       result: {
-        capabilities: [
-          { harness: "working", models: [{ id: "explicit-model" }] },
-        ],
+        catalogs: [{ harness: "codex", models: [{ id: "explicit-model" }] }],
         failures: [
           {
             harness: "qoder",
@@ -128,7 +126,7 @@ test.each(["rejected", "hung", "late"] as const)(
         [
           "qoder",
           {
-            capabilities: async () => ({ harness: "qoder", models: [] }),
+            modelCatalog: async () => ({ harness: "qoder", models: [] }),
             driverFactory: (context) =>
               createQoderDriver({ sdk })({
                 ...context,
@@ -233,7 +231,7 @@ test("结构化限流优先于含额度字样的正文，诊断引用在返回�
         "qoder",
         {
           driverFactory: createQoderDriver({ sdk }),
-          capabilities: async () => ({ harness: "qoder", models: [] }),
+          modelCatalog: async () => ({ harness: "qoder", models: [] }),
         },
       ],
     ]),
@@ -322,7 +320,7 @@ test("原生失败经 daemon 与 client wait 保留未知原因和显式重试�
         "qoder",
         {
           driverFactory: createQoderDriver({ sdk }),
-          capabilities: async () => ({ harness: "qoder", models: [] }),
+          modelCatalog: async () => ({ harness: "qoder", models: [] }),
         },
       ],
     ]),

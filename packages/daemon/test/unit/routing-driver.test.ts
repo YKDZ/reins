@@ -107,7 +107,7 @@ function codexRoutingFixture() {
         return worker.transport;
       },
     }),
-    capabilities: async () => ({ harness: "codex", models: [] }),
+    modelCatalog: async () => ({ harness: "codex", models: [] }),
   };
   const driver = createRoutingDriverFactory(new Map([["codex", adapter]]), {
     record: async () => undefined,
@@ -298,7 +298,7 @@ describe("routing driver invariants", () => {
         recordedAt: "2026-08-20T00:00:00.000Z",
         severity: "error" as const,
         source: "adapter" as const,
-        harness: "verified",
+        harness: "codex",
         sessionId,
         kind: "request_failure" as const,
         operation: "kill" as const,
@@ -321,17 +321,17 @@ describe("routing driver invariants", () => {
           throw new DriverFailure("close failed", diagnosticId);
         },
       }),
-      capabilities: async () => ({ harness: "verified", models: [] }),
+      modelCatalog: async () => ({ harness: "codex", models: [] }),
     };
     const record = vi.fn(async () => undefined);
-    const driver = createRoutingDriverFactory(
-      new Map([["verified", adapter]]),
-      { record, query },
-    )(() => {});
+    const driver = createRoutingDriverFactory(new Map([["codex", adapter]]), {
+      record,
+      query,
+    })(() => {});
     driver.start({
       sessionId,
       turnId: v.parse(turnIdSchema, "turn-verified"),
-      harness: "verified",
+      harness: "codex",
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
@@ -406,7 +406,7 @@ describe("routing driver invariants", () => {
           v: 1 as const,
           diagnosticId: suppliedId,
           recordedAt: "2026-08-20T00:00:00.000Z",
-          harness: "unrelated",
+          harness: "codex",
           sessionId,
           ...unrelated,
         },
@@ -421,12 +421,12 @@ describe("routing driver invariants", () => {
             throw new DriverFailure("terminate failed", suppliedId);
           },
         }),
-        capabilities: async () => ({ harness: "unrelated", models: [] }),
+        modelCatalog: async () => ({ harness: "qoder", models: [] }),
       };
       const recordFallback = vi.fn(async () => fallbackId);
       const machine = createSessionMachine({
         driverFactory: createRoutingDriverFactory(
-          new Map([["unrelated", adapter]]),
+          new Map([["qoder", adapter]]),
           { record: async () => undefined, query },
         ),
         identity: { session: () => sessionId },
@@ -435,7 +435,7 @@ describe("routing driver invariants", () => {
       await machine.spawn({
         cwd: "/tmp",
         sessionLabel: "unrelated",
-        harness: "unrelated",
+        harness: "qoder",
         message: "start",
       });
 
@@ -514,7 +514,7 @@ describe("routing driver invariants", () => {
             }),
           }),
       }),
-      capabilities: async () => ({ harness: "codex", models: [] }),
+      modelCatalog: async () => ({ harness: "codex", models: [] }),
       canCaptureHarnessStderr: true,
     };
     let validationError: unknown;
@@ -594,9 +594,9 @@ describe("routing driver invariants", () => {
           async terminate() {},
         };
       },
-      capabilities: async () => ({ harness: "owned", models: [] }),
+      modelCatalog: async () => ({ harness: "qoder", models: [] }),
     };
-    const driver = createRoutingDriverFactory(new Map([["owned", adapter]]), {
+    const driver = createRoutingDriverFactory(new Map([["qoder", adapter]]), {
       record,
       async query() {
         throw new Error("not found");
@@ -605,7 +605,7 @@ describe("routing driver invariants", () => {
     driver.start({
       sessionId: v.parse(sessionIdSchema, "session:owned:groute"),
       turnId: v.parse(turnIdSchema, "turn-owned"),
-      harness: "owned",
+      harness: "qoder",
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
@@ -613,7 +613,7 @@ describe("routing driver invariants", () => {
 
     await sink({
       source: "daemon",
-      harness: "other",
+      harness: "qoder",
       kind: "mapping_gap",
       operation: "spawn",
       reason: "unsupported_input",
@@ -666,16 +666,16 @@ describe("routing driver invariants", () => {
         resolvePermission() {},
         async terminate() {},
       }),
-      capabilities: async () => ({ harness: "diagnostic-fake", models: [] }),
+      modelCatalog: async () => ({ harness: "codex", models: [] }),
     };
     const driver = createRoutingDriverFactory(
-      new Map([["diagnostic-fake", adapter]]),
+      new Map([["codex", adapter]]),
       runtime,
     )(() => {});
     const spec: WorkerSpec = {
       sessionId: v.parse(sessionIdSchema, "session:diagnostic:groute"),
       turnId: v.parse(turnIdSchema, "turn-diagnostic"),
-      harness: "diagnostic-fake",
+      harness: "codex",
       message: "start",
       cwd: "/tmp",
       authorizationMode: "allowAll",
@@ -689,7 +689,7 @@ describe("routing driver invariants", () => {
     ).resolves.toMatchObject({
       record: {
         source: "adapter",
-        harness: "diagnostic-fake",
+        harness: "codex",
         kind: "mapping_gap",
       },
     });
@@ -738,7 +738,7 @@ describe("routing driver invariants", () => {
           async terminate() {},
         };
       },
-      capabilities: async () => ({ harness: "codex", models: [] }),
+      modelCatalog: async () => ({ harness: "codex", models: [] }),
     };
     const driver = createRoutingDriverFactory(new Map([["codex", adapter]]), {
       record: async () => undefined,

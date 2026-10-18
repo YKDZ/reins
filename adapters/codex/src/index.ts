@@ -1,5 +1,5 @@
 export { createCodexDriver } from "./codex-driver.ts";
-export { createCodexCapabilities } from "./capabilities.ts";
+export { createCodexModelCatalog } from "./model-catalog.ts";
 export { createCodexTransport } from "./transport.ts";
 export type {
   CodexChild,

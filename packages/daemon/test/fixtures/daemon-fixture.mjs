@@ -62,10 +62,10 @@ if (mode === "append-failure") {
   });
   const adapters = new Map([
     [
-      "explode",
+      "codex",
       {
-        capabilities: async () => ({
-          harness: "explode",
+        modelCatalog: async () => ({
+          harness: "codex",
           models: [
             {
               id: "explode-model",

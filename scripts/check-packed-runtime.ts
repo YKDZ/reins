@@ -371,7 +371,7 @@ async function runRecoveryAcceptance(options: {
   const observationPath = join(directory, "adapter-observations.ndjson");
   const activityPath = join(directory, "worker-activity.ndjson");
   const workerCwd = join(directory, "workspace");
-  const capabilityModePath = join(directory, "capability-mode.txt");
+  const modelCatalogModePath = join(directory, "model-catalog-mode.txt");
   const terminateGatePath = join(directory, "terminate.release");
   const directEnv: NodeJS.ProcessEnv = {
     ...process.env,
@@ -386,7 +386,7 @@ async function runRecoveryAcceptance(options: {
     REINS_IDLE_TIMEOUT_MS: "120000",
     REINS_PACKED_FIXTURE_OBSERVATIONS: observationPath,
     REINS_PACKED_FIXTURE_ACTIVITY: activityPath,
-    REINS_PACKED_FIXTURE_CAPABILITY_MODE: capabilityModePath,
+    REINS_PACKED_FIXTURE_MODEL_CATALOG_MODE: modelCatalogModePath,
     REINS_PACKED_FIXTURE_TERMINATE_GATE: terminateGatePath,
     REINS_PACKED_FIXTURE_TERMINATE_FAILURE_MARKER: join(
       directory,
@@ -399,7 +399,7 @@ async function runRecoveryAcceptance(options: {
     REINS_WORKER_CWD: workerCwd,
   };
   mkdirSync(workerCwd, { recursive: true });
-  writeFileSync(capabilityModePath, "with-model", "utf8");
+  writeFileSync(modelCatalogModePath, "with-model", "utf8");
   let daemon = await startDirectDaemon({
     label: "packed SDK recovery daemon",
     executable: options.daemonPath,
@@ -495,10 +495,10 @@ async function runRecoveryAcceptance(options: {
       "spawn 场景没有丢弃真实 daemon ACK",
     );
 
-    const capabilityQueriesBeforeRecovery = readJsonLines(
+    const modelCatalogQueriesBeforeRecovery = readJsonLines(
       observationPath,
-    ).filter(({ type }) => type === "capabilities_queried").length;
-    writeFileSync(capabilityModePath, "without-model", "utf8");
+    ).filter(({ type }) => type === "model_catalog_queried").length;
+    writeFileSync(modelCatalogModePath, "without-model", "utf8");
     const recoveredSpawn = await runSdkMode(
       options.sdkConsumer,
       directEnv,
@@ -519,8 +519,8 @@ async function runRecoveryAcceptance(options: {
     );
     assert(
       readJsonLines(observationPath).filter(
-        ({ type }) => type === "capabilities_queried",
-      ).length === capabilityQueriesBeforeRecovery,
+        ({ type }) => type === "model_catalog_queried",
+      ).length === modelCatalogQueriesBeforeRecovery,
       "恢复已接受 spawn 时重新查询了动态能力",
     );
     const newCredential = await runSdkMode(
@@ -534,7 +534,7 @@ async function runRecoveryAcceptance(options: {
       newCredential.code === "invalid_params" && newCredential.path === "model",
       "新 spawn credential 未按变化后的模型目录重新校验",
     );
-    writeFileSync(capabilityModePath, "with-model", "utf8");
+    writeFileSync(modelCatalogModePath, "with-model", "utf8");
 
     const workerStarted = await waitForFact(
       "真实 worker 启动",
@@ -558,7 +558,7 @@ async function runRecoveryAcceptance(options: {
       agent: "fixture-agent",
       authorizationMode: "interactive",
       cwd: workerCwd,
-      harness: "fixture",
+      harness: "codex",
       message: "  exact task\nkeep spacing  ",
       model: "fixture-model",
       reasoning: "high",
@@ -1811,7 +1811,7 @@ async function runInstalledApplicationAcceptance(options: {
     const value = readLastJsonRecord("installed application", result.stdout);
     assert(
       value.status === "queried" &&
-        value.capabilityHarness === "fixture" &&
+        value.modelCatalogHarness === "codex" &&
         value.sessionCount === 0 &&
         value.failureCode === "invalid_params" &&
         value.failureStage === "query" &&

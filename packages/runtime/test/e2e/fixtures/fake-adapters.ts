@@ -1,16 +1,20 @@
 import { appendFileSync } from "node:fs";
 
 import type {
-  HarnessCapability,
+  HarnessId,
+  HarnessModelCatalog,
   SessionId,
   TurnId,
   WorkerDriver,
   AdapterDriverFactory,
 } from "@reins/protocol";
-import { messageIdSchema, permissionIdSchema } from "@reins/protocol";
+import { messageIdSchema } from "@reins/protocol";
 import * as v from "valibot";
 
-function capability(harness: string, modelId: string): HarnessCapability {
+function modelCatalog(
+  harness: HarnessId,
+  modelId: string,
+): HarnessModelCatalog {
   return {
     harness,
     models: [
@@ -24,22 +28,23 @@ function capability(harness: string, modelId: string): HarnessCapability {
 }
 
 function fakeAdapter(options: {
-  harness: string;
+  harness: HarnessId;
   modelId: string;
-  behavior: "complete" | "hang" | "permission" | "failed" | "cancelled";
   canCaptureHarnessStderr?: boolean;
 }): {
   driverFactory: AdapterDriverFactory;
-  capabilities(): Promise<HarnessCapability>;
+  modelCatalog(): Promise<HarnessModelCatalog>;
 } {
-  const { harness, modelId, behavior } = options;
+  const { harness, modelId } = options;
   const factory: AdapterDriverFactory = ({ emit, diagnostics }) => {
     let current: { sessionId: SessionId; turnId: TurnId } | null = null;
-    const resolvedPermissions = new Set<string>();
-    let expectedPermissionCount = 1;
     const driver: WorkerDriver = {
       start(spec) {
         current = { sessionId: spec.sessionId, turnId: spec.turnId };
+        const behavior =
+          spec.captureHarnessStderr === true || !spec.message.startsWith("hold")
+            ? "complete"
+            : "hang";
         const observationsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
         if (observationsFile !== undefined) {
           appendFileSync(
@@ -82,44 +87,6 @@ function fakeAdapter(options: {
             });
           });
         }
-        if (behavior === "permission") {
-          const permissionIds =
-            spec.message === "queue" ? (["p1", "p2"] as const) : ["p1"];
-          expectedPermissionCount = permissionIds.length;
-          for (const permissionId of permissionIds) {
-            emit({
-              type: "permission.requested",
-              sessionId: spec.sessionId,
-              turnId: spec.turnId,
-              permissionId: v.parse(permissionIdSchema, permissionId),
-              kind: "tool:Bash",
-              input: { command: permissionId },
-              options: [
-                { outcome: "allow", scope: "once" },
-                { outcome: "deny", feedback: false },
-              ],
-            });
-          }
-        }
-        if (behavior === "failed" || behavior === "cancelled") {
-          queueMicrotask(() => {
-            emit({
-              type: "turn.completed",
-              sessionId: spec.sessionId,
-              turnId: spec.turnId,
-              ...(behavior === "failed"
-                ? {
-                    stopReason: "failed" as const,
-                    failure: {
-                      failureCategory: "unclassified" as const,
-                      retryDisposition: "unknown" as const,
-                    },
-                  }
-                : { stopReason: "cancelled" as const }),
-              finalReply: null,
-            });
-          });
-        }
       },
       async deliver(_sessionId, turnId, message) {
         if (current === null) return;
@@ -142,32 +109,14 @@ function fakeAdapter(options: {
         });
       },
       async interrupt() {},
-      resolvePermission(_sessionId, permissionId, resolution) {
-        if (current === null) return;
-        const requestsFile = process.env.REINS_FIXTURE_REQUESTS_FILE;
-        if (requestsFile !== undefined) {
-          appendFileSync(requestsFile, `${permissionId}\n`);
-        }
-        resolvedPermissions.add(permissionId);
-        if (resolvedPermissions.size < expectedPermissionCount) return;
-        const { sessionId, turnId } = current;
-        queueMicrotask(() => {
-          emit({
-            type: "turn.completed",
-            sessionId,
-            turnId,
-            stopReason: "end_turn",
-            finalReply: `resolved:${resolution.outcome}`,
-          });
-        });
-      },
+      resolvePermission() {},
       async terminate() {},
     };
     return driver;
   };
   return {
     driverFactory: factory,
-    capabilities: async () => capability(harness, modelId),
+    modelCatalog: async () => modelCatalog(harness, modelId),
     ...(options.canCaptureHarnessStderr === true
       ? { canCaptureHarnessStderr: true }
       : {}),
@@ -175,35 +124,10 @@ function fakeAdapter(options: {
 }
 
 export default {
-  fake: fakeAdapter({
-    harness: "fake",
+  codex: fakeAdapter({
+    harness: "codex",
     modelId: "fake-model",
-    behavior: "complete",
-  }),
-  capture: fakeAdapter({
-    harness: "capture",
-    modelId: "capture-model",
-    behavior: "complete",
     canCaptureHarnessStderr: true,
   }),
-  hang: fakeAdapter({
-    harness: "hang",
-    modelId: "hang-model",
-    behavior: "hang",
-  }),
-  permission: fakeAdapter({
-    harness: "permission",
-    modelId: "perm-model",
-    behavior: "permission",
-  }),
-  failed: fakeAdapter({
-    harness: "failed",
-    modelId: "failed-model",
-    behavior: "failed",
-  }),
-  cancelled: fakeAdapter({
-    harness: "cancelled",
-    modelId: "cancelled-model",
-    behavior: "cancelled",
-  }),
+  qoder: fakeAdapter({ harness: "qoder", modelId: "qoder-fixture-model" }),
 };

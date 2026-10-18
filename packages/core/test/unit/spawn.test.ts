@@ -1,6 +1,7 @@
 import type {
   CoreDiagnosticFact,
   DomainEvent,
+  SpawnParams,
   SessionId,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
@@ -62,7 +63,7 @@ describe("spawn", () => {
       harness: "codex",
       message: "first",
       cwd: "/tmp/demo",
-    };
+    } satisfies SpawnParams;
 
     const first = await machine.spawn(params);
     const second = await machine.spawn({ ...params, message: "second" });

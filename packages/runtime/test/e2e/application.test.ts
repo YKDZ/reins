@@ -30,6 +30,7 @@ import {
   type ReinsConnection,
   type SendInput,
   type SessionHandle,
+  type SpawnInput,
   type TurnHandle,
 } from "@ykdz/reins-sdk";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
@@ -179,11 +180,11 @@ test("programmatic callers share one real daemon and reconnect to the same sessi
   clients.push(first, second);
 
   const spawnInput = {
-    harness: "fake",
+    harness: "codex",
     message: "keep this session after disconnect",
     sessionLabel: "application-session",
     cwd: process.cwd(),
-  };
+  } satisfies SpawnInput;
   const spawnCredential = first.prepareOperation("spawn");
   const spawned = await first.spawn(spawnInput, spawnCredential);
   const sessionHandle = spawned.sessionHandle;
@@ -277,8 +278,8 @@ test("application startup failure keeps the raw transport code", async () => {
     env,
   });
   clients.push(retried);
-  const capabilities = await retried.capabilities();
-  expect(capabilities).toHaveProperty("capabilities");
+  const modelCatalog = await retried.modelCatalog();
+  expect(modelCatalog).toHaveProperty("catalogs");
   expect((await readFile(daemonSockets, "utf8")).trim().split("\n")).toEqual([
     env.REINS_SOCKET,
   ]);
@@ -332,7 +333,7 @@ test("application reports local startup IO failures and can retry", async () => 
   await mkdir(blockedParent);
   const retried = await connectReins(options);
   clients.push(retried);
-  expect(await retried.capabilities()).toHaveProperty("capabilities");
+  expect(await retried.modelCatalog()).toHaveProperty("catalogs");
   expect((await readFile(daemonPids, "utf8")).trim().split("\n")).toHaveLength(
     1,
   );
@@ -420,7 +421,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
 
   const captured = await connection.spawn(
     {
-      harness: "capture",
+      harness: "codex",
       message: "capture diagnostic evidence",
       sessionLabel: "capture-stderr",
       cwd: process.cwd(),
@@ -502,7 +503,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
       turnHandle: first.turnHandle as TurnHandle,
     },
     {
-      harness: "capture",
+      harness: "codex",
       sources: ["harness"],
     },
     { kinds: ["harness_stderr"] },
@@ -521,7 +522,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   expect(
     await connection.diagnostics({
       sessionHandle: captured.sessionHandle,
-      harness: "fake",
+      harness: "qoder",
     }),
   ).toEqual({ records: [], truncated: false });
   expect(
@@ -533,7 +534,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     records: [{ diagnosticId: result.records.at(-1)?.diagnosticId }],
     truncated: true,
   });
-  expect(await connection.diagnostics({ harness: "none" })).toEqual({
+  expect(await connection.diagnostics({ harness: "qoder" })).toEqual({
     records: [],
     truncated: false,
   });
@@ -547,7 +548,7 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
   await expect(
     connection.spawn(
       {
-        harness: "fake",
+        harness: "qoder",
         message: "capture is unavailable",
         sessionLabel: unsupportedSessionLabel,
         cwd: process.cwd(),
@@ -588,7 +589,7 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
   clients.push(owner);
   const spawned = await owner.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "owned session",
       sessionLabel: "owned-session",
       cwd: process.cwd(),
@@ -662,7 +663,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
 
   const unlabelled = await connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "unlabelled",
       cwd: process.cwd(),
     },
@@ -671,7 +672,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
   const label = "root";
   const first = await connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "first labelled session",
       sessionLabel: label,
       cwd: process.cwd(),
@@ -680,7 +681,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
   );
   const second = await connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "second labelled session",
       sessionLabel: label,
       cwd: process.cwd(),
@@ -690,7 +691,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
   const longLabel = "标签—".repeat(40);
   const longLabelled = await connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "long label",
       sessionLabel: longLabel,
       cwd: process.cwd(),
@@ -723,7 +724,7 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
   );
   const emptyLabel = await connection.spawn(
     {
-      harness: "fake",
+      harness: "codex",
       message: "empty label",
       sessionLabel: "",
       cwd: process.cwd(),
@@ -732,6 +733,36 @@ test("SDK 将可选会话标签作为元数据并始终通过精确身份控制"
   );
   expect(await connection.list({ sessionLabel: "" })).toMatchObject([
     { sessionHandle: emptyLabel.sessionHandle, sessionLabel: "" },
+  ]);
+  const formerReservedLabel = "session_name_conflict";
+  const retryInput = {
+    harness: "codex",
+    message: "same operation with former reserved label",
+    sessionLabel: formerReservedLabel,
+    cwd: process.cwd(),
+  } satisfies SpawnInput;
+  const retryCredential = connection.prepareOperation("spawn");
+  const original = await connection.spawn(retryInput, retryCredential);
+  const replay = await connection.spawn(retryInput, retryCredential);
+  expect(replay.sessionHandle).toBe(original.sessionHandle);
+  await expect(
+    connection.spawn(
+      { ...retryInput, sessionLabel: "changed label" },
+      retryCredential,
+    ),
+  ).rejects.toMatchObject({
+    failure: { code: "command_id_conflict" },
+  });
+  const independent = await connection.spawn(
+    { ...retryInput, message: "different operation, same label" },
+    connection.prepareOperation("spawn"),
+  );
+  expect(independent.sessionHandle).not.toBe(original.sessionHandle);
+  expect(
+    await connection.list({ sessionLabel: formerReservedLabel }),
+  ).toMatchObject([
+    { sessionHandle: original.sessionHandle },
+    { sessionHandle: independent.sessionHandle },
   ]);
   expect(
     await connection.kill(
@@ -773,7 +804,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
 
   const active = await connection.spawn(
     {
-      harness: "hang",
+      harness: "codex",
       message: "hold the active turn",
       sessionLabel: "active-send",
       cwd: process.cwd(),
@@ -882,7 +913,7 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
 
   const held = await connection.spawn(
     {
-      harness: "hang",
+      harness: "codex",
       message: "hold for interrupt",
       sessionLabel: "interrupt-target",
       cwd: process.cwd(),

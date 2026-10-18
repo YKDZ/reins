@@ -505,8 +505,8 @@ test("a long finite SDK wait deadline is not clamped to an immediate timeout", a
 
 test("SDK preserves typed harness failure facts on the exact completed target", async () => {
   const f = await fixture(waitAdapters);
-  expect(await f.connection.capabilities()).toMatchObject({
-    capabilities: [{ harness: "codex" }],
+  expect(await f.connection.modelCatalog()).toMatchObject({
+    catalogs: [{ harness: "codex" }],
     failures: [],
   });
   const spawned = await f.connection.spawn(
@@ -544,18 +544,18 @@ test("SDK preserves typed harness failure facts on the exact completed target", 
   });
 });
 
-test("SDK capability failures retain typed retry facts without exposing adapter text", async () => {
+test("SDK model catalog failures retain typed retry facts without exposing adapter text", async () => {
   const f = await fixture(failureAdapters);
-  const capabilities = await f.connection.capabilities();
-  expect(capabilities).toMatchObject({
-    capabilities: [{ harness: "codex" }],
+  const modelCatalog = await f.connection.modelCatalog();
+  expect(modelCatalog).toMatchObject({
+    catalogs: [{ harness: "codex" }],
     failures: [
       {
-        harness: "unavailable",
+        harness: "qoder",
         failureCategory: "unclassified",
         retryDisposition: "unknown",
       },
     ],
   });
-  expect(JSON.stringify(capabilities)).not.toContain("private credential");
+  expect(JSON.stringify(modelCatalog)).not.toContain("private credential");
 });

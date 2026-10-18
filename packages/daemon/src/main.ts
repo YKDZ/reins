@@ -6,14 +6,14 @@ import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import {
-  createCodexCapabilities,
+  createCodexModelCatalog,
   createCodexDriver,
   createCodexTransport,
 } from "@reins/codex";
-import type { ProtocolMessage } from "@reins/protocol";
-import { makeErrorCause } from "@reins/protocol";
+import type { HarnessId, ProtocolMessage } from "@reins/protocol";
+import { harnessIdSchema, makeErrorCause } from "@reins/protocol";
 import {
-  createQoderCapabilities,
+  createQoderModelCatalog,
   createQoderDriver,
   createRealQoderSdk,
 } from "@reins/qoder";
@@ -22,6 +22,7 @@ import {
   resolveReinsSocketPath,
   transportErrorCodeOf,
 } from "@reins/transport";
+import * as v from "valibot";
 
 import { createDaemon, runDaemonLifecycle } from "./daemon.ts";
 import { openDiagnosticsRuntime } from "./diagnostics-recorder.ts";
@@ -30,14 +31,14 @@ import { DEFAULT_IDLE_TIMEOUT_MS } from "./server.ts";
 
 // 发布阶段的拼接点（ADR-0011）：默认注册两个真实 adapter；
 // --adapters <module> 可用外部模块整体替换注册表（测试与扩展入口）。
-function builtInAdapters(): Map<string, HarnessAdapter> {
+function builtInAdapters(): Map<HarnessId, HarnessAdapter> {
   const qoderSdk = createRealQoderSdk();
-  return new Map<string, HarnessAdapter>([
+  return new Map<HarnessId, HarnessAdapter>([
     [
       "qoder",
       {
         driverFactory: createQoderDriver({ sdk: qoderSdk }),
-        capabilities: createQoderCapabilities(qoderSdk),
+        modelCatalog: createQoderModelCatalog(qoderSdk),
         canCaptureHarnessStderr: false,
       },
     ],
@@ -47,7 +48,7 @@ function builtInAdapters(): Map<string, HarnessAdapter> {
         driverFactory: createCodexDriver({
           transportFactory: (options) => createCodexTransport(options),
         }),
-        capabilities: createCodexCapabilities(),
+        modelCatalog: createCodexModelCatalog(),
         canCaptureHarnessStderr: true,
       },
     ],
@@ -56,21 +57,33 @@ function builtInAdapters(): Map<string, HarnessAdapter> {
 
 async function loadAdapters(
   modulePath: string | undefined,
-): Promise<Map<string, HarnessAdapter>> {
+): Promise<Map<HarnessId, HarnessAdapter>> {
   if (modulePath === undefined) return builtInAdapters();
   const imported = (await import(pathToFileURL(modulePath).href)) as {
     default?: unknown;
   };
   const value = imported.default;
   if (value instanceof Map) {
-    return new Map(value as Map<string, HarnessAdapter>);
+    return validateAdapters(value as Map<string, HarnessAdapter>);
   }
   if (typeof value === "object" && value !== null) {
-    return new Map(Object.entries(value as Record<string, HarnessAdapter>));
+    return validateAdapters(
+      new Map(Object.entries(value as Record<string, HarnessAdapter>)),
+    );
   }
   throw new Error(
     `--adapters module must default-export a Map or object: ${modulePath}`,
   );
+}
+
+function validateAdapters(
+  source: Map<string, HarnessAdapter>,
+): Map<HarnessId, HarnessAdapter> {
+  const adapters = new Map<HarnessId, HarnessAdapter>();
+  for (const [harness, adapter] of source) {
+    adapters.set(v.parse(harnessIdSchema, harness), adapter);
+  }
+  return adapters;
 }
 
 function parseFlags(argv: readonly string[]): {
@@ -124,7 +137,7 @@ async function main(): Promise<void> {
   const daemon = createDaemon({
     transport,
     adapters,
-      identity: { session: () => diagnosticsRuntime.sessionId() },
+    identity: { session: () => diagnosticsRuntime.sessionId() },
     diagnostics: diagnosticsRuntime,
     idleTimeoutMs: idleTimeoutFromEnv(process.env),
   });
