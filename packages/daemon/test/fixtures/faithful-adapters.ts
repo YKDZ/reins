@@ -47,6 +47,25 @@ const qoderFactory: ReturnType<typeof createQoderDriver> = (options) => {
               ) &&
               params.options?.canUseTool !== undefined
             ) {
+              replies.push({
+                type: "assistant",
+                uuid: randomUUID(),
+                session_id: "00000000-0000-4000-8000-000000000001",
+                message: {
+                  id: randomUUID(),
+                  content: [
+                    {
+                      type: "tool_use",
+                      id: "native-tool",
+                      name: "Bash",
+                      input: { command: "caller command" },
+                    },
+                  ],
+                  stop_reason: "tool_use",
+                  usage: { input_tokens: 0, output_tokens: 0 },
+                },
+              });
+              await new Promise<void>((resolve) => setImmediate(resolve));
               const suggestions =
                 message.message.content === "session-permission"
                   ? [
