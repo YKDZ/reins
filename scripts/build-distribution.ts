@@ -220,6 +220,8 @@ const runtimeBundle = await rolldown({
   input: {
     "reins-daemon": "packages/daemon/src/main.ts",
     index: "packages/runtime/src/index.ts",
+    "stdio-main": "packages/runtime/src/stdio-main.ts",
+    "control-entry": "packages/runtime/src/control-entry.ts",
   },
   platform: "node",
   external: (specifier) =>
@@ -244,10 +246,10 @@ const runtimeChunks = runtimeOutput.output.filter(
 verifyBundle(
   runtimeChunks,
   Object.keys(runtimeDependencies),
-  ["reins-daemon.js", "index.js"],
+  ["reins-daemon.js", "index.js", "stdio-main.js", "control-entry.js"],
   true,
 );
-for (const name of ["reins-daemon.js"] as const) {
+for (const name of ["reins-daemon.js", "stdio-main.js"] as const) {
   const path = join(runtimeDistributionDirectory, name);
   if (!readFileSync(path, "utf8").startsWith("#!/usr/bin/env node\n")) {
     throw new Error(`Executable omitted shebang: ${path}`);
@@ -256,7 +258,11 @@ for (const name of ["reins-daemon.js"] as const) {
   if ((statSync(path).mode & 0o777) !== 0o755)
     throw new Error(`Executable mode is not 0755: ${path}`);
 }
-for (const name of ["index.d.ts", "application-contracts.d.ts"] as const) {
+for (const name of [
+  "index.d.ts",
+  "application-contracts.d.ts",
+  "control-entry.d.ts",
+] as const) {
   const declaration = join(repository, "packages", "runtime", "dist", name);
   if (!readFileSync(declaration, "utf8")) {
     throw new Error(`Application declaration is empty: ${declaration}`);
