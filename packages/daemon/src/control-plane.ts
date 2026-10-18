@@ -174,6 +174,7 @@ function canonical(value: unknown): string {
 export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   const eventLogLimit = options.eventLogLimit ?? DEFAULT_EVENT_LOG_LIMIT;
   const eventListeners = new Set<(entry: CommittedEvent) => void>();
+  const waitListeners = new Set<(entry?: CommittedEvent) => void>();
   const committedEvents = new Map<SessionId, StoredCommittedEvent[]>();
   const transientOperations = new Map<
     string,
@@ -898,7 +899,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         const params = rawParams as WaitParams;
         for (const target of params.targets)
           assertSessionScope(target.sessionId, consumer);
-        return await options.machine.wait(params);
+        return await waitForCommittedTargets(params);
       }
       case "interrupt": {
         const params = rawParams as Parameters<SessionMachine["interrupt"]>[0];
@@ -962,22 +963,63 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     consumer?: ConsumerContext,
   ): SessionInfo[] {
     const criteria = filter ?? {};
-    return options.controlStore
-      .listSessions()
-      .map(({ info }) => info)
-      .filter(
-        (session) =>
-          (criteria.sessionId === undefined ||
-            session.sessionId === criteria.sessionId) &&
-          (criteria.harness === undefined ||
-            session.harness === criteria.harness) &&
-          (criteria.state === undefined || session.state === criteria.state) &&
-          (criteria.sessionLabel === undefined ||
-            session.sessionLabel === criteria.sessionLabel) &&
-          (criteria.model === undefined || session.model === criteria.model) &&
-          (consumer === undefined ||
-            options.consumerScope.inScope(consumer, session.sessionId)),
-      );
+    const liveSessionIds = new Set(
+      options.machine.list().map((session) => session.sessionId),
+    );
+    const storeUnavailable =
+      eventWriteFailure !== undefined ||
+      options.controlStore.health().status !== "available";
+    return options.controlStore.listSessions().flatMap((stored) => {
+      const { info } = stored;
+      if (
+        criteria.sessionId === undefined &&
+        stored.generation !== options.diagnostics.generation
+      )
+        return [];
+      if (
+        criteria.sessionId !== undefined &&
+        info.sessionId !== criteria.sessionId
+      )
+        return [];
+      if (
+        consumer !== undefined &&
+        !options.consumerScope.inScope(consumer, info.sessionId)
+      )
+        return [];
+
+      let session = info;
+      if (info.state !== "killed" && info.state !== "unreachable") {
+        const unreachableReason = storeUnavailable
+          ? "commit_unavailable"
+          : stored.generation !== options.diagnostics.generation
+            ? "previous_generation"
+            : liveSessionIds.has(info.sessionId)
+              ? undefined
+              : "control_lost";
+        if (unreachableReason !== undefined)
+          session = unreachableSessionInfo(info, unreachableReason);
+      }
+      if (
+        criteria.harness !== undefined &&
+        session.harness !== criteria.harness
+      )
+        return [];
+      if (criteria.state !== undefined) {
+        const stateMatches =
+          session.state === criteria.state ||
+          (session.state === "unreachable" &&
+            session.lastKnownState === criteria.state);
+        if (!stateMatches) return [];
+      }
+      if (
+        criteria.sessionLabel !== undefined &&
+        session.sessionLabel !== criteria.sessionLabel
+      )
+        return [];
+      if (criteria.model !== undefined && session.model !== criteria.model)
+        return [];
+      return [session];
+    });
   }
 
   function acceptEvent(event: DomainEvent): Promise<void> {
@@ -999,15 +1041,209 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         entry = options.controlStore.recordEvent(event, session);
       }
       for (const listener of Array.from(eventListeners)) listener(entry);
+      wakeWaiters(entry);
       return Promise.resolve();
     } catch (error) {
       eventWriteFailure ??= error;
+      wakeWaiters();
       return Promise.reject(error);
+    }
+  }
+
+  function wakeWaiters(entry?: CommittedEvent): void {
+    for (const listener of Array.from(waitListeners)) {
+      try {
+        listener(entry);
+      } catch {
+        // 每个等待者负责把读取失败转为自己的拒绝，不阻断事件提交链。
+      }
     }
   }
 
   async function settleEvents(): Promise<void> {
     if (eventWriteFailure !== undefined) throw eventWriteFailure;
+  }
+
+  function unreachableSessionInfo(
+    info: Exclude<SessionInfo, { state: "killed" | "unreachable" }>,
+    unreachableReason:
+      | "previous_generation"
+      | "control_lost"
+      | "commit_unavailable",
+  ): SessionInfo {
+    if (info.state === "busy") {
+      const { activeTurnId, ...fields } = info;
+      return {
+        ...fields,
+        state: "unreachable",
+        lastKnownState: "busy",
+        lastKnownActiveTurn: activeTurnId,
+        unreachableReason,
+      };
+    }
+    return {
+      ...info,
+      state: "unreachable",
+      lastKnownState: "idle",
+      unreachableReason,
+    };
+  }
+
+  function readWaitFacts(params: WaitParams): Omit<WaitResult, "status"> {
+    const completed: WaitResult["completed"] = [];
+    const pending: WaitResult["pending"] = [];
+    const unreachable: NonNullable<WaitResult["unreachable"]> = [];
+    const sessions = new Map<SessionId, StoredSession>();
+    const events = new Map<SessionId, readonly StoredCommittedEvent[]>();
+    const machineSessions = new Set(
+      options.machine.list().map((session) => session.sessionId),
+    );
+    const commitUnavailable =
+      eventWriteFailure !== undefined ||
+      options.controlStore.health().status !== "available";
+
+    for (const target of params.targets) {
+      let stored = sessions.get(target.sessionId);
+      if (stored === undefined) {
+        stored = options.controlStore.getSession(target.sessionId);
+        if (stored === undefined)
+          throw {
+            code: "session_not_found",
+            sessionId: target.sessionId,
+          } satisfies MachineError;
+        sessions.set(target.sessionId, stored);
+      }
+      let history = events.get(target.sessionId);
+      if (history === undefined) {
+        history = options.controlStore.sessionEvents(target.sessionId);
+        events.set(target.sessionId, history);
+      }
+      const targetEvents = history.filter(
+        ({ event }) => "turnId" in event && event.turnId === target.turnId,
+      );
+      const terminal = targetEvents.find(
+        ({ event }) => event.type === "turn.completed",
+      )?.event;
+      const knownActiveTurn =
+        stored.info.state === "busy" &&
+        stored.info.activeTurnId === target.turnId;
+      const knownStarted = targetEvents.some(
+        ({ event }) => event.type === "turn.started",
+      );
+      if (terminal?.type === "turn.completed") {
+        const { type: _type, ...turn } = terminal;
+        completed.push(turn);
+        continue;
+      }
+      if (!knownStarted && !knownActiveTurn)
+        throw {
+          code: "invalid_params",
+          issues: [{ issue: "invalid_value", path: "targets.turnId" }],
+        } satisfies MachineError;
+
+      let reason:
+        | "previous_generation"
+        | "control_lost"
+        | "commit_unavailable"
+        | undefined;
+      if (commitUnavailable) reason = "commit_unavailable";
+      else if (stored.generation !== options.diagnostics.generation)
+        reason = "previous_generation";
+      else if (
+        stored.info.state === "killed" ||
+        stored.info.state === "unreachable" ||
+        !machineSessions.has(target.sessionId)
+      )
+        reason = "control_lost";
+
+      if (reason === undefined) pending.push(target);
+      else unreachable.push({ ...target, reason });
+    }
+    return {
+      completed,
+      pending,
+      ...(unreachable.length === 0 ? {} : { unreachable }),
+    };
+  }
+
+  function settledWaitResult(
+    params: WaitParams,
+    facts: Omit<WaitResult, "status">,
+  ): WaitResult | undefined {
+    const unreachableCount = facts.unreachable?.length ?? 0;
+    if (params.completion === "any") {
+      if (facts.completed.length > 0) return { status: "satisfied", ...facts };
+      if (facts.pending.length === 0 && unreachableCount > 0)
+        return { status: "unreachable", ...facts };
+      return undefined;
+    }
+    if (unreachableCount > 0) return { status: "unreachable", ...facts };
+    if (facts.pending.length === 0) return { status: "satisfied", ...facts };
+    return undefined;
+  }
+
+  function waitForCommittedTargets(params: WaitParams): Promise<WaitResult> {
+    const initialFacts = readWaitFacts(params);
+    const initialResult = settledWaitResult(params, initialFacts);
+    if (initialResult !== undefined) return Promise.resolve(initialResult);
+    if (params.timeoutMs === 0)
+      return Promise.resolve({ status: "timeout", ...initialFacts });
+
+    return new Promise<WaitResult>((resolve, reject) => {
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      let settled = false;
+      const finish = (action: () => void): void => {
+        if (settled) return;
+        settled = true;
+        waitListeners.delete(observe);
+        if (timer !== undefined) clearTimeout(timer);
+        action();
+      };
+      const observe = (entry?: CommittedEvent): void => {
+        if (entry !== undefined) {
+          const event = entry.event;
+          if (
+            event.type !== "turn.completed" ||
+            !params.targets.some(
+              (target) =>
+                target.sessionId === event.sessionId &&
+                target.turnId === event.turnId,
+            )
+          )
+            return;
+        }
+        try {
+          const facts = readWaitFacts(params);
+          const result = settledWaitResult(params, facts);
+          if (result !== undefined) finish(() => resolve(result));
+        } catch (error) {
+          finish(() => reject(error));
+        }
+      };
+      waitListeners.add(observe);
+      if (params.timeoutMs !== undefined) {
+        const deadline = performance.now() + params.timeoutMs;
+        const observeDeadline = (): void => {
+          const remaining = deadline - performance.now();
+          if (remaining > 0) {
+            timer = setTimeout(
+              observeDeadline,
+              Math.min(remaining, 2_147_483_647),
+            );
+            return;
+          }
+          try {
+            const facts = readWaitFacts(params);
+            const result = settledWaitResult(params, facts);
+            finish(() => resolve(result ?? { status: "timeout", ...facts }));
+          } catch (error) {
+            finish(() => reject(error));
+          }
+        };
+        observeDeadline();
+      }
+      observe();
+    });
   }
 
   function attachReplay(
@@ -1165,6 +1401,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     if (
       request.method === "getOperation" ||
       request.method === "list" ||
+      request.method === "wait" ||
       request.method === "attach" ||
       request.method === "modelCatalog" ||
       request.method === "diagnostics"
@@ -1421,12 +1658,11 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     list,
     attachReplay,
     async waitForAttachTurn(target) {
-      const result = await options.machine.wait({
+      const result = await waitForCommittedTargets({
         targets: [target],
         completion: "all",
         timeoutMs: 0,
       });
-      await settleEvents();
       return result;
     },
     isSessionKilled(sessionId) {
@@ -1476,6 +1712,8 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     close() {
       unsubscribeMachine();
       eventListeners.clear();
+      wakeWaiters();
+      waitListeners.clear();
       options.controlStore.close();
     },
   };

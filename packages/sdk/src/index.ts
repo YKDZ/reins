@@ -761,6 +761,16 @@ async function connectClient(
           pending: result.pending.map((target) =>
             parseTurnHandle(encodeTurnHandle(target)),
           ),
+          ...(result.unreachable === undefined
+            ? {}
+            : {
+                unreachable: result.unreachable.map(
+                  ({ reason, ...target }) => ({
+                    turnHandle: parseTurnHandle(encodeTurnHandle(target)),
+                    reason,
+                  }),
+                ),
+              }),
         } satisfies WaitResult;
       },
       async interrupt(input: InterruptInput, options) {
@@ -1356,6 +1366,24 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
       ...common,
       state: "idle",
       lastCompletedTurn: lastCompletedTurn!,
+    };
+  if (session.state === "unreachable")
+    return {
+      ...common,
+      state: "unreachable",
+      lastKnownState: session.lastKnownState,
+      ...(session.lastKnownActiveTurn === undefined
+        ? {}
+        : {
+            lastKnownActiveTurn: parseTurnHandle(
+              encodeTurnHandle({
+                sessionId: session.sessionId,
+                turnId: session.lastKnownActiveTurn,
+              }),
+            ),
+          }),
+      ...(lastCompletedTurn === undefined ? {} : { lastCompletedTurn }),
+      unreachableReason: session.unreachableReason,
     };
   return {
     ...common,

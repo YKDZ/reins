@@ -294,6 +294,7 @@ export const sessionStateSchema = v.union([
   v.literal("busy"),
   v.literal("idle"),
   v.literal("killed"),
+  v.literal("unreachable"),
 ]);
 export type SessionState = v.InferOutput<typeof sessionStateSchema>;
 
@@ -507,9 +508,21 @@ export const turnCompletedSchema = v.variant("stopReason", [
 export type TurnCompleted = v.InferOutput<typeof turnCompletedSchema>;
 
 export const waitResultSchema = v.strictObject({
-  status: v.picklist(["satisfied", "timeout"]),
+  status: v.picklist(["satisfied", "timeout", "unreachable"]),
   completed: v.array(turnCompletedSchema),
   pending: v.array(turnTargetSchema),
+  unreachable: v.optional(
+    v.array(
+      v.strictObject({
+        ...turnTargetSchema.entries,
+        reason: v.picklist([
+          "previous_generation",
+          "control_lost",
+          "commit_unavailable",
+        ]),
+      }),
+    ),
+  ),
 });
 export type WaitResult = v.InferOutput<typeof waitResultSchema>;
 
@@ -656,6 +669,17 @@ export const sessionInfoSchema = v.variant("state", [
     lastCompletedTurn: completedTurnSummarySchema,
   }),
   v.strictObject({ ...sessionInfoFields, state: v.literal("killed") }),
+  v.strictObject({
+    ...sessionInfoFields,
+    state: v.literal("unreachable"),
+    lastKnownState: v.picklist(["busy", "idle"]),
+    lastKnownActiveTurn: v.optional(turnIdSchema),
+    unreachableReason: v.picklist([
+      "previous_generation",
+      "control_lost",
+      "commit_unavailable",
+    ]),
+  }),
 ]);
 export type SessionInfo = v.InferOutput<typeof sessionInfoSchema>;
 

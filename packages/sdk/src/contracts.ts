@@ -137,9 +137,13 @@ export type CompletedTurn = {
   | { stopReason: "end_turn" | "cancelled" | "killed" }
 );
 export type WaitResult = {
-  status: "satisfied" | "timeout";
+  status: "satisfied" | "timeout" | "unreachable";
   completed: CompletedTurn[];
   pending: TurnHandle[];
+  unreachable?: Array<{
+    turnHandle: TurnHandle;
+    reason: "previous_generation" | "control_lost" | "commit_unavailable";
+  }>;
 };
 export type InterruptInput = { turnHandle: TurnHandle };
 export type InterruptResult = {
@@ -148,7 +152,7 @@ export type InterruptResult = {
 };
 
 export type StopReason = "end_turn" | "cancelled" | "failed" | "killed";
-export type SessionState = "busy" | "idle" | "killed";
+export type SessionState = "busy" | "idle" | "killed" | "unreachable";
 export type HarnessFailure = {
   failureCategory:
     | "credential_rejected"
@@ -375,6 +379,16 @@ export type SessionInfo =
   | (SessionInfoFields & {
       state: "killed";
       lastCompletedTurn?: LastCompletedTurn;
+    })
+  | (SessionInfoFields & {
+      state: "unreachable";
+      lastKnownState: "busy" | "idle";
+      lastKnownActiveTurn?: TurnHandle;
+      lastCompletedTurn?: LastCompletedTurn;
+      unreachableReason:
+        | "previous_generation"
+        | "control_lost"
+        | "commit_unavailable";
     });
 
 export type InvalidParameterIssue =

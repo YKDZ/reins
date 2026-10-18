@@ -1,5 +1,5 @@
-import { mkdtemp, rm } from "node:fs/promises";
-import { access } from "node:fs/promises";
+import { spawn } from "node:child_process";
+import { access, mkdtemp, rm } from "node:fs/promises";
 import { connect, createServer as createNetServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -205,6 +205,52 @@ describe("Unix socket 传输", () => {
       },
     });
     expect(JSON.stringify(failure).includes(socketPath)).toBe(false);
+  });
+
+  test("重启监听器时移除没有活动服务的遗留 socket", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "reins-transport-stale-"));
+    dirs.push(dir);
+    const socketPath = join(dir, "reins.sock");
+    const child = spawn(
+      process.execPath,
+      [
+        "-e",
+        "require('node:net').createServer().listen(process.argv[1])",
+        socketPath,
+      ],
+      { stdio: "ignore" },
+    );
+    const deadline = Date.now() + 2_000;
+    while (!(await exists(socketPath))) {
+      if (Date.now() >= deadline) throw new Error("socket 子进程未启动");
+      if (child.exitCode !== null)
+        throw new Error(`socket 子进程提前退出: ${child.exitCode}`);
+      await flush();
+    }
+    await new Promise<void>((resolve, reject) => {
+      child.once("error", reject);
+      child.once("exit", () => resolve());
+      child.kill("SIGKILL");
+    });
+    expect(await exists(socketPath)).toBe(true);
+
+    const server = createUnixSocketServer({ path: socketPath });
+    servers.push(server);
+    await server.listen();
+    expect(await exists(socketPath)).toBe(true);
+  });
+
+  test("并发 listen 复用同一 Unix socket 监听", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "reins-transport-listen-race-"));
+    dirs.push(dir);
+    const socketPath = join(dir, "reins.sock");
+    const server = createUnixSocketServer({ path: socketPath });
+    servers.push(server);
+
+    await Promise.all([server.listen(), server.listen()]);
+    const client = await createUnixSocketClient(socketPath);
+    clients.push(client);
+    expect(await exists(socketPath)).toBe(true);
   });
 
   test("普通 listen I/O 失败在 socket adapter 原点归一化为安全事实", async () => {

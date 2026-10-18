@@ -17,9 +17,11 @@ import {
   type ResumeCursor,
   type SendInput,
   type SessionHandle,
+  type SessionState,
   type SpawnInput,
   type TurnHandle,
   type WaitInput,
+  type WaitResult,
 } from "@ykdz/reins-sdk";
 
 declare const connection: ReinsConnection;
@@ -76,6 +78,7 @@ const restoredDiagnosticId = parseDiagnosticId(
 );
 
 const supportedHarness: HarnessId = "qoder";
+const unreachableState: SessionState = "unreachable";
 async function inspectSpawnOperation() {
   const operation = await connection.getOperation(spawnOperationKey);
   if (operation.status === "succeeded") return operation.result.cwd;
@@ -107,11 +110,21 @@ async function inspectModelCatalog(): Promise<
   return [result.catalogs[0], failure];
 }
 
+function inspectWaitResult(result: WaitResult): string[] {
+  if (result.status === "unreachable")
+    return (result.unreachable ?? []).map(
+      ({ turnHandle, reason }) => `${reason}:${turnHandle}`,
+    );
+  return result.pending;
+}
+
 void connect;
 void supportedHarness;
+void unreachableState;
 void invalidHarness;
 void invalidSpawn;
 void inspectModelCatalog;
+void inspectWaitResult;
 void inspectSpawnOperation;
 void started;
 void generatedOperation;
