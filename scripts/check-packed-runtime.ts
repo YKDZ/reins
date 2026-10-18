@@ -1,9 +1,11 @@
-import { spawnSync } from "node:child_process";
 import {
+  copyFileSync,
   existsSync,
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  readdirSync,
+  renameSync,
   rmSync,
   writeFileSync,
 } from "node:fs";
@@ -12,339 +14,1910 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
 import {
-  assertReleaseVersionAuthority,
-  readJsonObject,
-  releaseTarballName,
-} from "./release-package.ts";
+  startUnixAcknowledgementProxy,
+  type UnixAcknowledgementProxy,
+} from "./packed-runtime-fixtures/ack-proxy.ts";
+import {
+  isCleanStop,
+  startDaemon,
+  stopDaemon,
+} from "./packed-runtime-fixtures/daemon.ts";
+import {
+  runLoggedCommand,
+  waitForPath,
+  waitForPathRemoval,
+} from "./packed-runtime-fixtures/process.ts";
+import type {
+  DaemonHandle,
+  LoggedCommandResult,
+} from "./packed-runtime-fixtures/types.ts";
+import {
+  validateReleasePackages,
+  writeReleaseOutputs,
+} from "./validate-release-package.ts";
+
+type JsonRecord = Record<string, unknown>;
 
 const repository = resolve(dirname(fileURLToPath(import.meta.url)), "..");
-const artifactDirectory = resolve(
-  process.env.REINS_ARTIFACTS_DIR ?? join(repository, ".artifacts"),
-  "release",
+const fixtureSource = fileURLToPath(
+  new URL("./packed-runtime-fixtures/", import.meta.url),
 );
-const evidenceDirectory = resolve(
-  process.env.REINS_RUNTIME_SMOKE_EVIDENCE_DIR ??
-    join(repository, ".artifacts", "packed-runtime-smoke"),
-);
+const daemonGraceMs = 5_000;
 
-function run(
-  command: string,
-  args: readonly string[],
-  cwd: string,
-  label: string,
-  env: NodeJS.ProcessEnv = process.env,
-): void {
-  const result = spawnSync(command, [...args], {
-    cwd,
-    env,
-    encoding: "utf8",
-    maxBuffer: 16 * 1024 * 1024,
-    timeout: 300_000,
+function assert(condition: unknown, message: string): asserts condition {
+  if (!condition) throw new Error(message);
+}
+
+function isRecord(value: unknown): value is JsonRecord {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function readJsonObject(path: string): JsonRecord {
+  const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+  if (!isRecord(value)) throw new Error(`JSON 对象无效：${path}`);
+  return value;
+}
+
+function readJsonLines(path: string): JsonRecord[] {
+  if (!existsSync(path)) return [];
+  return readFileSync(path, "utf8")
+    .split("\n")
+    .filter(Boolean)
+    .map((line) => {
+      const value: unknown = JSON.parse(line);
+      if (!isRecord(value)) throw new Error(`JSON 行无效：${path}`);
+      return value;
+    });
+}
+
+function readLastJsonRecord(label: string, stdout: string): JsonRecord {
+  const line = stdout.trim().split("\n").filter(Boolean).at(-1);
+  if (line === undefined) throw new Error(`${label} 没有返回 JSON 结果`);
+  const value: unknown = JSON.parse(line);
+  if (!isRecord(value)) throw new Error(`${label} 未返回 JSON 对象`);
+  return value;
+}
+
+async function runCommand(options: {
+  readonly command: string;
+  readonly args: readonly string[];
+  readonly cwd: string;
+  readonly env?: NodeJS.ProcessEnv;
+  readonly label: string;
+  readonly logPath: string;
+  readonly timeoutMs?: number;
+}): Promise<LoggedCommandResult> {
+  const result = await runLoggedCommand({
+    command: options.command,
+    args: options.args,
+    cwd: options.cwd,
+    ...(options.env === undefined ? {} : { env: options.env }),
+    logPath: options.logPath,
+    timeoutMs: options.timeoutMs ?? 120_000,
   });
-  if (result.error !== undefined) throw result.error;
-  if (result.status !== 0) {
+  if (
+    result.exit.exitCode !== 0 ||
+    result.exit.signal !== null ||
+    result.exit.timedOut ||
+    result.exit.stillRunning
+  ) {
     throw new Error(
-      `${label} failed with exit ${result.status ?? 1}\n${result.stdout}${result.stderr}`,
+      `${options.label} 失败（exit=${String(result.exit.exitCode)}, signal=${String(result.exit.signal)}）\n${result.stdout}${result.stderr}\n日志：${result.logPath}`,
     );
+  }
+  return result;
+}
+
+function copyFixtures(destination: string): void {
+  mkdirSync(destination, { recursive: true });
+  for (const name of readdirSync(fixtureSource)) {
+    if (!name.endsWith(".ts")) continue;
+    copyFileSync(join(fixtureSource, name), join(destination, name));
   }
 }
 
-function readManifest(path: string): Record<string, unknown> {
-  return readJsonObject(join(path, "package.json"));
-}
-
-function shellQuote(value: string): string {
-  return `'${value.replaceAll("'", "'\\''")}'`;
-}
-
-function createConsumerTypecheck(consumerDirectory: string): void {
+function createConsumer(
+  directory: string,
+  name: string,
+  dependencies: Record<string, string>,
+  localSdkTarball?: string,
+): void {
+  mkdirSync(directory, { recursive: true });
   writeFileSync(
-    join(consumerDirectory, "consumer.ts"),
-    [
-      'import { connect } from "@ykdz/reins-sdk";',
-      'import { connectReins, type ConnectReinsOptions } from "@ykdz/reins/application";',
-      'const options: ConnectReinsOptions = { consumerContext: "packed-runtime-consumer" };',
-      "void connect;",
-      "void connectReins;",
-      "void options;",
-      "",
-    ].join("\n"),
-  );
-  writeFileSync(
-    join(consumerDirectory, "tsconfig.json"),
+    join(directory, "package.json"),
     `${JSON.stringify(
       {
-        compilerOptions: {
-          module: "NodeNext",
-          moduleResolution: "NodeNext",
-          target: "ES2023",
-          strict: true,
-          noEmit: true,
-          skipLibCheck: true,
-          types: [],
-        },
-        files: ["consumer.ts"],
+        name,
+        version: "0.0.0",
+        private: true,
+        type: "module",
+        dependencies,
       },
       null,
       2,
     )}\n`,
   );
-  run(
-    join(repository, "node_modules", ".bin", "tsc"),
-    [
-      "--project",
-      join(consumerDirectory, "tsconfig.json"),
-      "--pretty",
-      "false",
-    ],
-    consumerDirectory,
-    "installed consumer typecheck",
-  );
-}
-
-function createRuntimeConsumer(
-  consumerDirectory: string,
-  daemonPath: string,
-  launcherPath: string,
-  pidPath: string,
-): void {
   writeFileSync(
-    launcherPath,
-    `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(pidPath)}\nexec ${shellQuote(daemonPath)} "$@"\n`,
-    { mode: 0o700 },
-  );
-  writeFileSync(
-    join(consumerDirectory, "consumer.mjs"),
+    join(directory, "pnpm-workspace.yaml"),
     [
-      'import assert from "node:assert/strict";',
-      'import { connect } from "@ykdz/reins-sdk";',
-      'import { connectReins } from "@ykdz/reins/application";',
-      "",
-      "const socketPath = process.env.REINS_SOCKET;",
-      'const context = "packed-runtime-consumer";',
-      "assert.ok(socketPath);",
-      "const application = await connectReins({",
-      "  consumerContext: context,",
-      "  env: process.env,",
-      "  timeoutMs: 10_000,",
-      "});",
-      "let sdk;",
-      "try {",
-      "  sdk = await connect({ socketPath, consumerContext: context, timeoutMs: 5_000 });",
-      "  assert.equal(sdk.handshake.daemonGeneration, application.handshake.daemonGeneration);",
-      '  assert.deepEqual((await sdk.capabilities()).capabilities.map(({ harness }) => harness).sort(), ["capture", "failed", "fake", "hang", "permission", "cancelled"].sort());',
-      "  const spawned = await application.spawn(",
-      '    { harness: "fake", message: "packed runtime", sessionName: "packed-runtime-session", cwd: process.cwd() },',
-      '    application.prepareOperation("spawn"),',
-      "  );",
-      '  const completed = await sdk.wait({ targets: [spawned.turnHandle], completion: "all", timeoutMs: 5_000 });',
-      '  assert.equal(completed.status, "satisfied");',
-      '  assert.equal(completed.completed[0]?.finalReply, "ok");',
-      "  assert.equal((await sdk.list({ sessionHandle: spawned.sessionHandle }))[0]?.sessionHandle, spawned.sessionHandle);",
-      "} finally {",
-      "  sdk?.close();",
-      "  application.close();",
-      "}",
+      "packages: []",
+      "allowBuilds:",
+      '  "@qodercn-ai/qodercn-agent-sdk": true',
+      ...(localSdkTarball === undefined
+        ? []
+        : [
+            "overrides:",
+            `  "@ykdz/reins-sdk": ${JSON.stringify(`file:${localSdkTarball}`)}`,
+          ]),
       "",
     ].join("\n"),
   );
 }
 
-function stopDaemon(pidPath: string): void {
+async function installConsumer(
+  directory: string,
+  logsDirectory: string,
+  label: string,
+): Promise<void> {
+  await runCommand({
+    command: "pnpm",
+    args: ["install", "--prefer-offline", "--reporter=append-only"],
+    cwd: directory,
+    label,
+    logPath: join(logsDirectory, `${label}.log`),
+    timeoutMs: 300_000,
+  });
+}
+
+async function typecheckConsumer(
+  directory: string,
+  sources: readonly string[],
+  logsDirectory: string,
+  label: string,
+): Promise<void> {
+  await runCommand({
+    command: join(repository, "node_modules", ".bin", "tsc"),
+    args: [
+      "--noEmit",
+      "--strict",
+      "--noUnusedLocals",
+      "--noUnusedParameters",
+      "--target",
+      "ES2023",
+      "--module",
+      "NodeNext",
+      "--moduleResolution",
+      "NodeNext",
+      "--skipLibCheck",
+      "false",
+      ...sources,
+    ],
+    cwd: directory,
+    label,
+    logPath: join(logsDirectory, `${label}.log`),
+  });
+}
+
+async function runFixture(
+  consumerDirectory: string,
+  fixtureName: string,
+  env: NodeJS.ProcessEnv,
+  logsDirectory: string,
+  label: string,
+  args: readonly string[] = [],
+  timeoutMs = 30_000,
+): Promise<LoggedCommandResult> {
+  return runCommand({
+    command: process.execPath,
+    args: [
+      "--experimental-strip-types",
+      join(consumerDirectory, "fixtures", fixtureName),
+      ...args,
+    ],
+    cwd: consumerDirectory,
+    env,
+    label,
+    logPath: join(logsDirectory, `${label}.log`),
+    timeoutMs,
+  });
+}
+
+async function runSdkMode(
+  consumerDirectory: string,
+  env: NodeJS.ProcessEnv,
+  logsDirectory: string,
+  mode: string,
+  extraEnv: NodeJS.ProcessEnv = {},
+  label = mode,
+): Promise<JsonRecord> {
+  const result = await runFixture(
+    consumerDirectory,
+    "sdk-recoverable-control.ts",
+    { ...env, ...extraEnv },
+    logsDirectory,
+    `sdk-${label}`,
+    [mode],
+  );
+  return readLastJsonRecord(`SDK ${mode}`, result.stdout);
+}
+
+async function waitForFact(
+  label: string,
+  path: string,
+  matches: (fact: JsonRecord) => boolean,
+  timeoutMs = 5_000,
+): Promise<JsonRecord> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const found = readJsonLines(path).find(matches);
+    if (found !== undefined) return found;
+    if (Date.now() >= deadline) throw new Error(`等待超时：${label}`);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  }
+}
+
+function assertProcessStopped(label: string, pid: number): void {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    if (isRecord(error) && error.code === "ESRCH") return;
+    throw error;
+  }
+  throw new Error(`${label} 仍在运行：${pid}`);
+}
+
+function assertProcessRunning(label: string, pid: number): void {
+  try {
+    process.kill(pid, 0);
+  } catch (error) {
+    throw new Error(`${label} 未运行：${pid}（${String(error)}）`);
+  }
+}
+
+async function stopInstalledDaemon(pidPath: string): Promise<void> {
   if (!existsSync(pidPath)) return;
   const pid = Number(readFileSync(pidPath, "utf8").trim());
   if (!Number.isInteger(pid) || pid <= 0) return;
   try {
     process.kill(pid, "SIGTERM");
   } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      error.code !== "ESRCH"
-    )
-      throw error;
+    if (!(isRecord(error) && error.code === "ESRCH")) throw error;
   }
-  const deadline = Date.now() + 5_000;
+  const deadline = Date.now() + daemonGraceMs;
   while (Date.now() < deadline) {
     try {
       process.kill(pid, 0);
     } catch (error) {
-      if (error instanceof Error && "code" in error && error.code === "ESRCH")
-        return;
+      if (isRecord(error) && error.code === "ESRCH") return;
       throw error;
     }
-    Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 25);
+    await new Promise((resolve) => setTimeout(resolve, 25));
   }
   try {
     process.kill(pid, "SIGKILL");
   } catch (error) {
-    if (
-      !(error instanceof Error) ||
-      !("code" in error) ||
-      error.code !== "ESRCH"
-    )
-      throw error;
+    if (!(isRecord(error) && error.code === "ESRCH")) throw error;
   }
-  throw new Error(`Installed daemon did not stop after SIGTERM: ${pid}`);
+  throw new Error(`运行包启动的 daemon 未能按时退出：${pid}`);
 }
 
-const identity = assertReleaseVersionAuthority(repository);
-const runtimeTarball = join(
-  artifactDirectory,
-  releaseTarballName(identity.name, identity.version),
-);
-const sdkTarball = join(
-  artifactDirectory,
-  releaseTarballName("@ykdz/reins-sdk", identity.version),
-);
-if (!existsSync(runtimeTarball) || !existsSync(sdkTarball)) {
-  throw new Error(
-    "Build both release tarballs before running the consumer check",
-  );
-}
-if (process.platform !== "linux" || process.arch !== "x64") {
-  throw new Error(
-    "The runtime consumer check requires the published linux-x64 target",
-  );
+function shellQuote(value: string): string {
+  return `'${value.replaceAll("'", "'\\''")}'`;
 }
 
-const temporaryDirectory = mkdtempSync(
-  join(tmpdir(), "reins-runtime-consumer-"),
-);
-const consumerDirectory = join(temporaryDirectory, "consumer");
-const pidPath = join(temporaryDirectory, "daemon.pid");
-const socketPath = join(temporaryDirectory, "runtime.sock");
-const stateDirectory = join(temporaryDirectory, "state");
-const installedRuntimePath = join(
-  consumerDirectory,
-  "node_modules",
-  "@ykdz",
-  "reins",
-);
-const installedSdkPath = join(
-  consumerDirectory,
-  "node_modules",
-  "@ykdz",
-  "reins-sdk",
-);
-const binDirectory = join(consumerDirectory, "node_modules", ".bin");
-const daemonPath = join(binDirectory, "reins-daemon");
-const launcherPath = join(temporaryDirectory, "daemon-launcher");
-const adaptersPath = join(
-  repository,
-  "packages",
-  "runtime",
-  "test",
-  "e2e",
-  "fixtures",
-  "fake-adapters.ts",
-);
-mkdirSync(consumerDirectory, { recursive: true });
-mkdirSync(evidenceDirectory, { recursive: true });
+async function startDirectDaemon(options: {
+  readonly label: string;
+  readonly executable: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly socketPath: string;
+  readonly logPath: string;
+  readonly handles: Set<DaemonHandle>;
+}): Promise<DaemonHandle> {
+  const handle = await startDaemon({
+    label: options.label,
+    executable: options.executable,
+    args: [],
+    env: options.env,
+    socketPath: options.socketPath,
+    logPath: options.logPath,
+    readyTimeoutMs: 10_000,
+  });
+  options.handles.add(handle);
+  assert(!handle.startupTimedOut, `${options.label} 启动超时`);
+  return handle;
+}
 
-let primaryFailure: unknown;
-try {
-  writeFileSync(
-    join(consumerDirectory, "package.json"),
-    `${JSON.stringify(
+async function stopDirectDaemon(
+  handle: DaemonHandle,
+  handles: Set<DaemonHandle>,
+): Promise<void> {
+  const result = await stopDaemon(handle, daemonGraceMs);
+  handles.delete(handle);
+  assert(isCleanStop(result), `daemon 未干净停止：${JSON.stringify(result)}`);
+  await waitForPathRemoval(handle.socketPath, daemonGraceMs);
+  await waitForPathRemoval(`${handle.socketPath}.lock`, daemonGraceMs);
+}
+
+async function stopAllDaemons(handles: Set<DaemonHandle>): Promise<void> {
+  const failures: unknown[] = [];
+  for (const handle of handles) {
+    try {
+      const result = await stopDaemon(handle, daemonGraceMs);
+      handles.delete(handle);
+      if (!isCleanStop(result))
+        failures.push(
+          new Error(`${handle.label} 清理未干净：${JSON.stringify(result)}`),
+        );
+      await waitForPathRemoval(handle.socketPath, daemonGraceMs);
+      await waitForPathRemoval(`${handle.socketPath}.lock`, daemonGraceMs);
+    } catch (error) {
+      failures.push(error);
+    }
+  }
+  if (failures.length > 0)
+    throw new AggregateError(failures, "daemon 资源清理失败");
+}
+
+async function runRecoveryAcceptance(options: {
+  readonly sdkConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+  readonly handles: Set<DaemonHandle>;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "sdk-recovery");
+  mkdirSync(directory, { recursive: true });
+  const socketPath = join(directory, "reins.sock");
+  const observationPath = join(directory, "adapter-observations.ndjson");
+  const activityPath = join(directory, "worker-activity.ndjson");
+  const workerCwd = join(directory, "workspace");
+  const capabilityModePath = join(directory, "capability-mode.txt");
+  const terminateGatePath = join(directory, "terminate.release");
+  const directEnv: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-runtime-recovery",
+    REINS_ADAPTERS_MODULE: join(
+      options.sdkConsumer,
+      "fixtures",
+      "adapter-fixture.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: observationPath,
+    REINS_PACKED_FIXTURE_ACTIVITY: activityPath,
+    REINS_PACKED_FIXTURE_CAPABILITY_MODE: capabilityModePath,
+    REINS_PACKED_FIXTURE_TERMINATE_GATE: terminateGatePath,
+    REINS_PACKED_FIXTURE_FAIL_FIRST_TERMINATE_SESSION_NAME: "packed-recover",
+    REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE: join(
+      directory,
+      "reject-permission",
+    ),
+    REINS_WORKER_CWD: workerCwd,
+  };
+  mkdirSync(workerCwd, { recursive: true });
+  writeFileSync(capabilityModePath, "with-model", "utf8");
+  let daemon = await startDirectDaemon({
+    label: "packed SDK recovery daemon",
+    executable: options.daemonPath,
+    env: directEnv,
+    socketPath,
+    logPath: join(options.logsDirectory, "recovery-daemon.log"),
+    handles: options.handles,
+  });
+  let acknowledgementProxy: UnixAcknowledgementProxy | undefined;
+  try {
+    const query = await runFixture(
+      options.sdkConsumer,
+      "sdk-query.ts",
+      directEnv,
+      options.logsDirectory,
+      "sdk-only-query",
+    );
+    const queryResult = readLastJsonRecord("SDK query", query.stdout);
+    assert(queryResult.sessionCount === 0, "SDK 初始会话列表不为空");
+    assert(
+      queryResult.invalidParams === "invalid_params",
+      "SDK 未保留类型化查询错误",
+    );
+
+    const prepared = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "prepare-spawn",
+    );
+    assert(
+      prepared.prepared === true &&
+        prepared.serialized === true &&
+        prepared.sessionCount === 0 &&
+        typeof prepared.daemonGeneration === "string" &&
+        typeof prepared.intent === "string",
+      "prepareOperation 执行了远端副作用或未返回可保存输入",
+    );
+    const spawnIntent = prepared.intent;
+
+    const workersBeforeValidation = readJsonLines(observationPath).filter(
+      ({ type }) => type === "worker_started",
+    ).length;
+    const validation = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "spawn-validation",
+    );
+    assert(
+      JSON.stringify(validation.codes) ===
+        JSON.stringify([
+          "invalid_params",
+          "invalid_params",
+          "unsupported_feature",
+          "unknown_harness",
+        ]),
+      "SDK 与 daemon 未拒绝无效 spawn 输入",
+    );
+    assert(
+      readJsonLines(observationPath).filter(
+        ({ type }) => type === "worker_started",
+      ).length === workersBeforeValidation,
+      "拒绝的 spawn 派发了 worker",
+    );
+
+    acknowledgementProxy = await startUnixAcknowledgementProxy({
+      socketPath: join(directory, "spawn-ack.sock"),
+      targetPath: socketPath,
+      method: "spawn",
+    });
+    const droppedSpawn = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "spawn-drop",
       {
-        name: "reins-runtime-consumer",
-        version: "0.0.0",
-        private: true,
-        overrides: { "@ykdz/reins-sdk": "$@ykdz/reins-sdk" },
+        REINS_SOCKET: acknowledgementProxy.socketPath,
+        REINS_OPERATION_INTENT_JSON: spawnIntent,
       },
-      null,
-      2,
-    )}\n`,
-  );
-  run(
-    "npm",
-    [
-      "install",
-      "--no-audit",
-      "--no-fund",
-      "--package-lock=false",
-      "--prefer-offline",
-      runtimeTarball,
-      sdkTarball,
-    ],
-    consumerDirectory,
-    "clean dual-package install",
-  );
+    );
+    const spawnAcknowledgement =
+      await acknowledgementProxy.waitForDroppedAcknowledgement();
+    await acknowledgementProxy.close();
+    acknowledgementProxy = undefined;
+    assert(
+      droppedSpawn.code === "command_outcome_unknown" &&
+        droppedSpawn.stage === "operation" &&
+        spawnAcknowledgement.method === "spawn" &&
+        isRecord(spawnAcknowledgement.result) &&
+        typeof spawnAcknowledgement.result.sessionId === "string" &&
+        typeof spawnAcknowledgement.result.turnId === "string",
+      "spawn 场景没有丢弃真实 daemon ACK",
+    );
 
-  const runtimeManifest = readManifest(installedRuntimePath);
-  const sdkManifest = readManifest(installedSdkPath);
-  if (
-    runtimeManifest.name !== identity.name ||
-    runtimeManifest.version !== identity.version ||
-    sdkManifest.name !== "@ykdz/reins-sdk" ||
-    sdkManifest.version !== identity.version ||
-    JSON.stringify(Object.keys(runtimeManifest.bin as object).sort()) !==
-      JSON.stringify(["reins-daemon"]) ||
-    JSON.stringify(Object.keys(runtimeManifest.exports as object).sort()) !==
-      JSON.stringify(["./application"])
-  ) {
-    throw new Error(
-      "Installed packages do not expose the same-version runtime and SDK contracts",
+    const capabilityQueriesBeforeRecovery = readJsonLines(
+      observationPath,
+    ).filter(({ type }) => type === "capabilities_queried").length;
+    writeFileSync(capabilityModePath, "without-model", "utf8");
+    const recoveredSpawn = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "spawn-recover",
+      { REINS_OPERATION_INTENT_JSON: spawnIntent },
+    );
+    const spawnResult = recoveredSpawn.result;
+    assert(
+      isRecord(spawnResult) &&
+        spawnResult.sessionHandle === spawnAcknowledgement.result.sessionId &&
+        spawnResult.cwd === workerCwd &&
+        typeof spawnResult.turnHandle === "string" &&
+        spawnResult.turnHandle.startsWith(
+          `${spawnAcknowledgement.result.sessionId}/${spawnAcknowledgement.result.turnId}.`,
+        ),
+      "SDK 未恢复 daemon 已接受的原 spawn 结果",
+    );
+    assert(
+      readJsonLines(observationPath).filter(
+        ({ type }) => type === "capabilities_queried",
+      ).length === capabilityQueriesBeforeRecovery,
+      "恢复已接受 spawn 时重新查询了动态能力",
+    );
+    const newCredential = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "spawn-new-credential",
+      { REINS_OPERATION_INTENT_JSON: spawnIntent },
+    );
+    assert(
+      newCredential.code === "invalid_params" && newCredential.path === "model",
+      "新 spawn credential 未按变化后的模型目录重新校验",
+    );
+    writeFileSync(capabilityModePath, "with-model", "utf8");
+
+    const workerStarted = await waitForFact(
+      "真实 worker 启动",
+      observationPath,
+      (fact) => fact.type === "worker_started",
+    );
+    const workerReady = await waitForFact(
+      "真实 worker 子进程",
+      observationPath,
+      (fact) => fact.type === "worker_ready",
+    );
+    assert(
+      isRecord(workerStarted.spec) &&
+        typeof workerReady.workerPid === "number" &&
+        typeof workerReady.descendantPid === "number" &&
+        workerReady.workerCwd === workerCwd,
+      "适配器没有提供 worker 进程和工作目录事实",
+    );
+    const spec = workerStarted.spec;
+    const expectedSpec = {
+      agent: "fixture-agent",
+      authorizationMode: "interactive",
+      cwd: workerCwd,
+      harness: "fixture",
+      message: "  exact task\nkeep spacing  ",
+      model: "fixture-model",
+      reasoning: "high",
+      sandbox: "workspace-write",
+      sessionName: "packed-recover",
+      sessionId: spawnAcknowledgement.result.sessionId,
+      turnId: spawnAcknowledgement.result.turnId,
+    };
+    assert(
+      JSON.stringify(Object.keys(spec).sort()) ===
+        JSON.stringify(Object.keys(expectedSpec).sort()) &&
+        Object.entries(expectedSpec).every(
+          ([key, value]) => spec[key] === value,
+        ),
+      "SDK 未原样保留 spawn 的用户输入和省略字段",
+    );
+    const spawnConflict = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "spawn-conflict",
+      { REINS_OPERATION_INTENT_JSON: spawnIntent },
+    );
+    assert(
+      spawnConflict.code === "command_id_conflict",
+      "spawn 请求指纹冲突未被拒绝",
+    );
+    assert(
+      readJsonLines(observationPath).filter(
+        ({ type }) => type === "worker_started",
+      ).length ===
+        workersBeforeValidation + 1,
+      "spawn ACK 恢复重复启动了 worker",
+    );
+
+    const deliveredBeforeSend = readJsonLines(observationPath).filter(
+      ({ type }) => type === "message_delivered",
+    ).length;
+    const preparedSend = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "prepare-send",
+      { REINS_TARGET_TURN: String(spawnResult.turnHandle) },
+    );
+    assert(
+      preparedSend.prepared === true && typeof preparedSend.intent === "string",
+      "SDK 未创建 send 操作凭据",
+    );
+    const sendIntent = preparedSend.intent;
+    assert(
+      readJsonLines(observationPath).filter(
+        ({ type }) => type === "message_delivered",
+      ).length === deliveredBeforeSend,
+      "准备 send 凭据时提前派发了消息",
+    );
+    acknowledgementProxy = await startUnixAcknowledgementProxy({
+      socketPath: join(directory, "send-ack.sock"),
+      targetPath: socketPath,
+      method: "send",
+    });
+    const droppedSend = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "send-drop",
+      {
+        REINS_SOCKET: acknowledgementProxy.socketPath,
+        REINS_OPERATION_INTENT_JSON: sendIntent,
+      },
+    );
+    const sendAcknowledgement =
+      await acknowledgementProxy.waitForDroppedAcknowledgement();
+    await acknowledgementProxy.close();
+    acknowledgementProxy = undefined;
+    assert(
+      droppedSend.code === "command_outcome_unknown" &&
+        sendAcknowledgement.method === "send" &&
+        isRecord(sendAcknowledgement.result) &&
+        sendAcknowledgement.result.sessionId ===
+          spawnAcknowledgement.result.sessionId &&
+        sendAcknowledgement.result.turnId ===
+          spawnAcknowledgement.result.turnId,
+      "send 场景没有丢弃真实 daemon ACK",
+    );
+    const recoveredSend = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "send-recover",
+      { REINS_OPERATION_INTENT_JSON: sendIntent },
+    );
+    assert(
+      isRecord(recoveredSend.result) &&
+        recoveredSend.result.sessionHandle === spawnResult.sessionHandle &&
+        recoveredSend.result.turnHandle === spawnResult.turnHandle &&
+        recoveredSend.result.deliveryPoint === "active_turn",
+      "SDK 未恢复精确 active-turn send 结果",
+    );
+    const sendConflict = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "send-conflict",
+      { REINS_OPERATION_INTENT_JSON: sendIntent },
+    );
+    assert(
+      sendConflict.code === "command_id_conflict",
+      "send 请求指纹冲突未被拒绝",
+    );
+    const delivered = readJsonLines(observationPath).filter(
+      ({ type }) => type === "message_delivered",
+    );
+    assert(
+      delivered.length === deliveredBeforeSend + 1 &&
+        delivered[0]?.sessionId === spawnAcknowledgement.result.sessionId &&
+        delivered[0]?.turnId === spawnAcknowledgement.result.turnId &&
+        delivered[0]?.message === "  exact delivered note\nkeep spacing  ",
+      "send 恢复重复派发或改变了正文",
+    );
+
+    const interruptsBefore = readJsonLines(observationPath).filter(
+      ({ type }) => type === "interrupt_requested",
+    ).length;
+    const preparedInterrupt = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "prepare-interrupt",
+      { REINS_TARGET_TURN: String(spawnResult.turnHandle) },
+    );
+    assert(
+      preparedInterrupt.prepared === true &&
+        typeof preparedInterrupt.intent === "string",
+      "SDK 未创建 interrupt 操作凭据",
+    );
+    const interruptIntent = preparedInterrupt.intent;
+    acknowledgementProxy = await startUnixAcknowledgementProxy({
+      socketPath: join(directory, "interrupt-ack.sock"),
+      targetPath: socketPath,
+      method: "interrupt",
+    });
+    const droppedInterrupt = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "interrupt-drop",
+      {
+        REINS_SOCKET: acknowledgementProxy.socketPath,
+        REINS_OPERATION_INTENT_JSON: interruptIntent,
+      },
+    );
+    const interruptAcknowledgement =
+      await acknowledgementProxy.waitForDroppedAcknowledgement();
+    await acknowledgementProxy.close();
+    acknowledgementProxy = undefined;
+    assert(
+      droppedInterrupt.code === "command_outcome_unknown" &&
+        interruptAcknowledgement.method === "interrupt" &&
+        isRecord(interruptAcknowledgement.result) &&
+        interruptAcknowledgement.result.sessionId ===
+          spawnAcknowledgement.result.sessionId &&
+        interruptAcknowledgement.result.turnId ===
+          spawnAcknowledgement.result.turnId,
+      "interrupt 场景没有丢弃真实 daemon ACK",
+    );
+    const recoveredInterrupt = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "interrupt-recover",
+      { REINS_OPERATION_INTENT_JSON: interruptIntent },
+    );
+    assert(
+      isRecord(recoveredInterrupt.result) &&
+        recoveredInterrupt.result.turnHandle === spawnResult.turnHandle &&
+        recoveredInterrupt.result.status === "accepted" &&
+        isRecord(recoveredInterrupt.observed) &&
+        recoveredInterrupt.observed.status === "timeout" &&
+        Array.isArray(recoveredInterrupt.observed.pending) &&
+        recoveredInterrupt.observed.pending[0] === spawnResult.turnHandle,
+      "interrupt 接受被误当成回合已经结束",
+    );
+    assert(
+      readJsonLines(observationPath).filter(
+        ({ type }) => type === "interrupt_requested",
+      ).length ===
+        interruptsBefore + 1,
+      "interrupt ACK 恢复重复派发了中断",
+    );
+
+    const preparedKill = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "prepare-kill",
+      { REINS_TARGET_SESSION: String(spawnResult.sessionHandle) },
+    );
+    assert(
+      preparedKill.prepared === true && typeof preparedKill.intent === "string",
+      "SDK 未创建 kill 操作凭据",
+    );
+    const killIntent = preparedKill.intent;
+    const failedKill = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "kill-failure-replay",
+      { REINS_OPERATION_INTENT_JSON: killIntent },
+    );
+    assert(
+      isRecord(failedKill.failure) &&
+        failedKill.failure.code === "internal_error",
+      "清理失败没有保留原始操作错误",
+    );
+    const activityWhileFailed = readJsonLines(activityPath);
+    assert(
+      activityWhileFailed.some(({ type }) => type === "heartbeat") &&
+        typeof workerReady.workerPid === "number" &&
+        typeof workerReady.descendantPid === "number",
+      "第一次 kill 失败没有留下实际运行的 worker 证据",
+    );
+    assertProcessRunning("worker", workerReady.workerPid);
+    assertProcessRunning("worker descendant", workerReady.descendantPid);
+    const retry = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "prepare-kill-retry",
+      { REINS_OPERATION_INTENT_JSON: killIntent },
+    );
+    assert(
+      retry.prepared === true && typeof retry.intent === "string",
+      "未生成新的 kill 重试凭据",
+    );
+    assert(
+      readJsonLines(observationPath).filter(
+        ({ type }) => type === "terminate_called",
+      ).length === 1,
+      "准备新的 kill 凭据时重复执行了清理",
+    );
+    const retryIntent = retry.intent;
+    acknowledgementProxy = await startUnixAcknowledgementProxy({
+      socketPath: join(directory, "kill-ack.sock"),
+      targetPath: socketPath,
+      method: "kill",
+    });
+    const killDropPromise = runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "kill-drop",
+      {
+        REINS_SOCKET: acknowledgementProxy.socketPath,
+        REINS_OPERATION_INTENT_JSON: retryIntent,
+      },
+    );
+    await waitForFact(
+      "第二次 kill 的受控清理门",
+      observationPath,
+      (fact) => fact.type === "terminate_waiting" && fact.attempt === 2,
+    );
+    const killRecoveryStartedPath = join(directory, "kill-recovery.started");
+    let pendingKillRecoveryCompleted = false;
+    let pendingKillRecoveryFailure: unknown;
+    const pendingKillRecoveryPromise = runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "kill-recover",
+      {
+        REINS_OPERATION_INTENT_JSON: retryIntent,
+        REINS_EXPECTED_TURN_HANDLE: String(spawnResult.turnHandle),
+        REINS_KILL_RECOVERY_STARTED: killRecoveryStartedPath,
+      },
+      "kill-recover-while-pending",
+    )
+      .then((result) => {
+        pendingKillRecoveryCompleted = true;
+        return result;
+      })
+      .catch((error: unknown) => {
+        pendingKillRecoveryCompleted = true;
+        pendingKillRecoveryFailure = error;
+        return undefined;
+      });
+    await waitForPath(killRecoveryStartedPath, 5_000);
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert(
+      !pendingKillRecoveryCompleted &&
+        readJsonLines(observationPath).filter(
+          ({ type }) => type === "terminate_called",
+        ).length === 2,
+      "恢复中的 kill 未等待已有清理或重复派发了清理",
+    );
+    writeFileSync(terminateGatePath, "released", "utf8");
+    const [killAcknowledgement, droppedKill, pendingKillRecovery] =
+      await Promise.all([
+        acknowledgementProxy.waitForDroppedAcknowledgement(),
+        killDropPromise,
+        pendingKillRecoveryPromise,
+      ]);
+    await acknowledgementProxy.close();
+    acknowledgementProxy = undefined;
+    assert(
+      droppedKill.code === "command_outcome_unknown" &&
+        droppedKill.operation === "kill" &&
+        killAcknowledgement.method === "kill" &&
+        isRecord(killAcknowledgement.result) &&
+        killAcknowledgement.result.sessionId === spawnResult.sessionHandle,
+      "kill 场景没有保留真实 ACK 丢失后的未知结果",
+    );
+    assert(
+      pendingKillRecoveryFailure === undefined &&
+        isRecord(pendingKillRecovery?.result) &&
+        pendingKillRecovery.result.status === "killed",
+      "清理进行中提交的 SDK 恢复没有加入并恢复原 kill 结果",
+    );
+    const recoveredKill = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "kill-recover",
+      {
+        REINS_OPERATION_INTENT_JSON: retryIntent,
+        REINS_EXPECTED_TURN_HANDLE: String(spawnResult.turnHandle),
+      },
+    );
+    assert(
+      isRecord(recoveredKill.result) &&
+        recoveredKill.result.sessionHandle === spawnResult.sessionHandle &&
+        recoveredKill.result.status === "killed" &&
+        isRecord(recoveredKill.session) &&
+        recoveredKill.session.state === "killed" &&
+        isRecord(recoveredKill.session.lastCompletedTurn) &&
+        recoveredKill.session.lastCompletedTurn.turnHandle ===
+          spawnResult.turnHandle &&
+        recoveredKill.session.lastCompletedTurn.stopReason === "killed",
+      "SDK 未恢复已完成 kill 的精确终态",
+    );
+    const killReplay = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "kill-recover",
+      {
+        REINS_OPERATION_INTENT_JSON: retryIntent,
+        REINS_EXPECTED_TURN_HANDLE: String(spawnResult.turnHandle),
+      },
+    );
+    assert(
+      isRecord(killReplay.result) &&
+        JSON.stringify(killReplay.result) ===
+          JSON.stringify(recoveredKill.result) &&
+        readJsonLines(observationPath).filter(
+          ({ type }) => type === "terminate_called",
+        ).length === 2,
+      "重复恢复 kill 没有返回原结果或重复清理",
+    );
+    const finalActivity = readJsonLines(activityPath);
+    for (const [role, pid] of [
+      ["worker", workerReady.workerPid],
+      ["descendant", workerReady.descendantPid],
+    ] as const) {
+      assert(
+        finalActivity.filter(
+          (fact) =>
+            fact.type === "opened" && fact.role === role && fact.pid === pid,
+        ).length === 1 &&
+          finalActivity.filter(
+            (fact) =>
+              fact.type === "closed" && fact.role === role && fact.pid === pid,
+          ).length === 1,
+        `${role} 的资源没有恰好关闭一次`,
+      );
+      assertProcessStopped(role, pid);
+    }
+
+    await runPermissionAcceptance({
+      consumer: options.sdkConsumer,
+      env: directEnv,
+      observationsPath: observationPath,
+      directory,
+      logsDirectory: options.logsDirectory,
+    });
+
+    const diagnostics = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "harness-failure-diagnostics",
+    );
+    assert(
+      isRecord(diagnostics.completed) &&
+        diagnostics.completed.stopReason === "failed" &&
+        isRecord(diagnostics.diagnostic) &&
+        diagnostics.diagnostic.source === "adapter" &&
+        diagnostics.diagnostic.kind === "turn_failure" &&
+        diagnostics.malformedTurnCode === "invalid_params" &&
+        diagnostics.mismatchedSessionCode === "invalid_params",
+      "SDK 未按精确 turn/session 查询结构化诊断",
+    );
+
+    const generationBeforeRestart = String(prepared.daemonGeneration);
+    await stopDirectDaemon(daemon, options.handles);
+    daemon = await startDirectDaemon({
+      label: "restarted packed SDK daemon",
+      executable: options.daemonPath,
+      env: directEnv,
+      socketPath,
+      logPath: join(options.logsDirectory, "restarted-recovery-daemon.log"),
+      handles: options.handles,
+    });
+    const staleSpawn = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "spawn-stale",
+      { REINS_OPERATION_INTENT_JSON: spawnIntent },
+    );
+    const staleSend = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "send-stale",
+      { REINS_OPERATION_INTENT_JSON: sendIntent },
+    );
+    const staleInterrupt = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "interrupt-stale",
+      { REINS_OPERATION_INTENT_JSON: interruptIntent },
+    );
+    const staleHandle = await runSdkMode(
+      options.sdkConsumer,
+      directEnv,
+      options.logsDirectory,
+      "handle-stale",
+      { REINS_TARGET_SESSION: String(spawnResult.sessionHandle) },
+    );
+    assert(
+      staleSpawn.code === "stale_command_id" &&
+        staleSend.code === "stale_command_id" &&
+        staleInterrupt.code === "stale_command_id" &&
+        staleSpawn.daemonGeneration !== generationBeforeRestart &&
+        staleHandle.status === "not_found" &&
+        staleHandle.sessionHandle === spawnResult.sessionHandle,
+      "旧世代操作或会话身份被错误地用于新 daemon",
+    );
+  } finally {
+    if (acknowledgementProxy !== undefined) await acknowledgementProxy.close();
+    writeFileSync(terminateGatePath, "released", "utf8");
+  }
+  await stopDirectDaemon(daemon, options.handles);
+}
+
+async function runPermissionAcceptance(options: {
+  readonly consumer: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly observationsPath: string;
+  readonly directory: string;
+  readonly logsDirectory: string;
+}): Promise<void> {
+  const permissionSessions: JsonRecord[] = [];
+  const spawnPermission = async (name: string): Promise<JsonRecord> => {
+    const spawned = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "spawn-permission",
+      { REINS_PERMISSION_SESSION_NAME: name },
+    );
+    assert(isRecord(spawned.result), "授权场景未返回真实会话和回合身份");
+    permissionSessions.push(spawned.result);
+    return spawned.result;
+  };
+  const observePermission = async (
+    sessionHandle: string,
+  ): Promise<JsonRecord> => {
+    const observed = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "observe-permission",
+      { REINS_TARGET_SESSION: sessionHandle },
+    );
+    assert(
+      observed.sessionHandle === sessionHandle &&
+        typeof observed.permissionHandle === "string" &&
+        JSON.stringify(observed.options) ===
+          JSON.stringify([
+            { outcome: "allow", scope: "once" },
+            { outcome: "deny", feedback: false },
+          ]),
+      "SDK 未暴露适配器实际发出的授权选择",
+    );
+    return observed;
+  };
+  const preparePermission = async (
+    permissionHandle: string,
+  ): Promise<string> => {
+    const prepared = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "prepare-permission",
+      { REINS_PERMISSION_HANDLE: permissionHandle },
+    );
+    assert(
+      prepared.prepared === true && typeof prepared.intent === "string",
+      "SDK 未创建可保存的授权决议操作",
+    );
+    return prepared.intent;
+  };
+
+  const cleanupPermissionSessions = async (): Promise<void> => {
+    const activityPath = options.env.REINS_PACKED_FIXTURE_ACTIVITY;
+    assert(activityPath !== undefined, "授权场景没有配置 worker 进程事实日志");
+    for (const session of permissionSessions) {
+      const sessionHandle = session.sessionHandle;
+      const turnHandle = session.turnHandle;
+      assert(
+        typeof sessionHandle === "string" && typeof turnHandle === "string",
+        "授权场景没有可清理的会话和回合身份",
+      );
+      const prepared = await runSdkMode(
+        options.consumer,
+        options.env,
+        options.logsDirectory,
+        "prepare-kill",
+        { REINS_TARGET_SESSION: sessionHandle },
+      );
+      assert(
+        prepared.prepared === true && typeof prepared.intent === "string",
+        "SDK 未创建授权场景清理凭据",
+      );
+      const killed = await runSdkMode(
+        options.consumer,
+        options.env,
+        options.logsDirectory,
+        "kill-recover",
+        {
+          REINS_OPERATION_INTENT_JSON: prepared.intent,
+          REINS_EXPECTED_TURN_HANDLE: turnHandle,
+        },
+        `permission-cleanup-${sessionHandle}`,
+      );
+      assert(
+        isRecord(killed.result) &&
+          killed.result.status === "killed" &&
+          isRecord(killed.session) &&
+          killed.session.state === "killed",
+        "SDK 未清理授权场景会话",
+      );
+      const workerReady = await waitForFact(
+        "授权 worker 进程",
+        options.observationsPath,
+        (fact) =>
+          fact.type === "worker_ready" && fact.sessionId === sessionHandle,
+      );
+      assert(
+        typeof workerReady.workerPid === "number" &&
+          typeof workerReady.descendantPid === "number",
+        "授权 worker 缺少进程身份",
+      );
+      const finalActivity = readJsonLines(activityPath);
+      for (const [role, pid] of [
+        ["worker", workerReady.workerPid],
+        ["descendant", workerReady.descendantPid],
+      ] as const) {
+        assert(
+          finalActivity.filter(
+            (fact) =>
+              fact.type === "opened" && fact.role === role && fact.pid === pid,
+          ).length === 1 &&
+            finalActivity.filter(
+              (fact) =>
+                fact.type === "closed" &&
+                fact.role === role &&
+                fact.pid === pid,
+            ).length === 1,
+          `授权 ${role} 进程未恰好关闭一次：${pid}`,
+        );
+        assertProcessStopped(`授权 ${role} 进程`, pid);
+      }
+    }
+  };
+
+  try {
+    const firstSession = await spawnPermission("packed-permission-mismatch");
+    const firstObserved = await observePermission(
+      String(firstSession.sessionHandle),
+    );
+    const mismatchIntent = await preparePermission(
+      String(firstObserved.permissionHandle),
+    );
+    const callsBeforeMismatch = readJsonLines(options.observationsPath).filter(
+      (fact) =>
+        fact.sessionId === firstSession.sessionHandle &&
+        fact.type === "permission_resolved",
+    ).length;
+    const mismatch = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "permission-mismatch-replay",
+      { REINS_OPERATION_INTENT_JSON: mismatchIntent },
+    );
+    assert(
+      isRecord(mismatch.mismatch) &&
+        mismatch.mismatch.code === "permission_resolution_mismatch" &&
+        isRecord(mismatch.replay) &&
+        JSON.stringify(mismatch.mismatch) === JSON.stringify(mismatch.replay) &&
+        isRecord(mismatch.conflict) &&
+        mismatch.conflict.code === "command_id_conflict" &&
+        readJsonLines(options.observationsPath).filter(
+          (fact) =>
+            fact.sessionId === firstSession.sessionHandle &&
+            fact.type === "permission_resolved",
+        ).length === callsBeforeMismatch,
+      "SDK 未在适配器执行前固定授权菜单错误和请求冲突",
+    );
+    const acceptedPermissionIntent = await preparePermission(
+      String(firstObserved.permissionHandle),
+    );
+    const acceptedPermission = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "resolve-permission",
+      { REINS_OPERATION_INTENT_JSON: acceptedPermissionIntent },
+    );
+    assert(
+      isRecord(acceptedPermission.result) &&
+        acceptedPermission.result.status === "resolved" &&
+        acceptedPermission.result.permissionHandle ===
+          firstObserved.permissionHandle,
+      "SDK 未按当前待处理菜单提交授权决议",
+    );
+
+    const lostSession = await spawnPermission("packed-permission-lost-ack");
+    const lostObserved = await observePermission(
+      String(lostSession.sessionHandle),
+    );
+    const lostIntent = await preparePermission(
+      String(lostObserved.permissionHandle),
+    );
+    const proxy = await startUnixAcknowledgementProxy({
+      socketPath: join(options.directory, "permission-ack.sock"),
+      targetPath: options.env.REINS_SOCKET as string,
+      method: "resolvePermission",
+    });
+    try {
+      const lost = await runSdkMode(
+        options.consumer,
+        options.env,
+        options.logsDirectory,
+        "resolve-permission-drop",
+        {
+          REINS_SOCKET: proxy.socketPath,
+          REINS_OPERATION_INTENT_JSON: lostIntent,
+        },
+      );
+      const acknowledgement = await proxy.waitForDroppedAcknowledgement();
+      assert(
+        lost.code === "command_outcome_unknown" &&
+          lost.stage === "operation" &&
+          acknowledgement.method === "resolvePermission" &&
+          isRecord(acknowledgement.result) &&
+          acknowledgement.result.sessionId === lostSession.sessionHandle,
+        "授权场景没有观察到真实 ACK 丢失",
+      );
+    } finally {
+      await proxy.close();
+    }
+    const recovered = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "resolve-permission",
+      { REINS_OPERATION_INTENT_JSON: lostIntent },
+    );
+    const deliveredResolutions = readJsonLines(options.observationsPath).filter(
+      (fact) =>
+        fact.sessionId === lostSession.sessionHandle &&
+        fact.type === "permission_resolved",
+    );
+    assert(
+      isRecord(recovered.result) &&
+        recovered.result.status === "resolved" &&
+        recovered.result.permissionHandle === lostObserved.permissionHandle &&
+        deliveredResolutions.length === 1 &&
+        JSON.stringify(deliveredResolutions[0]?.resolution) ===
+          JSON.stringify({ outcome: "allow", scope: "once" }),
+      "授权 ACK 丢失后恢复重复派发或改变了结果",
+    );
+  } finally {
+    await cleanupPermissionSessions();
+  }
+}
+
+async function runPermissionDiagnosticFailure(options: {
+  readonly consumer: string;
+  readonly env: NodeJS.ProcessEnv;
+  readonly directory: string;
+  readonly logsDirectory: string;
+}): Promise<void> {
+  const session = await runSdkMode(
+    options.consumer,
+    options.env,
+    options.logsDirectory,
+    "spawn-permission",
+    { REINS_PERMISSION_SESSION_NAME: "packed-perm-diagnostic-failure" },
+  );
+  assert(isRecord(session.result), "诊断故障场景没有创建授权会话");
+  const sessionHandle = String(session.result.sessionHandle);
+  const turnHandle = String(session.result.turnHandle);
+  try {
+    const observed = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "observe-permission",
+      { REINS_TARGET_SESSION: sessionHandle },
+    );
+    assert(typeof observed.permissionHandle === "string", "未观察到待处理授权");
+    const prepared = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "prepare-permission",
+      { REINS_PERMISSION_HANDLE: observed.permissionHandle },
+    );
+    assert(typeof prepared.intent === "string", "未准备诊断故障决议");
+
+    const rejectPath = join(options.directory, "reject-permission");
+    writeFileSync(rejectPath, "reject", "utf8");
+    const activeDiagnostics = join(
+      options.env.REINS_STATE_DIR as string,
+      "diagnostics",
+      "active.ndjson",
+    );
+    assert(existsSync(activeDiagnostics), "正式诊断轨迹尚未创建");
+    renameSync(activeDiagnostics, `${activeDiagnostics}.saved`);
+    mkdirSync(activeDiagnostics);
+    const rejected = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "permission-failure-replay",
+      { REINS_OPERATION_INTENT_JSON: String(prepared.intent) },
+    );
+    assert(
+      isRecord(rejected.failure) &&
+        rejected.failure.code === "internal_error" &&
+        isRecord(rejected.failure.facts) &&
+        isRecord(rejected.failure.facts.cause) &&
+        rejected.failure.facts.cause.kind === "exception" &&
+        typeof rejected.failure.facts.cause.message === "string" &&
+        rejected.failure.facts.cause.message.includes(
+          "Fixture rejected permission delivery",
+        ) &&
+        rejected.failure.facts.diagnosticId === undefined &&
+        isRecord(rejected.query) &&
+        rejected.query.code === "diagnostics_unavailable",
+      "诊断落盘失败掩盖了原授权执行错误",
+    );
+  } finally {
+    const prepared = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "prepare-kill",
+      { REINS_TARGET_SESSION: sessionHandle },
+    );
+    assert(
+      prepared.prepared === true && typeof prepared.intent === "string",
+      "SDK 未创建诊断故障场景清理凭据",
+    );
+    const killed = await runSdkMode(
+      options.consumer,
+      options.env,
+      options.logsDirectory,
+      "kill-recover",
+      {
+        REINS_OPERATION_INTENT_JSON: prepared.intent,
+        REINS_EXPECTED_TURN_HANDLE: turnHandle,
+      },
+    );
+    assert(
+      isRecord(killed.result) &&
+        killed.result.status === "killed" &&
+        isRecord(killed.session) &&
+        killed.session.state === "killed",
+      "SDK 未清理诊断故障授权会话",
     );
   }
-  if (!existsSync(daemonPath))
-    throw new Error("Installed daemon machine entry is missing");
+}
 
-  createConsumerTypecheck(consumerDirectory);
-  createRuntimeConsumer(consumerDirectory, daemonPath, launcherPath, pidPath);
-  run(
-    process.execPath,
-    [join(consumerDirectory, "consumer.mjs")],
-    consumerDirectory,
-    "installed runtime and SDK consumer",
-    {
-      ...process.env,
-      REINS_SOCKET: socketPath,
-      REINS_STATE_DIR: stateDirectory,
-      REINS_DAEMON_BIN: launcherPath,
-      REINS_ADAPTERS_MODULE: adaptersPath,
-      REINS_IDLE_TIMEOUT_MS: "120000",
-    },
+async function runPermissionFailureAcceptance(options: {
+  readonly sdkConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+  readonly handles: Set<DaemonHandle>;
+}): Promise<void> {
+  const directory = join(
+    options.temporaryRoot,
+    "permission-diagnostic-failure",
   );
-} catch (error) {
-  primaryFailure = error;
-} finally {
+  const socketPath = join(directory, "reins.sock");
+  const workerCwd = join(directory, "workspace");
+  mkdirSync(workerCwd, { recursive: true });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-runtime-permission-failure",
+    REINS_ADAPTERS_MODULE: join(
+      options.sdkConsumer,
+      "fixtures",
+      "adapter-fixture.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: join(directory, "observations.ndjson"),
+    REINS_PACKED_FIXTURE_ACTIVITY: join(directory, "activity.ndjson"),
+    REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE: join(
+      directory,
+      "reject-permission",
+    ),
+    REINS_WORKER_CWD: workerCwd,
+  };
+  const daemon = await startDirectDaemon({
+    label: "packed permission diagnostic failure daemon",
+    executable: options.daemonPath,
+    env,
+    socketPath,
+    logPath: join(options.logsDirectory, "permission-failure-daemon.log"),
+    handles: options.handles,
+  });
+  try {
+    await runPermissionDiagnosticFailure({
+      consumer: options.sdkConsumer,
+      env,
+      directory,
+      logsDirectory: options.logsDirectory,
+    });
+  } finally {
+    await stopDirectDaemon(daemon, options.handles);
+  }
+}
+
+async function runRuntimeFactsAcceptance(options: {
+  readonly sdkConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+  readonly handles: Set<DaemonHandle>;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "runtime-facts");
+  const socketPath = join(directory, "reins.sock");
+  const factGate = join(directory, "fact.release");
+  const resolutionPath = join(directory, "resolution.json");
+  const workerCwd = join(directory, "workspace");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-runtime-facts",
+    REINS_ADAPTERS_MODULE: join(
+      options.sdkConsumer,
+      "fixtures",
+      "adapter-registry.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_FACT_GATE: factGate,
+    REINS_PERMISSION_RESULT: resolutionPath,
+    REINS_WORKER_CWD: workerCwd,
+  };
+  mkdirSync(workerCwd, { recursive: true });
+  const daemon = await startDirectDaemon({
+    label: "packed runtime fact daemon",
+    executable: options.daemonPath,
+    env,
+    socketPath,
+    logPath: join(options.logsDirectory, "facts-daemon.log"),
+    handles: options.handles,
+  });
+  try {
+    const facts = await runFixture(
+      options.sdkConsumer,
+      "sdk-runtime-facts.ts",
+      env,
+      options.logsDirectory,
+      "sdk-runtime-facts",
+    );
+    const factResult = readLastJsonRecord("runtime facts", facts.stdout);
+    assert(
+      Array.isArray(factResult.factTypes) &&
+        JSON.stringify(factResult.factTypes) ===
+          JSON.stringify([
+            "message",
+            "text.delta",
+            "text.delta",
+            "message",
+            "tool.requested",
+            "tool.completed",
+            "permission.requested",
+            "permission.resolved",
+            "turn.completed",
+          ]) &&
+        factResult.resumedFactCount === factResult.factTypes.length &&
+        factResult.waitStatus === "satisfied" &&
+        factResult.newTurnDeliveryPoint === "new_turn" &&
+        factResult.newTurnStatus === "satisfied" &&
+        typeof factResult.sessionHandle === "string" &&
+        typeof factResult.turnHandle === "string" &&
+        typeof factResult.newTurnHandle === "string",
+      "公开 SDK 事实序列或游标续接发生变化",
+    );
+
+    const disconnected = await runSdkMode(
+      options.sdkConsumer,
+      env,
+      options.logsDirectory,
+      "disconnect-first-fact",
+      { REINS_TARGET_SESSION: String(factResult.sessionHandle) },
+    );
+    assert(
+      disconnected.code === "daemon_disconnected" &&
+        disconnected.cursorMatchesDeliveredFact === true &&
+        typeof disconnected.checkpoint === "string" &&
+        typeof disconnected.deliveredFactCount === "number",
+      "消费者断开后未返回最后已交付事实的游标",
+    );
+    const kill = await runSdkMode(
+      options.sdkConsumer,
+      env,
+      options.logsDirectory,
+      "prepare-kill",
+      { REINS_TARGET_SESSION: String(factResult.sessionHandle) },
+    );
+    assert(typeof kill.intent === "string", "无法清理已完成的事实会话");
+    const killed = await runSdkMode(
+      options.sdkConsumer,
+      env,
+      options.logsDirectory,
+      "kill-recover",
+      {
+        REINS_OPERATION_INTENT_JSON: String(kill.intent),
+        REINS_EXPECTED_TURN_HANDLE: String(factResult.newTurnHandle),
+      },
+    );
+    assert(isRecord(killed.result), "事实会话没有返回关闭结果");
+    const resumed = await runSdkMode(
+      options.sdkConsumer,
+      env,
+      options.logsDirectory,
+      "replay-facts",
+      {
+        REINS_TARGET_SESSION: String(factResult.sessionHandle),
+        REINS_RESUME_FACT_COUNT: String(disconnected.deliveredFactCount),
+        REINS_RESUME_CURSOR: String(disconnected.checkpoint),
+      },
+    );
+    assert(
+      resumed.checkpointWasDelivered === true &&
+        resumed.resumedAfterDisconnect === true &&
+        Array.isArray(resumed.resumedFacts),
+      "SDK 未从断连 checkpoint 精确续接事件",
+    );
+    const killedList = await runFixture(
+      options.sdkConsumer,
+      "sdk-killed-list.ts",
+      {
+        ...env,
+        REINS_TARGET_SESSION: String(factResult.sessionHandle),
+      },
+      options.logsDirectory,
+      "sdk-killed-list",
+    );
+    const killedListResult = readLastJsonRecord(
+      "killed session list",
+      killedList.stdout,
+    );
+    assert(
+      killedListResult.state === "killed" &&
+        killedListResult.sessionHandle === factResult.sessionHandle &&
+        isRecord(killedListResult.lastCompletedTurn) &&
+        killedListResult.lastCompletedTurn.stopReason === "end_turn",
+      "关闭已完成会话后丢失其精确回合终态",
+    );
+  } finally {
+    await stopDirectDaemon(daemon, options.handles);
+  }
+}
+
+async function runExactWaitAcceptance(options: {
+  readonly sdkConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+  readonly handles: Set<DaemonHandle>;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "exact-wait");
+  const socketPath = join(directory, "reins.sock");
+  const workerCwd = join(directory, "workspace");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-runtime-exact-wait",
+    REINS_ADAPTERS_MODULE: join(
+      options.sdkConsumer,
+      "fixtures",
+      "adapter-fixture.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: join(directory, "observations.ndjson"),
+    REINS_PACKED_FIXTURE_ACTIVITY: join(directory, "activity.ndjson"),
+    REINS_WORKER_CWD: workerCwd,
+  };
+  mkdirSync(workerCwd, { recursive: true });
+  const daemon = await startDirectDaemon({
+    label: "packed exact wait daemon",
+    executable: options.daemonPath,
+    env,
+    socketPath,
+    logPath: join(options.logsDirectory, "exact-wait-daemon.log"),
+    handles: options.handles,
+  });
+  try {
+    const result = await runFixture(
+      options.sdkConsumer,
+      "sdk-exact-wait.ts",
+      env,
+      options.logsDirectory,
+      "sdk-exact-wait",
+      [],
+      60_000,
+    );
+    const value = readLastJsonRecord("exact wait", result.stdout);
+    assert(
+      Array.isArray(value.anyCompleted) &&
+        Array.isArray(value.anyPending) &&
+        Array.isArray(value.allCompleted) &&
+        Array.isArray(value.zeroTimeoutPending) &&
+        value.anyCompleted.length === 1 &&
+        value.anyPending.length === 1 &&
+        value.allCompleted.length === 2 &&
+        value.zeroTimeoutPending.length === 1,
+      "SDK any/all wait 没有保留精确完成与待处理目标",
+    );
+  } finally {
+    await stopDirectDaemon(daemon, options.handles);
+  }
+}
+
+async function runSessionIsolationAcceptance(options: {
+  readonly sdkConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+  readonly handles: Set<DaemonHandle>;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "session-isolation");
+  const socketPath = join(directory, "reins.sock");
+  const workerCwd = join(directory, "workspace");
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-runtime-owner",
+    REINS_ADAPTERS_MODULE: join(
+      options.sdkConsumer,
+      "fixtures",
+      "adapter-fixture.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: join(directory, "observations.ndjson"),
+    REINS_PACKED_FIXTURE_ACTIVITY: join(directory, "activity.ndjson"),
+    REINS_WORKER_CWD: workerCwd,
+  };
+  mkdirSync(workerCwd, { recursive: true });
+  const daemon = await startDirectDaemon({
+    label: "packed session isolation daemon",
+    executable: options.daemonPath,
+    env,
+    socketPath,
+    logPath: join(options.logsDirectory, "session-isolation-daemon.log"),
+    handles: options.handles,
+  });
+  try {
+    const result = await runFixture(
+      options.sdkConsumer,
+      "sdk-session-isolation.ts",
+      env,
+      options.logsDirectory,
+      "sdk-session-isolation",
+      [],
+      60_000,
+    );
+    const value = readLastJsonRecord("session isolation", result.stdout);
+    assert(
+      Array.isArray(value.sessions) &&
+        value.sessions.length === 2 &&
+        value.foreignKill === "not_found" &&
+        value.isolatedClose === true &&
+        value.clientClosePreservedSession === true &&
+        value.processResourcesClosed === true,
+      "SDK 消费者归属、会话关闭或 client.close 隔离失效",
+    );
+  } finally {
+    await stopDirectDaemon(daemon, options.handles);
+  }
+}
+
+async function runInstalledApplicationAcceptance(options: {
+  readonly runtimeConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "installed-application");
+  mkdirSync(directory, { recursive: true });
+  const socketPath = join(directory, "reins.sock");
+  const pidPath = join(directory, "daemon.pid");
+  const workerCwd = join(directory, "workspace");
+  mkdirSync(workerCwd, { recursive: true });
+  const launcherPath = join(directory, "daemon-launcher");
+  writeFileSync(
+    launcherPath,
+    `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(pidPath)}\nexec ${shellQuote(options.daemonPath)} "$@"\n`,
+    { mode: 0o700 },
+  );
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-runtime-application",
+    REINS_DAEMON_BIN: launcherPath,
+    REINS_ADAPTERS_MODULE: join(
+      options.runtimeConsumer,
+      "fixtures",
+      "adapter-fixture.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_PACKED_FIXTURE_OBSERVATIONS: join(directory, "observations.ndjson"),
+    REINS_PACKED_FIXTURE_ACTIVITY: join(directory, "activity.ndjson"),
+    REINS_WORKER_CWD: workerCwd,
+  };
+  try {
+    const result = await runFixture(
+      options.runtimeConsumer,
+      "application-query.ts",
+      env,
+      options.logsDirectory,
+      "installed-application-query",
+      [],
+      60_000,
+    );
+    const value = readLastJsonRecord("installed application", result.stdout);
+    assert(
+      value.status === "queried" &&
+        value.capabilityHarness === "fixture" &&
+        value.sessionCount === 0 &&
+        value.failureCode === "invalid_params" &&
+        value.failureStage === "query" &&
+        value.closeReason === "killed" &&
+        typeof value.sessionHandle === "string" &&
+        typeof value.turnHandle === "string",
+      "已安装运行包未通过公开 application API 完成正式操作",
+    );
+  } finally {
+    await stopInstalledDaemon(pidPath);
+  }
+}
+
+async function main(): Promise<void> {
+  const rootManifest = readJsonObject(join(repository, "package.json"));
+  const rootEngines = rootManifest.engines;
+  assert(
+    isRecord(rootEngines) &&
+      typeof rootEngines.node === "string" &&
+      process.versions.node === rootEngines.node,
+    `正式制品验收要求根 manifest 声明的 Node，当前为 ${process.versions.node}`,
+  );
+  const packageGroup = validateReleasePackages({ repository });
+  const runtimeArtifact = packageGroup.artifacts.find(
+    ({ packageName }) => packageName === "@ykdz/reins",
+  );
+  const sdkArtifact = packageGroup.artifacts.find(
+    ({ packageName }) => packageName === "@ykdz/reins-sdk",
+  );
+  assert(runtimeArtifact !== undefined, "正式制品组缺少运行包");
+  assert(sdkArtifact !== undefined, "正式制品组缺少轻 SDK");
+  assert(
+    process.platform === "linux" && process.arch === "x64",
+    "当前发行包仅支持 linux-x64",
+  );
+
+  const temporaryRoot = mkdtempSync(join(tmpdir(), "reins-packed-runtime-"));
+  assert(
+    !temporaryRoot.startsWith(`${repository}/`),
+    "消费者安装必须位于工作区之外",
+  );
+  const logsDirectory = join(temporaryRoot, "logs");
+  mkdirSync(logsDirectory, { recursive: true });
+  const sdkConsumer = join(temporaryRoot, "sdk-only-consumer");
+  const runtimeConsumer = join(temporaryRoot, "runtime-sdk-consumer");
+  const handles = new Set<DaemonHandle>();
+  let primaryFailure: unknown;
   let cleanupFailure: unknown;
   try {
-    stopDaemon(pidPath);
+    createConsumer(sdkConsumer, "reins-packed-sdk-consumer", {
+      "@ykdz/reins-sdk": `file:${sdkArtifact.path}`,
+    });
+    copyFixtures(join(sdkConsumer, "fixtures"));
+    await installConsumer(sdkConsumer, logsDirectory, "sdk-only-install");
+    assert(
+      !existsSync(join(sdkConsumer, "node_modules", "@ykdz", "reins")),
+      "轻 SDK 独立安装意外引入完整运行包",
+    );
+    await typecheckConsumer(
+      sdkConsumer,
+      [
+        join(sdkConsumer, "fixtures", "sdk-public-types.ts"),
+        join(sdkConsumer, "fixtures", "sdk-public-types-negative.ts"),
+        join(sdkConsumer, "fixtures", "sdk-recoverable-control.ts"),
+        join(sdkConsumer, "fixtures", "sdk-exact-wait.ts"),
+      ],
+      logsDirectory,
+      "sdk-only-types",
+    );
+
+    createConsumer(
+      runtimeConsumer,
+      "reins-packed-runtime-consumer",
+      {
+        "@ykdz/reins": `file:${runtimeArtifact.path}`,
+        "@ykdz/reins-sdk": `file:${sdkArtifact.path}`,
+      },
+      sdkArtifact.path,
+    );
+    copyFixtures(join(runtimeConsumer, "fixtures"));
+    await installConsumer(
+      runtimeConsumer,
+      logsDirectory,
+      "runtime-sdk-install",
+    );
+    const installedRuntimePath = join(
+      runtimeConsumer,
+      "node_modules",
+      "@ykdz",
+      "reins",
+    );
+    const installedSdkPath = join(
+      runtimeConsumer,
+      "node_modules",
+      "@ykdz",
+      "reins-sdk",
+    );
+    const installedRuntime = readJsonObject(
+      join(installedRuntimePath, "package.json"),
+    );
+    const installedSdk = readJsonObject(join(installedSdkPath, "package.json"));
+    assert(
+      installedRuntime.name === "@ykdz/reins" &&
+        installedRuntime.version === runtimeArtifact.version &&
+        installedSdk.name === "@ykdz/reins-sdk" &&
+        installedSdk.version === sdkArtifact.version,
+      "本地安装消费了错误包或不匹配版本",
+    );
+    const runtimeExports = installedRuntime.exports;
+    const runtimeBins = installedRuntime.bin;
+    assert(
+      isRecord(runtimeExports) &&
+        JSON.stringify(Object.keys(runtimeExports)) ===
+          JSON.stringify(["./application"]) &&
+        isRecord(runtimeBins) &&
+        JSON.stringify(Object.keys(runtimeBins)) ===
+          JSON.stringify(["reins-daemon"]),
+      "运行包没有公开唯一 application 与 daemon 入口",
+    );
+    const daemonPath = join(
+      runtimeConsumer,
+      "node_modules",
+      ".bin",
+      "reins-daemon",
+    );
+    assert(existsSync(daemonPath), "真实安装没有提供 reins-daemon 机器入口");
+    await typecheckConsumer(
+      runtimeConsumer,
+      [join(runtimeConsumer, "fixtures", "application-public-types.ts")],
+      logsDirectory,
+      "runtime-application-types",
+    );
+
+    await runInstalledApplicationAcceptance({
+      runtimeConsumer,
+      daemonPath,
+      temporaryRoot,
+      logsDirectory,
+    });
+    await runRecoveryAcceptance({
+      sdkConsumer,
+      daemonPath,
+      temporaryRoot,
+      logsDirectory,
+      handles,
+    });
+    await runPermissionFailureAcceptance({
+      sdkConsumer,
+      daemonPath,
+      temporaryRoot,
+      logsDirectory,
+      handles,
+    });
+    await runExactWaitAcceptance({
+      sdkConsumer,
+      daemonPath,
+      temporaryRoot,
+      logsDirectory,
+      handles,
+    });
+    await runRuntimeFactsAcceptance({
+      sdkConsumer,
+      daemonPath,
+      temporaryRoot,
+      logsDirectory,
+      handles,
+    });
+    await runSessionIsolationAcceptance({
+      sdkConsumer,
+      daemonPath,
+      temporaryRoot,
+      logsDirectory,
+      handles,
+    });
   } catch (error) {
-    cleanupFailure = error;
+    primaryFailure = error;
+  } finally {
+    try {
+      await stopAllDaemons(handles);
+    } catch (error) {
+      cleanupFailure = error;
+    }
+    rmSync(temporaryRoot, { recursive: true, force: true });
   }
-  rmSync(temporaryDirectory, { recursive: true, force: true });
   if (primaryFailure !== undefined) {
     if (cleanupFailure !== undefined)
       throw new AggregateError(
         [primaryFailure, cleanupFailure],
-        "Consumer check and cleanup failed",
+        "正式制品验收与资源清理都失败",
       );
     throw primaryFailure;
   }
   if (cleanupFailure !== undefined) throw cleanupFailure;
+
+  writeReleaseOutputs(packageGroup);
+  process.stdout.write("双包制品与公开 SDK 消费验收通过\n");
 }
 
-writeFileSync(
-  join(evidenceDirectory, "consumer-check.json"),
-  `${JSON.stringify(
-    {
-      runtime: { name: identity.name, version: identity.version },
-      sdk: { name: "@ykdz/reins-sdk", version: identity.version },
-      checks: [
-        "clean-install",
-        "public-types",
-        "local-startup",
-        "daemon-entry",
-        "sdk-consumer",
-      ],
-      result: "passed",
-    },
-    null,
-    2,
-  )}\n`,
-);
-process.stdout.write("Packed runtime consumer check passed\n");
+await main();
