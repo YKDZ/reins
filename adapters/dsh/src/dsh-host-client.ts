@@ -42,7 +42,11 @@ const HOST_CLOSE_TIMEOUT_MS = 15_000;
 function acceptanceAfterSend(
   type: DshHostCommand["type"],
 ): "not_accepted" | "unknown" {
-  return type === "start" || type === "deliver" || type === "close"
+  return type === "start" ||
+    type === "deliver" ||
+    type === "interrupt" ||
+    type === "bind-turn" ||
+    type === "close"
     ? "unknown"
     : "not_accepted";
 }
