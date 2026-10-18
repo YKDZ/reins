@@ -304,7 +304,15 @@ describe("SQLite控制存储", () => {
         turnId: sendResult.turnId,
         messageId: sendResult.messageId,
         role: "caller",
-        content: sendRequest.message,
+        content: [
+          { type: "text", text: sendRequest.message, textElements: [] },
+          {
+            type: "image",
+            source: "url",
+            url: "https://example.invalid/accepted.png",
+            detail: "high",
+          },
+        ],
       },
       {
         type: "turn.completed",
@@ -325,6 +333,54 @@ describe("SQLite控制存储", () => {
         },
       },
     };
+    const caller = sendEvents[1];
+    const terminal = sendEvents[2];
+    if (caller?.type !== "message" || terminal?.type !== "turn.completed")
+      throw new Error("Expected the accepted caller and turn completion");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [
+          sendEvents[0]!,
+          { ...caller, messageId: "wrong-message" as never },
+          terminal,
+        ],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [sendEvents[0]!, caller, caller, terminal],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [
+          sendEvents[0]!,
+          caller,
+          { ...terminal, turnId: "other-turn" as never },
+        ],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
+    expect(() =>
+      store.commitSend({
+        operationKey: sendKey,
+        result: sendResult,
+        session: sendSession,
+        events: [
+          sendEvents[0]!,
+          { ...caller, content: "different caller" },
+          terminal,
+        ],
+      }),
+    ).toThrow("Send events do not match the accepted new turn");
     expect(
       store.commitSend({
         operationKey: sendKey,

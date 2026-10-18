@@ -790,7 +790,8 @@ function createControlStore(database: DatabaseSync): ControlStore {
         caller.turnId !== parsedResult.turnId ||
         caller.messageId !== parsedResult.messageId ||
         caller.role !== "caller" ||
-        caller.content !== operation.request.message ||
+        (typeof caller.content === "string" &&
+          caller.content !== operation.request.message) ||
         events.some(
           (event, index) =>
             event.sessionId !== parsedResult.sessionId ||

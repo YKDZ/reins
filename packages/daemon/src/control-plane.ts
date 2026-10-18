@@ -52,6 +52,7 @@ import {
   machineErrorSchema,
   operationRecordSchemaFor,
   parseOperationKey,
+  sendParamsSchema,
   newTurnSendParamsSchema,
   spawnParamsSchema,
 } from "@reins/protocol";
@@ -2127,6 +2128,26 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         existing.fingerprint === fingerprint
         ? existing.outcome
         : { error: { code: "operation_key_conflict" } };
+
+    if (request.method === "send") {
+      const parsedSend = v.safeParse(sendParamsSchema, request.params);
+      if (parsedSend.success && parsedSend.output.placement === "active_turn") {
+        try {
+          if (options.controlStore.getOperation(operationKey) !== undefined)
+            return { error: { code: "operation_key_conflict" } };
+        } catch (error) {
+          wakeWaitersIfStoreUnavailable();
+          return {
+            error: storeUnavailable(
+              operationKey,
+              "register",
+              "not_dispatched",
+              error,
+            ),
+          };
+        }
+      }
+    }
 
     if (request.method === "spawn") {
       const parsed = v.safeParse(spawnParamsSchema, request.params);
