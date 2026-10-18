@@ -651,7 +651,7 @@ describe("attach.ended 载荷", () => {
 });
 
 describe("message 事件 role", () => {
-  test("role 只能是 caller 或 worker，旧 driver 值被拒绝", () => {
+  test("保留 caller、worker 与带来源的 harness 消息，拒绝无来源宿主消息", () => {
     const base = {
       type: "message",
       sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:7",
@@ -661,6 +661,17 @@ describe("message 事件 role", () => {
     } as const;
     ok(domainEventSchema, { ...base, role: "caller" });
     ok(domainEventSchema, { ...base, role: "worker" });
+    ok(domainEventSchema, {
+      ...base,
+      role: "harness",
+      source: { kind: "tool-jobs", id: "bash-1234" },
+    });
+    bad(domainEventSchema, { ...base, role: "harness" });
+    bad(domainEventSchema, {
+      ...base,
+      role: "caller",
+      source: { kind: "tool-jobs", id: "bash-1234" },
+    });
     bad(domainEventSchema, { ...base, role: "driver" });
     bad(domainEventSchema, { ...base, role: "user" });
   });

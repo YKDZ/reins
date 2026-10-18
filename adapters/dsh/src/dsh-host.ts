@@ -53,6 +53,11 @@ const hostCommandSchema = v.union([
     messageId: v.optional(messageIdSchema),
     message: v.string(),
   }),
+  v.strictObject({
+    id: v.number(),
+    type: v.literal("interrupt"),
+    turnId: turnIdSchema,
+  }),
   v.strictObject({ id: v.number(), type: v.literal("close") }),
   v.strictObject({ id: v.number(), type: v.literal("catalog") }),
 ]);
@@ -154,19 +159,26 @@ function sendSessionEvent(
   event: SessionEvent,
   turnId?: TurnId,
   callerMessageId?: MessageId,
+  nativeTurn?: number,
 ): void {
   send({
     type: "session-event",
     event,
+    ...(nativeTurn === undefined ? {} : { nativeTurn }),
     ...(turnId === undefined ? {} : { turnId }),
     ...(callerMessageId === undefined ? {} : { callerMessageId }),
   });
 }
 
-function sendStreamFrame(frame: AssistantStreamFrame, turnId?: TurnId): void {
+function sendStreamFrame(
+  frame: AssistantStreamFrame,
+  turnId?: TurnId,
+  nativeTurn?: number,
+): void {
   send({
     type: "assistant-stream",
     frame,
+    ...(nativeTurn === undefined ? {} : { nativeTurn }),
     ...(turnId === undefined ? {} : { turnId }),
   });
 }
@@ -225,6 +237,8 @@ export async function runDshRuntimeHost(): Promise<void> {
   const nativeCallerMessageIds = new Map<string, NativeCaller>();
   const activePreSteps = new Map<number, AbortSignal>();
   const attemptTurnIds = new Map<string, TurnId>();
+  const attemptNativeTurns = new Map<string, number>();
+  let openNativeTurn: number | undefined;
   let closed = false;
   let closing: Promise<void> | undefined;
 
@@ -482,7 +496,10 @@ export async function runDshRuntimeHost(): Promise<void> {
             if (pending !== undefined)
               nativeTurnIds.set(event.data.turn, pending.turnId);
           }
-          const nativeTurn = nativeTurnOf(event);
+          const eventNativeTurn = nativeTurnOf(event);
+          const nativeTurn =
+            eventNativeTurn ??
+            (event.type === "user/message" ? openNativeTurn : undefined);
           const messageTurn =
             event.type === "user/message"
               ? nativeMessageTurns.get(event.data.id)
@@ -499,7 +516,8 @@ export async function runDshRuntimeHost(): Promise<void> {
             event.type === "user/message"
               ? nativeCallerMessageIds.get(event.data.id)
               : undefined;
-          sendSessionEvent(event, turnId, caller?.messageId);
+          sendSessionEvent(event, turnId, caller?.messageId, nativeTurn);
+          if (event.type === "turn/start") openNativeTurn = event.data.turn;
           if (event.type === "user/message") {
             nativeCallerMessageIds.delete(event.data.id);
             nativeMessageTurns.delete(event.data.id);
@@ -516,6 +534,7 @@ export async function runDshRuntimeHost(): Promise<void> {
                 nativeMessageTurns.delete(nativeMessageId);
               }
             }
+            if (openNativeTurn === event.data.turn) openNativeTurn = undefined;
           }
         },
       );
@@ -528,14 +547,26 @@ export async function runDshRuntimeHost(): Promise<void> {
         ({ frame }) => {
           if (frame.type === "start") {
             const turnId = nativeTurnIds.get(frame.turn);
+            attemptNativeTurns.set(String(frame.attemptId), frame.turn);
             if (turnId !== undefined)
               attemptTurnIds.set(String(frame.attemptId), turnId);
-            sendStreamFrame(frame, turnId);
+            sendStreamFrame(frame, turnId, frame.turn);
           } else if (frame.type === "chunk") {
-            sendStreamFrame(frame, attemptTurnIds.get(String(frame.attemptId)));
+            const attemptId = String(frame.attemptId);
+            sendStreamFrame(
+              frame,
+              attemptTurnIds.get(attemptId),
+              attemptNativeTurns.get(attemptId),
+            );
           } else {
-            sendStreamFrame(frame, attemptTurnIds.get(String(frame.attemptId)));
-            attemptTurnIds.delete(String(frame.attemptId));
+            const attemptId = String(frame.attemptId);
+            sendStreamFrame(
+              frame,
+              attemptTurnIds.get(attemptId),
+              attemptNativeTurns.get(attemptId),
+            );
+            attemptTurnIds.delete(attemptId);
+            attemptNativeTurns.delete(attemptId);
           }
         },
       );
@@ -569,6 +600,27 @@ export async function runDshRuntimeHost(): Promise<void> {
         type: "rejected",
         acceptance: "not_accepted",
       });
+      return;
+    }
+    if (command.type === "interrupt") {
+      const nativeTurn = activeNativeTurn(handle.agent, command.turnId);
+      if (nativeTurn === undefined) {
+        reject(command.id, "not_accepted");
+        return;
+      }
+      const signal = activePreSteps.get(nativeTurn);
+      if (signal === undefined) {
+        reject(command.id, "not_accepted");
+        return;
+      }
+      try {
+        handle.agent.cancel({ kind: "user" });
+      } catch (error) {
+        reject(command.id, "unknown", safeFailureFrom(error));
+        return;
+      }
+      if (signal.aborted) send({ id: command.id, type: "interrupted" });
+      else reject(command.id, "unknown");
       return;
     }
     const accepted =

@@ -843,6 +843,15 @@ export type AgentFact =
       nativeTruncated?: true;
     })
   | (TurnFactBase & {
+      type: "message";
+      messageKey: MessageKey;
+      role: "harness";
+      source: BackgroundActivitySource;
+      content: MessageContent;
+      /** 仅上游明确报告正文截断时出现。 */
+      nativeTruncated?: true;
+    })
+  | (TurnFactBase & {
       type: "tool.requested";
       toolKey: ToolKey;
       name: string;

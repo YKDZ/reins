@@ -2054,7 +2054,7 @@ function dshMessagesResponse(
     .join("");
 }
 
-async function startDshProviderFixture(): Promise<{
+async function startDshProviderFixture(backgroundGatePath: string): Promise<{
   readonly baseUrl: string;
   readonly requests: JsonRecord[];
   readonly scenarios: string[];
@@ -2070,6 +2070,18 @@ async function startDshProviderFixture(): Promise<{
   const releaseFirst = new Promise<void>((resolve) => {
     releaseFirstRequest = resolve;
   });
+  let interruptTargetStarted!: () => void;
+  const interruptTargetRequest = new Promise<void>((resolve) => {
+    interruptTargetStarted = resolve;
+  });
+  let releaseInterruptTargetRequest!: () => void;
+  const releaseInterruptTarget = new Promise<void>((resolve) => {
+    releaseInterruptTargetRequest = resolve;
+  });
+  let backgroundWakeStarted!: () => void;
+  const backgroundWakeRequest = new Promise<void>((resolve) => {
+    backgroundWakeStarted = resolve;
+  });
   const server: Server = createServer((request, response) => {
     if (request.method === "GET" && request.url === "/wait-first") {
       void firstRequest.then(() => {
@@ -2082,6 +2094,35 @@ async function startDshProviderFixture(): Promise<{
       releaseFirstRequest();
       response.writeHead(200, { "content-type": "text/plain" });
       response.end("released");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/wait-interrupt-target") {
+      void interruptTargetRequest.then(() => {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("ready");
+      });
+      return;
+    }
+    if (
+      request.method === "GET" &&
+      request.url === "/release-interrupt-target"
+    ) {
+      releaseInterruptTargetRequest();
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("released");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/release-background-job") {
+      writeFileSync(backgroundGatePath, "released\n");
+      response.writeHead(200, { "content-type": "text/plain" });
+      response.end("released");
+      return;
+    }
+    if (request.method === "GET" && request.url === "/wait-background-wake") {
+      void backgroundWakeRequest.then(() => {
+        response.writeHead(200, { "content-type": "text/plain" });
+        response.end("ready");
+      });
       return;
     }
     if (request.method !== "POST") {
@@ -2104,37 +2145,72 @@ async function startDshProviderFixture(): Promise<{
           "Generate the session title from this JSON array",
         )
           ? "session-title"
-          : messages.includes("DSH_NEW_TURN_CONFIRMED")
-            ? "new-turn"
-            : messages.includes("OFFICIAL_TOOL_READ_ONCE")
-              ? "tool-result"
-              : messages.includes("Read evidence.txt")
-                ? "initial"
-                : "unknown";
+          : messages.includes("finished [status: completed")
+            ? "background-wake"
+            : messages.includes("started background job bash-")
+              ? "background-result"
+              : messages.includes("DSH_BACKGROUND_JOB_START")
+                ? "background-start"
+                : messages.includes("DSH_AFTER_INTERRUPT_CONFIRMED")
+                  ? "after-interrupt"
+                  : messages.includes("DSH_INTERRUPT_TARGET")
+                    ? "interrupt-target"
+                    : messages.includes("DSH_NEW_TURN_CONFIRMED")
+                      ? "new-turn"
+                      : messages.includes("OFFICIAL_TOOL_READ_ONCE")
+                        ? "tool-result"
+                        : messages.includes("Read evidence.txt")
+                          ? "initial"
+                          : "unknown";
         scenarios.push(scenario);
         assert(scenario !== "unknown", "官方 DSH 发出了未分类模型请求");
         if (scenario === "initial") {
           firstRequestStarted();
           await releaseFirst;
         }
-        const toolCall = scenario === "initial";
+        if (scenario === "interrupt-target") {
+          interruptTargetStarted();
+          await releaseInterruptTarget;
+        }
+        if (scenario === "background-wake") backgroundWakeStarted();
+        const toolCall =
+          scenario === "initial" || scenario === "background-start";
         const text =
           scenario === "session-title"
             ? "DSH_TITLE_CONFIRMED"
             : scenario === "tool-result"
               ? "DSH_READ_CONFIRMED"
-              : "DSH_NEW_TURN_CONFIRMED";
+              : scenario === "after-interrupt"
+                ? "DSH_AFTER_INTERRUPT_CONFIRMED"
+                : scenario === "background-result"
+                  ? "DSH_BACKGROUND_START_CONFIRMED"
+                  : scenario === "background-wake"
+                    ? "DSH_BACKGROUND_WAKE_CONFIRMED"
+                    : "DSH_NEW_TURN_CONFIRMED";
         response.writeHead(200, { "content-type": "text/event-stream" });
         response.end(
           dshMessagesResponse(
             `packed-dsh-${requests.length}`,
             toolCall
-              ? {
-                  type: "tool_use",
-                  id: "packed-dsh-read-once",
-                  name: "read",
-                  input: { file_path: "evidence.txt" },
-                }
+              ? scenario === "background-start"
+                ? {
+                    type: "tool_use",
+                    id: "packed-dsh-background-bash",
+                    name: "bash",
+                    input: {
+                      command:
+                        "while [ ! -f release-background-job ]; do sleep 0.02; done; printf 'DSH_BACKGROUND_JOB_RESULT'",
+                      description:
+                        "Wait for the packed DSH background-job test release gate",
+                      run_in_background: true,
+                    },
+                  }
+                : {
+                    type: "tool_use",
+                    id: "packed-dsh-read-once",
+                    name: "read",
+                    input: { file_path: "evidence.txt" },
+                  }
               : {
                   type: "text",
                   text,
@@ -2163,6 +2239,8 @@ async function startDshProviderFixture(): Promise<{
     scenarios,
     async close() {
       releaseFirstRequest();
+      releaseInterruptTargetRequest();
+      backgroundWakeStarted();
       server.closeAllConnections();
       await new Promise<void>((resolve, reject) => {
         server.close((error) =>
@@ -2191,7 +2269,9 @@ async function runDshRuntimeAcceptance(options: {
     `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(pidPath)}\nexec ${shellQuote(options.daemonPath)} "$@"\n`,
     { mode: 0o700 },
   );
-  const provider = await startDshProviderFixture();
+  const provider = await startDshProviderFixture(
+    join(workerCwd, "release-background-job"),
+  );
   const env: NodeJS.ProcessEnv = {
     ...process.env,
     REINS_SOCKET: socketPath,
@@ -2225,7 +2305,7 @@ async function runDshRuntimeAcceptance(options: {
     const serializedRequest = (scenario: string): string =>
       JSON.stringify(requestFor(scenario)) ?? "";
     assert(
-      provider.requests.length === 4 &&
+      provider.requests.length === 9 &&
         provider.scenarios.filter((scenario) => scenario === "initial")
           .length === 1 &&
         provider.scenarios.filter((scenario) => scenario === "session-title")
@@ -2234,12 +2314,39 @@ async function runDshRuntimeAcceptance(options: {
           .length === 1 &&
         provider.scenarios.filter((scenario) => scenario === "new-turn")
           .length === 1 &&
+        provider.scenarios.filter((scenario) => scenario === "interrupt-target")
+          .length === 1 &&
+        provider.scenarios.filter((scenario) => scenario === "after-interrupt")
+          .length === 1 &&
+        provider.scenarios.filter((scenario) => scenario === "background-start")
+          .length === 1 &&
+        provider.scenarios.filter(
+          (scenario) => scenario === "background-result",
+        ).length === 1 &&
+        provider.scenarios.filter((scenario) => scenario === "background-wake")
+          .length === 1 &&
         serializedRequest("initial").includes('"name":"read"') &&
         serializedRequest("tool-result").includes("OFFICIAL_TOOL_READ_ONCE") &&
         serializedRequest("tool-result").includes(
           "DSH_ACTIVE_STEER_CONFIRMED",
         ) &&
-        serializedRequest("new-turn").includes("DSH_NEW_TURN_CONFIRMED"),
+        serializedRequest("new-turn").includes("DSH_NEW_TURN_CONFIRMED") &&
+        serializedRequest("interrupt-target").includes(
+          "DSH_INTERRUPT_TARGET",
+        ) &&
+        serializedRequest("after-interrupt").includes(
+          "DSH_AFTER_INTERRUPT_CONFIRMED",
+        ) &&
+        !serializedRequest("after-interrupt").includes(
+          "DSH_DRAIN_INPUT_MUST_NOT_EXECUTE",
+        ) &&
+        serializedRequest("background-start").includes('"name":"bash"') &&
+        serializedRequest("background-result").includes(
+          "started background job bash-",
+        ) &&
+        serializedRequest("background-wake").includes(
+          "finished [status: completed",
+        ),
       "完整官方 DSH profile 未完成标题、原生 Read 工具及同会话后续回合",
     );
   } finally {

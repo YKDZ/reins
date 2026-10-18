@@ -898,16 +898,28 @@ export const domainEventSchema = v.union([
     messageId: messageIdSchema,
     delta: v.string(),
   }),
-  v.strictObject({
-    type: v.literal("message"),
-    sessionId: sessionIdSchema,
-    turnId: turnIdSchema,
-    messageId: messageIdSchema,
-    role: v.union([v.literal("caller"), v.literal("worker")]),
-    content: messageContentSchema,
-    // 仅上游明确报告截断时标记；缺省不表示 Reins 历史存在缺口。
-    nativeTruncated: v.optional(v.literal(true)),
-  }),
+  v.union([
+    v.strictObject({
+      type: v.literal("message"),
+      sessionId: sessionIdSchema,
+      turnId: turnIdSchema,
+      messageId: messageIdSchema,
+      role: v.union([v.literal("caller"), v.literal("worker")]),
+      content: messageContentSchema,
+      // 仅上游明确报告截断时标记；缺省不表示 Reins 历史存在缺口。
+      nativeTruncated: v.optional(v.literal(true)),
+    }),
+    v.strictObject({
+      type: v.literal("message"),
+      sessionId: sessionIdSchema,
+      turnId: turnIdSchema,
+      messageId: messageIdSchema,
+      role: v.literal("harness"),
+      source: backgroundActivitySourceSchema,
+      content: messageContentSchema,
+      nativeTruncated: v.optional(v.literal(true)),
+    }),
+  ]),
   v.strictObject({
     type: v.literal("tool.requested"),
     sessionId: sessionIdSchema,

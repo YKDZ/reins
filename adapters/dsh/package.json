@@ -48,6 +48,7 @@
     "@deepseek-ai/dsh-session-title-llm": "catalog:",
     "@deepseek-ai/dsh-shell": "catalog:",
     "@deepseek-ai/dsh-spill": "catalog:",
+    "@deepseek-ai/dsh-tool-jobs": "catalog:",
     "@deepseek-ai/dsh-util-time": "catalog:",
     "@deepseek-ai/dsh-workflow": "catalog:",
     "@reins/adapter-kit": "workspace:*",

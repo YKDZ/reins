@@ -1,5 +1,9 @@
+import type { JobRegisteredData } from "@deepseek-ai/dsh-jobs";
+import type {} from "@deepseek-ai/dsh-tool-jobs";
 import { HarnessSession, type DiagnosticSink } from "@reins/adapter-kit";
 import type {
+  BackgroundActivityCause,
+  BackgroundActivitySource,
   AdapterDriverFactory,
   HarnessFailure,
   MachineError,
@@ -8,12 +12,14 @@ import type {
   MessageId,
   SessionId,
   TurnId,
+  ToolCallId,
   WorkerDriver,
   WorkerSpec,
 } from "@reins/protocol";
 import {
   makeTextEvidence,
   WorkerDeliveryFailure,
+  WorkerInterruptFailure,
   WorkerStartFailure,
 } from "@reins/protocol";
 
@@ -30,6 +36,16 @@ type AssistantSessionEvent = Extract<
 type PendingAssistantMessage = {
   readonly event: AssistantSessionEvent;
   readonly turnId: TurnId;
+};
+
+type NativeToolCall = {
+  readonly turnId: TurnId;
+  readonly toolCallId: ToolCallId;
+};
+
+type NativeJob = {
+  readonly source: BackgroundActivitySource;
+  readonly causedBy?: BackgroundActivityCause;
 };
 
 type TurnFailureEvidence = Parameters<HarnessSession["failTurn"]>[1];
@@ -104,7 +120,7 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 }
 
 export function createDshDriver(): AdapterDriverFactory {
-  return ({ emit, diagnostics }) => {
+  return ({ emit, beginAutonomousTurn, diagnostics }) => {
     const diagnosticSink: DiagnosticSink = diagnostics;
     let host: DshHostClient | undefined;
     let session: HarnessSession | undefined;
@@ -117,6 +133,10 @@ export function createDshDriver(): AdapterDriverFactory {
     const attemptTurns = new Map<string, TurnId>();
     const attemptByEventSeq = new Map<number, string>();
     const assistantByEventSeq = new Map<number, PendingAssistantMessage>();
+    const nativeTurns = new Map<number, TurnId>();
+    const nativeToolCalls = new Map<string, NativeToolCall>();
+    const nativeJobs = new Map<string, NativeJob>();
+    let hostEventQueue = Promise.resolve();
 
     function emitFailureTurn(failure: HarnessFailure): void {
       if (session === undefined || session.turnId === null) return;
@@ -134,7 +154,54 @@ export function createDshDriver(): AdapterDriverFactory {
     }
 
     function turnForEvent(event: DshHostEvent): TurnId | undefined {
-      return "turnId" in event ? event.turnId : undefined;
+      if ("turnId" in event && event.turnId !== undefined) return event.turnId;
+      return "nativeTurn" in event && event.nativeTurn !== undefined
+        ? nativeTurns.get(event.nativeTurn)
+        : undefined;
+    }
+
+    function jobCause(data: JobRegisteredData): NativeJob {
+      const rootCallId = data.toolCall?.rootCallId;
+      const call =
+        rootCallId === undefined ? undefined : nativeToolCalls.get(rootCallId);
+      return {
+        source: { kind: "tool-jobs", id: String(data.jobId) },
+        ...(call === undefined
+          ? {}
+          : {
+              causedBy: {
+                turnId: call.turnId,
+                toolCallId: call.toolCallId,
+              },
+            }),
+      };
+    }
+
+    function emitJobActivity(
+      data: JobRegisteredData,
+      status: "active" | "completed" | "failed" | "cancelled",
+    ): NativeJob {
+      const job = nativeJobs.get(String(data.jobId)) ?? jobCause(data);
+      nativeJobs.set(String(data.jobId), job);
+      if (session === undefined) return job;
+      emit({
+        type: "background.activity",
+        sessionId: session.sessionId,
+        source: job.source,
+        status,
+        ...(job.causedBy === undefined ? {} : { causedBy: job.causedBy }),
+      });
+      return job;
+    }
+
+    function nativeNoticeJobId(
+      event: Extract<
+        import("@deepseek-ai/dsh-session").SessionEvent,
+        { readonly type: "user/message" }
+      >,
+    ): string | undefined {
+      const text = textContent(event.data.content);
+      return /^background job ([^\s]+)/u.exec(text ?? "")?.[1];
     }
 
     function flushAssistantMessage(seq: number): void {
@@ -242,18 +309,34 @@ export function createDshDriver(): AdapterDriverFactory {
       }
     }
 
-    function handleSessionEvent(
+    async function handleSessionEvent(
       event: Extract<DshHostEvent, { type: "session-event" }>,
-    ): void {
+    ): Promise<void> {
       if (session === undefined) return;
       const turnId = turnForEvent(event);
       const nativeEvent = event.event;
       if (nativeEvent.type === "turn/end") {
         handleTurnEnd(nativeEvent, turnId);
+        if (event.nativeTurn !== undefined)
+          nativeTurns.delete(event.nativeTurn);
         return;
       }
-      if (turnId === undefined || turnId !== session.turnId) return;
+      if (nativeEvent.type === "job/registered") {
+        emitJobActivity(nativeEvent.data, "active");
+        return;
+      }
+      if (nativeEvent.type === "job/settled") {
+        const status =
+          nativeEvent.data.status === "completed"
+            ? "completed"
+            : nativeEvent.data.status === "failed"
+              ? "failed"
+              : "cancelled";
+        emitJobActivity(nativeEvent.data, status);
+        return;
+      }
       if (nativeEvent.type === "assistant/message") {
+        if (turnId === undefined || turnId !== session.turnId) return;
         assistantByEventSeq.set(nativeEvent.seq, {
           event: nativeEvent,
           turnId,
@@ -262,38 +345,66 @@ export function createDshDriver(): AdapterDriverFactory {
         return;
       }
       if (nativeEvent.type === "user/message") {
-        if (event.callerMessageId === undefined) return;
+        if (event.callerMessageId !== undefined) {
+          if (turnId === undefined || turnId !== session.turnId) return;
+          emit({
+            type: "message",
+            sessionId: session.sessionId,
+            turnId,
+            messageId: event.callerMessageId,
+            role: "caller",
+            content: nativeContent(nativeEvent.data.content, session),
+          });
+          return;
+        }
+        if (
+          nativeEvent.data.source.kind !== "tool-jobs" ||
+          nativeEvent.data.source.form !== "notice"
+        )
+          return;
+        const nativeJobId = nativeNoticeJobId(nativeEvent);
+        const job =
+          nativeJobId === undefined ? undefined : nativeJobs.get(nativeJobId);
+        const source = job?.source ?? {
+          kind: "tool-jobs",
+          id: nativeJobId ?? String(nativeEvent.data.id),
+        };
+        let messageTurnId = turnId;
+        if (messageTurnId === undefined) {
+          if (
+            event.nativeTurn === undefined ||
+            beginAutonomousTurn === undefined
+          )
+            return;
+          messageTurnId = await beginAutonomousTurn({
+            source,
+            ...(job?.causedBy === undefined ? {} : { causedBy: job.causedBy }),
+          });
+          session.beginTurn(messageTurnId);
+          nativeTurns.set(event.nativeTurn, messageTurnId);
+        }
+        if (messageTurnId !== session.turnId) return;
         emit({
           type: "message",
           sessionId: session.sessionId,
-          turnId,
-          messageId: event.callerMessageId,
-          role: "caller",
+          turnId: messageTurnId,
+          messageId: session.messageId(nativeEvent.data.id),
+          role: "harness",
+          source,
           content: nativeContent(nativeEvent.data.content, session),
-        });
-        return;
-      }
-      if (nativeEvent.type === "tool/call") {
-        session.toolNames.set(nativeEvent.data.callId, nativeEvent.data.name);
-        emit({
-          type: "tool.requested",
-          sessionId: session.sessionId,
-          turnId,
-          toolCallId: session.toolCallId(nativeEvent.data.callId),
-          name: nativeEvent.data.name,
-          input: nativeEvent.data.arguments,
         });
         return;
       }
       if (nativeEvent.type === "tool/result") {
         const nativeCallId = nativeEvent.data.message.source.callId;
         const name = session.toolNames.get(nativeCallId);
-        if (name === undefined) return;
+        const nativeCall = nativeToolCalls.get(nativeCallId);
+        if (name === undefined || nativeCall === undefined) return;
         emit({
           type: "tool.completed",
           sessionId: session.sessionId,
-          turnId,
-          toolCallId: session.toolCallId(nativeCallId),
+          turnId: nativeCall.turnId,
+          toolCallId: nativeCall.toolCallId,
           name,
           result: nativeContent(nativeEvent.data.message.content, session),
           ...(nativeEvent.data.error === undefined
@@ -302,18 +413,46 @@ export function createDshDriver(): AdapterDriverFactory {
           isError: nativeEvent.data.message.isError === true,
         });
         session.toolNames.delete(nativeCallId);
+        nativeToolCalls.delete(nativeCallId);
+        return;
+      }
+      if (turnId === undefined || turnId !== session.turnId) return;
+      if (nativeEvent.type === "tool/call") {
+        session.toolNames.set(nativeEvent.data.callId, nativeEvent.data.name);
+        const toolCallId = session.toolCallId(nativeEvent.data.callId);
+        nativeToolCalls.set(nativeEvent.data.callId, { turnId, toolCallId });
+        emit({
+          type: "tool.requested",
+          sessionId: session.sessionId,
+          turnId,
+          toolCallId,
+          name: nativeEvent.data.name,
+          input: nativeEvent.data.arguments,
+        });
       }
     }
 
-    function handleHostEvent(event: DshHostEvent): void {
+    async function handleHostEvent(event: DshHostEvent): Promise<void> {
       if (event.type === "assistant-stream") {
         handleAssistantFrame(event);
       } else if (event.type === "session-event") {
-        handleSessionEvent(event);
+        await handleSessionEvent(event);
       } else if (event.type === "fatal") {
         if (!startAccepted || terminating) return;
         emitFailureTurn(failureFromSafeFacts(event.failure));
       }
+    }
+
+    function enqueueHostEvent(event: DshHostEvent): void {
+      hostEventQueue = hostEventQueue
+        .then(() => handleHostEvent(event))
+        .catch(() => {
+          if (session?.turnId !== null && session !== undefined)
+            emitFailureTurn({
+              failureCategory: "runtime_unavailable",
+              retryDisposition: "external_state_change",
+            });
+        });
     }
 
     function assertHostResponse(
@@ -350,10 +489,14 @@ export function createDshDriver(): AdapterDriverFactory {
 
         terminating = false;
         startAccepted = false;
+        hostEventQueue = Promise.resolve();
         attemptMessageIds.clear();
         attemptTurns.clear();
         attemptByEventSeq.clear();
         assistantByEventSeq.clear();
+        nativeTurns.clear();
+        nativeToolCalls.clear();
+        nativeJobs.clear();
         session = new HarnessSession({
           sessionId: spec.sessionId,
           emit,
@@ -369,7 +512,7 @@ export function createDshDriver(): AdapterDriverFactory {
               ? { ...process.env, DSH_PERMISSION_MODE: "danger-full-access" }
               : process.env;
           host = new DshHostClient({ cwd: spec.cwd, env: environment });
-          disposeHostEvents = host.onEvent(handleHostEvent);
+          disposeHostEvents = host.onEvent(enqueueHostEvent);
           disposeHostExit = host.onExit(handleHostExit);
           await host.readyHost();
           hostStartSent = true;
@@ -439,11 +582,30 @@ export function createDshDriver(): AdapterDriverFactory {
           );
         }
       },
-      async interrupt(): Promise<void> {
-        throw {
-          code: "unsupported_feature",
-          feature: "interrupt",
-        } satisfies MachineError;
+      async interrupt(sessionId: SessionId, turnId: TurnId): Promise<void> {
+        if (
+          host === undefined ||
+          session === undefined ||
+          session.sessionId !== sessionId
+        )
+          throw { code: "session_not_found", sessionId } satisfies MachineError;
+        try {
+          const response = await host.request({ type: "interrupt", turnId });
+          if (response.type === "interrupted") return;
+          throw new DshHostRequestError(
+            "The official DSH host did not confirm interruption",
+            response.type === "rejected" ? response.acceptance : "unknown",
+            "failure" in response ? response.failure : undefined,
+          );
+        } catch (error) {
+          const acceptance =
+            error instanceof DshHostRequestError ? error.acceptance : "unknown";
+          throw new WorkerInterruptFailure(
+            "The official DSH host did not confirm interruption acceptance",
+            acceptance,
+            { cause: error },
+          );
+        }
       },
       resolvePermission(): void {
         throw {
@@ -459,6 +621,7 @@ export function createDshDriver(): AdapterDriverFactory {
         termination = (async () => {
           try {
             if (currentHost !== undefined) await currentHost.close();
+            await hostEventQueue;
           } finally {
             disposeHostEvents?.();
             disposeHostExit?.();

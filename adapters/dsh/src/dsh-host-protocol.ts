@@ -1,5 +1,7 @@
 import type { AssistantStreamFrame } from "@deepseek-ai/dsh-agent";
+import type {} from "@deepseek-ai/dsh-jobs";
 import type { SessionEvent } from "@deepseek-ai/dsh-session";
+import type {} from "@deepseek-ai/dsh-tool-jobs";
 import type { MessageId, TurnId } from "@reins/protocol";
 
 export type DshSafeFailure = {
@@ -29,6 +31,11 @@ export type DshHostCommand =
       readonly messageId?: MessageId;
       readonly message: string;
     }
+  | {
+      readonly id: number;
+      readonly type: "interrupt";
+      readonly turnId: TurnId;
+    }
   | { readonly id: number; readonly type: "close" }
   | { readonly id: number; readonly type: "catalog" };
 
@@ -38,12 +45,14 @@ export type DshHostEvent =
   | {
       readonly type: "session-event";
       readonly event: SessionEvent;
+      readonly nativeTurn?: number;
       readonly turnId?: TurnId;
       readonly callerMessageId?: MessageId;
     }
   | {
       readonly type: "assistant-stream";
       readonly frame: AssistantStreamFrame;
+      readonly nativeTurn?: number;
       readonly turnId?: TurnId;
     };
 
@@ -62,6 +71,7 @@ export type DshHostResponse =
       readonly type: "accepted";
       readonly nativeMessageId: string;
     }
+  | { readonly id: number; readonly type: "interrupted" }
   | {
       readonly id: number;
       readonly type: "catalog";
