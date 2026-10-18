@@ -11,7 +11,7 @@ import {
   diagnosticRecordSchema,
   makeDiagnosticId,
   runtimeScopeIdSchema,
-  sessionNameSchema,
+  sessionIdSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test, vi } from "vitest";
@@ -35,7 +35,6 @@ const state: DaemonState = {
     runtimeScopeIdSchema,
     "00000000-0000-4000-8000-000000000000",
   ),
-  durable: true,
   retention: { maxAgeMs: 1, maxBytes: 1 },
 };
 const temporaryDirectories: string[] = [];
@@ -331,7 +330,7 @@ describe("DiagnosticsRuntime", () => {
     ).toBeUndefined();
     const diagnosticId = await runtime.record(input());
 
-    expect(diagnosticId).toMatch(/^da-2/);
+    expect(diagnosticId).toMatch(/^diagnostic:a:2$/u);
     await runtime.close();
   });
 
@@ -508,7 +507,6 @@ describe("DiagnosticsRuntime", () => {
       directory: root,
       diagnosticsDirectory,
       runtimeScopeId: state.runtimeScopeId,
-      durable: true,
       retention: { maxAgeMs: 1000, maxBytes: 1 },
     };
 
@@ -553,9 +551,10 @@ describe("DiagnosticsRuntime", () => {
     const store = new MemoryStore();
     const runtime = await openRuntime(store);
 
-    expect(runtime.sessionId(v.parse(sessionNameSchema, "reviewer"))).toBe(
-      "reviewer@ga",
-    );
+    const firstSessionId = runtime.sessionId();
+    const secondSessionId = runtime.sessionId();
+    expect(v.safeParse(sessionIdSchema, firstSessionId).success).toBe(true);
+    expect(secondSessionId).not.toBe(firstSessionId);
     await runtime.close();
     await runtime.close();
     expect(store.closed).toBe(1);

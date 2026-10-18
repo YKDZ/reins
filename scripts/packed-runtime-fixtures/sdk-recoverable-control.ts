@@ -1,10 +1,14 @@
 import {
   connect,
+  parseDiagnosticId,
+  parsePermissionHandle,
+  parseResumeCursor,
+  parseSessionHandle,
+  parseTurnHandle,
   ReinsSdkError,
   type OperationCredential,
   type ReinsConnection,
   type AgentFact,
-  type DiagnosticId,
   type InterruptInput,
   type PermissionHandle,
   type PermissionResolution,
@@ -84,7 +88,7 @@ async function connectSdk(): Promise<ReinsConnection> {
 
 function spawnInput(): SpawnInput {
   return {
-    sessionName: "packed-recover",
+    sessionLabel: "packed-recover",
     harness: "codex",
     message: "  exact task\nkeep spacing  ",
     cwd: required("REINS_WORKER_CWD"),
@@ -116,17 +120,18 @@ async function expectFailure<T>(
 async function prepareSpawn(): Promise<void> {
   const connection = await connectSdk();
   try {
+    const sessionsBefore = await connection.list();
     const credential = connection.prepareOperation("spawn");
     const input = spawnInput();
     const serialized = publishIntent({ credential, input });
-    const sessions = await connection.list();
-    if (sessions.some((session) => session.sessionName === input.sessionName))
+    const sessionsAfter = await connection.list();
+    if (sessionsAfter.length !== sessionsBefore.length)
       throw new Error("Preparing an operation created a session");
     process.stdout.write(
       `${JSON.stringify({
         prepared: true,
         serialized: true,
-        sessionCount: sessions.length,
+        sessionCount: sessionsAfter.length,
         daemonGeneration: connection.handshake.daemonGeneration,
         intent: serialized,
       })}\n`,
@@ -266,7 +271,7 @@ async function spawnWithNewCredential(): Promise<void> {
       connection.spawn(
         {
           ...intent.input,
-          sessionName: "packed-model-catalog-retry",
+          sessionLabel: "packed-model-catalog-retry",
         },
         connection.prepareOperation("spawn"),
       ),
@@ -291,7 +296,7 @@ async function spawnWithNewCredential(): Promise<void> {
 function sendInput(): SendInput {
   return {
     placement: "active_turn",
-    turnHandle: required("REINS_TARGET_TURN") as TurnHandle,
+    turnHandle: parseTurnHandle(required("REINS_TARGET_TURN")),
     message: "  exact delivered note\nkeep spacing  ",
   };
 }
@@ -318,7 +323,7 @@ async function prepareNewTurn(): Promise<void> {
       credential: connection.prepareOperation("send"),
       input: {
         placement: "new_turn",
-        sessionHandle: required("REINS_TARGET_SESSION") as SessionHandle,
+        sessionHandle: parseSessionHandle(required("REINS_TARGET_SESSION")),
         message: required("REINS_NEW_TURN_MESSAGE"),
       },
     };
@@ -367,7 +372,7 @@ async function waitOrdered(): Promise<void> {
   const connection = await connectSdk();
   try {
     const result = await connection.wait({
-      targets: parsedTargets as TurnHandle[],
+      targets: parsedTargets.map((target) => parseTurnHandle(target)),
       completion,
       timeoutMs,
     });
@@ -446,7 +451,7 @@ async function prepareInterrupt(): Promise<void> {
   try {
     const intent: InterruptIntent = {
       credential: connection.prepareOperation("interrupt"),
-      input: { turnHandle: required("REINS_TARGET_TURN") as TurnHandle },
+      input: { turnHandle: parseTurnHandle(required("REINS_TARGET_TURN")) },
     };
     process.stdout.write(
       `${JSON.stringify({ prepared: true, intent: publishIntent(intent) })}\n`,
@@ -701,7 +706,7 @@ async function staleInterrupt(): Promise<void> {
 }
 
 async function staleHandle(): Promise<void> {
-  const sessionHandle = required("REINS_TARGET_SESSION") as SessionHandle;
+  const sessionHandle = parseSessionHandle(required("REINS_TARGET_SESSION"));
   const connection = await connectSdk();
   try {
     const result = await connection.kill(
@@ -723,7 +728,9 @@ async function preparePermission(): Promise<void> {
   try {
     const intent: PermissionIntent = {
       credential: connection.prepareOperation("resolvePermission"),
-      permissionHandle: required("REINS_PERMISSION_HANDLE") as PermissionHandle,
+      permissionHandle: parsePermissionHandle(
+        required("REINS_PERMISSION_HANDLE"),
+      ),
       resolution: { outcome: "allow", scope: "once" },
     };
     process.stdout.write(
@@ -739,7 +746,7 @@ async function spawnPermission(): Promise<void> {
   try {
     const result = await connection.spawn(
       {
-        sessionName: required("REINS_PERMISSION_SESSION_NAME"),
+        sessionLabel: required("REINS_PERMISSION_SESSION_LABEL"),
         harness: "codex",
         message: "packed-permission",
         cwd: required("REINS_WORKER_CWD"),
@@ -753,7 +760,7 @@ async function spawnPermission(): Promise<void> {
 }
 
 async function observePermission(): Promise<void> {
-  const sessionHandle = required("REINS_TARGET_SESSION") as SessionHandle;
+  const sessionHandle = parseSessionHandle(required("REINS_TARGET_SESSION"));
   const connection = await connectSdk();
   const subscription = await connection.attach(
     { scope: "session", sessionHandle },
@@ -943,7 +950,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
     const input = {
       ...spawnInput(),
       message: "packed-harness-failure",
-      sessionName: "packed-harness-diagnostics",
+      sessionLabel: "packed-harness-diagnostics",
     };
     const spawned = await connection.spawn(
       input,
@@ -964,7 +971,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
     )
       throw new Error("The installed SDK omitted typed Harness failure facts");
     const result = await connection.diagnostics({
-      diagnosticId: failedTurn.diagnosticId as DiagnosticId,
+      diagnosticId: parseDiagnosticId(failedTurn.diagnosticId),
     });
     if (
       !("record" in result) ||
@@ -1007,7 +1014,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
       );
     const mismatchedSession = await expectFailure(() =>
       connection.diagnostics({
-        sessionHandle: "different@g1" as SessionHandle,
+        sessionHandle: "session:different:g1" as SessionHandle,
         turnHandle: spawned.turnHandle,
       }),
     );
@@ -1046,7 +1053,7 @@ async function harnessFailureDiagnostics(): Promise<void> {
 }
 
 async function replayFacts(): Promise<void> {
-  const sessionHandle = required("REINS_TARGET_SESSION") as SessionHandle;
+  const sessionHandle = parseSessionHandle(required("REINS_TARGET_SESSION"));
   const target = { scope: "session" as const, sessionHandle };
   const connection = await connectSdk();
   const facts: AgentFact[] = [];
@@ -1092,7 +1099,7 @@ async function replayFacts(): Promise<void> {
   try {
     const subscription = await resumedConnection.attach(target, {
       mode: "after",
-      cursor: (disconnectedCheckpoint ?? checkpoint) as ResumeCursor,
+      cursor: parseResumeCursor(disconnectedCheckpoint ?? checkpoint),
     });
     replayed = subscription.establishment.replayed;
     try {
@@ -1173,7 +1180,7 @@ async function replayWindow(): Promise<void> {
   const connection = await connectSdk();
   try {
     const input: SpawnInput = {
-      sessionName: "packed-history-window",
+      sessionLabel: "packed-history-window",
       harness: "qoder",
       message: JSON.stringify({
         gate: required("REINS_HISTORY_GATE"),

@@ -1,9 +1,18 @@
 import {
   connect,
+  parseDiagnosticId,
+  parseOperationCredential,
+  parseSessionHandle,
+  parseTurnHandle,
+  serializeDiagnosticId,
+  serializeOperationCredential,
+  serializeSessionHandle,
+  serializeTurnHandle,
   type AgentTarget,
   type HarnessId,
   type ModelCatalogFailure,
   type ModelCatalogResult,
+  type DiagnosticId,
   type ReinsConnection,
   type ResumeCursor,
   type SendInput,
@@ -17,12 +26,13 @@ declare const connection: ReinsConnection;
 declare const sessionHandle: SessionHandle;
 declare const turnHandle: TurnHandle;
 declare const resumeCursor: ResumeCursor;
+declare const diagnosticId: DiagnosticId;
 const dynamicModelId: string = "vendor:model-2031-05-preview";
 const dynamicReasoningEffort: string = "vendor-calibration-mode";
 
 const spawnInput: SpawnInput = {
   harness: "codex",
-  sessionName: "repeated labels remain valid consumer data",
+  sessionLabel: "repeated labels remain valid consumer data",
   message: "dynamic task input",
   cwd: "/consumer/workspace",
   model: dynamicModelId,
@@ -50,6 +60,17 @@ const resumed = connection.attach(target, {
   mode: "after",
   cursor: resumeCursor,
 });
+const restoredSessionHandle = parseSessionHandle(
+  serializeSessionHandle(sessionHandle),
+);
+const restoredTurnHandle = parseTurnHandle(serializeTurnHandle(turnHandle));
+const restoredCredential = parseOperationCredential(
+  "spawn",
+  serializeOperationCredential("spawn", spawnCredential),
+);
+const restoredDiagnosticId = parseDiagnosticId(
+  serializeDiagnosticId(diagnosticId),
+);
 
 const supportedHarness: HarnessId = "qoder";
 function spawnWithHarness<Harness extends SpawnInput["harness"]>(
@@ -87,3 +108,7 @@ void activeTurnSend;
 void newTurnSend;
 void waitInput;
 void resumed;
+void restoredSessionHandle;
+void restoredTurnHandle;
+void restoredCredential;
+void restoredDiagnosticId;

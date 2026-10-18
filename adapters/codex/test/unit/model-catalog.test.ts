@@ -6,7 +6,6 @@ import type {
   DiagnosticId,
   DriverDiagnosticFact,
   SessionId,
-  SessionName,
   TurnId,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
@@ -51,7 +50,7 @@ describe("Codex 模型目录", () => {
     modelCatalogFake.transport.start = () => {
       modelCatalogStarts += 1;
     };
-    const sessionId = "model-catalog-worker@g1" as SessionId;
+    const sessionId = "session:capabilities-worker:g1" as SessionId;
     const worker = createCodexDriver({
       transportFactory: () => workerFake.transport,
     })({
@@ -64,7 +63,6 @@ describe("Codex 模型目录", () => {
       worker.start({
         sessionId,
         turnId: "t1" as TurnId,
-        sessionName: "model-catalog-worker" as SessionName,
         harness: "codex",
         message: "caller task",
         cwd: "/tmp/demo",

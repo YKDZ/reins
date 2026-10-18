@@ -49,7 +49,6 @@ if (mode === "append-failure") {
       return {
         directory: "/fixture",
         diagnosticsDirectory: "/fixture/diagnostics",
-        durable: false,
         retention: { maxAgeMs: 1, maxBytes: 1 },
       };
     },
@@ -86,10 +85,11 @@ if (mode === "append-failure") {
       },
     ],
   ]);
+  let sessionCounter = 0;
   const daemon = createDaemonForTest({
     transport: createUnixSocketServer({ path: socketPath }),
     adapters,
-    identity: { session: (name) => `${name}@g1` },
+    identity: { session: () => `session:daemon-fixture:${++sessionCounter}` },
     diagnostics,
     idleTimeoutMs: 100,
   });

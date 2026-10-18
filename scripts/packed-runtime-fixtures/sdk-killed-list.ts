@@ -1,4 +1,4 @@
-import { connect, type SessionHandle } from "@ykdz/reins-sdk";
+import { connect, parseSessionHandle } from "@ykdz/reins-sdk";
 
 declare const process: {
   env: Record<string, string | undefined>;
@@ -8,14 +8,15 @@ declare const process: {
 async function main(): Promise<void> {
   const socketPath = process.env.REINS_SOCKET;
   const consumerContext = process.env.REINS_CONSUMER_CONTEXT;
-  const sessionHandle = process.env.REINS_TARGET_SESSION;
+  const serializedSessionHandle = process.env.REINS_TARGET_SESSION;
   if (
     socketPath === undefined ||
     consumerContext === undefined ||
-    sessionHandle === undefined
+    serializedSessionHandle === undefined
   ) {
     throw new Error("The SDK list fixture needs socket, context, and handle");
   }
+  const sessionHandle = parseSessionHandle(serializedSessionHandle);
 
   const connection = await connect({
     socketPath,
@@ -23,7 +24,7 @@ async function main(): Promise<void> {
   });
   try {
     const sessions = await connection.list({
-      sessionHandle: sessionHandle as SessionHandle,
+      sessionHandle,
     });
     const [session] = sessions;
     if (

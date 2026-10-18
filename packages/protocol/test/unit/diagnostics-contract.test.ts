@@ -19,7 +19,6 @@ import {
   protocolResultSchemaFor,
   requestIdSchema,
   sessionIdSchema,
-  sessionNameSchema,
   toolCallIdSchema,
   transportFailureFactSchema,
   turnIdSchema,
@@ -33,7 +32,6 @@ import {
   type MachineError,
   type PermissionId,
   type RequestId,
-  type SessionName,
   type SessionId,
   type ToolCallId,
   type TurnId,
@@ -45,7 +43,7 @@ const ok = (schema: v.GenericSchema, input: unknown): void =>
 const bad = (schema: v.GenericSchema, input: unknown): void =>
   expect(v.safeParse(schema, input).success).toBe(false);
 
-const sessionId = "reviewer@g7";
+const sessionId = "session:reviewer:g7";
 const diagnosticId = makeDiagnosticId("7", "42");
 
 describe("worker event rejection contract", () => {
@@ -302,81 +300,9 @@ describe("worker event rejection contract", () => {
 });
 
 describe("typed identifiers", () => {
-  test("DiagnosticId check character detects every one-character edit and adjacent transposition", () => {
-    const vector = "d1-098";
-    ok(diagnosticIdSchema, vector);
-    bad(diagnosticIdSchema, "d1-908");
-    bad(diagnosticIdSchema, "d1-102");
-    bad(diagnosticIdSchema, "d11-02");
-    ok(diagnosticIdSchema, "d1-101");
-    bad(diagnosticIdSchema, "d11-01");
-
-    const alphabet = "0123456789abcdefghijklmnopqrstuvwxyz";
-    for (let index = 0; index < vector.length; index += 1) {
-      if (vector[index] === "-") continue;
-      for (const replacement of alphabet) {
-        if (replacement === vector[index]) continue;
-        bad(
-          diagnosticIdSchema,
-          `${vector.slice(0, index)}${replacement}${vector.slice(index + 1)}`,
-        );
-      }
-    }
-
-    const exhaustive = makeDiagnosticId("1", alphabet);
-    for (let index = 1; index < exhaustive.length - 1; index += 1) {
-      if (exhaustive[index] === exhaustive[index + 1]) continue;
-      const swapped =
-        exhaustive.slice(0, index) +
-        exhaustive[index + 1] +
-        exhaustive[index] +
-        exhaustive.slice(index + 2);
-      bad(diagnosticIdSchema, swapped);
-    }
-
-    for (const character of alphabet) {
-      const moveRight = makeDiagnosticId("1", `${character}0`);
-      const separator = moveRight.indexOf("-");
-      bad(
-        diagnosticIdSchema,
-        moveRight.slice(0, separator) +
-          character +
-          "-" +
-          moveRight.slice(separator + 2),
-      );
-
-      const moveLeft = makeDiagnosticId(`1${character}`, "0");
-      const leftSeparator = moveLeft.indexOf("-");
-      bad(
-        diagnosticIdSchema,
-        moveLeft.slice(0, leftSeparator - 1) +
-          "-" +
-          character +
-          moveLeft.slice(leftSeparator + 1),
-      );
-    }
-
-    for (let length = 1; length <= 72; length += 1) {
-      const generated = makeDiagnosticId("a".repeat(length), "b0");
-      const separator = generated.indexOf("-");
-      bad(
-        diagnosticIdSchema,
-        generated.slice(0, separator) + "b-" + generated.slice(separator + 2),
-      );
-    }
-  });
-
-  test("validates owned ID formats and rejects cross-brand assignment", () => {
-    ok(sessionNameSchema, "code-reviewer");
-    bad(sessionNameSchema, "Core");
-    bad(sessionNameSchema, "daemon");
+  test("keeps domain IDs distinct by type", () => {
     ok(sessionIdSchema, sessionId);
-    bad(sessionIdSchema, "s1");
-    bad(sessionIdSchema, "daemon@g1");
     ok(diagnosticIdSchema, diagnosticId);
-    bad(diagnosticIdSchema, `${diagnosticId.slice(0, -1)}z`);
-
-    const sessionName: SessionName = v.parse(sessionNameSchema, "reviewer");
     const sid: SessionId = v.parse(sessionIdSchema, sessionId);
     const tid: TurnId = v.parse(turnIdSchema, "t1");
     const pid: PermissionId = v.parse(permissionIdSchema, "p1");
@@ -388,8 +314,6 @@ describe("typed identifiers", () => {
     const wrongSession: SessionId = tid;
     // @ts-expect-error independently branded IDs are not interchangeable.
     const wrongDiagnostic: DiagnosticId = mid;
-    // @ts-expect-error SessionName is not an addressable SessionId.
-    const nameAsSession: SessionId = sessionName;
     // @ts-expect-error PermissionId is not a TurnId.
     const permissionAsTurn: TurnId = pid;
     // @ts-expect-error ToolCallId is not a MessageId.
@@ -401,23 +325,21 @@ describe("typed identifiers", () => {
       did,
       wrongSession,
       wrongDiagnostic,
-      nameAsSession,
       permissionAsTurn,
       toolAsMessage,
       requestAsDiagnostic,
     ];
   });
 
-  test("every owned identifier schema rejects malformed and foreign formats", () => {
+  test("owned identifier schemas reject empty values", () => {
     const cases: Array<[v.GenericSchema, string, string]> = [
-      [sessionNameSchema, "reviewer", "Reviewer"],
-      [sessionIdSchema, "reviewer@g7", "reviewer"],
-      [turnIdSchema, "t1", "T1"],
-      [permissionIdSchema, "p1", "p/1"],
-      [messageIdSchema, "m1", "m_1"],
-      [toolCallIdSchema, "c1", "c.1"],
-      [requestIdSchema, "r1", "r 1"],
-      [diagnosticIdSchema, diagnosticId, "d7-42x"],
+      [sessionIdSchema, "session:g7:1", ""],
+      [turnIdSchema, "turn:1", ""],
+      [permissionIdSchema, "permission:1", ""],
+      [messageIdSchema, "message:1", ""],
+      [toolCallIdSchema, "tool:1", ""],
+      [requestIdSchema, "r1", ""],
+      [diagnosticIdSchema, diagnosticId, ""],
     ];
     for (const [schema, valid, invalid] of cases) {
       ok(schema, valid);
@@ -1348,7 +1270,6 @@ describe("machine errors", () => {
         code: "diagnostics_store_corrupt",
         cause: { kind: "io", message: "corrupt" },
       },
-      { code: "session_name_conflict", sessionName: "reviewer" },
       { code: "daemon_timeout" },
       { code: "invalid_daemon_response" },
       {

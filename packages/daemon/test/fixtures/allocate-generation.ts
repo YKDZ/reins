@@ -14,7 +14,6 @@ const state: DaemonState = {
     runtimeScopeIdSchema,
     "00000000-0000-4000-8000-000000000000",
   ),
-  durable: true,
   retention: { maxAgeMs: 1, maxBytes: 1 },
 };
 process.stdout.write("ready\n");

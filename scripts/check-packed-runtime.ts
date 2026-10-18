@@ -388,7 +388,10 @@ async function runRecoveryAcceptance(options: {
     REINS_PACKED_FIXTURE_ACTIVITY: activityPath,
     REINS_PACKED_FIXTURE_MODEL_CATALOG_MODE: modelCatalogModePath,
     REINS_PACKED_FIXTURE_TERMINATE_GATE: terminateGatePath,
-    REINS_PACKED_FIXTURE_FAIL_FIRST_TERMINATE_SESSION_NAME: "packed-recover",
+    REINS_PACKED_FIXTURE_TERMINATE_FAILURE_MARKER: join(
+      directory,
+      "terminate-failure-used",
+    ),
     REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE: join(
       directory,
       "reject-permission",
@@ -560,7 +563,6 @@ async function runRecoveryAcceptance(options: {
       model: "fixture-model",
       reasoning: "high",
       sandbox: "workspace-write",
-      sessionName: "packed-recover",
       sessionId: spawnAcknowledgement.result.sessionId,
       turnId: spawnAcknowledgement.result.turnId,
     };
@@ -1027,7 +1029,7 @@ async function runPermissionAcceptance(options: {
       options.env,
       options.logsDirectory,
       "spawn-permission",
-      { REINS_PERMISSION_SESSION_NAME: name },
+      { REINS_PERMISSION_SESSION_LABEL: name },
     );
     assert(isRecord(spawned.result), "授权场景未返回真实会话和回合身份");
     permissionSessions.push(spawned.result);
@@ -1269,7 +1271,7 @@ async function runPermissionDiagnosticFailure(options: {
     options.env,
     options.logsDirectory,
     "spawn-permission",
-    { REINS_PERMISSION_SESSION_NAME: "packed-perm-diagnostic-failure" },
+    { REINS_PERMISSION_SESSION_LABEL: "packed-perm-diagnostic-failure" },
   );
   assert(isRecord(session.result), "诊断故障场景没有创建授权会话");
   const sessionHandle = String(session.result.sessionHandle);

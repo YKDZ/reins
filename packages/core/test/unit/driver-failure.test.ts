@@ -47,7 +47,7 @@ describe("driver 抛错时动作整体回滚", () => {
     machine.subscribe((event) => events.push(event));
 
     const failure = machine.spawn({
-      sessionName: ids.sessionName("microtask-orphan"),
+      sessionLabel: ids.sessionLabel("microtask-orphan"),
       harness: "codex",
       message: "start",
       cwd: "/tmp/demo",
@@ -86,7 +86,7 @@ describe("driver 抛错时动作整体回滚", () => {
       diagnostics: { record: async () => await accepted },
     });
     const failure = machine.spawn({
-      sessionName: ids.sessionName("accepted-diagnostic"),
+      sessionLabel: ids.sessionLabel("accepted-diagnostic"),
       harness: "codex",
       message: "start",
       cwd: "/tmp/demo",
@@ -123,7 +123,7 @@ describe("driver 抛错时动作整体回滚", () => {
 
     await expect(
       machine.spawn({
-        sessionName: ids.sessionName("emitter-isolated"),
+        sessionLabel: ids.sessionLabel("emitter-isolated"),
         harness: "codex",
         message: "start",
         cwd: "/tmp/demo",
@@ -157,7 +157,7 @@ describe("driver 抛错时动作整体回滚", () => {
 
     await expect(
       machine.spawn({
-        sessionName: ids.sessionName("already-recorded"),
+        sessionLabel: ids.sessionLabel("already-recorded"),
         harness: "codex",
         message: "start",
         cwd: "/tmp/demo",
@@ -173,13 +173,14 @@ describe("driver 抛错时动作整体回滚", () => {
       },
     });
     const diagnosticId = makeDiagnosticId("test", "1");
+    const expectedSessionId = ids.session("session:failed-start:gtest");
     const record = vi.fn(async () => diagnosticId);
     const diagnostics: DiagnosticEmitter = {
       record,
     };
     const machine = createSessionMachine({
       driverFactory: fake.factory,
-      identity: testIdentity,
+      identity: { session: () => expectedSessionId },
       diagnostics,
     });
     const events: DomainEvent[] = [];
@@ -187,7 +188,7 @@ describe("driver 抛错时动作整体回滚", () => {
 
     await expect(
       machine.spawn({
-        sessionName: ids.sessionName("fixture-1"),
+        sessionLabel: ids.sessionLabel("fixture-1"),
         harness: "codex",
         message: "开始",
         cwd: "/tmp/demo",
@@ -204,7 +205,7 @@ describe("driver 抛错时动作整体回滚", () => {
     expect(machine.list()).toEqual([]);
     expect(record).toHaveBeenCalledWith(
       expect.objectContaining({
-        sessionId: ids.session("fixture-1@gtest"),
+        sessionId: expectedSessionId,
         turnId: ids.turn("t1"),
         kind: "request_failure",
         operation: "spawn",
@@ -234,7 +235,7 @@ describe("driver 抛错时动作整体回滚", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-2"),
+      sessionLabel: ids.sessionLabel("fixture-2"),
       harness: "codex",
       message: "第一步",
       cwd: "/tmp/demo",
@@ -295,7 +296,7 @@ describe("driver 抛错时动作整体回滚", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId: id } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-3"),
+      sessionLabel: ids.sessionLabel("fixture-3"),
       harness: "codex",
       message: "进行中",
       cwd: "/tmp/demo",
@@ -345,7 +346,7 @@ describe("driver 抛错时动作整体回滚", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("concurrent-kill"),
+      sessionLabel: ids.sessionLabel("concurrent-kill"),
       harness: "codex",
       message: "start",
       cwd: "/tmp/demo",
@@ -420,7 +421,7 @@ describe("driver 抛错时动作整体回滚", () => {
       },
     });
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("verified-failure"),
+      sessionLabel: ids.sessionLabel("verified-failure"),
       harness: "codex",
       message: "start",
       cwd: "/tmp/demo",

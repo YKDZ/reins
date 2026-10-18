@@ -2,7 +2,6 @@ import type {
   DriverDiagnosticFact,
   DomainEvent,
   SessionId,
-  SessionName,
   TurnId,
 } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
@@ -46,9 +45,8 @@ live("codex live smoke", () => {
     });
 
     driver.start({
-      sessionId: "smoke@g1" as SessionId,
+      sessionId: "session:smoke:g1" as SessionId,
       turnId: "t1" as TurnId,
-      sessionName: "smoke" as SessionName,
       harness: "codex",
       message: "用一条 shell 命令列出当前目录的内容",
       cwd: process.cwd(),
@@ -77,6 +75,6 @@ live("codex live smoke", () => {
     expect(
       diagnostics.some((input) => input.kind === "protocol_violation"),
     ).toBe(false);
-    await driver.terminate("smoke@g1" as SessionId);
+    await driver.terminate("session:smoke:g1" as SessionId);
   }, 180_000);
 });

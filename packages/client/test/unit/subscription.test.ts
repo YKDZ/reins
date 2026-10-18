@@ -35,9 +35,9 @@ async function fixture(autoAck = true) {
       kind: "response",
       requestId: attach.requestId,
       result: {
-        sessionId: "readable@g1",
+        sessionId: "session:readable:g1",
         subscriptionId: "subscription-1",
-        target: { scope: "session", sessionId: "readable@g1" },
+        target: { scope: "session", sessionId: "session:readable:g1" },
         window: { oldest: null, head: null, truncated: false },
         replayed: 0,
       },
@@ -84,7 +84,7 @@ async function fixture(autoAck = true) {
         subscriptionId: "subscription-1" as never,
         eventId: v.parse(eventIdSchema, ++position),
         event: v.parse(domainEventSchema, {
-          sessionId: "readable@g1",
+          sessionId: "session:readable:g1",
           turnId: "t1",
           ...event,
         }),
@@ -94,7 +94,7 @@ async function fixture(autoAck = true) {
 }
 const params = {
   scope: "session",
-  sessionId: "readable@g1",
+  sessionId: "session:readable:g1",
   replay: { mode: "none" },
 } as const;
 const flush = async (): Promise<void> => {

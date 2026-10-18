@@ -27,7 +27,6 @@ export type DaemonState = {
   readonly directory: string;
   readonly diagnosticsDirectory: string;
   readonly runtimeScopeId: RuntimeScopeId;
-  readonly durable: boolean;
   readonly retention: DiagnosticsRetention;
 };
 
@@ -205,7 +204,6 @@ export async function resolveDaemonState(options?: {
     directory,
     diagnosticsDirectory,
     runtimeScopeId,
-    durable: true,
     retention,
   };
 }

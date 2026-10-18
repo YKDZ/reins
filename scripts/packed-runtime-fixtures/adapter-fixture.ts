@@ -18,7 +18,6 @@ import type {
 type WorkerState = {
   readonly child: ChildProcess;
   readonly closed: Promise<void>;
-  readonly sessionName: string;
   readonly turnId: TurnId;
 };
 
@@ -37,6 +36,8 @@ const activityPath = process.env.REINS_PACKED_FIXTURE_ACTIVITY;
 const modelCatalogModePath =
   process.env.REINS_PACKED_FIXTURE_MODEL_CATALOG_MODE;
 const terminateGatePath = process.env.REINS_PACKED_FIXTURE_TERMINATE_GATE;
+const terminateFailureMarkerPath =
+  process.env.REINS_PACKED_FIXTURE_TERMINATE_FAILURE_MARKER;
 const rejectPermissionPath =
   process.env.REINS_PACKED_FIXTURE_REJECT_PERMISSION_FILE;
 const workerPath = fileURLToPath(
@@ -110,7 +111,6 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
       workers.set(spec.sessionId, {
         child,
         closed,
-        sessionName: spec.sessionName,
         turnId: spec.turnId,
       });
       record({
@@ -210,9 +210,10 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
       record({ type: "terminate_called", sessionId, attempt });
       if (
         attempt === 1 &&
-        worker.sessionName ===
-          process.env.REINS_PACKED_FIXTURE_FAIL_FIRST_TERMINATE_SESSION_NAME
+        terminateFailureMarkerPath !== undefined &&
+        !existsSync(terminateFailureMarkerPath)
       ) {
+        appendFileSync(terminateFailureMarkerPath, "rejected\n", "utf8");
         record({ type: "terminate_rejected", sessionId, attempt });
         throw new Error("Fixture intentionally rejects its first cleanup call");
       }

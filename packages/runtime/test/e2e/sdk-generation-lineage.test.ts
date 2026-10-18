@@ -113,7 +113,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   const runtimeScopeId = secondClient.handshake.runtimeScopeId;
   const secondSpawn = await secondClient.spawn(
     {
-      sessionName: "foo",
+      sessionLabel: "foo",
       harness: "codex",
       message: "hello",
       cwd: directory,
@@ -145,7 +145,7 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
   expect(thirdClient.handshake.runtimeScopeId).toBe(runtimeScopeId);
   const current = await thirdClient.spawn(
     {
-      sessionName: "foo",
+      sessionLabel: "foo",
       harness: "codex",
       message: "hello",
       cwd: directory,
@@ -169,10 +169,10 @@ test("rolling back durable state does not reuse an earlier SDK session generatio
       thirdClient.prepareOperation("kill"),
     ),
   ).toEqual({ sessionHandle: staleHandle, status: "not_found" });
-  expect(await thirdClient.list({ sessionName: "foo" })).toMatchObject([
+  expect(await thirdClient.list({ sessionLabel: "foo" })).toMatchObject([
     { sessionHandle: current.sessionHandle },
   ]);
-  expect(await thirdClient.list({ sessionName: "foo" })).toHaveLength(1);
+  expect(await thirdClient.list({ sessionLabel: "foo" })).toHaveLength(1);
   expect(
     await thirdClient.kill(
       { sessionHandle: current.sessionHandle },

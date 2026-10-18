@@ -95,7 +95,7 @@ export async function openEphemeralDaemonForTest(options: {
     const createdDaemon = createDaemon({
       transport,
       adapters: options.adapters,
-      identity: { session: (name) => openedRuntime.sessionId(name) },
+      identity: { session: () => openedRuntime.sessionId() },
       diagnostics: openedRuntime,
       runtimeScopeId: state.runtimeScopeId,
       idleTimeoutMs: 60_000,

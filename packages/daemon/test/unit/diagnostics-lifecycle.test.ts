@@ -36,7 +36,6 @@ async function realRuntime(): Promise<{
       runtimeScopeIdSchema,
       "00000000-0000-4000-8000-000000000000",
     ),
-    durable: true,
     retention: { maxAgeMs: 60_000, maxBytes: 1024 * 1024 },
   };
   const runtime = await openDiagnosticsRuntimeForTest({

@@ -151,10 +151,7 @@ async function main(): Promise<void> {
       {
         transport,
         adapters,
-        identity: {
-          session: (sessionName) =>
-            openedDiagnosticsRuntime.sessionId(sessionName),
-        },
+        identity: { session: () => openedDiagnosticsRuntime.sessionId() },
         diagnostics: openedDiagnosticsRuntime,
         runtimeScopeId: state.runtimeScopeId,
         idleTimeoutMs: idleTimeoutFromEnv(process.env),

@@ -45,7 +45,7 @@ export type OperationCredential<Kind extends OperationKind> = string & {
 export type HarnessId = "codex" | "qoder";
 
 export type SpawnInput = {
-  sessionName: string;
+  sessionLabel?: string;
   harness: HarnessId;
   message: string;
   cwd: string;
@@ -80,7 +80,7 @@ export type SendInput =
 export type SendResult = {
   sessionHandle: SessionHandle;
   turnHandle: TurnHandle;
-  messageId: string;
+  messageKey: MessageKey;
   deliveryPoint: "active_turn" | "new_turn";
 };
 export type WaitInput = {
@@ -92,7 +92,7 @@ export type CompletedTurn = {
   turnHandle: TurnHandle;
   finalReply: string | null;
   usage?: Record<string, unknown>;
-  diagnosticId?: string;
+  diagnosticId?: DiagnosticId;
   stopReason: StopReason;
 } & (
   | { stopReason: "failed"; failure: HarnessFailure }
@@ -141,7 +141,7 @@ export type HarnessModelCatalog = {
 };
 export type ModelCatalogFailure = HarnessFailure & {
   harness: HarnessId;
-  diagnosticId?: string;
+  diagnosticId?: DiagnosticId;
 };
 export type ModelCatalogResult = {
   catalogs: HarnessModelCatalog[];
@@ -245,7 +245,7 @@ export type AgentFact =
       model: string | null;
       reasoning: string | null;
       cwd: string;
-      sessionName: string;
+      sessionLabel?: string;
       spawnedAt: string;
     })
   | (TurnFactBase & { type: "turn.started" })
@@ -307,7 +307,7 @@ export type SessionFilter = {
   sessionHandle?: SessionHandle;
   harness?: HarnessId;
   state?: SessionState;
-  sessionName?: string;
+  sessionLabel?: string;
   model?: string;
 };
 export type LastCompletedTurn = {
@@ -316,7 +316,7 @@ export type LastCompletedTurn = {
 };
 type SessionInfoFields = {
   sessionHandle: SessionHandle;
-  sessionName: string;
+  sessionLabel?: string;
   harness: HarnessId;
   model: string | null;
   reasoning: string | null;
@@ -398,15 +398,20 @@ type FailureFactsByCode = {
   diagnostics_unavailable: Record<never, never>;
   unknown_harness: { harness: HarnessId; availableHarnesses: HarnessId[] };
   unsupported_feature: { feature: string };
-  session_name_conflict: { sessionName: string };
   session_busy: { sessionHandle: SessionHandle };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
   turn_not_active: { turnHandle: TurnHandle };
-  model_catalog_query_failed: { cause?: ErrorCause; diagnosticId?: string };
-  internal_error: { cause?: ErrorCause; diagnosticId?: string };
-  diagnostics_store_corrupt: { cause?: ErrorCause; diagnosticId?: string };
+  model_catalog_query_failed: {
+    cause?: ErrorCause;
+    diagnosticId?: DiagnosticId;
+  };
+  internal_error: { cause?: ErrorCause; diagnosticId?: DiagnosticId };
+  diagnostics_store_corrupt: {
+    cause?: ErrorCause;
+    diagnosticId?: DiagnosticId;
+  };
   daemon_start_failed: {
     cause?: ErrorCause;
     systemCode?: string;

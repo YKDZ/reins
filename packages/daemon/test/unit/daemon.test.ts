@@ -82,9 +82,12 @@ const testRuntimeScopeId: RuntimeScopeId = v.parse(
   "00000000-0000-4000-8000-000000000000",
 );
 
+let sessionCounter = 0;
 const testIdentity = {
-  session: (sessionName: string) =>
-    v.parse(sessionIdSchema, `${sessionName}@gdaemontest`),
+  session: () => {
+    sessionCounter += 1;
+    return v.parse(sessionIdSchema, `session:gdaemontest:${sessionCounter}`);
+  },
 };
 
 const testDiagnostics: DiagnosticsRuntime = {
@@ -481,7 +484,7 @@ describe("daemon 公共接口", () => {
       sessionId = (
         resultOf(
           await requester.request("spawn", {
-            sessionName: "public-interface",
+            sessionLabel: "public-interface",
             harness: "codex",
             message: "hello",
           }),
@@ -659,7 +662,7 @@ describe("daemon 协议面（缝 C）", () => {
       requestId: "raw1",
       method: "spawn",
       params: {
-        sessionName: "reviewer",
+        sessionLabel: "reviewer",
         harness: "codex",
         message: "hello",
         cwd: "/tmp",
@@ -736,34 +739,30 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
 
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
-    expect(spawned).toMatchObject({
-      kind: "response",
-      result: { sessionId: "reviewer@gdaemontest" },
-    });
+    const sessionId = (resultOf(spawned) as { sessionId: string }).sessionId;
+    expect(sessionId).toMatch(/^session:gdaemontest:\d+$/u);
     fake.controls.completeTurn("end_turn", "ok");
 
     const collector = collectNotifications(client);
     const attached = await requester("attach", {
       scope: "turn",
-      sessionId: "reviewer@gdaemontest",
+      sessionId,
       turnId: "t1",
       replay: { mode: "available" },
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId: "reviewer@gdaemontest", replayed: 2 },
+      result: { sessionId, replayed: 2 },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "turn.started",
       "turn.completed",
     ]);
-    expect(collector.ended).toEqual([
-      { sessionId: "reviewer@gdaemontest", reason: "end_turn" },
-    ]);
+    expect(collector.ended).toEqual([{ sessionId, reason: "end_turn" }]);
   });
 
   test("未知 harness 返回 unknown_harness 并附合法 harness 列表", async () => {
@@ -775,7 +774,7 @@ describe("daemon 协议面（缝 C）", () => {
     const client = server.connect();
     await flush();
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "qoder",
       message: "x",
       captureHarnessStderr: true,
@@ -802,7 +801,7 @@ describe("daemon 协议面（缝 C）", () => {
     const collector = collectNotifications(client);
 
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "capture-test",
+      sessionLabel: "capture-test",
       harness: "codex",
       message: "hello",
       captureHarnessStderr: true,
@@ -826,14 +825,16 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
 
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "capture-supported",
+      sessionLabel: "capture-supported",
       harness: "codex",
       message: "hello",
       captureHarnessStderr: true,
     });
 
     expect(response).toMatchObject({
-      result: { sessionId: "capture-supported@gdaemontest" },
+      result: {
+        sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u),
+      },
     });
     expect(fake.calls.starts).toBe(1);
     expect(fake.calls.specs[0]?.captureHarnessStderr).toBe(true);
@@ -880,7 +881,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -916,7 +917,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -945,7 +946,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -977,7 +978,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requesterB = makeRequester(clientB);
 
     const spawned = await requesterA("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -1036,7 +1037,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -1071,7 +1072,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -1096,7 +1097,7 @@ describe("daemon 协议面（缝 C）", () => {
     });
 
     const missing = await requester("wait", {
-      targets: [{ sessionId: "missing@gdaemontest", turnId: "t1" }],
+      targets: [{ sessionId: "session:missing:gdaemontest", turnId: "t1" }],
       completion: "all",
       timeoutMs: 1000,
     });
@@ -1123,7 +1124,7 @@ describe("daemon 协议面（缝 C）", () => {
     const requester = makeRequester(client);
     const collector = collectNotifications(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -1175,7 +1176,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-target",
+      sessionLabel: "attach-target",
       harness: "codex",
       message: "first",
     });
@@ -1220,7 +1221,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-gap",
+      sessionLabel: "attach-gap",
       harness: "codex",
       message: "first",
     });
@@ -1271,7 +1272,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-slice",
+      sessionLabel: "coherent-slice",
       harness: "codex",
       message: "first",
     });
@@ -1327,7 +1328,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-terminal",
+      sessionLabel: "coherent-terminal",
       harness: "codex",
       message: "first",
     });
@@ -1362,7 +1363,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-zero",
+      sessionLabel: "coherent-zero",
       harness: "codex",
       message: "first",
     });
@@ -1406,7 +1407,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-limit",
+      sessionLabel: "coherent-limit",
       harness: "codex",
       message: "first",
     });
@@ -1458,7 +1459,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "coherent-boundary",
+      sessionLabel: "coherent-boundary",
       harness: "codex",
       message: "first",
     });
@@ -1500,7 +1501,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-reentrant",
+      sessionLabel: "attach-reentrant",
       harness: "codex",
       message: "first",
     });
@@ -1538,7 +1539,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-hook",
+      sessionLabel: "attach-hook",
       harness: "codex",
       message: "first",
     });
@@ -1578,7 +1579,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-idle",
+      sessionLabel: "attach-idle",
       harness: "codex",
       message: "first",
     });
@@ -1609,7 +1610,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-reason",
+      sessionLabel: "attach-reason",
       harness: "codex",
       message: "first",
     });
@@ -1644,7 +1645,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-session",
+      sessionLabel: "attach-session",
       harness: "codex",
       message: "first",
     });
@@ -1683,7 +1684,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "attach-ring",
+      sessionLabel: "attach-ring",
       harness: "codex",
       message: "first",
     });
@@ -1715,7 +1716,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const response = await makeRequester(client).request("attach", {
       scope: "session",
-      sessionId: "missing@gdaemontest",
+      sessionId: "session:missing:gdaemontest",
       replay: { mode: "available" },
     });
     expect(response).toMatchObject({
@@ -1734,7 +1735,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     const spawned = await requester("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hello",
     });
@@ -1964,7 +1965,7 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
 
     const response = await makeRequester(client).request("spawn", {
-      sessionName: "failing",
+      sessionLabel: "failing",
       harness: "codex",
       message: "hello",
     });
@@ -2026,17 +2027,17 @@ describe("daemon 协议面（缝 C）", () => {
     await flush();
     const requester = makeRequester(client);
     await requester("spawn", {
-      sessionName: "a-one",
+      sessionLabel: "a-one",
       harness: "codex",
       message: "1",
     });
     await requester("spawn", {
-      sessionName: "a-two",
+      sessionLabel: "a-two",
       harness: "codex",
       message: "2",
     });
     await requester("spawn", {
-      sessionName: "b-one",
+      sessionLabel: "b-one",
       harness: "qoder",
       message: "3",
     });
@@ -2090,7 +2091,7 @@ describe("daemon 空闲退出", () => {
     const client = server.connect();
     await flush();
     const spawned = await makeRequester(client).request("spawn", {
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "hi",
     });
@@ -2153,7 +2154,7 @@ describe("daemon 空闲退出", () => {
     const client = server.connect();
     await flush();
     await makeRequester(client).request("spawn", {
-      sessionName: "shutdown-owner",
+      sessionLabel: "shutdown-owner",
       harness: "codex",
       message: "hi",
     });
@@ -2167,7 +2168,7 @@ describe("daemon 空闲退出", () => {
     expect(events.some((event) => event.type === "session.killed")).toBe(false);
 
     const rejected = await makeRequester(client).request("spawn", {
-      sessionName: "must-not-start",
+      sessionLabel: "must-not-start",
       harness: "codex",
       message: "late",
     });
@@ -2270,7 +2271,7 @@ describe("daemon 空闲退出", () => {
       requestId: "raw1",
       method: "spawn",
       params: {
-        sessionName: "queued-start",
+        sessionLabel: "queued-start",
         harness: "codex",
         message: "must not start",
       },
@@ -2407,7 +2408,7 @@ describe("daemon 空闲退出", () => {
     const client = server.connect();
     await flush();
     await makeRequester(client).request("spawn", {
-      sessionName: "retry-shutdown",
+      sessionLabel: "retry-shutdown",
       harness: "codex",
       message: "hi",
     });
@@ -2442,7 +2443,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const beta = makeRequester(betaClient, "beta");
 
     const spawned = await alpha("spawn", {
-      sessionName: "owned-by-alpha",
+      sessionLabel: "owned-by-alpha",
       harness: "codex",
       message: "hello",
     });
@@ -2498,7 +2499,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const sessionId = (
       resultOf(
         await makeRequester(firstAlpha, "alpha")("spawn", {
-          sessionName: "short-lived",
+          sessionLabel: "short-lived",
           harness: "codex",
           message: "hello",
         }),
@@ -2552,7 +2553,7 @@ describe("daemon 消费者范围（01 票第 2 项）", () => {
     const alpha = makeRequester(alphaClient, "alpha");
     const collector = collectNotifications(alphaClient);
     const spawned = await alpha("spawn", {
-      sessionName: "guarded",
+      sessionLabel: "guarded",
       harness: "codex",
       message: "hello",
     });
@@ -2616,14 +2617,14 @@ test("命令结果恢复：同身份 spawn 跨连接返回原 ACK 且仅创建�
     params: {
       harness: "codex",
       cwd: "/tmp",
-      sessionName: "recoverable",
+      sessionLabel: "recoverable",
       message: "caller original",
     },
   };
   const first = await sendRaw(a, { ...command, requestId: "original" });
   const replay = await sendRaw(b, { ...command, requestId: "recovered" });
   expect(first).toMatchObject({
-    result: { sessionId: "recoverable@gdaemontest" },
+    result: { sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u) },
   });
   expect(replay).toEqual({ ...first, requestId: "recovered" });
   expect(fake.calls.starts).toBe(1);
@@ -2661,7 +2662,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
     params: {
       harness: "codex",
       cwd: "/tmp",
-      sessionName: "lease-keeps-facts",
+      sessionLabel: "lease-keeps-facts",
       message: "start before lease loss",
     },
   };
@@ -2698,7 +2699,7 @@ test("writer lease 丢失时保留读取、缓存结果和必要停止", async (
       params: {
         harness: "codex",
         cwd: "/tmp",
-        sessionName: "lease-refuses-new-execution",
+        sessionLabel: "lease-refuses-new-execution",
         message: "must not start",
       },
     }),
@@ -2823,7 +2824,7 @@ test("writer lease 在模型目录等待期间丢失会阻止 native spawn", asy
       harness: "codex",
       model: "available",
       cwd: "/tmp",
-      sessionName: "lease-lost-during-catalog",
+      sessionLabel: "lease-lost-during-catalog",
       message: "must not dispatch after catalog wait",
     },
   };
@@ -2865,7 +2866,7 @@ test("命令结果恢复：其他消费者不能用原身份取结果或另起�
     params: {
       harness: "codex",
       cwd: "/tmp",
-      sessionName: "private-command",
+      sessionLabel: "private-command",
       message: "private",
     },
   };
@@ -2920,24 +2921,26 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
     expect(recovered).toEqual({ ...original, requestId: `b${id}` });
     return original;
   };
-  const sessionId = testIdentity.session("commands");
+  const sessionId = testIdentity.session();
   const missing = await command(
     "send",
     { placement: "new_turn", sessionId, message: "before spawn" },
     "1",
   );
   expect(missing).toMatchObject({ error: { code: "session_not_found" } });
-  await command(
+  const spawned = await command(
     "spawn",
     {
       harness: "codex",
       cwd: "/tmp",
-      sessionName: "commands",
+      sessionLabel: "commands",
       message: "initial",
       authorizationMode: "interactive",
     },
     "2",
   );
+  const spawnedSessionId = (resultOf(spawned) as { sessionId: SessionId })
+    .sessionId;
   // 状态已经变化；原来的机器错误仍是原请求的权威结果。
   expect(
     await sendRaw(b, {
@@ -2953,7 +2956,7 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       "resolvePermission",
       {
         turnId: "t1",
-        sessionId,
+        sessionId: spawnedSessionId,
         permissionId: "p1",
         resolution: { outcome: "allow", scope: "once" },
       },
@@ -2964,12 +2967,16 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
   expect(
     await command(
       "send",
-      { placement: "new_turn", sessionId, message: "once" },
+      { placement: "new_turn", sessionId: spawnedSessionId, message: "once" },
       "3",
     ),
   ).toHaveProperty("result");
   expect(
-    await command("interrupt", { sessionId, turnId: "t2" }, "4"),
+    await command(
+      "interrupt",
+      { sessionId: spawnedSessionId, turnId: "t2" },
+      "4",
+    ),
   ).toHaveProperty("result");
   expect(
     await sendRaw(b, {
@@ -2989,9 +2996,9 @@ test("命令结果恢复：成功、机器错误和冲突均不再次执行业�
       commandId: "test:00000003-0123-4123-8123-0123456789ab",
     }),
   ).toMatchObject({ error: { code: "command_id_conflict" } });
-  expect(await command("kill", { sessionId: sessionId }, "6")).toHaveProperty(
-    "result",
-  );
+  expect(
+    await command("kill", { sessionId: spawnedSessionId }, "6"),
+  ).toHaveProperty("result");
   expect(fake.calls.starts).toBe(1);
   expect(fake.calls.delivered).toHaveLength(1);
   expect(fake.calls.interrupted).toHaveLength(1);
@@ -3023,7 +3030,7 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
   const params = {
     harness: "codex",
     cwd: "/tmp",
-    sessionName: "model-catalog-ledger",
+    sessionLabel: "model-catalog-ledger",
     message: "original intent",
     model: "not-yet-available",
   };
@@ -3071,7 +3078,7 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
     requestId: "invalid-reasoning",
     params: {
       ...params,
-      sessionName: "model-catalog-reasoning",
+      sessionLabel: "model-catalog-reasoning",
       model: "not-yet-available",
       reasoning: "vendor-future-tier",
     },
@@ -3091,9 +3098,9 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
     requestId: "accepted-original",
   };
   const created = await sendRaw(connection, accepted);
-  expect(created).toMatchObject({
-    result: { sessionId: "model-catalog-ledger@gdaemontest" },
-  });
+  const createdSessionId = (resultOf(created) as { sessionId: string })
+    .sessionId;
+  expect(createdSessionId).toMatch(/^session:gdaemontest:\d+$/u);
   expect(fake.calls.starts).toBe(1);
 
   modelCatalog = { harness: "codex", models: [] };
@@ -3116,13 +3123,13 @@ test("模型目录查询失败时不把 harness 误判为未知或拒绝模型",
   const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const connection = server.connect();
   const response = await makeRequester(connection)("spawn", {
-    sessionName: "model-catalog-query-failed",
+    sessionLabel: "model-catalog-query-failed",
     harness: "codex",
     model: "live-model",
     message: "continue with explicitly supplied model",
   });
   expect(resultOf(response)).toMatchObject({
-    sessionId: "model-catalog-query-failed@gdaemontest",
+    sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u),
   });
   expect(fake.calls.starts).toBe(1);
   expect(fake.calls.specs[0]).toMatchObject({ model: "live-model" });
@@ -3147,7 +3154,7 @@ test("kill 恢复返回原清理失败，新身份才会重试", async () => {
   const request = makeRequester(connection);
   const spawned = resultOf(
     await request("spawn", {
-      sessionName: "kill-recovery",
+      sessionLabel: "kill-recovery",
       harness: "codex",
       message: "keep the worker until cleanup succeeds",
     }),
@@ -3210,7 +3217,7 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
     await sendRaw(connection, {
       ...base,
       requestId: "invalid",
-      params: { harness: "codex", sessionName: "params" },
+      params: { harness: "codex", sessionLabel: "params" },
     }),
   ).toMatchObject({ error: { code: "invalid_params" } });
   expect(
@@ -3220,7 +3227,7 @@ test("命令结果恢复：参数拒绝也是已知结果，不能用修改后�
       params: {
         harness: "codex",
         cwd: "/tmp",
-        sessionName: "params",
+        sessionLabel: "params",
         message: "now valid",
       },
     }),
@@ -3283,7 +3290,7 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
     params: {
       harness: "codex",
       cwd: "/tmp",
-      sessionName: "accepted",
+      sessionLabel: "accepted",
       message: "original",
     },
   };
@@ -3300,11 +3307,19 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
     });
     expect(
       await sendRaw(recovery, { ...command, requestId: "accepted-recovered" }),
-    ).toMatchObject({ result: { sessionId: "accepted@gdaemontest" } });
+    ).toMatchObject({
+      result: {
+        sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u),
+      },
+    });
     expect(fake.calls.starts).toBe(1);
     expect(
       await makeRequester(recovery, "original-consumer")("list", {}),
-    ).toMatchObject({ result: [{ sessionId: "accepted@gdaemontest" }] });
+    ).toMatchObject({
+      result: [
+        { sessionId: expect.stringMatching(/^session:gdaemontest:\d+$/u) },
+      ],
+    });
   } finally {
     client.close();
     recovery.close();
@@ -3323,7 +3338,7 @@ test("none turn scope ends from authoritative terminal history after event reten
   await flush();
   const request = makeRequester(client);
   const spawned = await request("spawn", {
-    sessionName: "retained-terminal",
+    sessionLabel: "retained-terminal",
     harness: "codex",
     message: "first",
   });
@@ -3367,7 +3382,7 @@ test("after freezes its replay prefix and buffers live events before the establi
   await flush();
   const requester = makeRequester(client);
   const spawned = await requester("spawn", {
-    sessionName: "after-boundary",
+    sessionLabel: "after-boundary",
     harness: "codex",
     message: "first",
   });

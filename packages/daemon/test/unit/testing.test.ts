@@ -109,7 +109,7 @@ test("failed cleanup rejects connections and retries without reopening", async (
       requestId: "spawnfailure" as never,
       method: "spawn",
       params: {
-        sessionName: "failure" as never,
+        sessionLabel: "failure" as never,
         harness: "codex",
         message: "start",
         cwd: "/tmp",

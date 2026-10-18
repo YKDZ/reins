@@ -40,7 +40,7 @@ try {
   const spawned = await connection.spawn(
     {
       harness: "codex",
-      sessionName: "packed-facts",
+      sessionLabel: "packed-facts",
       message: JSON.stringify({
         gate,
         reply: "done",

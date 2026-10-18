@@ -95,7 +95,7 @@ describe("决议菜单 schema", () => {
 
 describe("权限事件", () => {
   const base = {
-    sessionId: "reviewer@g7",
+    sessionId: "session:reviewer:g7",
     turnId: "t1",
     permissionId: "p1",
     kind: "tool:Bash",
@@ -155,7 +155,7 @@ describe("权限事件", () => {
 
 describe("工具生命周期事件", () => {
   const base = {
-    sessionId: "reviewer@g7",
+    sessionId: "session:reviewer:g7",
     turnId: "t1",
     toolCallId: "c1",
     name: "Bash",
@@ -184,26 +184,26 @@ describe("授权模式与决议命令", () => {
       cwd: "/tmp",
       harness: "codex",
       message: "x",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       authorizationMode: "interactive",
     });
     ok(spawnParamsSchema, {
       cwd: "/tmp",
       harness: "codex",
       message: "x",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       authorizationMode: "allowAll",
     });
     bad(spawnParamsSchema, {
       cwd: "/tmp",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "x",
       authorizationMode: "yolo",
     });
     bad(spawnParamsSchema, {
       cwd: "/tmp",
-      sessionName: "reviewer",
+      sessionLabel: "reviewer",
       harness: "codex",
       message: "x",
       permissionMode: "yolo",
@@ -212,18 +212,18 @@ describe("授权模式与决议命令", () => {
 
   test("resolvePermission 参数必须携带完整决议", () => {
     ok(resolvePermissionParamsSchema, {
-      sessionId: "reviewer@g7",
+      sessionId: "session:reviewer:g7",
       turnId: "t1",
       permissionId: "p1",
       resolution: { outcome: "allow", scope: "once" },
     });
     bad(resolvePermissionParamsSchema, {
-      sessionId: "reviewer@g7",
+      sessionId: "session:reviewer:g7",
       turnId: "t1",
       permissionId: "p1",
     });
     bad(resolvePermissionParamsSchema, {
-      sessionId: "reviewer@g7",
+      sessionId: "session:reviewer:g7",
       turnId: "t1",
       permissionId: "p1",
       resolution: { outcome: "allow" },

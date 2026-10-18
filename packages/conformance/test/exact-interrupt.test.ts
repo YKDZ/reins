@@ -4,7 +4,6 @@ import { openEphemeralDaemonForTest } from "@reins/daemon/testing";
 import type {
   ConsumerContext,
   DomainEvent,
-  SessionName,
   WorkerDriver,
   WorkerSpec,
 } from "@reins/protocol";
@@ -73,7 +72,7 @@ test("精确 interrupt 等原生接受才 ACK，取消独立观察且保留会�
   const spawned = await client.request("spawn", {
     harness: "codex",
     cwd: "/tmp",
-    sessionName: "exact-interrupt" as SessionName,
+    sessionLabel: "exact-interrupt",
     message: "initial caller task",
   });
   if ("error" in spawned) throw new Error("Expected spawn ACK");
@@ -134,7 +133,7 @@ test("interrupt 结束先赢的拒绝保留原目标，不停止显式后继回�
   const spawned = await client.request("spawn", {
     harness: "codex",
     cwd: "/tmp",
-    sessionName: "interrupt-race" as SessionName,
+    sessionLabel: "interrupt-race",
     message: "initial task",
   });
   if ("error" in spawned) throw new Error("Expected spawn ACK");
@@ -178,7 +177,7 @@ test("interrupt 错误父级在原生调用前拒绝，停止失败不伪造取�
     const response = await client.request("spawn", {
       harness: "codex",
       cwd: "/tmp",
-      sessionName: name as SessionName,
+      sessionLabel: name,
       message: "caller task",
     });
     if ("error" in response) throw new Error("Expected spawn ACK");

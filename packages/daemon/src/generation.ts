@@ -9,7 +9,6 @@ import {
   type DaemonGeneration,
   type DiagnosticId,
   type SessionId,
-  type SessionName,
 } from "@reins/protocol";
 import * as v from "valibot";
 
@@ -94,15 +93,6 @@ async function persistGeneration(
   }
 }
 
-function randomGeneration(
-  randomBytes: (size: number) => Buffer,
-): DaemonGeneration {
-  for (;;) {
-    const value = randomBytes(6).readUIntBE(0, 6);
-    if (value >= 2 ** 40) return parseGeneration(value.toString(36));
-  }
-}
-
 // 耐久 generation 的持久文件只保存单调递增的状态谱系计数器；对外发布的
 // generation token 再把一次 daemon 启动的随机 boot epoch 折叠进低位。计数器
 // 保证同一谱系内跨重启与并发启动不复用；boot epoch 保证删除／回滚／替换把
@@ -136,15 +126,6 @@ export async function acquireGenerationAllocator(
   },
 ): Promise<GenerationAllocatorLease> {
   const randomBytes = options?.randomBytes ?? secureRandomBytes;
-  if (!state.durable) {
-    return {
-      async allocate() {
-        return randomGeneration(randomBytes);
-      },
-      async close() {},
-    };
-  }
-
   // 先抽 boot epoch 再取得 lease：randomBootEpoch 可因随机源抛错，若在持锁后
   // 才执行，则 acquire reject 而 allocator 尚未交付调用方，lease 无从 close 而
   // 泄漏，同 state 的后续准备会被这把锁阻塞（ADR-0023 §7 启动失败须释放）。
@@ -196,17 +177,22 @@ class DurableGenerationAllocator implements GenerationAllocatorLease {
 }
 
 export type DaemonIdFactory = {
-  session(sessionName: SessionName): SessionId;
+  session(): SessionId;
   diagnostic(): DiagnosticId;
 };
 
 export function createDaemonIdFactory(
   generation: DaemonGeneration,
 ): DaemonIdFactory {
+  let sessionCounter = 0;
   let diagnosticCounter = 0;
   return {
-    session(sessionName) {
-      return v.parse(sessionIdSchema, `${sessionName}@g${generation}`);
+    session() {
+      sessionCounter += 1;
+      return v.parse(
+        sessionIdSchema,
+        `session:${generation}:${sessionCounter}`,
+      );
     },
     diagnostic() {
       diagnosticCounter += 1;

@@ -3,12 +3,14 @@ import {
   AgentSubscriptionError,
   isCommandOutcomeUnknown,
   OperationCredentialError,
+  parseRetryToken,
   ReinsClientError,
   type ReinsClient as ControlClient,
+  type AgentFact as ClientAgentFact,
+  type AgentTarget as ClientAgentTarget,
 } from "@reins/client/control";
 import type {
   AttachParams,
-  DiagnosticId as ProtocolDiagnosticId,
   DiagnosticRecord as ProtocolDiagnosticRecord,
   DiagnosticsResult as ProtocolDiagnosticsResult,
   MachineError,
@@ -20,17 +22,23 @@ import type {
   SessionInfo as ProtocolSessionInfo,
   SessionId,
   TurnId,
-  ResumeCursor as ProtocolResumeCursor,
 } from "@reins/protocol";
 import {
   consumerContextSchema,
   decodePermissionHandle,
   decodeTurnHandle,
+  diagnosticsParamsSchema,
+  diagnosticIdSchema,
+  encodeMessageKey,
   encodePermissionHandle,
   encodeTurnHandle,
+  messageKeySchema,
+  permissionHandleSchema,
   REINS_PROTOCOL_MAJOR_VERSION,
+  resumeCursorSchema,
   sessionIdSchema,
   runtimeScopeIdSchema,
+  toolKeySchema,
   turnHandleSchema,
 } from "@reins/protocol";
 import { createUnixSocketClient, isTransportError } from "@reins/transport";
@@ -48,6 +56,7 @@ import {
   type ReinsFailure,
   type RuntimeScopeId,
   type AgentFact,
+  type AgentFactId,
   type AgentSubscriptionEnd,
   type AgentTarget,
   type ReplayPolicy,
@@ -55,6 +64,8 @@ import {
   type FactSubscription,
   type SessionHandle,
   type SessionInfo,
+  type MessageKey,
+  type ToolKey,
   type PermissionHandle,
   type TurnHandle,
   type SendInput,
@@ -133,6 +144,105 @@ export type {
   ToolKey,
 } from "./contracts.ts";
 
+function parseWithBrand<Brand extends string>(
+  schema: v.GenericSchema,
+  value: unknown,
+): Brand {
+  return v.parse(schema, value) as Brand;
+}
+
+export function parseSessionHandle(value: unknown): SessionHandle {
+  return parseWithBrand<SessionHandle>(sessionIdSchema, value);
+}
+export function serializeSessionHandle(handle: SessionHandle): string {
+  return v.parse(sessionIdSchema, handle);
+}
+export function parseTurnHandle(value: unknown): TurnHandle {
+  return parseWithBrand<TurnHandle>(turnHandleSchema, value);
+}
+export function serializeTurnHandle(handle: TurnHandle): string {
+  return v.parse(turnHandleSchema, handle);
+}
+export function parsePermissionHandle(value: unknown): PermissionHandle {
+  return parseWithBrand<PermissionHandle>(permissionHandleSchema, value);
+}
+export function serializePermissionHandle(handle: PermissionHandle): string {
+  return v.parse(permissionHandleSchema, handle);
+}
+export function parseMessageKey(value: unknown): MessageKey {
+  return parseWithBrand<MessageKey>(messageKeySchema, value);
+}
+export function serializeMessageKey(key: MessageKey): string {
+  return v.parse(messageKeySchema, key);
+}
+export function parseToolKey(value: unknown): ToolKey {
+  return parseWithBrand<ToolKey>(toolKeySchema, value);
+}
+export function serializeToolKey(key: ToolKey): string {
+  return v.parse(toolKeySchema, key);
+}
+export function parseDiagnosticId(value: unknown): DiagnosticId {
+  return parseWithBrand<DiagnosticId>(diagnosticIdSchema, value);
+}
+export function serializeDiagnosticId(id: DiagnosticId): string {
+  return v.parse(diagnosticIdSchema, id);
+}
+export function parseResumeCursor(value: unknown): ResumeCursor {
+  return parseWithBrand<ResumeCursor>(resumeCursorSchema, value);
+}
+export function serializeResumeCursor(cursor: ResumeCursor): string {
+  return v.parse(resumeCursorSchema, cursor);
+}
+export function parseOperationCredential<Kind extends OperationKind>(
+  kind: Kind,
+  value: unknown,
+): OperationCredential<Kind> {
+  if (typeof value !== "string" || parseRetryToken(value).method !== kind)
+    throw new Error("Invalid operation credential");
+  return value as OperationCredential<Kind>;
+}
+export function serializeOperationCredential<Kind extends OperationKind>(
+  kind: Kind,
+  credential: OperationCredential<Kind>,
+): string {
+  return parseOperationCredential(kind, credential);
+}
+export function parseAgentFactId(value: unknown): AgentFactId {
+  if (typeof value !== "string" || !/^fact1_[A-Za-z0-9_-]+$/u.test(value))
+    throw new Error("Invalid agent fact ID");
+  return value as AgentFactId;
+}
+export function serializeAgentFactId(id: AgentFactId): string {
+  return parseAgentFactId(id);
+}
+
+function projectAgentTarget(target: ClientAgentTarget): AgentTarget {
+  return target.scope === "session"
+    ? {
+        scope: "session",
+        sessionHandle: parseSessionHandle(target.sessionHandle),
+      }
+    : { scope: "turn", turnHandle: parseTurnHandle(target.turnHandle) };
+}
+
+function projectAgentFact(fact: ClientAgentFact): AgentFact {
+  const projected: Record<string, unknown> = {
+    ...fact,
+    factId: parseAgentFactId(fact.factId),
+    sessionHandle: parseSessionHandle(fact.sessionHandle),
+  };
+  if ("turnHandle" in fact)
+    projected.turnHandle = parseTurnHandle(fact.turnHandle);
+  if ("messageKey" in fact)
+    projected.messageKey = parseMessageKey(fact.messageKey);
+  if ("toolKey" in fact) projected.toolKey = parseToolKey(fact.toolKey);
+  if ("permissionHandle" in fact)
+    projected.permissionHandle = parsePermissionHandle(fact.permissionHandle);
+  if ("diagnosticId" in fact && fact.diagnosticId !== undefined)
+    projected.diagnosticId = parseDiagnosticId(fact.diagnosticId);
+  return projected as AgentFact;
+}
+
 export async function connect(
   options: ConnectOptions,
 ): Promise<ReinsConnection> {
@@ -208,7 +318,9 @@ export async function connect(
             ({ code: _code, diagnosticId, failure, harness }) => ({
               harness,
               ...failure,
-              ...(diagnosticId === undefined ? {} : { diagnosticId }),
+              ...(diagnosticId === undefined
+                ? {}
+                : { diagnosticId: parseDiagnosticId(diagnosticId) }),
             }),
           ),
         };
@@ -219,7 +331,12 @@ export async function connect(
           ...rest,
           ...(sessionHandle === undefined
             ? {}
-            : { sessionId: sessionHandle as unknown as SessionId }),
+            : {
+                sessionId: v.parse(
+                  sessionIdSchema,
+                  serializeSessionHandle(sessionHandle),
+                ),
+              }),
         } as ProtocolParams<"list">;
         return (await query(client!, "list", params)).map(mapSessionInfo);
       },
@@ -244,14 +361,20 @@ export async function connect(
         const done = source.done.catch((error: unknown) => {
           throw projectSubscriptionError(error);
         });
-        void done.catch(() => undefined);
+        const projectedDone = done.then(({ target: endedTarget, reason }) => ({
+          target: projectAgentTarget(endedTarget),
+          reason,
+        }));
+        void projectedDone.catch(() => undefined);
         let finished = false;
         const subscription: FactSubscription = {
-          establishment:
-            source.establishment as unknown as FactSubscription["establishment"],
-          done: done as unknown as Promise<AgentSubscriptionEnd>,
+          establishment: {
+            ...source.establishment,
+            target: projectAgentTarget(source.establishment.target),
+          },
+          done: projectedDone as Promise<AgentSubscriptionEnd>,
           get checkpoint() {
-            return source.checkpoint as unknown as ResumeCursor;
+            return parseResumeCursor(source.checkpoint);
           },
           async next() {
             if (finished) return { value: undefined, done: true };
@@ -261,7 +384,7 @@ export async function connect(
                 finished = true;
                 return { value: undefined, done: true };
               }
-              return { value: item.value as unknown as AgentFact, done: false };
+              return { value: projectAgentFact(item.value), done: false };
             } catch (error) {
               throw projectSubscriptionError(error);
             }
@@ -304,18 +427,15 @@ export async function connect(
         }
       },
       async spawn(input, credential) {
-        const result = await perform(
-          client!,
-          "spawn",
-          input as unknown as ProtocolParams<"spawn">,
-          credential,
-        );
+        const result = await perform(client!, "spawn", input, credential);
         return {
-          sessionHandle: result.sessionId as unknown as SessionHandle,
-          turnHandle: encodeTurnHandle({
-            sessionId: result.sessionId,
-            turnId: result.turnId,
-          }) as unknown as TurnHandle,
+          sessionHandle: parseSessionHandle(result.sessionId),
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: result.sessionId,
+              turnId: result.turnId,
+            }),
+          ),
           cwd: result.cwd,
         };
       },
@@ -324,19 +444,24 @@ export async function connect(
           client!,
           "kill",
           {
-            sessionId: input.sessionHandle as unknown as SessionId,
+            sessionId: v.parse(
+              sessionIdSchema,
+              serializeSessionHandle(input.sessionHandle),
+            ),
           },
           credential,
         );
         return {
-          sessionHandle: result.sessionId as unknown as SessionHandle,
+          sessionHandle: parseSessionHandle(result.sessionId),
           status: result.status,
         };
       },
       async resolvePermission(permissionHandle, resolution, credential) {
         let target: ReturnType<typeof decodePermissionHandle>;
         try {
-          target = decodePermissionHandle(permissionHandle);
+          target = decodePermissionHandle(
+            serializePermissionHandle(parsePermissionHandle(permissionHandle)),
+          );
         } catch {
           throw new ReinsSdkError(
             {
@@ -356,7 +481,9 @@ export async function connect(
           permissionHandle,
         );
         return {
-          permissionHandle: encodePermissionHandle(result) as PermissionHandle,
+          permissionHandle: parsePermissionHandle(
+            encodePermissionHandle(result),
+          ),
           status: "resolved",
         };
       },
@@ -380,18 +507,30 @@ export async function connect(
             throw invalidInput("sessionHandle", "operation");
           params = {
             placement: "new_turn",
-            sessionId: input.sessionHandle as unknown as SessionId,
+            sessionId: v.parse(
+              sessionIdSchema,
+              serializeSessionHandle(input.sessionHandle),
+            ),
             message: input.message,
           };
         }
         const result = await perform(client!, "send", params, credential);
         return {
-          sessionHandle: result.sessionId as unknown as SessionHandle,
-          turnHandle: encodeTurnHandle({
-            sessionId: result.sessionId,
-            turnId: result.turnId,
-          }) as unknown as TurnHandle,
-          messageId: result.messageId,
+          sessionHandle: parseSessionHandle(result.sessionId),
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: result.sessionId,
+              turnId: result.turnId,
+            }),
+          ),
+          messageKey: parseMessageKey(
+            encodeMessageKey({
+              generation: handshake.daemonGeneration,
+              sessionId: result.sessionId,
+              turnId: result.turnId,
+              messageId: result.messageId,
+            }),
+          ),
           deliveryPoint: result.deliveryPoint,
         } satisfies SendResult;
       },
@@ -424,8 +563,8 @@ export async function connect(
         return {
           status: result.status,
           completed: result.completed.map(projectCompletedTurn),
-          pending: result.pending.map(
-            (target) => encodeTurnHandle(target) as unknown as TurnHandle,
+          pending: result.pending.map((target) =>
+            parseTurnHandle(encodeTurnHandle(target)),
           ),
         } satisfies WaitResult;
       },
@@ -472,13 +611,19 @@ function projectAttachParams(
     replay.mode === "after"
       ? {
           mode: "after" as const,
-          cursor: replay.cursor as unknown as ProtocolResumeCursor,
+          cursor: v.parse(
+            resumeCursorSchema,
+            serializeResumeCursor(replay.cursor),
+          ),
         }
       : replay;
   if (target.scope === "session")
     return {
       scope: "session",
-      sessionId: target.sessionHandle as unknown as SessionId,
+      sessionId: v.parse(
+        sessionIdSchema,
+        serializeSessionHandle(target.sessionHandle),
+      ),
       replay: protocolReplay,
     };
   return {
@@ -500,7 +645,7 @@ function projectSubscriptionError(error: unknown): ReinsSdkError | Error {
       return new ReinsSdkError({
         code: "daemon_disconnected",
         facts: {
-          resumeCursor: error.resumeCursor as unknown as ResumeCursor,
+          resumeCursor: parseResumeCursor(error.resumeCursor),
         },
       });
     return new ReinsSdkError(failure);
@@ -568,14 +713,17 @@ function projectDiagnosticsParams(
   if (query === undefined) return {};
   if ("diagnosticId" in query)
     return {
-      diagnosticId: query.diagnosticId as unknown as ProtocolDiagnosticId,
+      diagnosticId: v.parse(
+        diagnosticIdSchema,
+        serializeDiagnosticId(query.diagnosticId),
+      ),
     };
   const { sessionHandle, turnHandle, ...filters } = query;
   if (turnHandle !== undefined) {
     const target = targetFromHandle(turnHandle, "turnHandle", "query");
     if (
       sessionHandle !== undefined &&
-      sessionHandle !== (target.sessionId as unknown as SessionHandle)
+      serializeSessionHandle(sessionHandle) !== target.sessionId
     )
       throw new ReinsSdkError({
         code: "invalid_params",
@@ -588,14 +736,19 @@ function projectDiagnosticsParams(
           ],
         },
       });
-    return { ...filters, ...target } as ProtocolParams<"diagnostics">;
+    return v.parse(diagnosticsParamsSchema, { ...filters, ...target });
   }
-  return {
+  return v.parse(diagnosticsParamsSchema, {
     ...filters,
     ...(sessionHandle === undefined
       ? {}
-      : { sessionId: sessionHandle as unknown as SessionId }),
-  } as ProtocolParams<"diagnostics">;
+      : {
+          sessionId: v.parse(
+            sessionIdSchema,
+            serializeSessionHandle(sessionHandle),
+          ),
+        }),
+  });
 }
 
 function projectDiagnosticsResult(
@@ -619,17 +772,14 @@ function projectDiagnosticRecord(
   const { sessionId, turnId, diagnosticId, ...fields } = address;
   return {
     ...fields,
-    diagnosticId: diagnosticId as unknown as DiagnosticId,
+    diagnosticId: parseDiagnosticId(diagnosticId),
     ...(sessionId === undefined
       ? {}
-      : { sessionHandle: sessionId as unknown as SessionHandle }),
+      : { sessionHandle: parseSessionHandle(sessionId) }),
     ...(turnId === undefined || sessionId === undefined
       ? {}
       : {
-          turnHandle: encodeTurnHandle({
-            sessionId,
-            turnId,
-          }) as unknown as TurnHandle,
+          turnHandle: parseTurnHandle(encodeTurnHandle({ sessionId, turnId })),
         }),
   } as DiagnosticRecord;
 }
@@ -647,7 +797,7 @@ function targetFromHandle(
     !v.safeParse(turnHandleSchema, handle).success
   )
     throw invalidInput(path, stage);
-  return decodeTurnHandle(handle);
+  return decodeTurnHandle(serializeTurnHandle(parseTurnHandle(handle)));
 }
 
 function invalidInput(
@@ -669,12 +819,11 @@ function projectCompletedTurn(
   const { sessionId, turnId, usage, diagnosticId, ...fields } = turn;
   return {
     ...fields,
-    turnHandle: encodeTurnHandle({
-      sessionId,
-      turnId,
-    }) as unknown as TurnHandle,
+    turnHandle: parseTurnHandle(encodeTurnHandle({ sessionId, turnId })),
     ...(usage === undefined ? {} : { usage }),
-    ...(diagnosticId === undefined ? {} : { diagnosticId }),
+    ...(diagnosticId === undefined
+      ? {}
+      : { diagnosticId: parseDiagnosticId(diagnosticId) }),
   } as import("./contracts.ts").CompletedTurn;
 }
 
@@ -767,16 +916,11 @@ function projectFailure(
       };
     case "unsupported_feature":
       return { code: failure.code, facts: { feature: failure.feature } };
-    case "session_name_conflict":
-      return {
-        code: failure.code,
-        facts: { sessionName: failure.sessionName },
-      };
     case "session_busy":
       return {
         code: failure.code,
         facts: {
-          sessionHandle: failure.sessionId as unknown as SessionHandle,
+          sessionHandle: parseSessionHandle(failure.sessionId),
         },
       };
     case "session_not_found":
@@ -785,7 +929,7 @@ function projectFailure(
       return {
         code: failure.code,
         facts: {
-          sessionHandle: failure.sessionId as unknown as SessionHandle,
+          sessionHandle: parseSessionHandle(failure.sessionId),
         },
       };
     case "permission_not_pending":
@@ -797,7 +941,7 @@ function projectFailure(
       return {
         code: failure.code,
         facts: {
-          diagnosticId: failure.diagnosticId as unknown as DiagnosticId,
+          diagnosticId: parseDiagnosticId(failure.diagnosticId),
         },
       };
     case "diagnostics_unavailable":
@@ -806,10 +950,12 @@ function projectFailure(
       return {
         code: failure.code,
         facts: {
-          turnHandle: encodeTurnHandle({
-            sessionId: failure.sessionId,
-            turnId: failure.turnId,
-          }) as unknown as TurnHandle,
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: failure.sessionId,
+              turnId: failure.turnId,
+            }),
+          ),
         },
       };
     case "model_catalog_query_failed":
@@ -821,7 +967,7 @@ function projectFailure(
           ...(failure.cause === undefined ? {} : { cause: failure.cause }),
           ...(failure.diagnosticId === undefined
             ? {}
-            : { diagnosticId: failure.diagnosticId }),
+            : { diagnosticId: parseDiagnosticId(failure.diagnosticId) }),
         },
       };
     case "daemon_start_failed":
@@ -842,10 +988,12 @@ function publicParameterPath(path: string): string {
 }
 
 function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
-  const sessionHandle = session.sessionId as unknown as SessionHandle;
+  const sessionHandle = parseSessionHandle(session.sessionId);
   const common = {
     sessionHandle,
-    sessionName: session.sessionName,
+    ...(session.sessionLabel === undefined
+      ? {}
+      : { sessionLabel: session.sessionLabel }),
     harness: session.harness,
     model: session.model,
     reasoning: session.reasoning,
@@ -857,10 +1005,12 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
     session.lastCompletedTurn === undefined
       ? undefined
       : {
-          turnHandle: encodeTurnHandle({
-            sessionId: session.sessionId,
-            turnId: session.lastCompletedTurn.turnId,
-          }) as unknown as TurnHandle,
+          turnHandle: parseTurnHandle(
+            encodeTurnHandle({
+              sessionId: session.sessionId,
+              turnId: session.lastCompletedTurn.turnId,
+            }),
+          ),
           stopReason: session.lastCompletedTurn.stopReason,
         };
 
@@ -868,10 +1018,12 @@ function mapSessionInfo(session: ProtocolSessionInfo): SessionInfo {
     return {
       ...common,
       state: "busy",
-      activeTurn: encodeTurnHandle({
-        sessionId: session.sessionId,
-        turnId: session.activeTurnId,
-      }) as unknown as TurnHandle,
+      activeTurn: parseTurnHandle(
+        encodeTurnHandle({
+          sessionId: session.sessionId,
+          turnId: session.activeTurnId,
+        }),
+      ),
       ...(lastCompletedTurn === undefined ? {} : { lastCompletedTurn }),
     };
   }

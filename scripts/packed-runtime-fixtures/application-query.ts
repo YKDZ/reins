@@ -41,7 +41,7 @@ async function main(): Promise<void> {
     const spawned = await connection.spawn(
       {
         harness: "codex",
-        sessionName: "packed-application-session",
+        sessionLabel: "packed-application-session",
         message: "programmatic runtime consumption",
         cwd: process.env.REINS_WORKER_CWD ?? process.cwd(),
       },

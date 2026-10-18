@@ -2,12 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile } from "node:fs/promises";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
-import type {
-  DomainEvent,
-  SessionId,
-  SessionName,
-  TurnId,
-} from "@reins/protocol";
+import type { DomainEvent, SessionId, TurnId } from "@reins/protocol";
 import { describe, expect, test } from "vitest";
 
 import { KnownCredentialPolicyError } from "#/fixture-policy";
@@ -38,9 +33,8 @@ async function replayFixture(
     diagnostics: async () => undefined,
   });
   driver.start({
-    sessionId: "reviewer@g1" as SessionId,
+    sessionId: "session:reviewer:g1" as SessionId,
     turnId: "t1" as TurnId,
-    sessionName: "reviewer" as SessionName,
     harness: "qoder",
     message: "fixture replay",
     cwd: "/tmp",
@@ -192,7 +186,7 @@ describe("录制 fixture 回放", () => {
     const events = await replayFixture(messages);
     // 该指纹在 closed projection 迁移前固定，证明离线裁剪未改变公开事件流。
     expect(sha256(JSON.stringify(events))).toBe(
-      "a740394f391c2e0e26a59e68705042220377676a5a0a151a9535e64bc8335e82",
+      "6ea57657aa3015f3f99ee74ef3230149fedf3d2f9d7f84c5c7c527652c8147f3",
     );
 
     const deltas = events.filter((event) => event.type === "text.delta");
@@ -214,7 +208,7 @@ describe("录制 fixture 回放", () => {
     expect(snapshots).toEqual([
       {
         type: "message",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         messageId: "m1",
         role: "worker",
@@ -231,14 +225,14 @@ describe("录制 fixture 回放", () => {
     ).toEqual([
       {
         type: "tool.requested",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         toolCallId: "c1",
         name: "Bash",
       },
       {
         type: "tool.completed",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         toolCallId: "c1",
         name: "Bash",
@@ -251,7 +245,7 @@ describe("录制 fixture 回放", () => {
     expect(events.filter((event) => event.type === "turn.completed")).toEqual([
       {
         type: "turn.completed",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         stopReason: "end_turn",
         finalReply:
@@ -298,7 +292,7 @@ describe("录制 fixture 回放", () => {
     const events = await replayFixture(messages);
     // 该指纹在 closed projection 迁移前固定，证明离线裁剪未改变公开事件流。
     expect(sha256(JSON.stringify(events))).toBe(
-      "d0f931797e2a419a9252676a4a573f7d3dfb98aa0836b7667d38fdcc59a5a0a0",
+      "f462b630505dbda4c1a69be48690fe054913f12e14622a8daf7877b4f4703314",
     );
 
     expect(
@@ -309,14 +303,14 @@ describe("录制 fixture 回放", () => {
     ).toEqual([
       {
         type: "tool.requested",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         toolCallId: "c1",
         name: "Bash",
       },
       {
         type: "tool.completed",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         toolCallId: "c1",
         name: "Bash",
@@ -325,14 +319,14 @@ describe("录制 fixture 回放", () => {
       },
       {
         type: "tool.requested",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         toolCallId: "c2",
         name: "Bash",
       },
       {
         type: "tool.completed",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         toolCallId: "c2",
         name: "Bash",
@@ -369,7 +363,7 @@ describe("录制 fixture 回放", () => {
     expect(completed).toEqual([
       {
         type: "turn.completed",
-        sessionId: "reviewer@g1",
+        sessionId: "session:reviewer:g1",
         turnId: "t1",
         stopReason: "end_turn",
         finalReply: snapshots[1]?.content,

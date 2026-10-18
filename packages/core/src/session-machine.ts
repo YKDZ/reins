@@ -28,7 +28,6 @@ import {
   type ToolCallId,
   type TurnId,
   turnIdSchema,
-  type SessionName,
   type SessionInfo,
   type SpawnParams,
   type SpawnAck,
@@ -53,7 +52,7 @@ type SessionRecord = {
   readonly model: string | null;
   readonly reasoning: string | null;
   readonly cwd: string;
-  readonly sessionName: SpawnParams["sessionName"];
+  readonly sessionLabel?: string;
   readonly spawnedAt: string;
   state: "busy" | "idle" | "killed";
   currentTurnId: TurnId | null;
@@ -226,7 +225,9 @@ function toInfo(session: SessionRecord): SessionInfo {
 
   const common = {
     sessionId: session.id,
-    sessionName: session.sessionName,
+    ...(session.sessionLabel === undefined
+      ? {}
+      : { sessionLabel: session.sessionLabel }),
     harness: session.harness,
     model: session.model,
     reasoning: session.reasoning,
@@ -268,9 +269,8 @@ export type SessionMachine = {
   subscribe(listener: (event: DomainEvent) => void): () => void;
 };
 
-// identity seam 由 daemon 世代持有者实现；核心只申请 caller-authored name 的地址。
 export type SessionIdentity = {
-  session(sessionName: SessionName): SessionId;
+  session(): SessionId;
 };
 
 export function createSessionMachine(options: {
@@ -280,14 +280,12 @@ export function createSessionMachine(options: {
   onListenerError?: (error: unknown, event: DomainEvent) => void;
 }): SessionMachine {
   const sessions = new Map<SessionId, SessionRecord>();
-  const usedSessionNames = new Set<SessionName>();
   const waiters: Array<{
     targets: readonly TurnTarget[];
     completion: WaitParams["completion"];
     resolve: (result: WaitResult) => void;
     timer: ReturnType<typeof setTimeout> | null;
   }> = [];
-  let sessionSeq = 0;
   let turnSeq = 0;
   let messageSeq = 0;
   const pendingSpawns = new Map<SessionId, PendingSpawn>();
@@ -321,7 +319,9 @@ export function createSessionMachine(options: {
           model: event.model,
           reasoning: event.reasoning,
           cwd: event.cwd,
-          sessionName: event.sessionName,
+          ...(event.sessionLabel === undefined
+            ? {}
+            : { sessionLabel: event.sessionLabel }),
           spawnedAt: event.spawnedAt,
           state: "busy",
           currentTurnId: null,
@@ -874,19 +874,11 @@ export function createSessionMachine(options: {
         throw invalidParamsError(parsed.issues);
       }
       const spec = parsed.output;
-      if (usedSessionNames.has(spec.sessionName)) {
-        throw machineError({
-          code: "session_name_conflict",
-          sessionName: spec.sessionName,
-        });
-      }
-      usedSessionNames.add(spec.sessionName);
-      sessionSeq += 1;
-      const sessionId = options.identity.session(spec.sessionName);
+      const sessionId = options.identity.session();
       const turnId = nextTurnId(sessionId);
       const cwd = spec.cwd;
       const spawnScope: PendingSpawn = {
-        token: Symbol(spec.sessionName),
+        token: Symbol(sessionId),
         turn: createTurnScope(turnId),
         permissionIds: new Set(),
         pendingPermissions: new Map(),
@@ -904,7 +896,9 @@ export function createSessionMachine(options: {
               model: spec.model ?? null,
               reasoning: spec.reasoning ?? null,
               cwd,
-              sessionName: spec.sessionName,
+              ...(spec.sessionLabel === undefined
+                ? {}
+                : { sessionLabel: spec.sessionLabel }),
               spawnedAt: new Date().toISOString(),
             },
             { type: "turn.started", sessionId, turnId },
@@ -931,7 +925,6 @@ export function createSessionMachine(options: {
                 ...(spec.captureHarnessStderr === undefined
                   ? {}
                   : { captureHarnessStderr: spec.captureHarnessStderr }),
-                sessionName: spec.sessionName,
               });
             } finally {
               spawnScope.accepting = false;
@@ -1288,8 +1281,8 @@ export function createSessionMachine(options: {
                   session.harness === filter.harness) &&
                 (filter.state === undefined ||
                   session.state === filter.state) &&
-                (filter.sessionName === undefined ||
-                  session.sessionName === filter.sessionName) &&
+                (filter.sessionLabel === undefined ||
+                  session.sessionLabel === filter.sessionLabel) &&
                 (filter.model === undefined || session.model === filter.model),
             );
       return (

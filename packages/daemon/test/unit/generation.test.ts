@@ -3,11 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
-import {
-  diagnosticIdSchema,
-  sessionIdSchema,
-  sessionNameSchema,
-} from "@reins/protocol";
+import { diagnosticIdSchema, sessionIdSchema } from "@reins/protocol";
 import * as v from "valibot";
 import { afterEach, describe, expect, test } from "vitest";
 
@@ -86,15 +82,12 @@ describe("daemon generation", () => {
     const savedState = await readFile(generationFile);
 
     const secondGeneration = await allocateOnce(state);
-    const heldHandle = createDaemonIdFactory(secondGeneration).session(
-      v.parse(sessionNameSchema, "foo"),
-    );
+    const heldHandle = createDaemonIdFactory(secondGeneration).session();
 
     await writeFile(generationFile, savedState);
     const rolledBackGeneration = await allocateOnce(state);
-    const reissuedHandle = createDaemonIdFactory(rolledBackGeneration).session(
-      v.parse(sessionNameSchema, "foo"),
-    );
+    const reissuedHandle =
+      createDaemonIdFactory(rolledBackGeneration).session();
 
     expect(rolledBackGeneration).not.toBe(secondGeneration);
     expect(reissuedHandle).not.toBe(heldHandle);
@@ -195,12 +188,7 @@ describe("daemon generation", () => {
     const generation = await allocateOnce(state);
     const ids = createDaemonIdFactory(generation);
 
-    expect(
-      v.safeParse(
-        sessionIdSchema,
-        ids.session(v.parse(sessionNameSchema, "reviewer")),
-      ).success,
-    ).toBe(true);
+    expect(v.safeParse(sessionIdSchema, ids.session()).success).toBe(true);
     expect(v.safeParse(diagnosticIdSchema, ids.diagnostic()).success).toBe(
       true,
     );

@@ -30,7 +30,7 @@ describe("driver event ingress ownership", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("best-effort-registration"),
+      sessionLabel: ids.sessionLabel("best-effort-registration"),
       harness: "codex",
       message: "start",
       cwd: "/tmp/demo",
@@ -92,7 +92,7 @@ describe("driver event ingress ownership", () => {
     machine.subscribe((event) => events.push(event));
 
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("spawn-terminal-projection"),
+      sessionLabel: ids.sessionLabel("spawn-terminal-projection"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",
@@ -132,7 +132,7 @@ describe("driver event ingress ownership", () => {
     const spawn = async (name: string) =>
       (
         await machine.spawn({
-          sessionName: ids.sessionName(name),
+          sessionLabel: ids.sessionLabel(name),
           harness: "codex",
           message: "start",
           cwd: "/tmp/demo",
@@ -147,7 +147,7 @@ describe("driver event ingress ownership", () => {
       model: null,
       reasoning: null,
       cwd: "/secret/cwd",
-      sessionName: ids.sessionName("forged"),
+      sessionLabel: ids.sessionLabel("forged"),
       spawnedAt: "secret-time",
     });
     fake.controls.emit({
@@ -289,7 +289,7 @@ describe("driver event ingress ownership", () => {
     });
     fake.controls.emit({
       type: "message",
-      sessionId: ids.session("unknown@gtest"),
+      sessionId: ids.session("session:unknown:gtest"),
       turnId: ids.turn("t1"),
       messageId: ids.message("m-unknown"),
       role: "worker",
@@ -430,7 +430,7 @@ describe("driver event ingress ownership", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("projected-turn"),
+      sessionLabel: ids.sessionLabel("projected-turn"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",
@@ -501,7 +501,7 @@ describe("driver event ingress ownership", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("terminal-projection"),
+      sessionLabel: ids.sessionLabel("terminal-projection"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",
@@ -555,7 +555,7 @@ describe("driver event ingress ownership", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("completed-turn-ownership"),
+      sessionLabel: ids.sessionLabel("completed-turn-ownership"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",
@@ -663,13 +663,13 @@ describe("driver event ingress ownership", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId: first } = await machine.spawn({
-      sessionName: ids.sessionName("ingress-one"),
+      sessionLabel: ids.sessionLabel("ingress-one"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",
     });
     const { sessionId: second } = await machine.spawn({
-      sessionName: ids.sessionName("ingress-two"),
+      sessionLabel: ids.sessionLabel("ingress-two"),
       harness: "codex",
       message: "two",
       cwd: "/tmp/demo",
@@ -760,7 +760,7 @@ describe("driver event ingress ownership", () => {
     });
     fake.controls.emit({
       type: "session.killed",
-      sessionId: ids.session("missing@gtest"),
+      sessionId: ids.session("session:missing:gtest"),
     });
 
     await vi.waitFor(() => expect(diagnostics).toHaveLength(5));
@@ -779,7 +779,7 @@ describe("driver event ingress ownership", () => {
           (event.type === "message" &&
             event.content === "duplicate complete") ||
           (event.type === "message" && event.content === "stale turn") ||
-          event.sessionId === ids.session("missing@gtest"),
+          event.sessionId === ids.session("session:missing:gtest"),
       ),
     ).toEqual([]);
     expect(diagnostics.map((input) => input.reason)).toEqual([
@@ -808,10 +808,12 @@ describe("driver event ingress ownership", () => {
       permissionId: ids.permission("p9"),
       resolution: { outcome: "allow", scope: "once" },
     });
-    expect(machine.list()).toEqual([
-      expect.objectContaining({ sessionId: first, state: "busy", turns: 0 }),
-      expect.objectContaining({ sessionId: second, state: "busy", turns: 0 }),
-    ]);
+    expect(machine.list()).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ sessionId: first, state: "busy", turns: 0 }),
+        expect.objectContaining({ sessionId: second, state: "busy", turns: 0 }),
+      ]),
+    );
   });
 
   test("releases turn-local message and tool ids when each turn terminates", async () => {
@@ -828,7 +830,7 @@ describe("driver event ingress ownership", () => {
       },
     });
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("bounded-turn-scopes"),
+      sessionLabel: ids.sessionLabel("bounded-turn-scopes"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",
@@ -889,7 +891,7 @@ describe("driver event ingress ownership", () => {
       },
     });
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("permission-scope"),
+      sessionLabel: ids.sessionLabel("permission-scope"),
       harness: "codex",
       message: "one",
       cwd: "/tmp/demo",

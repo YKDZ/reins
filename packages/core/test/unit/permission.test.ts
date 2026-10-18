@@ -26,7 +26,7 @@ async function spawnInteractive(): Promise<{
   const events: DomainEvent[] = [];
   machine.subscribe((event) => events.push(event));
   const { sessionId } = await machine.spawn({
-    sessionName: ids.sessionName("fixture-13"),
+    sessionLabel: ids.sessionLabel("fixture-13"),
     harness: "codex",
     message: "审查这个 PR",
     cwd: "/tmp/demo",
@@ -60,13 +60,13 @@ describe("spawn 与授权模式", () => {
     });
 
     await machine.spawn({
-      sessionName: ids.sessionName("fixture-inline-6"),
+      sessionLabel: ids.sessionLabel("fixture-inline-6"),
       harness: "codex",
       message: "a",
       cwd: "/tmp/demo",
     });
     await machine.spawn({
-      sessionName: ids.sessionName("fixture-14"),
+      sessionLabel: ids.sessionLabel("fixture-14"),
       harness: "qoder",
       message: "b",
       cwd: "/tmp/demo",
@@ -208,7 +208,7 @@ describe("resolvePermission", () => {
     await expect(
       machine.resolvePermission({
         turnId: ids.turn("t1"),
-        sessionId: ids.session("missing@gtest"),
+        sessionId: ids.session("session:missing:gtest"),
         permissionId: ids.permission("p1"),
         resolution: { outcome: "allow", scope: "once" },
       }),
@@ -262,7 +262,7 @@ describe("resolvePermission", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-15"),
+      sessionLabel: ids.sessionLabel("fixture-15"),
       harness: "codex",
       message: "审查这个 PR",
       cwd: "/tmp/demo",
@@ -310,11 +310,17 @@ describe("resolvePermission", () => {
   });
 
   test("driver 同步发出的内容事件排在 resolved 之后", async () => {
+    let workerSessionId: SessionId | undefined;
     const fake = createFakeDriver({
+      start(spec) {
+        workerSessionId = spec.sessionId;
+      },
       resolvePermission: () => {
+        if (workerSessionId === undefined)
+          throw new Error("worker session was not started");
         fake.controls.emit({
           type: "text.delta",
-          sessionId: ids.session("fixture-16@gtest"),
+          sessionId: workerSessionId,
           turnId: ids.turn("t1"),
           messageId: ids.message("m1"),
           delta: "收到",
@@ -329,7 +335,7 @@ describe("resolvePermission", () => {
     const events: DomainEvent[] = [];
     machine.subscribe((event) => events.push(event));
     const { sessionId } = await machine.spawn({
-      sessionName: ids.sessionName("fixture-16"),
+      sessionLabel: ids.sessionLabel("fixture-16"),
       harness: "codex",
       message: "审查这个 PR",
       cwd: "/tmp/demo",

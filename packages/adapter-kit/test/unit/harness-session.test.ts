@@ -9,7 +9,7 @@ import { describe, expect, test, vi } from "vitest";
 import { AlreadyDiagnosedError, isAlreadyDiagnosedError } from "#/diagnostic";
 import { HarnessSession } from "#/harness-session";
 
-const sessionId = "reviewer@g1" as SessionId;
+const sessionId = "session:reviewer:g1" as SessionId;
 const firstTurnId = "t1" as TurnId;
 const secondTurnId = "t2" as TurnId;
 
@@ -78,7 +78,7 @@ describe("HarnessSession", () => {
       vi.useRealTimers();
     }
   });
-  test("AlreadyDiagnosed guard 只接受本模块实例与合法 DiagnosticId", () => {
+  test("AlreadyDiagnosed guard 只接受本模块实例与非空诊断 ID", () => {
     expect(
       isAlreadyDiagnosedError(
         new AlreadyDiagnosedError("accepted", "d1-098" as never),
@@ -90,7 +90,7 @@ describe("HarnessSession", () => {
         diagnosticId: "d1-invalid",
       }),
     ).toBe(false);
-    const forged = new AlreadyDiagnosedError("invalid", "d1-invalid" as never);
+    const forged = new AlreadyDiagnosedError("invalid", "" as never);
     expect(isAlreadyDiagnosedError(forged)).toBe(false);
   });
 

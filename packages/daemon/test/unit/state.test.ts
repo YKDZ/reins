@@ -27,7 +27,7 @@ afterEach(async () => {
 });
 
 describe("daemon state", () => {
-  test("resolves durable state in documented environment precedence and preserves private permissions", async () => {
+  test("resolves state in documented environment precedence and preserves private permissions", async () => {
     const root = await temporaryDirectory();
     const explicit = join(root, "explicit");
     const xdg = join(root, "xdg");
@@ -42,7 +42,7 @@ describe("daemon state", () => {
       },
     });
 
-    expect(state).toMatchObject({ directory: explicit, durable: true });
+    expect(state.directory).toBe(explicit);
     expect((await stat(explicit)).mode & 0o777).toBe(0o700);
     expect((await stat(state.diagnosticsDirectory)).mode & 0o777).toBe(0o700);
 
@@ -126,7 +126,6 @@ describe("daemon state", () => {
     const homeFallback = await resolveDaemonState({
       env: { XDG_STATE_HOME: "", HOME: root },
     });
-    expect(homeFallback.durable).toBe(true);
     expect(homeFallback.directory).toBe(join(root, ".local", "state", "reins"));
 
     await expect(

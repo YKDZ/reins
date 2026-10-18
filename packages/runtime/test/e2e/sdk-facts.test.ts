@@ -14,8 +14,24 @@ import { fileURLToPath } from "node:url";
 import { resolveDaemonState } from "@reins/daemon/state";
 import {
   connect,
+  parseAgentFactId,
+  parseMessageKey,
+  parseOperationCredential,
+  parsePermissionHandle,
+  parseResumeCursor,
   parseRuntimeScopeId,
+  parseSessionHandle,
+  parseToolKey,
+  parseTurnHandle,
   ReinsSdkError,
+  serializeAgentFactId,
+  serializeMessageKey,
+  serializeOperationCredential,
+  serializePermissionHandle,
+  serializeResumeCursor,
+  serializeSessionHandle,
+  serializeToolKey,
+  serializeTurnHandle,
   type AgentFact,
   type ReinsConnection,
 } from "@ykdz/reins-sdk";
@@ -92,12 +108,12 @@ async function fixture() {
   async function spawnSession(
     connection: ReinsConnection,
     message: string,
-    sessionName = "facts",
+    sessionLabel = "facts",
   ) {
     return connection.spawn(
       {
         harness: "codex",
-        sessionName,
+        sessionLabel,
         message,
         cwd: directory,
       },
@@ -127,6 +143,9 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   const target = { scope: "turn" as const, turnHandle: spawned.turnHandle };
   const live = await observer.attach(target, { mode: "none" });
   const initialCursor = live.checkpoint;
+  expect(parseResumeCursor(serializeResumeCursor(initialCursor))).toBe(
+    initialCursor,
+  );
   const facts: AgentFact[] = [];
   const consuming = (async () => {
     for await (const fact of live) {
@@ -157,7 +176,8 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   ]);
 
   const callerMessage = facts.find(
-    (fact) => fact.type === "message" && fact.role === "caller",
+    (fact): fact is Extract<AgentFact, { type: "message" }> =>
+      fact.type === "message" && fact.role === "caller",
   );
   const textFacts = facts.filter((fact) => fact.type === "text.delta");
   const workerMessage = facts.find(
@@ -165,6 +185,11 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
       fact.type === "message" && fact.role === "worker",
   );
   expect(callerMessage).toMatchObject({ content: "next" });
+  if (callerMessage === undefined)
+    throw new Error("missing caller message fact");
+  expect(parseMessageKey(serializeMessageKey(callerMessage.messageKey))).toBe(
+    callerMessage.messageKey,
+  );
   expect(textFacts.map((fact) => fact.delta)).toEqual(["hello ", "world"]);
   expect(textFacts[0]?.messageKey).toBe(workerMessage?.messageKey);
   expect(workerMessage).toMatchObject({ content: "hello world" });
@@ -172,6 +197,11 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   const toolRequested = facts.find((fact) => fact.type === "tool.requested");
   const toolCompleted = facts.find((fact) => fact.type === "tool.completed");
   expect(toolRequested).toMatchObject({ name: "read-file" });
+  if (toolRequested?.type !== "tool.requested")
+    throw new Error("missing tool request fact");
+  expect(parseToolKey(serializeToolKey(toolRequested.toolKey))).toBe(
+    toolRequested.toolKey,
+  );
   expect(toolRequested?.toolKey).toBe(toolCompleted?.toolKey);
   expect(toolCompleted).toMatchObject({
     name: "native-result-name",
@@ -190,6 +220,11 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
   if (resolved?.type !== "permission.resolved")
     throw new Error("missing permission resolution fact");
   expect(resolved.permissionHandle).toBe(requested.permissionHandle);
+  expect(
+    parsePermissionHandle(
+      serializePermissionHandle(requested.permissionHandle),
+    ),
+  ).toBe(requested.permissionHandle);
   expect(JSON.parse(await readFile(resolutionFile, "utf8"))).toEqual({
     outcome: "deny",
     feedback: "caller feedback",
@@ -206,6 +241,22 @@ test("SDK facts preserve message, tool, authorization, and replay identity", asy
       "eventId",
     ])
       expect(fact).not.toHaveProperty(key);
+  const credential = control.prepareOperation("spawn");
+  expect(
+    parseOperationCredential(
+      "spawn",
+      serializeOperationCredential("spawn", credential),
+    ),
+  ).toBe(credential);
+  expect(parseAgentFactId(serializeAgentFactId(callerMessage.factId))).toBe(
+    callerMessage.factId,
+  );
+  expect(
+    parseSessionHandle(serializeSessionHandle(spawned.sessionHandle)),
+  ).toBe(spawned.sessionHandle);
+  expect(parseTurnHandle(serializeTurnHandle(spawned.turnHandle))).toBe(
+    spawned.turnHandle,
+  );
 
   const available = await observer.attach(target, { mode: "available" });
   const availableFacts: AgentFact[] = [];
