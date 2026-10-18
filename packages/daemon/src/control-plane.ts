@@ -161,6 +161,7 @@ export type ControlPlane = {
   acceptEvent(event: DomainEvent): Promise<void>;
   settleEvents(): Promise<void>;
   subscribeEvents(listener: (entry: CommittedEvent) => void): () => void;
+  subscribeControlUnavailable(listener: () => void): () => void;
   assertSessionScope(sessionId: SessionId, consumer?: ConsumerContext): void;
   list(
     filter: Parameters<SessionMachine["list"]>[0],
@@ -208,6 +209,7 @@ function canonical(value: unknown): string {
 
 export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
   const eventListeners = new Set<(entry: CommittedEvent) => void>();
+  const controlUnavailableListeners = new Set<() => void>();
   const waitListeners = new Set<(entry?: CommittedEvent) => void>();
   const committedEvents = new Map<SessionId, StoredCommittedEvent[]>();
   const transientOperations = new Map<
@@ -1555,7 +1557,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       wakeWaiters(entry);
       return Promise.resolve();
     } catch (error) {
+      const firstUnavailableEvent = eventWriteFailure === undefined;
       eventWriteFailure ??= error;
+      if (firstUnavailableEvent) notifyControlUnavailable();
       wakeWaiters();
       if (!eventWriteFailures.has(event.sessionId)) {
         eventWriteFailures.set(event.sessionId, event);
@@ -1591,10 +1595,23 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       if (
         eventWriteFailure !== undefined ||
         options.controlStore.health().status !== "available"
-      )
+      ) {
         wakeWaiters();
+        notifyControlUnavailable();
+      }
     } catch {
       wakeWaiters();
+      notifyControlUnavailable();
+    }
+  }
+
+  function notifyControlUnavailable(): void {
+    for (const listener of Array.from(controlUnavailableListeners)) {
+      try {
+        listener();
+      } catch {
+        // 可用性变化不能中断事件失败的正式收束路径。
+      }
     }
   }
 
@@ -2795,6 +2812,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       eventListeners.add(listener);
       return () => eventListeners.delete(listener);
     },
+    subscribeControlUnavailable(listener) {
+      controlUnavailableListeners.add(listener);
+      return () => controlUnavailableListeners.delete(listener);
+    },
     assertSessionScope,
     list,
     attachInitial,
@@ -2854,6 +2875,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     close() {
       unsubscribeMachine();
       eventListeners.clear();
+      controlUnavailableListeners.clear();
       wakeWaiters();
       waitListeners.clear();
       options.controlStore.close();

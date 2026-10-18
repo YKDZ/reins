@@ -456,6 +456,7 @@ export function createProtocolServerInternal(
         }
       } finally {
         unsubscribeControlEvents();
+        unsubscribeControlUnavailable();
         options.control.close();
         startedResolve?.();
         startedResolve = null;
@@ -580,6 +581,11 @@ export function createProtocolServerInternal(
   const unsubscribeControlEvents = options.control.subscribeEvents(
     forwardCommittedEvent,
   );
+  const unsubscribeControlUnavailable =
+    options.control.subscribeControlUnavailable(() => {
+      for (const subscription of Array.from(attachSubscriptions))
+        endAttach(subscription, "control_unavailable");
+    });
 
   function requestIdOf(raw: unknown): RequestId | null {
     if (typeof raw !== "object" || raw === null) return null;

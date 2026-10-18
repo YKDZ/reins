@@ -2966,13 +2966,126 @@ describe("daemon 空闲退出", () => {
       }),
     ) as { sessionId: SessionId };
 
+    const observations = collectNotifications(connection);
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: first.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({ initial: { mode: "snapshot" } });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: second.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({ initial: { mode: "snapshot" } });
+    codex.controls.emitWorkerMessage("A 已提交正文");
+    qoder.controls.emitWorkerMessage("B 已提交正文");
+    await vi.waitFor(() =>
+      expect(
+        observations.events.filter(
+          (event) =>
+            event.type === "message" &&
+            (event.sessionId === first.sessionId ||
+              event.sessionId === second.sessionId),
+        ),
+      ).toHaveLength(2),
+    );
+
     failEventWrite = true;
     codex.controls.emitWorkerMessage("正文无法提交");
     await waitFor(() => codex.calls.terminated.includes(first.sessionId));
+    await vi.waitFor(() => expect(observations.ended).toHaveLength(2));
 
     expect(codex.calls.terminated).toEqual([first.sessionId]);
     expect(qoder.calls.terminated).toEqual([]);
     expect(second.sessionId).not.toBe(first.sessionId);
+    expect(observations.events).toMatchObject([
+      {
+        type: "message",
+        sessionId: first.sessionId,
+        content: "A 已提交正文",
+      },
+      {
+        type: "message",
+        sessionId: second.sessionId,
+        content: "B 已提交正文",
+      },
+    ]);
+    expect(observations.events).not.toContainEqual(
+      expect.objectContaining({
+        type: "message",
+        sessionId: first.sessionId,
+        content: "正文无法提交",
+      }),
+    );
+    expect(observations.ended).toEqual([
+      { sessionId: first.sessionId, reason: "control_unavailable" },
+      { sessionId: second.sessionId, reason: "control_unavailable" },
+    ]);
+    expect(
+      resultOf(
+        await requester("wait", {
+          targets: [{ sessionId: first.sessionId, turnId: "t1" }],
+          completion: "all",
+          timeoutMs: 0,
+        }),
+      ),
+    ).toMatchObject({
+      status: "unreachable",
+      unreachable: [
+        { sessionId: first.sessionId, reason: "commit_unavailable" },
+      ],
+    });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: first.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({
+      initial: {
+        mode: "snapshot",
+        baseline: {
+          session: {
+            state: "unreachable",
+            unreachableReason: "commit_unavailable",
+          },
+        },
+      },
+    });
+    expect(
+      resultOf(
+        await requester("attach", {
+          scope: "session",
+          sessionId: second.sessionId,
+          start: { mode: "snapshot" },
+        }),
+      ),
+    ).toMatchObject({
+      initial: {
+        mode: "snapshot",
+        baseline: {
+          session: {
+            state: "unreachable",
+            unreachableReason: "commit_unavailable",
+          },
+        },
+      },
+    });
+    await vi.waitFor(() => expect(observations.ended).toHaveLength(4));
+    expect(observations.ended.slice(2)).toEqual([
+      { sessionId: first.sessionId, reason: "control_unavailable" },
+      { sessionId: second.sessionId, reason: "control_unavailable" },
+    ]);
     connection.close();
     await expect(daemon.stop()).rejects.toThrow();
     await expect(running).rejects.toThrow();
