@@ -232,16 +232,7 @@ const fixtureDriverFactory: AdapterDriverFactory = ({ emit, diagnostics }) => {
         record({ type: "terminate_gate_released", sessionId, attempt });
       }
       if (worker.child.pid !== undefined) {
-        try {
-          process.kill(-worker.child.pid, "SIGTERM");
-        } catch (error) {
-          if (
-            !(error instanceof Error) ||
-            !("code" in error) ||
-            error.code !== "ESRCH"
-          )
-            throw error;
-        }
+        worker.child.kill("SIGTERM");
       }
       await worker.closed;
       record({ type: "terminate_finished", sessionId, attempt });

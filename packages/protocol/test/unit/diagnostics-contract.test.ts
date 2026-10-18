@@ -347,7 +347,7 @@ describe("typed identifiers", () => {
     }
   });
 
-  test("session and diagnostic identities reject each other's encoding", () => {
+  test("会话与诊断身份拒绝彼此的编码", () => {
     bad(sessionIdSchema, diagnosticId);
     bad(diagnosticIdSchema, sessionId);
     ok(sessionIdSchema, sessionId);
