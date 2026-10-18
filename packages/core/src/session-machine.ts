@@ -200,16 +200,17 @@ function copyPendingToolCompletions(
 
 function notePendingToolCompletions(
   pendingToolCompletions: SessionRecord["pendingToolCompletions"],
-  turnId: TurnId,
+  event: Extract<DomainEvent, { type: "turn.completed" }>,
   activeTurn: TurnScope | null,
 ): void {
-  if (activeTurn?.turnId !== turnId) return;
+  if (event.stopReason !== "cancelled" || activeTurn?.turnId !== event.turnId)
+    return;
   for (const [toolCallId, status] of activeTurn.tools) {
     if (status !== "requested") continue;
-    let toolCallIds = pendingToolCompletions.get(turnId);
+    let toolCallIds = pendingToolCompletions.get(event.turnId);
     if (toolCallIds === undefined) {
       toolCallIds = new Set();
-      pendingToolCompletions.set(turnId, toolCallIds);
+      pendingToolCompletions.set(event.turnId, toolCallIds);
     }
     toolCallIds.add(toolCallId);
   }
@@ -790,7 +791,7 @@ export function createSessionMachine(options: {
         if (session !== undefined) {
           notePendingToolCompletions(
             session.pendingToolCompletions,
-            event.turnId,
+            event,
             session.activeTurn,
           );
           const { type: _type, ...completed } = event;
@@ -927,7 +928,7 @@ export function createSessionMachine(options: {
       case "turn.completed":
         notePendingToolCompletions(
           projection.pendingToolCompletions,
-          event.turnId,
+          event,
           projection.activeTurn,
         );
         projection.state = "idle";
@@ -1298,7 +1299,7 @@ export function createSessionMachine(options: {
         else if (event.type === "turn.completed") {
           notePendingToolCompletions(
             spawning.pendingToolCompletions,
-            event.turnId,
+            event,
             spawning.turn,
           );
           spawning.completedTurnId = event.turnId;
