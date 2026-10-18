@@ -35,6 +35,7 @@ describe("spawn", () => {
     expect(events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
     ]);
     expect(machine.list()).toEqual([
       expect.objectContaining({
@@ -99,7 +100,7 @@ describe("spawn", () => {
             type: "text.delta",
             sessionId: spec.sessionId,
             turnId: spec.turnId,
-            messageId: ids.message("m1"),
+            messageId: ids.message("m3"),
             delta: "outer still current",
           });
         }

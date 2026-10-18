@@ -9,12 +9,15 @@ import {
   serializeSessionHandle,
   serializeTurnHandle,
   type AgentTarget,
+  type AgentFact,
   type HarnessId,
+  type MessageContentPart,
   type ModelCatalogFailure,
   type ModelCatalogResult,
   type DiagnosticId,
   type MessageKey,
   type OperationRecord,
+  type OperationKey,
   type ReinsConnection,
   type ReinsFailure,
   type ResumeCursor,
@@ -25,6 +28,7 @@ import {
   type SessionState,
   type SpawnInput,
   type TurnHandle,
+  type ToolKey,
   type WaitInput,
   type WaitResult,
 } from "@ykdz/reins-sdk";
@@ -160,6 +164,30 @@ async function inspectModelCatalog(): Promise<
   return [result.catalogs[0], failure];
 }
 
+declare const storeFailure: Extract<
+  ReinsFailure,
+  {
+    code: "control_store_unavailable";
+  }
+>;
+if (storeFailure.facts.stage === "event") {
+  const affectedSession: SessionHandle = storeFailure.facts.sessionHandle;
+  const affectedTurn: TurnHandle | undefined = storeFailure.facts.turnHandle;
+  const cleanupSession: SessionHandle | undefined =
+    storeFailure.facts.cleanupSessionHandle;
+  const failedEventType: string = storeFailure.facts.eventType;
+  void affectedSession;
+  void affectedTurn;
+  void cleanupSession;
+  void failedEventType;
+}
+if (storeFailure.facts.stage === "event_commit") {
+  const accepted: "accepted" = storeFailure.facts.acceptance;
+  const operationKey: OperationKey<"kill"> = storeFailure.facts.operationKey;
+  void accepted;
+  void operationKey;
+}
+
 function inspectWaitResult(result: WaitResult): string[] {
   if (result.status === "unreachable")
     return result.unreachable.map(
@@ -178,6 +206,29 @@ function inspectUnreachableSession(
 
 void connect;
 void supportedHarness;
+declare const publicFact: AgentFact;
+if (publicFact.type === "tool.requested") {
+  const completeToolInput: unknown = publicFact.input;
+  void completeToolInput;
+}
+if (publicFact.type === "tool.completed") {
+  const completeToolOutput: unknown = publicFact.result;
+  void completeToolOutput;
+}
+if (publicFact.type === "message") {
+  const nativeTruncation: true | undefined = publicFact.nativeTruncated;
+  void nativeTruncation;
+  const publicContent: string | MessageContentPart[] = publicFact.content;
+  void publicContent;
+  if (Array.isArray(publicFact.content)) {
+    for (const part of publicFact.content) {
+      if (part.type === "tool_call" || part.type === "tool_result") {
+        const relatedTool: ToolKey = part.toolKey;
+        void relatedTool;
+      }
+    }
+  }
+}
 void unreachableState;
 void invalidHarness;
 void invalidSpawn;

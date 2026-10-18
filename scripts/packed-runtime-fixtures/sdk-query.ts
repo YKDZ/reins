@@ -44,8 +44,11 @@ function inspectFailure(failure: ReinsFailure): string {
       return failure.facts.availableHarnesses.join(",");
     case "operation_pending":
     case "operation_outcome_unknown":
-    case "control_store_unavailable":
       return failure.facts.operationKey;
+    case "control_store_unavailable":
+      return failure.facts.stage === "event"
+        ? failure.facts.sessionHandle
+        : failure.facts.operationKey;
     case "session_busy":
       return failure.facts.sessionHandle;
     case "permission_not_pending":

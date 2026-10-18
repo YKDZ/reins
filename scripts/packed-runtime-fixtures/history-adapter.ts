@@ -1,4 +1,4 @@
-// 通过正式 adapter 接口生成大于事件保留窗口的消息历史。
+// 通过正式 adapter 接口生成用于验证全量分页回放的长消息历史。
 import { access } from "node:fs/promises";
 
 import type { HarnessAdapter } from "@reins/daemon";

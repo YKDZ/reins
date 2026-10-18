@@ -637,7 +637,7 @@ describe("daemon diagnostic error dispatch", () => {
         type: "message",
         sessionId: active,
         turnId: v.parse(turnIdSchema, "t1"),
-        messageId: "m1" as never,
+        messageId: "m2" as never,
         role: "worker",
         content: "accepted",
       });
@@ -645,7 +645,7 @@ describe("daemon diagnostic error dispatch", () => {
         type: "message",
         sessionId: active,
         turnId: v.parse(turnIdSchema, "t1"),
-        messageId: "m1" as never,
+        messageId: "m2" as never,
         role: "worker",
         content: "sentinel-content",
       });
@@ -826,7 +826,7 @@ describe("daemon diagnostic error dispatch", () => {
           eventTurnId: "t99",
           activeTurnId: "t1",
         },
-        { reason: "message_already_completed", messageId: "m1" },
+        { reason: "message_already_completed", messageId: "m2" },
         { reason: "tool_already_requested", toolCallId: "c1" },
         { reason: "tool_already_completed", toolCallId: "c2" },
         {

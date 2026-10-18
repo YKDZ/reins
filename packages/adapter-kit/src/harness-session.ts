@@ -180,7 +180,7 @@ export class HarnessSession<TAttachment = unknown> implements TurnJournal {
     const existing = this.messageIds.get(nativeId);
     if (existing !== undefined) return existing;
     this.messageSeq += 1;
-    const messageId = `m${this.messageSeq}` as MessageId;
+    const messageId = `w${this.messageSeq}` as MessageId;
     this.messageIds.set(nativeId, messageId);
     return messageId;
   }

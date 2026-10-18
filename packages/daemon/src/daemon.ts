@@ -59,7 +59,6 @@ export function createDaemon(options: {
   runtimeScopeId: RuntimeScopeId;
   controlStore?: ControlStore;
   idleTimeoutMs?: number;
-  eventLogLimit?: number;
 }): Daemon {
   return createDaemonInternal(options, {});
 }
@@ -73,7 +72,6 @@ export function createDaemonInternal(
     runtimeScopeId: RuntimeScopeId;
     controlStore?: ControlStore;
     idleTimeoutMs?: number;
-    eventLogLimit?: number;
   },
   testing: {
     beforeAttachReplay?: (sessionId: SessionId) => void;
@@ -113,9 +111,6 @@ export function createDaemonInternal(
     controlStore,
     runtimeScopeId: options.runtimeScopeId,
     ...(assertWriterLease === undefined ? {} : { assertWriterLease }),
-    ...(options.eventLogLimit === undefined
-      ? {}
-      : { eventLogLimit: options.eventLogLimit }),
   });
   const server = createProtocolServerInternal(
     {

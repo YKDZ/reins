@@ -1272,36 +1272,30 @@ async function replayWindow(): Promise<void> {
     } finally {
       available.close();
     }
-    let accepted: Awaited<ReturnType<ReinsConnection["attach"]>> | undefined;
-    let expired: ReinsSdkError | undefined;
+    const resumed = await connection.attach(target, {
+      mode: "after",
+      cursor: staleCursor,
+    });
+    const resumedFacts: AgentFact[] = [];
     try {
-      accepted = await connection.attach(target, {
-        mode: "after",
-        cursor: staleCursor,
-      });
-    } catch (error) {
-      expired = failure(error);
-    }
-    if (expired === undefined) {
-      accepted?.close();
-      throw new Error(
-        `The installed SDK accepted an expired cursor: oldest=${window.oldest}, head=${window.head}, cursor=${staleCursor}`,
-      );
+      for await (const fact of resumed) resumedFacts.push(fact);
+      const end = await resumed.done;
+      if (end.reason !== "end_turn")
+        throw new Error("The old cursor replay had the wrong end reason");
+    } finally {
+      resumed.close();
     }
     const retainedMessages = facts.filter((fact) => fact.type === "message");
     if (
-      !window.truncated ||
-      window.oldest === null ||
-      window.oldest <= 1 ||
+      window.truncated ||
+      window.oldest !== 1 ||
       window.head === null ||
-      facts.length !== 1000 ||
-      retainedMessages.length !== 999 ||
-      expired.failure.code !== "event_cursor_expired" ||
-      expired.failure.facts.oldest !== window.oldest ||
-      expired.failure.facts.head !== window.head
+      facts.length !== 1008 ||
+      retainedMessages.length !== 1006 ||
+      resumedFacts.length !== 1006
     )
       throw new Error(
-        "The installed SDK did not report the bounded replay window and typed cursor gap",
+        "The installed SDK did not preserve and replay the complete event history",
       );
     process.stdout.write(
       `${JSON.stringify({
@@ -1311,7 +1305,7 @@ async function replayWindow(): Promise<void> {
         retainedMessages: retainedMessages.length,
         window,
         factCount: facts.length,
-        expired: expired.failure,
+        resumedFactCount: resumedFacts.length,
       })}\n`,
     );
   } finally {

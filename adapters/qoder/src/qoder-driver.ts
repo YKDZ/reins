@@ -6,6 +6,7 @@ import type {
   AdapterDriverFactory,
   WorkerSpec,
   MachineError,
+  MessageId,
 } from "@reins/protocol";
 import {
   makeTextEvidence,
@@ -40,6 +41,15 @@ type PendingDelivery = {
   readonly resolve: () => void;
   readonly reject: (error: unknown) => void;
 };
+type CallerMessage = { messageId: MessageId; content: string };
+
+function inputText(content: SDKUserMessage["message"]["content"]): string {
+  if (typeof content === "string") return content;
+  return content
+    .filter((block) => block.type === "text" && typeof block.text === "string")
+    .map((block) => block.text ?? "")
+    .join("");
+}
 
 function userMessage(
   content: string,
@@ -147,6 +157,7 @@ export function createQoderDriver(deps: {
     let queryClosePromise: Promise<void> | null = null;
     let closedDiagnosticEmitted = false;
     let initialInputUuid: string | null = null;
+    const callerMessagesByUuid = new Map<string, CallerMessage>();
     let initialInputSent = false;
     let nativeSessionId: string | null = null;
     let startSettled = false;
@@ -259,7 +270,27 @@ export function createQoderDriver(deps: {
           }
           if (!sdkMessage(rawMessage))
             throw new Error("Qoder SDK returned an unrecognized message");
-          const events = await mapSdkMessage(session, mappingState, rawMessage);
+          let callerMessageId: MessageId | undefined;
+          if (rawMessage.type === "user" && rawMessage.uuid !== undefined) {
+            const callerMessage = callerMessagesByUuid.get(rawMessage.uuid);
+            if (
+              callerMessage !== undefined &&
+              inputText(rawMessage.message.content) === callerMessage.content
+            )
+              callerMessageId = callerMessage.messageId;
+          }
+          const events = await mapSdkMessage(
+            session,
+            mappingState,
+            rawMessage,
+            callerMessageId,
+          );
+          if (
+            callerMessageId !== undefined &&
+            rawMessage.type === "user" &&
+            rawMessage.uuid !== undefined
+          )
+            callerMessagesByUuid.delete(rawMessage.uuid);
           for (const event of events) {
             emit(event);
           }
@@ -345,6 +376,12 @@ export function createQoderDriver(deps: {
         closedDiagnosticEmitted = false;
         initialInputUuid = randomUUID();
         pendingDeliveries.clear();
+        callerMessagesByUuid.clear();
+        if (spec.messageId !== undefined)
+          callerMessagesByUuid.set(initialInputUuid, {
+            messageId: spec.messageId,
+            content: spec.message,
+          });
         initialInputSent = false;
         nativeSessionId = null;
         startSettled = false;
@@ -421,7 +458,7 @@ export function createQoderDriver(deps: {
           });
         return accepted;
       },
-      async deliver(sessionId, turnId, message, placement) {
+      async deliver(sessionId, turnId, message, placement, messageId) {
         if (placement === "active_turn") {
           throw { code: "unsupported_feature", feature: "active_turn" };
         }
@@ -442,6 +479,8 @@ export function createQoderDriver(deps: {
         const queued = new Promise<void>((resolve, reject) => {
           pendingDeliveries.set(uuid, { resolve, reject });
         });
+        if (messageId !== undefined)
+          callerMessagesByUuid.set(uuid, { messageId, content: message });
         try {
           stream.push(userMessage(message, "next", true, uuid));
         } catch (error) {

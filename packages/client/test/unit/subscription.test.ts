@@ -141,6 +141,48 @@ test("fact subscriptions retain permission history and expose only domain associ
   subscription.close();
 });
 
+test("message content tool references use the same public tool key", async () => {
+  const f = await fixture();
+  const subscription = await f.client.subscribeFacts(params as never);
+  f.emit({
+    type: "tool.requested",
+    toolCallId: "tool-1",
+    name: "Read",
+  });
+  const tool = await subscription.next();
+  f.emit({
+    type: "message",
+    messageId: "message-1",
+    role: "worker",
+    content: [
+      { type: "text", text: "读取完成" },
+      { type: "tool_call", toolCallId: "tool-1" },
+      { type: "tool_result", toolCallId: "tool-1" },
+    ],
+  });
+  const message = await subscription.next();
+
+  expect(tool.value).toMatchObject({ type: "tool.requested" });
+  if (tool.value?.type !== "tool.requested")
+    throw new Error("Missing public tool fact");
+  expect(message.value).toMatchObject({
+    type: "message",
+    content: [
+      { type: "text", text: "读取完成" },
+      { type: "tool_call", toolKey: tool.value.toolKey },
+      { type: "tool_result", toolKey: tool.value.toolKey },
+    ],
+  });
+  if (
+    message.value?.type !== "message" ||
+    !Array.isArray(message.value.content)
+  )
+    throw new Error("Missing structured public message");
+  expect(message.value.content[1]).not.toHaveProperty("toolCallId");
+  expect(message.value.content[2]).not.toHaveProperty("toolCallId");
+  subscription.close();
+});
+
 test("a disconnect cursor stops at the last fact delivered to the iterator", async () => {
   const f = await fixture();
   const subscription = await f.client.subscribeFacts(params as never);

@@ -191,6 +191,8 @@ export type {
   TurnHandle,
   AgentFact,
   AgentFactId,
+  MessageContent,
+  MessageContentPart,
   AgentSubscriptionEnd,
   AgentSubscriptionEstablishment,
   AgentTarget,
@@ -1284,6 +1286,47 @@ function projectFailure(
         },
       };
     case "control_store_unavailable":
+      if (failure.stage === "event" || failure.stage === "event_commit") {
+        const eventFacts = {
+          sessionHandle: parseSessionHandle(failure.sessionId),
+          eventType: failure.eventType,
+          ...(failure.turnId === undefined
+            ? {}
+            : {
+                turnHandle: parseTurnHandle(
+                  encodeTurnHandle({
+                    sessionId: failure.sessionId,
+                    turnId: failure.turnId,
+                  }),
+                ),
+              }),
+          cause: failure.cause,
+          ...(failure.cleanupCause === undefined
+            ? {}
+            : { cleanupCause: failure.cleanupCause }),
+          ...(failure.cleanupSessionId === undefined
+            ? {}
+            : {
+                cleanupSessionHandle: parseSessionHandle(
+                  failure.cleanupSessionId,
+                ),
+              }),
+        };
+        if (failure.stage === "event")
+          return {
+            code: failure.code,
+            facts: { stage: failure.stage, ...eventFacts },
+          };
+        return {
+          code: failure.code,
+          facts: {
+            stage: failure.stage,
+            operationKey: parseOperationKey(failure.operationKey, "kill"),
+            acceptance: failure.acceptance,
+            ...eventFacts,
+          },
+        };
+      }
       return {
         code: failure.code,
         facts: {

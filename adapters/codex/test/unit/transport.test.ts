@@ -582,6 +582,156 @@ describe("codex transport", () => {
     await transport.close();
   });
 
+  test("userMessage 保留结构化输入、路径引用与原生 turn 关联", async () => {
+    const fake = fakeChild();
+    const transport = createCodexTransport({ spawnChild: () => fake.child });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+    const params = {
+      turnId: "turn-7",
+      item: {
+        type: "userMessage",
+        id: "user-7",
+        clientId: null,
+        content: [
+          {
+            type: "text",
+            text: "查看文件",
+            text_elements: [
+              { byteRange: { start: 0, end: 6 }, placeholder: "文件" },
+            ],
+          },
+          {
+            type: "image",
+            url: "https://example.test/image.png",
+            detail: "high",
+          },
+          { type: "localImage", path: "/tmp/private/image.png" },
+          { type: "localAudio", path: "/tmp/private/audio.wav" },
+          { type: "skill", name: "review", path: "/tmp/private/skill.md" },
+        ],
+      },
+    };
+    fake.stdout.write(
+      `${JSON.stringify({ method: "item/completed", params })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: {
+        kind: "notification",
+        method: "item/completed",
+        params: {
+          turnId: "turn-7",
+          item: {
+            type: "userMessage",
+            id: "user-7",
+            clientId: null,
+            content: params.item.content,
+          },
+        },
+      },
+    });
+    await transport.close();
+  });
+
+  test("MCP 工具 item 保留原生 arguments 与结构化结果", async () => {
+    const fake = fakeChild();
+    const transport = createCodexTransport({ spawnChild: () => fake.child });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+    const argumentsValue = { query: "全文" };
+    const resultValue = {
+      content: [{ type: "text", text: "完整工具结果" }],
+      structuredContent: { count: 2 },
+      _meta: { source: "native" },
+    };
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "mcpToolCall",
+            id: "mcp-1",
+            status: "completed",
+            arguments: argumentsValue,
+            result: resultValue,
+            error: null,
+          },
+        },
+      })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: {
+        method: "item/completed",
+        params: {
+          item: {
+            type: "mcpToolCall",
+            id: "mcp-1",
+            status: "completed",
+            arguments: argumentsValue,
+            result: resultValue,
+            error: null,
+          },
+        },
+      },
+    });
+    await transport.close();
+  });
+
+  test("动态工具 item 保留原生参数与结构化输出项", async () => {
+    const fake = fakeChild();
+    const transport = createCodexTransport({ spawnChild: () => fake.child });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+    const argumentsValue = { query: "全文", options: ["raw"] };
+    const contentItems = [
+      { type: "inputText", text: "完整输出" },
+      { type: "inputImage", imageUrl: "data:image/png;base64,AAAA" },
+    ];
+
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: "item/completed",
+        params: {
+          item: {
+            type: "dynamicToolCall",
+            id: "dynamic-1",
+            namespace: "search",
+            tool: "query",
+            status: "completed",
+            arguments: argumentsValue,
+            contentItems,
+            success: true,
+          },
+        },
+      })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toMatchObject({
+      done: false,
+      value: {
+        method: "item/completed",
+        params: {
+          item: {
+            type: "dynamicToolCall",
+            id: "dynamic-1",
+            namespace: "search",
+            tool: "query",
+            status: "completed",
+            arguments: argumentsValue,
+            contentItems,
+            success: true,
+          },
+        },
+      },
+    });
+    await transport.close();
+  });
+
   test("turn/completed 保留 worker 提供的结构化失败标签与 message", async () => {
     const fake = fakeChild();
     const transport = createCodexTransport({ spawnChild: () => fake.child });
