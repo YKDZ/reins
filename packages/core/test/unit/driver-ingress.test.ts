@@ -521,7 +521,9 @@ describe("driver event ingress ownership", () => {
     await expect(
       machine.send({ placement: "new_turn", sessionId, message: "fails" }),
     ).rejects.toMatchObject({
-      code: "internal_error",
+      name: "SendDeliveryFailure",
+      acceptance: "unknown",
+      failure: { code: "internal_error" },
     });
     await vi.waitFor(() =>
       expect(
@@ -532,13 +534,14 @@ describe("driver event ingress ownership", () => {
         ),
       ).toBe(true),
     );
-    expect(events).toEqual([]);
+    expect(events).toEqual([{ type: "session.killed", sessionId }]);
     expect(machine.list()).toEqual([
-      expect.objectContaining({ sessionId, state: "idle", turns: 1 }),
+      expect.objectContaining({ sessionId, state: "killed", turns: 1 }),
     ]);
 
-    await machine.send({ placement: "new_turn", sessionId, message: "retry" });
-    expect(events.some((event) => event.type === "text.delta")).toBe(true);
+    await expect(
+      machine.send({ placement: "new_turn", sessionId, message: "retry" }),
+    ).rejects.toMatchObject({ code: "session_killed" });
   });
 
   test("prioritizes completed-turn ownership over permission lifecycle checks", async () => {

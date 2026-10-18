@@ -64,42 +64,49 @@ export type SpawnResult = {
   turnHandle: TurnHandle;
   cwd: string;
 };
-export type OperationRecord =
+export type RecoverableOperationKind = "spawn" | "send";
+type OperationResultByKind = { spawn: SpawnResult; send: SendResult };
+type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
       status: "unknown" | "unavailable" | "pending";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
     }
   | {
       status: "outcome_unknown";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
       cause?: ErrorCause;
       cleanupCause?: ErrorCause;
       diagnosticId?: DiagnosticId;
     }
   | {
       status: "succeeded";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
     }
   | {
       status: "failed";
-      operationKey: OperationKey<"spawn">;
+      operationKey: OperationKey<Kind>;
       error: ReinsFailure;
     }
   | {
       status: "accepted_uncommitted";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
     }
   | {
       status: "accepted_unconfirmed";
-      operationKey: OperationKey<"spawn">;
-      result: SpawnResult;
+      operationKey: OperationKey<Kind>;
+      result: OperationResultByKind[Kind];
       cause: ErrorCause;
       cleanupCause?: ErrorCause;
     };
+export type OperationRecord<
+  Kind extends RecoverableOperationKind = RecoverableOperationKind,
+> = Kind extends RecoverableOperationKind
+  ? OperationRecordForKind<Kind>
+  : never;
 export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
@@ -109,6 +116,7 @@ export type SendInput =
   | {
       placement: "new_turn";
       sessionHandle: SessionHandle;
+      ifLastCompletedTurn?: TurnHandle;
       message: string;
     }
   | {
@@ -832,7 +840,7 @@ type FailureFactsByCode = {
     stage: "register" | "dispatch" | "commit" | "failure";
     acceptance: "not_dispatched" | "unknown" | "accepted";
     cause: ErrorCause;
-    acceptedResult?: SpawnResult;
+    acceptedResult?: SpawnResult | SendResult;
     cleanupCause?: ErrorCause;
   };
   permission_not_pending: { permissionHandle: PermissionHandle };
@@ -842,6 +850,11 @@ type FailureFactsByCode = {
   unknown_harness: { harness: HarnessId; availableHarnesses: HarnessId[] };
   unsupported_feature: { feature: string };
   session_busy: { sessionHandle: SessionHandle };
+  turn_precondition_failed: {
+    sessionHandle: SessionHandle;
+    expected: TurnHandle;
+    actual: TurnHandle;
+  };
   session_not_found: { sessionHandle: SessionHandle };
   session_killed: { sessionHandle: SessionHandle };
   session_terminating: { sessionHandle: SessionHandle };
@@ -931,7 +944,9 @@ export type ReinsConnection = {
     signal?: AbortSignal,
   ): Promise<FactSubscription>;
   prepareOperation<Kind extends OperationKind>(kind: Kind): OperationKey<Kind>;
-  getOperation(operationKey: OperationKey<"spawn">): Promise<OperationRecord>;
+  getOperation<Kind extends RecoverableOperationKind>(
+    operationKey: OperationKey<Kind>,
+  ): Promise<OperationRecord<Kind>>;
   spawn(
     input: SpawnInput,
     options?: OperationOptions<"spawn">,

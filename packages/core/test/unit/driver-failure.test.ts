@@ -250,7 +250,7 @@ describe("driver 抛错时动作整体回滚", () => {
     );
   });
 
-  test("send：driver.deliver 抛错则不开启新回合，会话保持 idle", async () => {
+  test("send：接受状态未知时收束会话且不发布未确认回合", async () => {
     const fake = createFakeDriver({
       deliver: () => {
         throw new Error("投递失败");
@@ -286,10 +286,14 @@ describe("driver 抛错时动作整体回滚", () => {
 
     await expect(
       machine.send({ placement: "new_turn", sessionId: id, message: "继续" }),
-    ).rejects.toEqual(
+    ).rejects.toMatchObject(
       expect.objectContaining({
-        code: "internal_error",
-        cause: { kind: "exception", message: "投递失败" },
+        name: "SendDeliveryFailure",
+        acceptance: "unknown",
+        failure: {
+          code: "internal_error",
+          cause: { kind: "exception", message: "投递失败" },
+        },
       }),
     );
 
@@ -297,8 +301,9 @@ describe("driver 抛错时动作整体回滚", () => {
       events.filter((event) => event.type === "turn.started"),
     ).toHaveLength(1);
     expect(machine.list()[0]).toEqual(
-      expect.objectContaining({ sessionId: id, state: "idle" }),
+      expect.objectContaining({ sessionId: id, state: "killed" }),
     );
+    expect(events.at(-1)).toEqual({ type: "session.killed", sessionId: id });
     expect(inputs).toEqual([
       expect.objectContaining({
         sessionId: id,

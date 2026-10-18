@@ -12,6 +12,7 @@ import {
   type PermissionId,
   type TurnId,
   type MachineError,
+  WorkerDeliveryFailure,
   WorkerStartFailure,
 } from "@reins/protocol";
 
@@ -323,20 +324,28 @@ export function createCodexDriver(deps: {
       },
       async deliver(sessionId, turnId, message, placement) {
         if (session === null || session.sessionId !== sessionId || ended)
-          throw {
-            code: "turn_not_active",
-            sessionId,
-            turnId,
-          } satisfies MachineError;
+          throw new WorkerDeliveryFailure(
+            "Codex session is unavailable before turn dispatch",
+            "not_accepted",
+          );
         if (placement === "new_turn") {
           session.beginTurn(turnId);
-          const ready = startTurn(message);
+          let dispatched = false;
+          const ready = startTurn(message, () => {
+            dispatched = true;
+          });
           nativeTurns.set(turnId, ready);
           try {
             await ready;
           } catch (error) {
             session.turnId = null;
-            throw error;
+            throw new WorkerDeliveryFailure(
+              errorMessage(error),
+              dispatched && !(error instanceof CodexRequestError)
+                ? "unknown"
+                : "not_accepted",
+              { cause: error },
+            );
           }
           return;
         }

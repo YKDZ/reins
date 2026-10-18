@@ -5,11 +5,13 @@ import {
   type DiagnosticId,
   type MessageKey,
   type OperationKey,
+  type OperationRecord,
   type PermissionHandle,
   type ReplayPolicy,
   type ResumeCursor,
   type ReinsConnection,
   type SendInput,
+  type SendResult,
   type SessionHandle,
   type SessionInfo,
   type ToolKey,
@@ -121,10 +123,20 @@ const wrongSpawnOperationKey: OperationKey<"spawn"> =
   connection.prepareOperation("send");
 // @ts-expect-error 操作键会在泛型推断中保留操作类型。
 const wrongOperation: OperationKey<"send"> = spawnOperationKey;
+declare const sendRecord: OperationRecord<"send">;
+// @ts-expect-error send 查询记录不能伪装成 spawn 查询记录。
+const wrongSendRecord: OperationRecord<"spawn"> = sendRecord;
 // @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
 parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
-// @ts-expect-error 仅创建记录在本票提供可恢复结果查询。
-void connection.getOperation(sendOperationKey);
+async function inspectSendRecordKind(): Promise<void> {
+  const operation = await connection.getOperation(sendOperationKey);
+  if (operation.status !== "succeeded") return;
+  const result: SendResult = operation.result;
+  // @ts-expect-error send 结果不能读取 spawn 专属的工作目录。
+  const cwd: string = operation.result.cwd;
+  void result;
+  void cwd;
+}
 void connection.spawn(
   { harness: "codex", cwd: "/tmp", message: "x" },
   {
@@ -139,6 +151,13 @@ const invalidSend: SendInput = {
   // @ts-expect-error 活跃回合目标不能同时包含会话目标。
   sessionHandle,
   message: "ambiguous target",
+};
+const activeTurnWithPrecondition: SendInput = {
+  placement: "active_turn",
+  turnHandle,
+  message: "active turns cannot carry a predecessor condition",
+  // @ts-expect-error 前驱条件只适用于 new_turn。
+  ifLastCompletedTurn: turnHandle,
 };
 
 const unreachableSessionFields = {
@@ -198,8 +217,11 @@ if (completed.stopReason === "end_turn") {
 void wrongTurn;
 void wrongToolKey;
 void wrongOperation;
+void wrongSendRecord;
+void inspectSendRecordKind;
 void wrongSpawnOperationKey;
 void invalidSend;
+void activeTurnWithPrecondition;
 void invalidReplay;
 void sessionTarget;
 void mismatchedTarget;

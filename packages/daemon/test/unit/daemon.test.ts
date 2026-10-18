@@ -42,6 +42,7 @@ import {
   sessionIdSchema,
   consumerContextSchema,
   spawnParamsSchema,
+  WorkerDeliveryFailure,
   WorkerStartFailure,
 } from "@reins/protocol";
 import {
@@ -369,6 +370,11 @@ function createFakeHarness(options: {
   autoPermission?: { options: PermissionOption[] };
   canCaptureHarnessStderr?: boolean;
   terminate?: (sessionId: SessionId) => Promise<void>;
+  deliver?: (
+    sessionId: SessionId,
+    turnId: TurnId,
+    message: string,
+  ) => Promise<void>;
 }): {
   adapter: HarnessAdapter;
   calls: FakeCalls;
@@ -415,6 +421,7 @@ function createFakeHarness(options: {
     async deliver(sessionId, turnId, message) {
       current = { sessionId, turnId };
       calls.delivered.push({ sessionId, turnId, message });
+      await options.deliver?.(sessionId, turnId, message);
     },
     async interrupt(sessionId) {
       calls.interrupted.push(sessionId);
@@ -4175,6 +4182,60 @@ test("操作账本只在首次 spawn 时校验模型目录", async () => {
   connection.close();
 });
 
+test("active_turn send 同键正文冲突仍沿原操作指纹缓存拒绝", async () => {
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
+  });
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
+  const connection = server.connect();
+  const requester = makeRequester(connection);
+  const spawned = resultOf(
+    await requester("spawn", {
+      sessionLabel: "active-send-fingerprint",
+      harness: "codex",
+      message: "start the original turn",
+    }),
+  ) as { sessionId: SessionId; turnId: TurnId };
+  const operationKey = testOperationKey(
+    connection,
+    "send",
+    "00000006-0123-4123-8123-0123456789ab",
+  );
+  const original = {
+    kind: "request",
+    method: "send",
+    operationKey,
+    params: {
+      placement: "active_turn",
+      sessionId: spawned.sessionId,
+      turnId: spawned.turnId,
+      message: "deliver once",
+    },
+  } as const;
+  expect(
+    await sendRaw(connection, {
+      ...original,
+      requestId: "active-send-original",
+    }),
+  ).toHaveProperty("result");
+  expect(
+    await sendRaw(connection, {
+      ...original,
+      requestId: "active-send-conflict",
+      params: { ...original.params, message: "must not dispatch" },
+    }),
+  ).toMatchObject({ error: { code: "operation_key_conflict" } });
+  expect(fake.calls.delivered).toEqual([
+    {
+      sessionId: spawned.sessionId,
+      turnId: spawned.turnId,
+      message: "deliver once",
+    },
+  ]);
+  connection.close();
+});
+
 test("模型目录查询失败时不把 harness 误判为未知或拒绝模型", async () => {
   const fake = createFakeHarness({
     harness: "codex",
@@ -4197,6 +4258,113 @@ test("模型目录查询失败时不把 harness 误判为未知或拒绝模型",
   expect(fake.calls.starts).toBe(1);
   expect(fake.calls.specs[0]).toMatchObject({ model: "live-model" });
   connection.close();
+});
+
+test("新回合明确未接受但失败记录不可写时查询保留已知拒绝", async () => {
+  const backingStore = createInMemoryControlStore();
+  let failureWrites = 0;
+  const controlStore: ControlStore = {
+    ...backingStore,
+    failSend() {
+      failureWrites += 1;
+      throw new Error("send failure record unavailable");
+    },
+  };
+  const fake = createFakeHarness({
+    harness: "codex",
+    modelCatalog: emptyModelCatalog("codex"),
+    deliver: async () => {
+      throw new WorkerDeliveryFailure(
+        "native queue rejected the turn",
+        "not_accepted",
+      );
+    },
+  });
+  const server = createInMemoryTransportServer<ProtocolMessage>();
+  const daemon = createDaemon({
+    transport: server,
+    adapters: new Map([["codex", fake.adapter]]),
+    identity: testIdentity,
+    diagnostics: testDiagnostics,
+    runtimeScopeId: testRuntimeScopeId,
+    controlStore,
+    idleTimeoutMs: 60_000,
+  });
+  daemons.push(daemon);
+  const running = daemon.start();
+  const connection = server.connect();
+  await makeRequester(connection)("initialize", {
+    protocolMajorVersion: REINS_PROTOCOL_MAJOR_VERSION,
+    consumerContext: "test-consumer",
+  });
+  const spawned = resultOf(
+    await makeRequester(connection)("spawn", {
+      sessionLabel: "send-not-accepted",
+      harness: "codex",
+      message: "initial turn",
+    }),
+  ) as { sessionId: SessionId };
+  fake.controls.completeTurn();
+  await makeRequester(connection)("list", {});
+
+  const request = {
+    kind: "request",
+    method: "send",
+    testOperationId: "00000007-0123-4123-8123-0123456789ab",
+    params: {
+      sessionId: spawned.sessionId,
+      message: "rejected turn",
+      placement: "new_turn",
+    },
+  } as const;
+  const first = await sendRaw(connection, {
+    ...request,
+    requestId: "send-not-accepted-first",
+  });
+  expect(first).toMatchObject({
+    error: {
+      code: "control_store_unavailable",
+      stage: "failure",
+      acceptance: "not_dispatched",
+      cause: { message: expect.stringContaining("native queue rejected") },
+    },
+  });
+  const queried = await sendRaw(connection, {
+    kind: "request",
+    requestId: "send-not-accepted-query",
+    method: "getOperation",
+    params: {
+      operationKey: testOperationKey(
+        connection,
+        "send",
+        request.testOperationId,
+      ),
+    },
+  });
+  expect(queried).toMatchObject({
+    result: {
+      status: "failed",
+      error: {
+        code: "internal_error",
+        cause: { message: "native queue rejected the turn" },
+      },
+    },
+  });
+  const retry = await sendRaw(connection, {
+    ...request,
+    requestId: "send-not-accepted-retry",
+  });
+  expect(retry).toMatchObject({
+    error: {
+      code: "internal_error",
+      cause: { message: "native queue rejected the turn" },
+    },
+  });
+  expect(fake.calls.delivered).toHaveLength(1);
+  expect(failureWrites).toBe(1);
+  connection.close();
+  await daemon.stop();
+  await running;
 });
 
 test("kill 恢复返回原清理失败，新身份才会重试", async () => {

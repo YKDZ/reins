@@ -441,6 +441,19 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   await expect(
     original.wait({ targets: [completed.turnHandle], completion: "all" }),
   ).resolves.toMatchObject({ status: "satisfied" });
+  const sendKey = original.prepareOperation("send");
+  const sent = await original.send(
+    {
+      placement: "new_turn",
+      sessionHandle: completed.sessionHandle,
+      ifLastCompletedTurn: completed.turnHandle,
+      message: "complete before daemon restart",
+    },
+    { operationKey: sendKey },
+  );
+  await expect(
+    original.wait({ targets: [sent.turnHandle], completion: "all" }),
+  ).resolves.toMatchObject({ status: "satisfied" });
 
   const active = await original.spawn({
     harness: "codex",
@@ -463,6 +476,11 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
   clients.push(reconnected);
   expect(reconnected.handshake.daemonGeneration).not.toBe(originalGeneration);
   expect(await reconnected.list()).toEqual([]);
+  await expect(reconnected.getOperation(sendKey)).resolves.toEqual({
+    status: "succeeded",
+    operationKey: sendKey,
+    result: sent,
+  });
   expect(
     await reconnected.list({ sessionHandle: completed.sessionHandle }),
   ).toMatchObject([
@@ -470,7 +488,7 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
       state: "unreachable",
       lastKnownState: "idle",
       lastCompletedTurn: {
-        turnHandle: completed.turnHandle,
+        turnHandle: sent.turnHandle,
         stopReason: "end_turn",
       },
     },
@@ -1289,4 +1307,109 @@ test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets"
   expect(delivered).toHaveLength(2);
   expect(delivered[0]).toMatchObject({ message: activeMessage });
   expect(delivered[1]).toMatchObject({ message: nextMessage });
+});
+
+test("SDK new-turn preconditions are exact, persisted, and checked before delivery", async () => {
+  const directory = await mkdtemp(
+    join(tmpdir(), "reins-sdk-new-turn-condition-"),
+  );
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  const observations = join(directory, "adapter-observations.ndjson");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const connection = await openLocal({
+    consumerContext: "sdk-new-turn-condition",
+    env: {
+      ...process.env,
+      REINS_SOCKET: join(directory, "reins.sock"),
+      REINS_STATE_DIR: join(directory, "state"),
+      REINS_DAEMON_BIN: daemonLauncher,
+      REINS_ADAPTERS_MODULE: adaptersModule,
+      REINS_FIXTURE_REQUESTS_FILE: observations,
+      REINS_IDLE_TIMEOUT_MS: "120000",
+    },
+  });
+  clients.push(connection);
+
+  const first = await connection.spawn(
+    {
+      harness: "codex",
+      message: "complete first turn",
+      cwd: process.cwd(),
+    },
+    { operationKey: connection.prepareOperation("spawn") },
+  );
+  await connection.wait({ targets: [first.turnHandle], completion: "all" });
+
+  const sendIntent = {
+    placement: "new_turn" as const,
+    sessionHandle: first.sessionHandle,
+    ifLastCompletedTurn: first.turnHandle,
+    message: "start second turn",
+  };
+  const operationKey = connection.prepareOperation("send");
+  const second = await connection.send(sendIntent, { operationKey });
+  await connection.wait({ targets: [second.turnHandle], completion: "all" });
+
+  await expect(connection.send(sendIntent, { operationKey })).resolves.toEqual(
+    second,
+  );
+  await expect(
+    connection.send(
+      { ...sendIntent, message: "stale retry must not dispatch" },
+      { operationKey },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: { code: "operation_key_conflict" },
+  });
+  await expect(
+    connection.send(
+      {
+        ...sendIntent,
+        message: "stale predecessor must not dispatch",
+      },
+      { operationKey: connection.prepareOperation("send") },
+    ),
+  ).rejects.toMatchObject({
+    stage: "operation",
+    failure: {
+      code: "turn_precondition_failed",
+      facts: {
+        sessionHandle: first.sessionHandle,
+        expected: first.turnHandle,
+      },
+    },
+  });
+
+  const recovered = await connection.getOperation(operationKey);
+  expect(recovered).toMatchObject({
+    status: "succeeded",
+    operationKey,
+    result: second,
+  });
+
+  const observedRecords = (
+    await readFile(join(directory, "adapter-observations.ndjson"), "utf8")
+  )
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  expect(
+    observedRecords.filter(
+      (record) =>
+        record.type === "message_delivered" &&
+        record.message === "start second turn",
+    ),
+  ).toHaveLength(1);
+  expect(
+    observedRecords.some(
+      (record) => record.message === "stale predecessor must not dispatch",
+    ),
+  ).toBe(false);
 });

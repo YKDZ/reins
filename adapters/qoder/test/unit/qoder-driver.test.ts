@@ -25,13 +25,17 @@ const permissionId = "p1" as PermissionId;
 async function setup(
   authorizationMode: "interactive" | "allowAll" | "omitted" = "interactive",
   close?: () => Promise<void>,
+  behavior: { autoQueueAcceptance?: boolean } = {},
 ): Promise<{
   events: DomainEvent[];
   diagnostics: DriverDiagnosticFact[];
   fake: ReturnType<typeof createFakeSdk>;
   driver: ReturnType<ReturnType<typeof createQoderDriver>>;
 }> {
-  const fake = createFakeSdk(close === undefined ? {} : { close });
+  const fake = createFakeSdk({
+    ...behavior,
+    ...(close === undefined ? {} : { close }),
+  });
   const diagnostics: DriverDiagnosticFact[] = [];
   const sink: DiagnosticSink = async (input) => {
     diagnostics.push(input);
@@ -223,6 +227,37 @@ describe("qoder driver 事件映射", () => {
       acceptance: "not_accepted",
     });
     expect(fake.controls.delivered()).toEqual([]);
+    await driver.terminate(sessionId);
+  });
+
+  test("新回合等待与输入 UUID 精确匹配的 command_lifecycle queued", async () => {
+    const { fake, driver } = await setup("interactive", undefined, {
+      autoQueueAcceptance: false,
+    });
+    const delivery = driver.deliver(
+      sessionId,
+      secondTurnId,
+      "等原生入队回执",
+      "new_turn",
+    );
+    await flush();
+    const input = fake.controls.delivered().at(-1);
+    expect(input?.message.content).toBe("等原生入队回执");
+    const commandUuid = input?.uuid;
+    expect(commandUuid).toBeDefined();
+    if (commandUuid === undefined) throw new Error("Expected command UUID");
+
+    let accepted = false;
+    void delivery.then(() => {
+      accepted = true;
+    });
+    fake.controls.acknowledge("00000000-0000-4000-8000-000000000099");
+    await flush();
+    expect(accepted).toBe(false);
+
+    fake.controls.acknowledge(commandUuid);
+    await expect(delivery).resolves.toBeUndefined();
+    expect(accepted).toBe(true);
     await driver.terminate(sessionId);
   });
 

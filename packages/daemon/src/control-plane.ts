@@ -2,6 +2,8 @@ import { stat } from "node:fs/promises";
 
 import { isAlreadyDiagnosedError } from "@reins/adapter-kit";
 import {
+  SendCommitFailure,
+  SendDeliveryFailure,
   SpawnCommitFailure,
   SpawnStartFailure,
   type SessionMachine,
@@ -29,6 +31,9 @@ import type {
   RuntimeScopeId,
   SessionId,
   SessionInfo,
+  NewTurnSendParams,
+  SendAck,
+  SendParams,
   SpawnAck,
   SpawnParams,
   SubscriptionTarget,
@@ -44,8 +49,9 @@ import {
   makeErrorCause,
   makeTextEvidence,
   machineErrorSchema,
-  operationRecordSchema,
+  operationRecordSchemaFor,
   parseOperationKey,
+  newTurnSendParamsSchema,
   spawnParamsSchema,
 } from "@reins/protocol";
 import * as v from "valibot";
@@ -78,6 +84,24 @@ class SpawnCommitVerificationError extends Error {
   ) {
     super("Spawn commit could not be confirmed after an error");
     this.name = "SpawnCommitVerificationError";
+    this.durableState = durableState;
+    this.commitError = commitError;
+    this.verificationError = verificationError;
+  }
+}
+
+class SendCommitVerificationError extends Error {
+  readonly durableState: "not_committed" | "unconfirmed";
+  readonly commitError: unknown;
+  readonly verificationError: unknown;
+
+  constructor(
+    durableState: "not_committed" | "unconfirmed",
+    commitError: unknown,
+    verificationError?: unknown,
+  ) {
+    super("Send commit could not be confirmed after an error");
+    this.name = "SendCommitVerificationError";
     this.durableState = durableState;
     this.commitError = commitError;
     this.verificationError = verificationError;
@@ -190,6 +214,18 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     | {
         readonly status: "accepted_uncommitted" | "accepted_unconfirmed";
         readonly result: SpawnAck;
+        readonly error: unknown;
+        readonly verificationError?: unknown;
+        readonly cleanupError: unknown;
+      }
+    | { readonly status: "outcome_unknown"; readonly error: MachineError }
+  >();
+  const sendResults = new Map<
+    string,
+    | { readonly status: "failed"; readonly error: MachineError }
+    | {
+        readonly status: "accepted_uncommitted" | "accepted_unconfirmed";
+        readonly result: SendAck;
         readonly error: unknown;
         readonly verificationError?: unknown;
         readonly cleanupError: unknown;
@@ -413,6 +449,49 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     return info;
   }
 
+  function sendSessionInfo(
+    previous: SessionInfo,
+    result: SendAck,
+    events: readonly DomainEvent[],
+  ): SessionInfo {
+    if (previous.state !== "idle")
+      throw new Error("New turn target was not idle before commit");
+    const common: SessionProjectionBase = {
+      sessionId: previous.sessionId,
+      ...(previous.sessionLabel === undefined
+        ? {}
+        : { sessionLabel: previous.sessionLabel }),
+      harness: previous.harness,
+      model: previous.model,
+      reasoning: previous.reasoning,
+      cwd: previous.cwd,
+      spawnedAt: previous.spawnedAt,
+      turns: previous.turns,
+      ...(previous.lastCompletedTurn === undefined
+        ? {}
+        : { lastCompletedTurn: previous.lastCompletedTurn }),
+    };
+    const terminal = events.find((event) => event.type === "turn.completed");
+    if (terminal?.type === "turn.completed") {
+      if (terminal.turnId !== result.turnId)
+        throw new Error("New turn completion does not match its result");
+      return {
+        ...common,
+        turns: previous.turns + 1,
+        state: "idle",
+        lastCompletedTurn: {
+          turnId: terminal.turnId,
+          stopReason: terminal.stopReason,
+        },
+      };
+    }
+    return {
+      ...common,
+      state: "busy",
+      activeTurnId: result.turnId,
+    };
+  }
+
   function verifyCommittedSpawn(input: {
     operationKey: OperationKey;
     request: SpawnParams;
@@ -482,6 +561,76 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     }
   }
 
+  function verifyCommittedSend(input: {
+    operationKey: OperationKey;
+    request: NewTurnSendParams;
+    result: SendAck;
+    session: StoredSession;
+    events: readonly DomainEvent[];
+  }):
+    | {
+        readonly status: "committed";
+        readonly events: readonly StoredCommittedEvent[];
+      }
+    | { readonly status: "not_committed" }
+    | { readonly status: "unconfirmed"; readonly error: unknown } {
+    try {
+      const operation = options.controlStore.getOperation(input.operationKey);
+      if (operation === undefined || operation.kind !== "send")
+        return {
+          status: "unconfirmed",
+          error: new Error(
+            "Send operation record is missing after commit error",
+          ),
+        };
+      if (
+        operation.runtimeScopeId !== input.session.runtimeScopeId ||
+        operation.consumer !== input.session.consumer ||
+        operation.generation !== input.session.generation ||
+        canonical(operation.request) !== canonical(input.request)
+      )
+        return {
+          status: "unconfirmed",
+          error: new Error(
+            "Stored operation does not match the submitted send",
+          ),
+        };
+      if (operation.status === "dispatched") return { status: "not_committed" };
+      if (
+        operation.status !== "succeeded" ||
+        canonical(operation.result) !== canonical(input.result)
+      )
+        return {
+          status: "unconfirmed",
+          error: new Error(
+            "Stored send result does not match the accepted result",
+          ),
+        };
+      const session = options.controlStore.getSession(input.result.sessionId);
+      const committedEvents = options.controlStore.sessionEvents(
+        input.result.sessionId,
+      );
+      const tail = committedEvents.slice(-input.events.length);
+      if (
+        session === undefined ||
+        canonical(session) !== canonical(input.session) ||
+        tail.length !== input.events.length ||
+        tail.some(
+          (entry, index) =>
+            canonical(entry.event) !== canonical(input.events[index]) ||
+            (index > 0 && entry.eventId !== tail[index - 1]!.eventId + 1),
+        )
+      )
+        return {
+          status: "unconfirmed",
+          error: new Error("Stored send session or event batch is incomplete"),
+        };
+      return { status: "committed", events: tail };
+    } catch (error) {
+      return { status: "unconfirmed", error };
+    }
+  }
+
   function getOperation(
     operationKey: OperationKey,
     consumer: ConsumerContext | undefined,
@@ -492,20 +641,28 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     } catch {
       throw { code: "operation_key_conflict" } satisfies MachineError;
     }
+    if (claims.kind !== "spawn" && claims.kind !== "send")
+      throw { code: "operation_key_conflict" } satisfies MachineError;
     if (
       consumer === undefined ||
       claims.runtimeScopeId !== options.runtimeScopeId ||
       claims.consumer !== consumer
     )
       throw { code: "operation_key_scope_mismatch" } satisfies MachineError;
-    const known = spawnResults.get(operationKey);
+    const kind = claims.kind;
+    const known =
+      kind === "send"
+        ? sendResults.get(operationKey)
+        : spawnResults.get(operationKey);
+    const record = (value: unknown): OperationRecord =>
+      v.parse(operationRecordSchemaFor(kind), value) as OperationRecord;
     const knownUnknownRecord = (): OperationRecord => {
       const error =
         known?.status === "outcome_unknown" &&
         known.error.code === "operation_outcome_unknown"
           ? known.error
           : undefined;
-      return v.parse(operationRecordSchema, {
+      return record({
         status: "outcome_unknown",
         operationKey,
         ...(error?.cause === undefined ? {} : { cause: error.cause }),
@@ -517,17 +674,21 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           : { diagnosticId: error.diagnosticId }),
       });
     };
-    if (transientOperations.get(operationKey)?.method === "spawn")
-      return v.parse(operationRecordSchema, {
+    if (transientOperations.get(operationKey)?.method === kind)
+      return record({
         status: "pending",
         operationKey,
       });
     const knownAcceptedRecord = (
       status: "accepted_uncommitted" | "accepted_unconfirmed",
     ) => {
-      if (known === undefined || known.status === "outcome_unknown")
-        throw new Error("No accepted spawn result is recorded");
-      return v.parse(operationRecordSchema, {
+      if (
+        known === undefined ||
+        (known.status !== "accepted_uncommitted" &&
+          known.status !== "accepted_unconfirmed")
+      )
+        throw new Error("No accepted operation result is recorded");
+      return record({
         status,
         operationKey,
         result: known.result,
@@ -552,8 +713,10 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       if (operation === undefined) {
         if (known?.status === "accepted_uncommitted")
           return knownAcceptedRecord("accepted_unconfirmed");
+        if (known?.status === "failed")
+          return record({ status: "failed", operationKey, error: known.error });
         if (known?.status === "outcome_unknown") return knownUnknownRecord();
-        return v.parse(operationRecordSchema, {
+        return record({
           status:
             options.controlStore.health().status === "available"
               ? "unknown"
@@ -569,13 +732,25 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         throw { code: "operation_key_scope_mismatch" } satisfies MachineError;
       switch (operation.status) {
         case "pending":
-          return v.parse(operationRecordSchema, {
+          if (known?.status === "failed")
+            return record({
+              status: "failed",
+              operationKey,
+              error: known.error,
+            });
+          return record({
             status: "pending",
             operationKey,
           });
         case "dispatched":
-          if (transientOperations.get(operationKey)?.method === "spawn")
-            return v.parse(operationRecordSchema, {
+          if (known?.status === "failed")
+            return record({
+              status: "failed",
+              operationKey,
+              error: known.error,
+            });
+          if (transientOperations.get(operationKey)?.method === kind)
+            return record({
               status: "pending",
               operationKey,
             });
@@ -586,7 +761,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           if (known?.status === "outcome_unknown") return knownUnknownRecord();
           return knownUnknownRecord();
         case "outcome_unknown":
-          return v.parse(operationRecordSchema, {
+          return record({
             status: "outcome_unknown",
             operationKey,
             ...(operation.error.cause === undefined
@@ -600,13 +775,13 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
               : { diagnosticId: operation.error.diagnosticId }),
           });
         case "succeeded":
-          return v.parse(operationRecordSchema, {
+          return record({
             status: "succeeded",
             operationKey,
             result: operation.result,
           });
         case "failed":
-          return v.parse(operationRecordSchema, {
+          return record({
             status: "failed",
             operationKey,
             error: operation.error,
@@ -625,7 +800,9 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
       if (known?.status === "accepted_unconfirmed")
         return knownAcceptedRecord("accepted_unconfirmed");
       if (known?.status === "outcome_unknown") return knownUnknownRecord();
-      return v.parse(operationRecordSchema, {
+      if (known?.status === "failed")
+        return record({ status: "failed", operationKey, error: known.error });
+      return record({
         status: "unavailable",
         operationKey,
       });
@@ -904,10 +1081,198 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
         }
       }
       case "send": {
-        const params = rawParams as Parameters<SessionMachine["send"]>[0];
+        const params = rawParams as SendParams;
         assertSessionScope(params.sessionId, consumer);
         await assertWriterLease();
-        return await options.machine.send(params);
+        if (params.placement !== "new_turn")
+          return await options.machine.send(params);
+        const claims = operationClaims(operationKey, "send", consumer);
+        const key = operationKey!;
+        try {
+          return await options.machine.send(params, {
+            beforeDispatch() {
+              try {
+                options.controlStore.markSendDispatched(key);
+              } catch (error) {
+                wakeWaitersIfStoreUnavailable();
+                const failure = storeUnavailable(
+                  key,
+                  "dispatch",
+                  "not_dispatched",
+                  error,
+                );
+                sendResults.set(key, { status: "failed", error: failure });
+                try {
+                  options.controlStore.failSend(key, failure);
+                } catch {
+                  wakeWaitersIfStoreUnavailable();
+                }
+                throw failure;
+              }
+            },
+            async commit(result, events) {
+              const existingSession = options.controlStore.getSession(
+                result.sessionId,
+              );
+              if (existingSession === undefined)
+                throw new Error("Send target disappeared before commit");
+              const session: StoredSession = {
+                info: sendSessionInfo(existingSession.info, result, events),
+                runtimeScopeId: claims.runtimeScopeId,
+                consumer: claims.consumer,
+                generation: claims.generation,
+              };
+              let committed: readonly StoredCommittedEvent[];
+              try {
+                committed = options.controlStore.commitSend({
+                  operationKey: key,
+                  result,
+                  session,
+                  events,
+                });
+              } catch (commitError) {
+                wakeWaitersIfStoreUnavailable();
+                const verification = verifyCommittedSend({
+                  operationKey: key,
+                  request: params,
+                  result,
+                  session,
+                  events,
+                });
+                if (verification.status === "committed") {
+                  committed = verification.events;
+                } else {
+                  throw new SendCommitVerificationError(
+                    verification.status,
+                    commitError,
+                    verification.status === "unconfirmed"
+                      ? verification.error
+                      : undefined,
+                  );
+                }
+              }
+              committedEvents.set(result.sessionId, [...committed]);
+            },
+          });
+        } catch (error) {
+          if (error instanceof SendCommitFailure) {
+            const verification =
+              error.commitError instanceof SendCommitVerificationError
+                ? error.commitError
+                : undefined;
+            const durableState = verification?.durableState ?? "unconfirmed";
+            sendResults.set(key, {
+              status:
+                durableState === "not_committed"
+                  ? "accepted_uncommitted"
+                  : "accepted_unconfirmed",
+              result: error.result,
+              error: verification?.commitError ?? error.commitError,
+              ...(verification?.verificationError === undefined
+                ? {}
+                : { verificationError: verification.verificationError }),
+              cleanupError: error.terminationError,
+            });
+            throw storeUnavailable(
+              key,
+              "commit",
+              "accepted",
+              verification?.commitError ?? error.commitError,
+              error.result,
+              error.terminationError,
+            );
+          }
+          if (error instanceof SendDeliveryFailure) {
+            if (error.acceptance === "unknown") {
+              const unknown: MachineError = {
+                code: "operation_outcome_unknown",
+                operationKey: key,
+                cause: failureCause(error.failure),
+                ...(error.failure.code !== "internal_error" ||
+                error.failure.diagnosticId === undefined
+                  ? {}
+                  : { diagnosticId: error.failure.diagnosticId }),
+                ...(error.terminationError === undefined
+                  ? {}
+                  : {
+                      cleanupCause: makeErrorCause(
+                        "closed",
+                        errorMessage(error.terminationError),
+                      ),
+                    }),
+              };
+              sendResults.set(key, {
+                status: "outcome_unknown",
+                error: unknown,
+              });
+              try {
+                options.controlStore.recordSendOutcomeUnknown(
+                  key,
+                  unknown as Extract<
+                    MachineError,
+                    { code: "operation_outcome_unknown" }
+                  >,
+                );
+              } catch (storeError) {
+                wakeWaitersIfStoreUnavailable();
+                let recorded = false;
+                try {
+                  const operation = options.controlStore.getOperation(key);
+                  recorded =
+                    operation?.status === "outcome_unknown" &&
+                    canonical(operation.error) === canonical(unknown);
+                } catch {
+                  // 无法核实时保留原生接受未知事实。
+                }
+                if (!recorded)
+                  throw storeUnavailable(
+                    key,
+                    "failure",
+                    "unknown",
+                    new Error(
+                      `${failureCause(error.failure).message}; outcome record failed: ${errorMessage(storeError)}`,
+                    ),
+                    undefined,
+                    error.terminationError,
+                  );
+              }
+              throw unknown;
+            }
+
+            const failure = withCleanupCause(
+              error.failure,
+              error.terminationError,
+            );
+            sendResults.set(key, { status: "failed", error: failure });
+            try {
+              options.controlStore.failSend(key, failure);
+            } catch (storeError) {
+              wakeWaitersIfStoreUnavailable();
+              let recorded = false;
+              try {
+                const operation = options.controlStore.getOperation(key);
+                recorded =
+                  operation?.status === "failed" &&
+                  canonical(operation.error) === canonical(failure);
+              } catch {
+                // 无法核实时保留原生明确未接受事实。
+              }
+              if (!recorded)
+                throw storeUnavailable(
+                  key,
+                  "failure",
+                  "not_dispatched",
+                  new Error(
+                    `${failureCause(failure).message}; failure record failed: ${errorMessage(storeError)}`,
+                  ),
+                  undefined,
+                  error.terminationError,
+                );
+            }
+            throw failure;
+          }
+          throw error;
+        }
       }
       case "wait": {
         const params = rawParams as WaitParams;
@@ -1379,7 +1744,7 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
     stage: "register" | "dispatch" | "commit" | "failure",
     acceptance: "not_dispatched" | "unknown" | "accepted",
     error: unknown,
-    result?: SpawnAck,
+    result?: SpawnAck | SendAck,
     cleanupError?: unknown,
   ): MachineError {
     return {
@@ -1618,6 +1983,166 @@ export function createControlPlane(options: ControlPlaneOptions): ControlPlane {
           request.method === "spawn" &&
           transientOperations.get(operationKey) === pending
         )
+          transientOperations.delete(operationKey);
+      }
+    }
+
+    if (
+      request.method === "send" &&
+      v.safeParse(newTurnSendParamsSchema, request.params).success
+    ) {
+      const parsed = v.parse(newTurnSendParamsSchema, request.params);
+      let registration: ReturnType<ControlStore["registerSend"]>;
+      try {
+        registration = options.controlStore.registerSend({
+          operationKey,
+          runtimeScopeId: options.runtimeScopeId,
+          consumer: consumer!,
+          generation: options.diagnostics.generation,
+          request: parsed,
+        });
+      } catch (error) {
+        wakeWaitersIfStoreUnavailable();
+        const known = asMachineError(error);
+        return known.code === "operation_key_conflict"
+          ? { error: known }
+          : {
+              error: storeUnavailable(
+                operationKey,
+                "register",
+                "not_dispatched",
+                error,
+              ),
+            };
+      }
+
+      if (!registration.created) {
+        const known = sendResults.get(operationKey);
+        if (known?.status === "failed") return { error: known.error };
+        switch (registration.operation.status) {
+          case "succeeded":
+            return { result: registration.operation.result };
+          case "failed":
+            return { error: registration.operation.error };
+          case "pending":
+            return { error: { code: "operation_pending", operationKey } };
+          case "dispatched": {
+            const known = sendResults.get(operationKey);
+            if (
+              known?.status === "accepted_uncommitted" ||
+              known?.status === "accepted_unconfirmed"
+            )
+              return {
+                error: storeUnavailable(
+                  operationKey,
+                  "commit",
+                  "accepted",
+                  known.error,
+                  known.result,
+                  known.cleanupError,
+                ),
+              };
+            if (known?.status === "outcome_unknown")
+              return { error: known.error };
+            return {
+              error: {
+                code: "operation_outcome_unknown",
+                operationKey,
+              },
+            };
+          }
+          case "outcome_unknown":
+            return { error: registration.operation.error };
+        }
+      }
+
+      const outcome: Promise<{ result: unknown } | { error: MachineError }> =
+        (async () => {
+          if (eventWriteFailure !== undefined) {
+            const failure = storeUnavailable(
+              operationKey,
+              "dispatch",
+              "not_dispatched",
+              eventWriteFailure,
+            );
+            sendResults.set(operationKey, {
+              status: "failed",
+              error: failure,
+            });
+            try {
+              options.controlStore.failSend(operationKey, failure);
+            } catch {
+              wakeWaitersIfStoreUnavailable();
+              // 先前已知未派发，补记失败不会改变接受事实。
+            }
+            return { error: failure };
+          }
+
+          const result = await performSafely(perform);
+          if ("result" in result) return result;
+          const known = sendResults.get(operationKey);
+          if (
+            known?.status === "failed" ||
+            known?.status === "accepted_uncommitted" ||
+            known?.status === "accepted_unconfirmed" ||
+            known?.status === "outcome_unknown"
+          )
+            return result;
+          if (result.error.code === "control_store_unavailable") return result;
+
+          let storedOperation: ControlOperation | undefined;
+          try {
+            storedOperation = options.controlStore.getOperation(operationKey);
+          } catch (error) {
+            return {
+              error: storeUnavailable(
+                operationKey,
+                "failure",
+                "unknown",
+                error,
+              ),
+            };
+          }
+          if (storedOperation?.status === "failed") return result;
+          if (storedOperation?.status === "outcome_unknown")
+            return { error: storedOperation.error };
+          if (storedOperation?.status === "dispatched")
+            return {
+              error: {
+                code: "operation_outcome_unknown",
+                operationKey,
+              } satisfies MachineError,
+            };
+          try {
+            options.controlStore.failSend(operationKey, result.error);
+          } catch (error) {
+            wakeWaitersIfStoreUnavailable();
+            sendResults.set(operationKey, {
+              status: "failed",
+              error: result.error,
+            });
+            return {
+              error: storeUnavailable(
+                operationKey,
+                "failure",
+                "not_dispatched",
+                error,
+              ),
+            };
+          }
+          return result;
+        })();
+      const pending = {
+        method: request.method,
+        consumer,
+        fingerprint,
+        outcome,
+      };
+      transientOperations.set(operationKey, pending);
+      try {
+        return await outcome;
+      } finally {
+        if (transientOperations.get(operationKey) === pending)
           transientOperations.delete(operationKey);
       }
     }
