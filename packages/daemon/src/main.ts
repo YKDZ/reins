@@ -37,7 +37,7 @@ import type { HarnessAdapter } from "./registry.ts";
 import { DEFAULT_IDLE_TIMEOUT_MS } from "./server.ts";
 import { resolveDaemonState } from "./state.ts";
 
-// 发布阶段的拼接点（ADR-0011）：默认注册两个真实 adapter；
+// 发布阶段的拼接点（ADR-0011）：默认注册三个真实 adapter；
 // --adapters <module> 可用外部模块整体替换注册表（测试与扩展入口）。
 function builtInAdapters(): Map<HarnessId, HarnessAdapter> {
   const qoderSdk = createRealQoderSdk();

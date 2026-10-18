@@ -145,7 +145,12 @@ function createConsumer(
     [
       "packages: []",
       "allowBuilds:",
+      '  "@deepseek-ai/dsh-subprocess-local": true',
+      '  "@google/genai": false',
       '  "@qodercn-ai/qodercn-agent-sdk": true',
+      "  koffi: true",
+      "  node-pty: true",
+      "  protobufjs: false",
       ...(localSdkTarball === undefined
         ? []
         : [
