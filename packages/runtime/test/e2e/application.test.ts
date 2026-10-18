@@ -611,6 +611,25 @@ test("重启后只读旧世代已提交回合并明确标记失去控制的目�
     status: "satisfied",
     completed: [{ turnHandle: killed.turnHandle, stopReason: "killed" }],
   });
+
+  await expect(
+    reconnected.deleteRecords(completed.sessionHandle),
+  ).resolves.toEqual({
+    sessionHandle: completed.sessionHandle,
+    status: "deleted",
+  });
+  await expect(reconnected.getOperation(sendKey)).resolves.toEqual({
+    status: "deleted",
+    operationKey: sendKey,
+  });
+  await expect(
+    reconnected.attach(
+      { scope: "session", sessionHandle: completed.sessionHandle },
+      { mode: "after", cursor: previousCursor },
+    ),
+  ).rejects.toMatchObject({
+    failure: { code: "event_history_unavailable" },
+  });
 }, 60_000);
 
 test("application startup failure keeps the raw transport code", async () => {

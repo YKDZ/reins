@@ -46,10 +46,12 @@ function inspectFailure(failure: ReinsFailure): string {
     case "operation_outcome_unknown":
       return failure.facts.operationKey;
     case "control_store_unavailable":
-      return failure.facts.stage === "event"
+      return failure.facts.stage === "event" ||
+        failure.facts.stage === "record_deletion"
         ? failure.facts.sessionHandle
         : failure.facts.operationKey;
     case "session_busy":
+    case "session_records_live":
       return failure.facts.sessionHandle;
     case "permission_not_pending":
     case "permission_resolution_mismatch":

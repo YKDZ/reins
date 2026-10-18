@@ -110,6 +110,31 @@ export type StoredSession = {
   readonly generation: DaemonGeneration;
 };
 
+export type DeletedSession = {
+  readonly sessionId: SessionId;
+  readonly runtimeScopeId: RuntimeScopeId;
+  readonly consumer: ConsumerContext;
+  readonly generation: DaemonGeneration;
+};
+
+export type DeleteSessionRecordsInput = {
+  readonly sessionId: SessionId;
+  readonly runtimeScopeId: RuntimeScopeId;
+  readonly consumer: ConsumerContext;
+  readonly currentGeneration: DaemonGeneration;
+  readonly unreachable: boolean;
+  readonly knownOperationKeys?: readonly StoredOperationKey[];
+};
+
+export type DeleteSessionRecordsResult =
+  | { readonly status: "not_found" }
+  | { readonly status: "live" }
+  | {
+      readonly status: "deleted";
+      readonly session: DeletedSession;
+      readonly operationKeys: readonly StoredOperationKey[];
+    };
+
 export type StoredCommittedEvent = {
   readonly event: DomainEvent;
   readonly eventId: EventId;
@@ -219,8 +244,14 @@ export type ControlStore = {
   ): void;
   recordEvent(event: DomainEvent, session?: SessionInfo): StoredCommittedEvent;
   getOperation(operationKey: StoredOperationKey): ControlOperation | undefined;
+  isOperationDeleted(operationKey: StoredOperationKey): boolean;
   getSession(sessionId: SessionId): StoredSession | undefined;
+  getDeletedSession(sessionId: SessionId): DeletedSession | undefined;
+  getSessionOwner(sessionId: SessionId): ConsumerContext | undefined;
   listSessions(): readonly StoredSession[];
+  deleteSessionRecords(
+    input: DeleteSessionRecordsInput,
+  ): DeleteSessionRecordsResult;
   sessionEvents(sessionId: SessionId): readonly StoredCommittedEvent[];
   sessionEventsPage(input: SessionEventsPageInput): SessionEventsPage;
   eventWindow(sessionId: SessionId): {
@@ -432,6 +463,16 @@ function initializeDatabase(database: DatabaseSync): void {
       PRIMARY KEY(session_id, event_id),
       FOREIGN KEY(session_id) REFERENCES sessions(session_id)
     ) STRICT;
+    CREATE TABLE IF NOT EXISTS deleted_sessions (
+      session_id TEXT PRIMARY KEY,
+      runtime_scope_id TEXT NOT NULL,
+      consumer TEXT NOT NULL,
+      generation TEXT NOT NULL
+    ) STRICT;
+    CREATE TABLE IF NOT EXISTS deleted_operations (
+      operation_key TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL
+    ) STRICT;
   `);
 }
 
@@ -565,6 +606,48 @@ function createControlStore(database: DatabaseSync): ControlStore {
     return operation;
   }
 
+  function readDeletedSession(
+    sessionId: SessionId,
+  ): DeletedSession | undefined {
+    assertOpen();
+    sessionId = v.parse(sessionIdSchema, sessionId);
+    const row = database
+      .prepare("SELECT * FROM deleted_sessions WHERE session_id = ?")
+      .get(sessionId) as Record<string, unknown> | undefined;
+    if (row === undefined) return undefined;
+    const deleted: DeletedSession = {
+      sessionId: v.parse(sessionIdSchema, row.session_id),
+      runtimeScopeId: v.parse(runtimeScopeIdSchema, row.runtime_scope_id),
+      consumer: v.parse(consumerContextSchema, row.consumer),
+      generation: v.parse(daemonGenerationSchema, row.generation),
+    };
+    const [, sessionScopeId, sessionGeneration] = deleted.sessionId.split(":");
+    if (
+      sessionScopeId !== deleted.runtimeScopeId ||
+      sessionGeneration !== deleted.generation
+    )
+      throw new Error("Deleted session ownership does not match its identity");
+    return deleted;
+  }
+
+  function assertSessionRecordsAvailable(sessionId: SessionId): void {
+    if (readDeletedSession(sessionId) !== undefined)
+      throw {
+        code: "event_history_unavailable",
+        sessionId,
+      } satisfies MachineError;
+  }
+
+  function assertOperationNotDeleted(operationKey: StoredOperationKey): void {
+    assertOpen();
+    const row = database
+      .prepare(
+        "SELECT operation_key FROM deleted_operations WHERE operation_key = ?",
+      )
+      .get(operationKey);
+    if (row !== undefined) throw { code: "operation_key_conflict" };
+  }
+
   function permissionStillPending(
     request: ResolvePermissionParams,
     runtimeScopeId: RuntimeScopeId,
@@ -683,6 +766,8 @@ function createControlStore(database: DatabaseSync): ControlStore {
     readonly oldest: EventId | null;
   } {
     assertOpen();
+    sessionId = v.parse(sessionIdSchema, sessionId);
+    assertSessionRecordsAvailable(sessionId);
     const row = database
       .prepare(
         "SELECT (SELECT head FROM session_heads WHERE session_id = ?) AS head, (SELECT min(event_id) FROM session_events WHERE session_id = ?) AS oldest, (SELECT max(event_id) FROM session_events WHERE session_id = ?) AS latest, (SELECT count(*) FROM session_events WHERE session_id = ?) AS count",
@@ -714,6 +799,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
   ): SessionEventsPage {
     assertOpen();
     const sessionId = v.parse(sessionIdSchema, input.sessionId);
+    assertSessionRecordsAvailable(sessionId);
     if (!Number.isSafeInteger(input.afterEventId) || input.afterEventId < 0)
       throw new Error("Event page cursor must be a non-negative integer");
     if (!Number.isSafeInteger(input.limit) || input.limit < 1)
@@ -776,6 +862,21 @@ function createControlStore(database: DatabaseSync): ControlStore {
     };
   }
 
+  function readDeletedOperationKeys(
+    sessionId: SessionId,
+  ): StoredOperationKey[] {
+    const rows = database
+      .prepare(
+        "SELECT operation_key FROM deleted_operations WHERE session_id = ? ORDER BY operation_key",
+      )
+      .all(sessionId) as Record<string, unknown>[];
+    return rows.map((row) => v.parse(operationKeySchema, row.operation_key));
+  }
+
+  function sessionOperationPredicate(): string {
+    return "runtime_scope_id = ? AND consumer = ? AND (json_extract(request_json, '$.sessionId') = ? OR json_extract(result_json, '$.sessionId') = ? OR json_extract(error_json, '$.sessionId') = ? OR json_extract(error_json, '$.acceptedResult.sessionId') = ? OR json_extract(error_json, '$.effect.sessionId') = ? OR json_extract(error_json, '$.cleanupSessionId') = ?)";
+  }
+
   return {
     registerSpawn(input) {
       const operationKey = validatedOperationKey(input.operationKey, "spawn");
@@ -792,6 +893,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
         consumer,
         generation,
       );
+      assertOperationNotDeleted(operationKey);
       const parsedRequest = v.parse(spawnParamsSchema, input.request);
       const requestJson = stableJson(parsedRequest);
       const current = readOperation(operationKey);
@@ -840,6 +942,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
         consumer,
         generation,
       );
+      assertOperationNotDeleted(operationKey);
       const parsedRequest = v.parse(sendParamsSchema, input.request);
       const requestJson = stableJson(parsedRequest);
       const current = readOperation(operationKey);
@@ -892,6 +995,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
         consumer,
         generation,
       );
+      assertOperationNotDeleted(operationKey);
       const parsedRequest = v.parse(interruptParamsSchema, input.request);
       const requestJson = stableJson(parsedRequest);
       const current = readOperation(operationKey);
@@ -944,6 +1048,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
         consumer,
         generation,
       );
+      assertOperationNotDeleted(operationKey);
       const request = v.parse(resolvePermissionParamsSchema, input.request);
       const requestJson = stableJson(request);
       const registration = transaction(() => {
@@ -1049,6 +1154,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
         consumer,
         generation,
       );
+      assertOperationNotDeleted(operationKey);
       const parsedRequest = v.parse(killParamsSchema, input.request);
       const requestJson = stableJson(parsedRequest);
       const current = readOperation(operationKey);
@@ -1771,6 +1877,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
     },
     recordEvent(event, session) {
       const parsedEvent = v.parse(domainEventSchema, event);
+      assertSessionRecordsAvailable(parsedEvent.sessionId);
       return transaction(() => {
         const entry = appendEvent(parsedEvent);
         if (session !== undefined) {
@@ -1785,8 +1892,28 @@ function createControlStore(database: DatabaseSync): ControlStore {
     getOperation(operationKey) {
       return readOperation(operationKey);
     },
+    isOperationDeleted(operationKey) {
+      assertOpen();
+      operationKey = validatedOperationKey(operationKey);
+      return (
+        database
+          .prepare(
+            "SELECT operation_key FROM deleted_operations WHERE operation_key = ?",
+          )
+          .get(operationKey) !== undefined
+      );
+    },
     getSession(sessionId) {
       return readSession(sessionId);
+    },
+    getDeletedSession(sessionId) {
+      return readDeletedSession(sessionId);
+    },
+    getSessionOwner(sessionId) {
+      return (
+        readSession(sessionId)?.consumer ??
+        readDeletedSession(sessionId)?.consumer
+      );
     },
     listSessions() {
       assertOpen();
@@ -1796,9 +1923,144 @@ function createControlStore(database: DatabaseSync): ControlStore {
           left.info.spawnedAt.localeCompare(right.info.spawnedAt),
         );
     },
+    deleteSessionRecords(input) {
+      assertOpen();
+      const sessionId = v.parse(sessionIdSchema, input.sessionId);
+      const runtimeScopeId = v.parse(
+        runtimeScopeIdSchema,
+        input.runtimeScopeId,
+      );
+      const consumer = v.parse(consumerContextSchema, input.consumer);
+      const currentGeneration = v.parse(
+        daemonGenerationSchema,
+        input.currentGeneration,
+      );
+      const knownOperationKeys = Array.from(
+        new Set(
+          (input.knownOperationKeys ?? []).map((value) =>
+            validatedOperationKey(value),
+          ),
+        ),
+      );
+      for (const operationKey of knownOperationKeys) {
+        const claims = parseOperationKey(operationKey);
+        if (
+          claims.runtimeScopeId !== runtimeScopeId ||
+          claims.consumer !== consumer
+        )
+          throw new Error(
+            "Deleted operation does not belong to its session owner",
+          );
+      }
+      const existingTombstone = readDeletedSession(sessionId);
+      if (existingTombstone !== undefined) {
+        if (
+          existingTombstone.runtimeScopeId !== runtimeScopeId ||
+          existingTombstone.consumer !== consumer
+        )
+          return { status: "not_found" as const };
+        return {
+          status: "deleted" as const,
+          session: existingTombstone,
+          operationKeys: readDeletedOperationKeys(sessionId),
+        };
+      }
+
+      return transaction(() => {
+        const row = database
+          .prepare("SELECT * FROM sessions WHERE session_id = ?")
+          .get(sessionId) as SessionRow | undefined;
+        if (row === undefined) return { status: "not_found" as const };
+        const stored = sessionFromRow(row);
+        if (
+          stored.runtimeScopeId !== runtimeScopeId ||
+          stored.consumer !== consumer
+        )
+          return { status: "not_found" as const };
+        if (
+          stored.info.state !== "killed" &&
+          !input.unreachable &&
+          stored.generation === currentGeneration
+        )
+          return { status: "live" as const };
+
+        const deletedSession: DeletedSession = {
+          sessionId,
+          runtimeScopeId: stored.runtimeScopeId,
+          consumer: stored.consumer,
+          generation: stored.generation,
+        };
+        database
+          .prepare(
+            "INSERT INTO deleted_sessions(session_id, runtime_scope_id, consumer, generation) VALUES (?, ?, ?, ?)",
+          )
+          .run(
+            deletedSession.sessionId,
+            deletedSession.runtimeScopeId,
+            deletedSession.consumer,
+            deletedSession.generation,
+          );
+
+        const predicate = sessionOperationPredicate();
+        const predicateValues = [
+          runtimeScopeId,
+          consumer,
+          sessionId,
+          sessionId,
+          sessionId,
+          sessionId,
+          sessionId,
+          sessionId,
+        ];
+        const operations = database
+          .prepare(`SELECT operation_key FROM operations WHERE ${predicate}`)
+          .all(...predicateValues) as Record<string, unknown>[];
+        const operationKeys = operations.map((operationRow) =>
+          v.parse(operationKeySchema, operationRow.operation_key),
+        );
+        for (const operationKey of knownOperationKeys)
+          if (!operationKeys.includes(operationKey))
+            operationKeys.push(operationKey);
+        const insertDeletedOperation = database.prepare(
+          "INSERT INTO deleted_operations(operation_key, session_id) VALUES (?, ?)",
+        );
+        for (const operationKey of operationKeys) {
+          const existing = database
+            .prepare(
+              "SELECT session_id FROM deleted_operations WHERE operation_key = ?",
+            )
+            .get(operationKey) as { session_id: unknown } | undefined;
+          if (existing !== undefined) {
+            if (existing.session_id !== sessionId)
+              throw new Error("Deleted operation belongs to another session");
+            continue;
+          }
+          insertDeletedOperation.run(operationKey, sessionId);
+        }
+
+        database
+          .prepare("DELETE FROM operations WHERE " + predicate)
+          .run(...predicateValues);
+        database
+          .prepare("DELETE FROM session_events WHERE session_id = ?")
+          .run(sessionId);
+        database
+          .prepare("DELETE FROM session_heads WHERE session_id = ?")
+          .run(sessionId);
+        database
+          .prepare("DELETE FROM sessions WHERE session_id = ?")
+          .run(sessionId);
+        return {
+          status: "deleted" as const,
+          session: deletedSession,
+          operationKeys,
+        };
+      });
+    },
     sessionEvents(sessionId) {
       assertOpen();
       sessionId = v.parse(sessionIdSchema, sessionId);
+      assertSessionRecordsAvailable(sessionId);
       const rows = database
         .prepare(
           "SELECT event_id, event_json FROM session_events WHERE session_id = ? ORDER BY event_id",

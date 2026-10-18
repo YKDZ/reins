@@ -179,6 +179,16 @@ void connection.resolvePermission(
     operationKey: sendOperationKey,
   },
 );
+// @ts-expect-error 记录删除只接受精确会话句柄。
+void connection.deleteRecords(turnHandle);
+async function inspectDeletedOperation(): Promise<void> {
+  const operation = await connection.getOperation(spawnOperationKey);
+  if (operation.status !== "deleted") return;
+  // @ts-expect-error 删除后不再公开已清理的操作结果。
+  const result = operation.result;
+  void result;
+}
+void inspectDeletedOperation;
 // @ts-expect-error 显式泛型操作种类必须同时接受运行时校验的种类。
 parseOperationKey<"send">(serializeOperationKey(spawnOperationKey));
 async function inspectSendRecordKind(): Promise<void> {

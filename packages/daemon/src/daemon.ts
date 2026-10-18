@@ -81,8 +81,8 @@ export function createDaemonInternal(
   assertWriterLease?: () => Promise<void>,
 ): Daemon {
   const controlStore = options.controlStore ?? createInMemoryControlStore();
-  const consumerScope = createConsumerScope(
-    (sessionId) => controlStore.getSession(sessionId)?.consumer,
+  const consumerScope = createConsumerScope((sessionId) =>
+    controlStore.getSessionOwner(sessionId),
   );
   const diagnostics = orderDiagnosticsAcceptance(
     options.diagnostics,
