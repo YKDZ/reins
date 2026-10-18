@@ -57,7 +57,10 @@
     "valibot": "catalog:"
   },
   "devDependencies": {
+    "@reins/adapter-kit": "workspace:*",
+    "@reins/codex": "workspace:*",
     "@reins/daemon": "workspace:*",
+    "@reins/qoder": "workspace:*",
     "@reins/typescript-config": "workspace:*",
     "@types/node": "catalog:",
     "@types/proper-lockfile": "catalog:",

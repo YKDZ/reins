@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import {
+  access,
   mkdir,
   mkdtemp,
   readFile,
@@ -14,8 +15,12 @@ import { fileURLToPath } from "node:url";
 import { consumerContextSchema } from "@reins/protocol";
 import {
   connect,
+  type DiagnosticId,
+  type DiagnosticsQuery,
   type ReinsConnection,
+  type SendInput,
   type SessionHandle,
+  type TurnHandle,
 } from "@ykdz/reins-sdk";
 import { ReinsSdkError } from "@ykdz/reins-sdk";
 import { connectReins } from "@ykdz/reins/application";
@@ -100,6 +105,37 @@ afterEach(async () => {
       throw new AggregateError(cleanupErrors, "Daemon cleanup failed");
     }
   }
+});
+
+test("runtime rejects an empty consumer binding before starting the daemon", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-application-unbound-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const socketPath = join(directory, "reins.sock");
+
+  await expect(
+    connectReins({
+      consumerContext: "",
+      env: {
+        ...process.env,
+        REINS_SOCKET: socketPath,
+        REINS_STATE_DIR: join(directory, "state"),
+        REINS_DAEMON_BIN: daemonLauncher,
+        REINS_ADAPTERS_MODULE: adaptersModule,
+      },
+    }),
+  ).rejects.toMatchObject({
+    stage: "connect",
+    failure: { code: "consumer_context_required" },
+  });
+  await expect(access(socketPath)).rejects.toMatchObject({ code: "ENOENT" });
+  await expect(access(daemonPids)).rejects.toMatchObject({ code: "ENOENT" });
 });
 
 test("programmatic callers share one real daemon and reconnect to the same session", async () => {
@@ -387,7 +423,10 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     kinds: ["harness_stderr"],
   });
   const deadline = Date.now() + 5_000;
-  while (!("records" in result && result.records.length === 3) && Date.now() < deadline) {
+  while (
+    !("records" in result && result.records.length === 3) &&
+    Date.now() < deadline
+  ) {
     await new Promise((resolve) => setTimeout(resolve, 25));
     result = await connection.diagnostics({
       sessionHandle: captured.sessionHandle,
@@ -395,15 +434,101 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
     });
   }
   expect(result).toMatchObject({ truncated: false });
-  if (!("records" in result)) throw new Error("missing bounded stderr diagnostics");
-  expect(result.records[0]?.text).toMatchObject({
+  if (!("records" in result))
+    throw new Error("missing bounded stderr diagnostics");
+  const evidence = result.records[0]?.text as
+    | { text: string; truncated: boolean; originalBytes: number }
+    | undefined;
+  expect(evidence).toMatchObject({
     text: "é".repeat(8_192),
     truncated: true,
     originalBytes: 20_000,
   });
-  expect(Buffer.byteLength(result.records[0]?.text?.text ?? "", "utf8")).toBe(
-    16 * 1024,
-  );
+  expect(Buffer.byteLength(evidence?.text ?? "", "utf8")).toBe(16 * 1024);
+  const first = result.records[0];
+  if (first === undefined) throw new Error("missing stderr diagnostic record");
+  expect(
+    await connection.diagnostics({
+      diagnosticId: first.diagnosticId as DiagnosticId,
+    }),
+  ).toMatchObject({ record: { diagnosticId: first.diagnosticId } });
+  const byTurn = await connection.diagnostics({
+    turnHandle: first.turnHandle as TurnHandle,
+    kinds: ["harness_stderr"],
+  });
+  expect("records" in byTurn ? byTurn.records.length : 0).toBe(3);
+  await expect(
+    connection.diagnostics({ turnHandle: "invalid" as TurnHandle }),
+  ).rejects.toMatchObject({
+    stage: "query",
+    failure: {
+      code: "invalid_params",
+      facts: { issues: [{ issue: "invalid_value", path: "turnHandle" }] },
+    },
+  });
+  await expect(
+    connection.diagnostics({
+      sessionHandle: "other@g1" as SessionHandle,
+      turnHandle: first.turnHandle as TurnHandle,
+    }),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "invalid_params",
+      facts: {
+        issues: [
+          {
+            issue: "invalid_combination",
+            paths: ["sessionHandle", "turnHandle"],
+          },
+        ],
+      },
+    },
+  });
+
+  const queries = [
+    { sessionHandle: captured.sessionHandle },
+    {
+      sessionHandle: captured.sessionHandle,
+      turnHandle: first.turnHandle as TurnHandle,
+    },
+    {
+      harness: "capture",
+      sources: ["harness"],
+    },
+    { kinds: ["harness_stderr"] },
+    { minSeverity: "info" },
+    { since: first.recordedAt, until: first.recordedAt },
+  ] satisfies readonly DiagnosticsQuery[];
+  for (const query of queries) {
+    const filtered = await connection.diagnostics(query);
+    expect("records" in filtered ? filtered.records.length : 0).toBeGreaterThan(
+      0,
+    );
+  }
+  expect(
+    await connection.diagnostics({
+      sessionHandle: captured.sessionHandle,
+      harness: "fake",
+    }),
+  ).toEqual({ records: [], truncated: false });
+  expect(
+    await connection.diagnostics({
+      sessionHandle: captured.sessionHandle,
+      limit: 1,
+    }),
+  ).toMatchObject({
+    records: [{ diagnosticId: result.records.at(-1)?.diagnosticId }],
+    truncated: true,
+  });
+  expect(await connection.diagnostics({ harness: "none" })).toEqual({
+    records: [],
+    truncated: false,
+  });
+  await expect(
+    connection.diagnostics({ diagnosticId: "d1-098" as DiagnosticId }),
+  ).rejects.toMatchObject({
+    failure: { code: "diagnostic_not_found" },
+  });
 
   const unsupportedSessionName = "unsupported-stderr-capture";
   await expect(
@@ -418,7 +543,10 @@ test("public SDK keeps bounded stderr evidence and rejects unsupported capture",
       connection.prepareOperation("spawn"),
     ),
   ).rejects.toMatchObject({
-    failure: { code: "unsupported_feature", facts: { feature: "capture_harness_stderr" } },
+    failure: {
+      code: "unsupported_feature",
+      facts: { feature: "capture_harness_stderr" },
+    },
   });
   expect(
     await connection.list({ sessionName: unsupportedSessionName }),
@@ -490,7 +618,252 @@ test("SDK consumer binding isolates another consumer's sessions and controls", a
       facts: { sessionHandle: spawned.sessionHandle },
     },
   });
-  expect(await owner.list({ sessionHandle: spawned.sessionHandle })).toHaveLength(
-    1,
+  expect(
+    await owner.list({ sessionHandle: spawned.sessionHandle }),
+  ).toHaveLength(1);
+});
+
+test("SDK 在同一 daemon 世代内仍拒绝复用会话名", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-application-name-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
   );
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: join(directory, "reins.sock"),
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_DAEMON_BIN: daemonLauncher,
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_IDLE_TIMEOUT_MS: "120000",
+  };
+  const connection = await connectReins({
+    consumerContext: "application-name-e2e",
+    env,
+  });
+  clients.push(connection);
+
+  const first = await connection.spawn(
+    {
+      harness: "fake",
+      message: "first",
+      sessionName: "reused-name",
+      cwd: process.cwd(),
+    },
+    connection.prepareOperation("spawn"),
+  );
+  await expect(
+    connection.spawn(
+      {
+        harness: "fake",
+        message: "second",
+        sessionName: "reused-name",
+        cwd: process.cwd(),
+      },
+      connection.prepareOperation("spawn"),
+    ),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "session_name_conflict",
+      facts: { sessionName: "reused-name" },
+    },
+  });
+
+  expect(
+    await connection.kill(
+      { sessionHandle: first.sessionHandle },
+      connection.prepareOperation("kill"),
+    ),
+  ).toEqual({ sessionHandle: first.sessionHandle, status: "killed" });
+  await expect(
+    connection.spawn(
+      {
+        harness: "fake",
+        message: "third",
+        sessionName: "reused-name",
+        cwd: process.cwd(),
+      },
+      connection.prepareOperation("spawn"),
+    ),
+  ).rejects.toMatchObject({
+    failure: {
+      code: "session_name_conflict",
+      facts: { sessionName: "reused-name" },
+    },
+  });
+  expect(await connection.list({ sessionName: "reused-name" })).toMatchObject([
+    { sessionHandle: first.sessionHandle },
+  ]);
+});
+
+test("SDK send, wait, interrupt, kill, and new-turn delivery keep exact targets", async () => {
+  const directory = await mkdtemp(join(tmpdir(), "reins-sdk-control-actions-"));
+  const daemonPids = join(directory, "daemon-pids.txt");
+  fixtures.push({ directory, daemonPids });
+  const daemonLauncher = join(directory, "reins-daemon");
+  const observations = join(directory, "adapter-observations.ndjson");
+  await writeFile(
+    daemonLauncher,
+    `#!/bin/sh\nprintf '%s\\n' "$$" >> '${daemonPids}'\nexec '${daemonBin}' "$@"\n`,
+    { mode: 0o700 },
+  );
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: join(directory, "reins.sock"),
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_DAEMON_BIN: daemonLauncher,
+    REINS_ADAPTERS_MODULE: adaptersModule,
+    REINS_FIXTURE_REQUESTS_FILE: observations,
+    REINS_IDLE_TIMEOUT_MS: "120000",
+  };
+  const connection = await connectReins({
+    consumerContext: "sdk-control-actions",
+    env,
+  });
+  clients.push(connection);
+
+  const active = await connection.spawn(
+    {
+      harness: "hang",
+      message: "hold the active turn",
+      sessionName: "active-send",
+      cwd: process.cwd(),
+    },
+    connection.prepareOperation("spawn"),
+  );
+  for (const input of [
+    {
+      sessionHandle: active.sessionHandle,
+      message: "missing placement",
+    },
+    {
+      placement: "unknown",
+      sessionHandle: active.sessionHandle,
+      message: "unknown placement",
+    },
+  ]) {
+    await expect(
+      connection.send(
+        input as unknown as SendInput,
+        connection.prepareOperation("send"),
+      ),
+    ).rejects.toMatchObject({
+      stage: "operation",
+      failure: { code: "invalid_params" },
+    });
+  }
+  expect(
+    await connection.list({ sessionHandle: active.sessionHandle }),
+  ).toMatchObject([{ state: "busy", activeTurn: active.turnHandle }]);
+  const activeMessage = "  exact active input\nkeep spacing  ";
+  const activeSend = await connection.send(
+    {
+      placement: "active_turn",
+      turnHandle: active.turnHandle,
+      message: activeMessage,
+    },
+    connection.prepareOperation("send"),
+  );
+  expect(activeSend).toMatchObject({
+    sessionHandle: active.sessionHandle,
+    turnHandle: active.turnHandle,
+    deliveryPoint: "active_turn",
+  });
+  expect(activeSend.messageId).toEqual(expect.any(String));
+  expect(
+    await connection.wait({
+      targets: [active.turnHandle],
+      completion: "all",
+      timeoutMs: 5_000,
+    }),
+  ).toMatchObject({
+    status: "satisfied",
+    completed: [
+      {
+        turnHandle: active.turnHandle,
+        stopReason: "end_turn",
+        finalReply: "ok",
+      },
+    ],
+  });
+
+  const nextMessage = "new turn input";
+  const nextTurn = await connection.send(
+    {
+      placement: "new_turn",
+      sessionHandle: active.sessionHandle,
+      message: nextMessage,
+    },
+    connection.prepareOperation("send"),
+  );
+  expect(nextTurn).toMatchObject({
+    sessionHandle: active.sessionHandle,
+    deliveryPoint: "new_turn",
+  });
+  expect(nextTurn.turnHandle).not.toBe(active.turnHandle);
+  expect(
+    await connection.wait({
+      targets: [nextTurn.turnHandle],
+      completion: "all",
+      timeoutMs: 5_000,
+    }),
+  ).toMatchObject({ status: "satisfied" });
+
+  const held = await connection.spawn(
+    {
+      harness: "hang",
+      message: "hold for interrupt",
+      sessionName: "interrupt-target",
+      cwd: process.cwd(),
+    },
+    connection.prepareOperation("spawn"),
+  );
+  expect(
+    await connection.interrupt(
+      { turnHandle: held.turnHandle },
+      connection.prepareOperation("interrupt"),
+    ),
+  ).toEqual({ turnHandle: held.turnHandle, status: "accepted" });
+  expect(
+    await connection.wait({
+      targets: [held.turnHandle],
+      completion: "all",
+      timeoutMs: 0,
+    }),
+  ).toEqual({
+    status: "timeout",
+    completed: [],
+    pending: [held.turnHandle],
+  });
+  expect(
+    await connection.kill(
+      { sessionHandle: held.sessionHandle },
+      connection.prepareOperation("kill"),
+    ),
+  ).toEqual({ sessionHandle: held.sessionHandle, status: "killed" });
+  expect(
+    await connection.wait({
+      targets: [held.turnHandle],
+      completion: "all",
+      timeoutMs: 5_000,
+    }),
+  ).toMatchObject({
+    status: "satisfied",
+    completed: [{ turnHandle: held.turnHandle, stopReason: "killed" }],
+  });
+
+  const observed = (await readFile(observations, "utf8"))
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  const delivered = observed.filter(
+    (record) => record.type === "message_delivered",
+  );
+  expect(delivered).toHaveLength(2);
+  expect(delivered[0]).toMatchObject({ message: activeMessage });
+  expect(delivered[1]).toMatchObject({ message: nextMessage });
 });

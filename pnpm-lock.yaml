@@ -657,9 +657,18 @@ importers:
       '@ykdz/reins-sdk':
         injected: false
     devDependencies:
+      '@reins/adapter-kit':
+        specifier: workspace:*
+        version: link:../adapter-kit
+      '@reins/codex':
+        specifier: workspace:*
+        version: link:../../adapters/codex
       '@reins/daemon':
         specifier: workspace:*
         version: link:../daemon
+      '@reins/qoder':
+        specifier: workspace:*
+        version: link:../../adapters/qoder
       '@reins/typescript-config':
         specifier: workspace:*
         version: link:../typescript-config
