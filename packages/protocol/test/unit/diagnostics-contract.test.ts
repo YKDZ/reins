@@ -18,7 +18,9 @@ import {
   protocolParamsSchemaFor,
   protocolResultSchemaFor,
   requestIdSchema,
+  runtimeScopeIdSchema,
   sessionIdSchema,
+  serializeOperationKey,
   toolCallIdSchema,
   transportFailureFactSchema,
   turnIdSchema,
@@ -45,6 +47,17 @@ const bad = (schema: v.GenericSchema, input: unknown): void =>
 
 const sessionId = "session:00000000-0000-4000-8000-000000000000:reviewer:7";
 const diagnosticId = makeDiagnosticId("7", "42");
+const runtimeScopeId = v.parse(
+  runtimeScopeIdSchema,
+  "00000000-0000-4000-8000-000000000000",
+);
+const killOperationKey = serializeOperationKey({
+  runtimeScopeId,
+  consumer: "reviewer",
+  kind: "kill",
+  generation: "generation7",
+  nonce: "00000000-0000-4000-8000-000000000007",
+});
 
 describe("worker event rejection contract", () => {
   const rejections = [
@@ -1286,6 +1299,27 @@ describe("machine errors", () => {
         code: "diagnostics_store_corrupt",
         cause: { kind: "io", message: "corrupt" },
       },
+      {
+        code: "control_store_unavailable",
+        stage: "event",
+        sessionId,
+        eventType: "message",
+        turnId: "t1",
+        cause: { kind: "io", message: "event body commit failed" },
+        cleanupCause: { kind: "closed", message: "worker stop failed" },
+      },
+      {
+        code: "control_store_unavailable",
+        stage: "event_commit",
+        operationKey: killOperationKey,
+        acceptance: "accepted",
+        sessionId,
+        eventType: "session.killed",
+        cause: { kind: "io", message: "kill event commit failed" },
+        cleanupCause: { kind: "closed", message: "stop cleanup failed" },
+        cleanupSessionId:
+          "session:00000000-0000-4000-8000-000000000000:other:8",
+      },
       { code: "daemon_timeout" },
       { code: "invalid_daemon_response" },
       {
@@ -1298,6 +1332,26 @@ describe("machine errors", () => {
       ok(machineErrorSchema, error);
       bad(machineErrorSchema, { ...error, unexpectedField: true });
     }
+    bad(machineErrorSchema, {
+      code: "control_store_unavailable",
+      stage: "event",
+      eventType: "message",
+      cause: { kind: "io", message: "missing session" },
+    });
+    bad(machineErrorSchema, {
+      code: "control_store_unavailable",
+      stage: "commit",
+      acceptance: "accepted",
+      cause: { kind: "io", message: "missing operation key" },
+    });
+    bad(machineErrorSchema, {
+      code: "control_store_unavailable",
+      stage: "event_commit",
+      acceptance: "accepted",
+      sessionId,
+      eventType: "session.killed",
+      cause: { kind: "io", message: "missing operation key" },
+    });
     bad(machineErrorSchema, { code: "unknown_error" });
 
     bad(machineErrorSchema, { code: "invalid_params", issues: [] });

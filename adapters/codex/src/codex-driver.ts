@@ -10,6 +10,7 @@ import {
   type AdapterDriverFactory,
   type WorkerSpec,
   type PermissionId,
+  type MessageId,
   type TurnId,
   type MachineError,
   WorkerStartFailure,
@@ -26,6 +27,7 @@ import {
 import {
   CodexRequestError,
   type CodexApprovalRequest,
+  type CodexInboundItem,
   type CodexTransport,
   type InboundMessage,
 } from "./transport.ts";
@@ -81,23 +83,79 @@ export function createCodexDriver(deps: {
       {};
     const nativeTurns = new Map<TurnId, Promise<string>>();
     const pendingByRequest = new Map<number, PermissionId>();
+    const pendingCallerMessages: Array<{
+      readonly messageId: MessageId;
+      readonly content: string;
+      nativeTurnId?: string;
+    }> = [];
+
+    function callerText(
+      item: Extract<CodexInboundItem, { type: "userMessage" }>,
+    ): string | null {
+      const textInputs = item.content.filter((input) => input.type === "text");
+      if (textInputs.length === 0) return null;
+      return textInputs.map((input) => input.text).join("");
+    }
+
+    function takeCallerMessage(
+      message: Extract<InboundMessage, { kind: "notification" }>,
+    ): MessageId | undefined {
+      if (
+        message.method !== "item/completed" ||
+        message.params.item.type !== "userMessage"
+      )
+        return undefined;
+      const content = callerText(message.params.item);
+      if (content === null) return undefined;
+      const nativeTurnId = message.params.turnId ?? activeTurnId;
+      const index = pendingCallerMessages.findIndex(
+        (candidate) =>
+          candidate.content === content &&
+          (candidate.nativeTurnId === nativeTurnId ||
+            (candidate.nativeTurnId === undefined &&
+              nativeTurnId !== activeTurnId)),
+      );
+      if (index < 0) return undefined;
+      return pendingCallerMessages.splice(index, 1)[0]?.messageId;
+    }
+
+    function removePendingCallerMessage(messageId: MessageId): void {
+      const index = pendingCallerMessages.findIndex(
+        (candidate) => candidate.messageId === messageId,
+      );
+      if (index >= 0) pendingCallerMessages.splice(index, 1);
+    }
 
     async function startTurn(
       message: string,
+      messageId: MessageId | undefined,
       onDispatch?: () => void,
     ): Promise<string> {
       if (transport === null || threadId === "" || ended)
         throw new Error("Codex session is unavailable");
       if (onDispatch !== undefined && transport.isClosed())
         throw new Error("codex app-server closed");
+      if (messageId !== undefined)
+        pendingCallerMessages.push({ messageId, content: message });
       const pendingTurn = transport.request("turn/start", {
         threadId,
         input: [textInput(message)],
         ...turnOverrides,
       });
       onDispatch?.();
-      const turn = await pendingTurn;
+      let turn: Awaited<typeof pendingTurn>;
+      try {
+        turn = await pendingTurn;
+      } catch (error) {
+        if (messageId !== undefined) removePendingCallerMessage(messageId);
+        throw error;
+      }
       activeTurnId = turn.turn.id;
+      const pendingCaller = pendingCallerMessages.find(
+        (candidate) => candidate.messageId === messageId,
+      );
+      if (pendingCaller !== undefined)
+        pendingCaller.nativeTurnId = turn.turn.id;
       return turn.turn.id;
     }
 
@@ -168,7 +226,12 @@ export function createCodexDriver(deps: {
               message.params.turn.id !== activeTurnId
             )
               continue;
-            const events = await mapNotification(session, message);
+            const callerMessageId = takeCallerMessage(message);
+            const events = await mapNotification(
+              session,
+              message,
+              callerMessageId,
+            );
             for (const event of events) {
               if (event.type === "turn.completed") {
                 activeTurnId = null;
@@ -291,7 +354,7 @@ export function createCodexDriver(deps: {
           threadId = thread?.thread.id ?? "";
           workerInitialized = true;
           resolveInitial(
-            await startTurn(spec.message, () => {
+            await startTurn(spec.message, spec.messageId, () => {
               initialTurnDispatched = true;
             }),
           );
@@ -321,7 +384,7 @@ export function createCodexDriver(deps: {
           reason: "initialized",
         });
       },
-      async deliver(sessionId, turnId, message, placement) {
+      async deliver(sessionId, turnId, message, placement, messageId) {
         if (session === null || session.sessionId !== sessionId || ended)
           throw {
             code: "turn_not_active",
@@ -330,7 +393,7 @@ export function createCodexDriver(deps: {
           } satisfies MachineError;
         if (placement === "new_turn") {
           session.beginTurn(turnId);
-          const ready = startTurn(message);
+          const ready = startTurn(message, messageId);
           nativeTurns.set(turnId, ready);
           try {
             await ready;
@@ -355,6 +418,12 @@ export function createCodexDriver(deps: {
             turnId,
           } satisfies MachineError;
         try {
+          if (messageId !== undefined)
+            pendingCallerMessages.push({
+              messageId,
+              content: message,
+              nativeTurnId: expectedTurnId,
+            });
           const accepted = await transport.request("turn/steer", {
             threadId,
             input: [textInput(message)],
@@ -363,6 +432,7 @@ export function createCodexDriver(deps: {
           if (accepted.turnId !== expectedTurnId)
             throw new Error("Codex accepted a different turn");
         } catch (error) {
+          if (messageId !== undefined) removePendingCallerMessage(messageId);
           if (error instanceof CodexRequestError && session.turnId !== turnId)
             throw {
               code: "turn_not_active",

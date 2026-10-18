@@ -144,7 +144,7 @@ describe("录制 fixture 回放", () => {
               "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
             artifactSha256:
               "380b7a9d716ce02770f2f35a6976f9e2227eb240388ff47d7679fd20d7d7a9fb",
-            projectionVersion: 3,
+            projectionVersion: 4,
           },
           "two-tools": {
             sourceSha256: fixture.metadata.sourceSha256,
@@ -178,16 +178,16 @@ describe("录制 fixture 回放", () => {
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.25",
       sdkVersion: "1.0.23",
-      projectionVersion: 3,
+      projectionVersion: 4,
       artifactSha256:
-        "380b7a9d716ce02770f2f35a6976f9e2227eb240388ff47d7679fd20d7d7a9fb",
+        "6742c4899bd51665fc72c2a3e0f69d3429edec32a1afea34cf21debefcc290c5",
       sourceSha256:
         "c5ee314bd0db8fd340fd3b811600399b1319a04e0277f3b89488614a6a72c4b0",
     });
     const events = await replayFixture(messages);
     // 固定指纹确认录制回放的公开事件流没有意外漂移。
     expect(sha256(JSON.stringify(events))).toBe(
-      "202ef223e237e0790276b3483e4373f6a28817347a4c30e34711dfab8d91b1c4",
+      "a58f471a5f68608da6e99d95a41adf1a4c566201e15ade969009e185811c7ecc",
     );
 
     const deltas = events.filter((event) => event.type === "text.delta");
@@ -204,17 +204,41 @@ describe("录制 fixture 回放", () => {
       "字节",
     ]);
     expect(new Set(deltas.map((event) => event.messageId))).toEqual(
-      new Set(["m1"]),
+      new Set(["w2"]),
     );
     expect(snapshots).toEqual([
       {
         type: "message",
         sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:1",
         turnId: "t1",
-        messageId: "m1",
+        messageId: "w1",
         role: "worker",
-        content:
-          "当前目录包含两个文件：\n\n- `alpha.txt` — 6 字节\n- `beta.md` — 7 字节",
+        content: [
+          {
+            type: "thinking",
+            text: "The user wants to list the contents of the current directory using a shell command.",
+            signature: "",
+          },
+          { type: "tool_call", toolCallId: "c1" },
+        ],
+      },
+      {
+        type: "message",
+        sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:1",
+        turnId: "t1",
+        messageId: "w2",
+        role: "worker",
+        content: [
+          {
+            type: "thinking",
+            text: "The user asked me to list the current directory contents using a shell command. I've done that. Let me summarize the results.\n",
+            signature: "",
+          },
+          {
+            type: "text",
+            text: "当前目录包含两个文件：\n\n- `alpha.txt` — 6 字节\n- `beta.md` — 7 字节",
+          },
+        ],
       },
     ]);
 
@@ -230,6 +254,10 @@ describe("录制 fixture 回放", () => {
         turnId: "t1",
         toolCallId: "c1",
         name: "Bash",
+        input: {
+          command: "ls -la",
+          description: "List current directory contents",
+        },
       },
       {
         type: "tool.completed",
@@ -284,16 +312,16 @@ describe("录制 fixture 回放", () => {
       protocolVersion: "1.2.0",
       qoderCliVersion: "1.1.23",
       sdkVersion: "1.0.23",
-      projectionVersion: 3,
+      projectionVersion: 4,
       artifactSha256:
-        "fd22bd2353a3b9651e88a52e057c3dd31ca7de04d811ce8d803826a022096491",
+        "61bff04768ebaaa8b590ea050427faa43653fb9901f91c6df28e3cc71bc326a3",
       sourceSha256:
         "58e8d23afce4c0aa2cd8b5293f2b06dee2be3f4c968f01acc6391f1c327b4be8",
     });
     const events = await replayFixture(messages);
     // 固定指纹确认录制回放的公开事件流没有意外漂移。
     expect(sha256(JSON.stringify(events))).toBe(
-      "cbce4388e2a1c870b94fed670472c048c9708f5196ce9a450808f3dc2637feac",
+      "a1725a506fd8b7a054fdd196635b4b7c2a7d8e163c3d2b87188a2339a955087f",
     );
 
     expect(
@@ -308,6 +336,10 @@ describe("录制 fixture 回放", () => {
         turnId: "t1",
         toolCallId: "c1",
         name: "Bash",
+        input: {
+          command: "printf first",
+          description: 'Print "first"',
+        },
       },
       {
         type: "tool.completed",
@@ -324,6 +356,10 @@ describe("录制 fixture 回放", () => {
         turnId: "t1",
         toolCallId: "c2",
         name: "Bash",
+        input: {
+          command: "printf second",
+          description: 'Print "second"',
+        },
       },
       {
         type: "tool.completed",
@@ -339,11 +375,54 @@ describe("录制 fixture 回放", () => {
     const deltas = events.filter((event) => event.type === "text.delta");
     const snapshots = events.filter((event) => event.type === "message");
     expect(deltas).toHaveLength(12);
-    expect(snapshots.map((event) => event.messageId)).toEqual(["m1", "m2"]);
+    expect(snapshots.map((event) => event.messageId)).toEqual([
+      "w1",
+      "w2",
+      "w3",
+    ]);
+    expect(snapshots.map((event) => event.content)).toEqual([
+      [
+        {
+          type: "thinking",
+          text: "The user wants me to call the Bash tool exactly twice in sequence, not merged. First call executes only `printf first`, second call executes only `printf second`. Then summarize after both complete.",
+          signature: "",
+        },
+        {
+          type: "text",
+          text: "I'll run the two commands sequentially as requested.\n\n",
+        },
+        { type: "tool_call", toolCallId: "c1" },
+      ],
+      [
+        {
+          type: "thinking",
+          text: "First call done. Now the second call.\n",
+          signature: "",
+        },
+        { type: "tool_call", toolCallId: "c2" },
+      ],
+      [
+        { type: "thinking", text: "Both done. Now summarize.", signature: "" },
+        {
+          type: "text",
+          text: "Both commands completed successfully:\n- First call output: `first`\n- Second call output: `second`",
+        },
+      ],
+    ]);
     expect(new Set(deltas.map((event) => event.messageId))).toEqual(
-      new Set(["m1", "m2"]),
+      new Set(["w1", "w3"]),
     );
-    const deltaHashes = snapshots.map((snapshot) =>
+    const textOf = (content: (typeof snapshots)[number]["content"]): string =>
+      typeof content === "string"
+        ? content
+        : content
+            .filter((part) => part.type === "text")
+            .map((part) => (part.type === "text" ? part.text : ""))
+            .join("");
+    const textSnapshots = snapshots.filter(
+      (snapshot) => textOf(snapshot.content).length > 0,
+    );
+    const deltaHashes = textSnapshots.map((snapshot) =>
       sha256(
         deltas
           .filter((delta) => delta.messageId === snapshot.messageId)
@@ -351,8 +430,8 @@ describe("录制 fixture 回放", () => {
           .join(""),
       ),
     );
-    const snapshotHashes = snapshots.map((snapshot) =>
-      sha256(snapshot.content),
+    const snapshotHashes = textSnapshots.map((snapshot) =>
+      sha256(textOf(snapshot.content)),
     );
     expect(deltaHashes).toEqual([
       "d45dd6feecf4f151424376d88796d93b761b9101488e5bc845545c3385fa48a5",
@@ -367,7 +446,7 @@ describe("录制 fixture 回放", () => {
         sessionId: "session:00000000-0000-4000-8000-000000000000:reviewer:1",
         turnId: "t1",
         stopReason: "end_turn",
-        finalReply: snapshots[1]?.content,
+        finalReply: textOf(textSnapshots[1]!.content),
         usage: {
           input_tokens: 0,
           cache_creation_input_tokens: 0,

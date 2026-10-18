@@ -15,7 +15,7 @@ const metadata = {
   sdkVersion: "1.0.23",
   qoderCliVersion: "1.1.23",
   protocolVersion: "1.2.0",
-  projectionVersion: 3,
+  projectionVersion: 4,
   lineCount: 1,
   uniqueNativeToolCount: 0,
   artifactSha256:

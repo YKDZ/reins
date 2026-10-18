@@ -12,6 +12,7 @@ import type {
   TurnHandle,
   DaemonGeneration,
   MessageKey,
+  MessageContentPart,
   ToolKey,
 } from "@reins/protocol";
 import {
@@ -33,14 +34,29 @@ export type AgentFactId = string & {
   readonly [agentFactIdBrand]: "AgentFactId";
 };
 
+type ToPublicMessageContentPart<TPart> = TPart extends {
+  toolCallId: unknown;
+}
+  ? Omit<TPart, "toolCallId"> & { toolKey: ToolKey }
+  : TPart;
+type PublicMessageContentPart = ToPublicMessageContentPart<MessageContentPart>;
+
 type PublicFact<E> = E extends DomainEvent
   ? Omit<
       E,
-      "sessionId" | "turnId" | "messageId" | "toolCallId" | "permissionId"
+      | "sessionId"
+      | "turnId"
+      | "messageId"
+      | "toolCallId"
+      | "permissionId"
+      | (E extends { type: "message" } ? "content" : never)
     > & {
       sessionHandle: SessionHandle;
     } & (E extends { turnId: unknown } ? { turnHandle: TurnHandle } : {}) &
       (E extends { messageId: unknown } ? { messageKey: MessageKey } : {}) &
+      (E extends { type: "message" }
+        ? { content: string | PublicMessageContentPart[] }
+        : {}) &
       (E extends { toolCallId: unknown } ? { toolKey: ToolKey } : {}) &
       (E extends { permissionId: unknown }
         ? { permissionHandle: PermissionHandle }
@@ -113,8 +129,33 @@ export function createAgentFact(
     typeof permissionId === "string"
       ? v.parse(permissionIdSchema, permissionId)
       : undefined;
+  const publicContent = Array.isArray(fields.content)
+    ? fields.content.map((part) => {
+        if (
+          typeof part !== "object" ||
+          part === null ||
+          !("toolCallId" in part) ||
+          parsedTurnId === undefined
+        )
+          return part;
+        const parsedPartToolCallId = v.parse(toolCallIdSchema, part.toolCallId);
+        const contentPart = Object.fromEntries(
+          Object.entries(part).filter(([key]) => key !== "toolCallId"),
+        );
+        return {
+          ...contentPart,
+          toolKey: encodeToolKey({
+            generation,
+            sessionId: parsedSessionId,
+            turnId: parsedTurnId,
+            toolCallId: parsedPartToolCallId,
+          }),
+        };
+      })
+    : fields.content;
   const fact = {
     ...fields,
+    ...(fields.content === undefined ? {} : { content: publicContent }),
     sessionHandle: parsedSessionId,
     ...(parsedTurnId !== undefined
       ? {

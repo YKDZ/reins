@@ -43,7 +43,11 @@ function fingerprintEvent(event: DomainEvent): unknown {
     case "message":
       return {
         ...event,
-        contentHash: sha256(event.content),
+        contentHash: sha256(
+          typeof event.content === "string"
+            ? event.content
+            : JSON.stringify(event.content),
+        ),
         content: undefined,
       };
     case "tool.requested":

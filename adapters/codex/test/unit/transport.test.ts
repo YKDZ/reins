@@ -582,6 +582,59 @@ describe("codex transport", () => {
     await transport.close();
   });
 
+  test("userMessage 保留结构化输入、路径引用与原生 turn 关联", async () => {
+    const fake = fakeChild();
+    const transport = createCodexTransport({ spawnChild: () => fake.child });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+    const params = {
+      turnId: "turn-7",
+      item: {
+        type: "userMessage",
+        id: "user-7",
+        clientId: null,
+        content: [
+          {
+            type: "text",
+            text: "查看文件",
+            text_elements: [
+              { byteRange: { start: 0, end: 6 }, placeholder: "文件" },
+            ],
+          },
+          {
+            type: "image",
+            url: "https://example.test/image.png",
+            detail: "high",
+          },
+          { type: "localImage", path: "/tmp/private/image.png" },
+          { type: "localAudio", path: "/tmp/private/audio.wav" },
+          { type: "skill", name: "review", path: "/tmp/private/skill.md" },
+        ],
+      },
+    };
+    fake.stdout.write(
+      `${JSON.stringify({ method: "item/completed", params })}\n`,
+    );
+
+    await expect(iterator.next()).resolves.toEqual({
+      done: false,
+      value: {
+        kind: "notification",
+        method: "item/completed",
+        params: {
+          turnId: "turn-7",
+          item: {
+            type: "userMessage",
+            id: "user-7",
+            clientId: null,
+            content: params.item.content,
+          },
+        },
+      },
+    });
+    await transport.close();
+  });
+
   test("MCP 工具 item 保留原生 arguments 与结构化结果", async () => {
     const fake = fakeChild();
     const transport = createCodexTransport({ spawnChild: () => fake.child });

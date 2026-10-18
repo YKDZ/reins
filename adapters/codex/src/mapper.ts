@@ -1,9 +1,14 @@
+import { readFile } from "node:fs/promises";
+
 import type { TurnJournal } from "@reins/adapter-kit";
 import {
   makeTextEvidence,
   UNKNOWN_HARNESS_FAILURE,
   type DomainEvent,
   type HarnessFailure,
+  type MessageContent,
+  type MessageContentPart,
+  type MessageId,
   type PermissionOption,
   type PermissionResolution,
 } from "@reins/protocol";
@@ -94,6 +99,7 @@ function mapItemCompleted(
   item: CodexInboundItem,
 ): DomainEvent[] {
   if (session.turnId === null) return [];
+  if (item.type === "userMessage") return [];
   if (item.type === "agentMessage") {
     session.setFinalText(item.text);
     return [
@@ -165,9 +171,107 @@ function mapItemCompleted(
   return [];
 }
 
+async function codexMessageBody(
+  content: Extract<CodexInboundItem, { type: "userMessage" }>["content"],
+): Promise<MessageContent> {
+  const parts: MessageContentPart[] = [];
+  for (const input of content) {
+    switch (input.type) {
+      case "text":
+        parts.push({
+          type: "text",
+          text: input.text,
+          ...(input.text_elements.length === 0
+            ? {}
+            : {
+                textElements: input.text_elements.map((element) => ({
+                  byteRange: { ...element.byteRange },
+                  placeholder: element.placeholder,
+                })),
+              }),
+        });
+        break;
+      case "image":
+        parts.push({
+          type: "image",
+          source: "url",
+          url: input.url,
+          ...(input.detail === undefined ? {} : { detail: input.detail }),
+        });
+        break;
+      case "localImage":
+        try {
+          const data = await readFile(input.path);
+          parts.push({
+            type: "image",
+            source: "bytes",
+            data: data.toString("base64"),
+            ...(input.detail === undefined ? {} : { detail: input.detail }),
+          });
+        } catch {
+          parts.push({
+            type: "image",
+            source: "unavailable",
+            reason: "read_failed",
+          });
+        }
+        break;
+      case "audio":
+        parts.push({ type: "audio", source: "url", url: input.url });
+        break;
+      case "localAudio":
+        try {
+          const data = await readFile(input.path);
+          parts.push({
+            type: "audio",
+            source: "bytes",
+            data: data.toString("base64"),
+          });
+        } catch {
+          parts.push({
+            type: "audio",
+            source: "unavailable",
+            reason: "read_failed",
+          });
+        }
+        break;
+      case "skill":
+      case "mention":
+        parts.push({
+          type: "reference",
+          referenceType: input.type,
+          name: input.name,
+        });
+        break;
+      default:
+        input satisfies never;
+    }
+  }
+  return parts;
+}
+
+async function mapCallerMessage(
+  session: TurnJournal,
+  item: Extract<CodexInboundItem, { type: "userMessage" }>,
+  messageId: MessageId | undefined,
+): Promise<DomainEvent[]> {
+  if (session.turnId === null || messageId === undefined) return [];
+  return [
+    {
+      type: "message",
+      sessionId: session.sessionId,
+      turnId: session.turnId,
+      messageId,
+      role: "caller",
+      content: await codexMessageBody(item.content),
+    },
+  ];
+}
+
 export async function mapNotification(
   session: TurnJournal,
   message: Extract<InboundMessage, { kind: "notification" }>,
+  callerMessageId?: MessageId,
 ): Promise<DomainEvent[]> {
   switch (message.method) {
     case "item/agentMessage/delta":
@@ -184,6 +288,8 @@ export async function mapNotification(
     case "item/started":
       return mapItemStarted(session, message.params.item);
     case "item/completed":
+      if (message.params.item.type === "userMessage")
+        return mapCallerMessage(session, message.params.item, callerMessageId);
       return mapItemCompleted(session, message.params.item);
     case "thread/tokenUsage/updated":
       session.setUsage({ ...message.params.tokenUsage });

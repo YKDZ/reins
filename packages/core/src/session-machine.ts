@@ -12,9 +12,9 @@ import {
   killParamsSchema,
   type ListFilter,
   type MachineError,
+  type MessageId,
   machineErrorSchema,
   makeErrorCause,
-  type MessageId,
   messageIdSchema,
   type PermissionId,
   type PermissionOption,
@@ -926,6 +926,37 @@ export function createSessionMachine(options: {
     return v.parse(turnIdSchema, `t${turnSeq}`);
   }
 
+  function nextMessageId(): MessageId {
+    messageSeq += 1;
+    return v.parse(messageIdSchema, `m${messageSeq}`);
+  }
+
+  function selectCallerMessage(
+    events: readonly DomainEvent[],
+    fallback: Extract<DomainEvent, { type: "message" }>,
+  ): {
+    caller: Extract<DomainEvent, { type: "message" }>;
+    remainder: DomainEvent[];
+  } {
+    const caller = events.find(
+      (event) =>
+        event.type === "message" &&
+        event.role === "caller" &&
+        event.messageId === fallback.messageId,
+    );
+    return {
+      caller: caller?.type === "message" ? caller : fallback,
+      remainder: events.filter(
+        (event) =>
+          !(
+            event.type === "message" &&
+            event.role === "caller" &&
+            event.messageId === fallback.messageId
+          ),
+      ),
+    };
+  }
+
   return {
     async spawn(params, commit) {
       const parsed = v.safeParse(spawnParamsSchema, params);
@@ -935,6 +966,7 @@ export function createSessionMachine(options: {
       const spec = parsed.output;
       const sessionId = options.identity.session();
       const turnId = nextTurnId(sessionId);
+      const messageId = nextMessageId();
       const cwd = spec.cwd;
       const spawnScope: PendingSpawn = {
         token: Symbol(sessionId),
@@ -951,6 +983,7 @@ export function createSessionMachine(options: {
         await driver.start({
           sessionId,
           turnId,
+          messageId,
           harness: spec.harness,
           message: spec.message,
           cwd,
@@ -998,6 +1031,21 @@ export function createSessionMachine(options: {
         );
       }
       const result = { sessionId, turnId, cwd };
+      const callerMessage: DomainEvent = {
+        type: "message",
+        sessionId,
+        turnId,
+        messageId,
+        role: "caller",
+        content: spec.message,
+      };
+      spawnScope.turn.messages.set(messageId, "complete");
+      const nativeCallerMessage = spawnScope.events.find(
+        (event) =>
+          event.type === "message" &&
+          event.role === "caller" &&
+          event.messageId === messageId,
+      );
       const events: DomainEvent[] = [
         {
           type: "session.created",
@@ -1012,7 +1060,15 @@ export function createSessionMachine(options: {
           spawnedAt: new Date().toISOString(),
         },
         { type: "turn.started", sessionId, turnId },
-        ...spawnScope.events,
+        nativeCallerMessage ?? callerMessage,
+        ...spawnScope.events.filter(
+          (event) =>
+            !(
+              event.type === "message" &&
+              event.role === "caller" &&
+              event.messageId === messageId
+            ),
+        ),
       ];
       // 固定创建提交的截点。原生在异步提交期间产生的事件只进入 lateEvents，
       // 会在创建事实提交并发布后逐批走普通记录路径。
@@ -1065,10 +1121,20 @@ export function createSessionMachine(options: {
       ) {
         throw machineError({ code: "session_busy", sessionId });
       }
-      messageSeq += 1;
-      const messageId = v.parse(messageIdSchema, `m${messageSeq}`);
+      const messageId = nextMessageId();
+      const callerMessage: Extract<DomainEvent, { type: "message" }> = {
+        type: "message",
+        sessionId,
+        turnId:
+          parsed.output.placement === "new_turn"
+            ? nextTurnId(sessionId)
+            : parsed.output.turnId,
+        messageId,
+        role: "caller",
+        content: message,
+      };
       if (parsed.output.placement === "new_turn") {
-        const turnId = nextTurnId(sessionId);
+        const turnId = callerMessage.turnId;
         const started: DomainEvent = {
           type: "turn.started",
           sessionId,
@@ -1079,19 +1145,15 @@ export function createSessionMachine(options: {
         const delivery = createPendingDelivery(projection, true);
         pendingDeliveries.set(sessionId, delivery);
         try {
-          await driver.deliver(sessionId, turnId, message, "new_turn");
-          bus.publish([
-            started,
-            {
-              type: "message",
-              sessionId,
-              turnId,
-              messageId,
-              role: "caller",
-              content: message,
-            },
-            ...delivery.events,
-          ]);
+          await driver.deliver(
+            sessionId,
+            turnId,
+            message,
+            "new_turn",
+            messageId,
+          );
+          const selected = selectCallerMessage(delivery.events, callerMessage);
+          bus.publish([started, selected.caller, ...selected.remainder]);
         } catch (error) {
           throw await unexpectedFailure(options.diagnostics, error, {
             sessionId,
@@ -1129,15 +1191,20 @@ export function createSessionMachine(options: {
       delivery.count += 1;
       pendingDeliveries.set(sessionId, delivery);
       try {
-        await driver.deliver(sessionId, turnId, message, "active_turn");
-        bus.publish({
-          type: "message",
+        await driver.deliver(
           sessionId,
           turnId,
+          message,
+          "active_turn",
           messageId,
-          role: "caller",
-          content: message,
-        });
+        );
+        const selected = selectCallerMessage(delivery.events, callerMessage);
+        delivery.events.splice(
+          0,
+          delivery.events.length,
+          ...selected.remainder,
+        );
+        bus.publish(selected.caller);
       } catch (error) {
         throw await unexpectedFailure(options.diagnostics, error, {
           sessionId,
@@ -1159,7 +1226,12 @@ export function createSessionMachine(options: {
           }
         }
       }
-      return { sessionId, turnId, messageId, deliveryPoint: "active_turn" };
+      return {
+        sessionId,
+        turnId: callerMessage.turnId,
+        messageId,
+        deliveryPoint: "active_turn",
+      };
     },
     async wait(params) {
       const parsed = v.safeParse(waitParamsSchema, params);

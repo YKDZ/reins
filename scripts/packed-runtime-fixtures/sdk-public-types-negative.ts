@@ -2,11 +2,13 @@ import {
   type AgentTarget,
   type CompletedTurn,
   type DiagnosticId,
+  type MessageContentPart,
   type MessageKey,
   type OperationKey,
   type PermissionHandle,
   type ReplayPolicy,
   type ResumeCursor,
+  type ReinsFailure,
   type ReinsConnection,
   type SendInput,
   type SessionHandle,
@@ -33,6 +35,16 @@ declare const diagnosticId: DiagnosticId;
 declare const messageKey: MessageKey;
 declare const permissionHandle: PermissionHandle;
 declare const toolKey: ToolKey;
+const invalidToolCallPart: MessageContentPart = {
+  type: "tool_call",
+  // @ts-expect-error 正文中的工具关联必须使用公开 ToolKey。
+  toolCallId: toolKey,
+};
+const invalidToolResultPart: MessageContentPart = {
+  type: "tool_result",
+  // @ts-expect-error 原生工具调用 ID 不作为 SDK 正文身份公开。
+  toolCallId: "native-tool-id",
+};
 
 // @ts-expect-error 会话句柄与回合句柄具有不同的公开身份。
 const wrongTurn: TurnHandle = sessionHandle;
@@ -81,6 +93,40 @@ const sessionTarget: AgentTarget = { scope: "session", sessionHandle };
 // @ts-expect-error 目标范围决定可接受的句柄类型。
 const mismatchedTarget: AgentTarget = { scope: "turn", sessionHandle };
 
+const eventFailureWithoutSession: Extract<
+  ReinsFailure,
+  {
+    code: "control_store_unavailable";
+  }
+> = {
+  code: "control_store_unavailable",
+  // @ts-expect-error 事件存储故障必须关联真实会话。
+  facts: {
+    stage: "event",
+    eventType: "message",
+    cause: { kind: "io", message: "failed" },
+  },
+};
+if (eventFailureWithoutSession.facts.stage === "event") {
+  // @ts-expect-error 异步事件故障没有 caller 操作键。
+  void eventFailureWithoutSession.facts.operationKey;
+}
+
+const operationFailureWithoutKey: Extract<
+  ReinsFailure,
+  {
+    code: "control_store_unavailable";
+  }
+> = {
+  code: "control_store_unavailable",
+  // @ts-expect-error 操作阶段故障必须关联实际操作键。
+  facts: {
+    stage: "commit",
+    acceptance: "accepted",
+    cause: { kind: "io", message: "failed" },
+  },
+};
+
 if (completed.stopReason === "end_turn") {
   // @ts-expect-error 成功结束回合的结果没有失败分支。
   void completed.failure;
@@ -94,4 +140,8 @@ void invalidSend;
 void invalidReplay;
 void sessionTarget;
 void mismatchedTarget;
+void eventFailureWithoutSession;
+void operationFailureWithoutKey;
 void resumeCursor;
+void invalidToolCallPart;
+void invalidToolResultPart;

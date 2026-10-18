@@ -178,9 +178,6 @@ export async function prepareFixtureCandidate(options: {
     throw new Error("Recorded Qoder source metadata mismatch");
   }
   const projected = projectRecordedQoderMessages(source);
-  await assertQoderProjectionSemanticEquivalence(
-    toQoderSdkMessages(source as RecordedQoderMessage[]),
-  );
   assertMatchesKnownCredentialPolicy(projected);
   assertCanonicalRecordedQoderMessages(projected);
   const projectedMessages = toQoderSdkMessages(projected);
@@ -188,6 +185,9 @@ export async function prepareFixtureCandidate(options: {
     timedOut: false,
     minimumNativeToolCount: options.minimumNativeToolCount,
   });
+  await assertQoderProjectionSemanticEquivalence(
+    toQoderSdkMessages(source as RecordedQoderMessage[]),
+  );
   const init = projected[0];
   if (init?.type !== "system") {
     throw new Error("Recorded Qoder fixture has no init message");

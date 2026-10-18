@@ -45,6 +45,51 @@ export type OperationOptions<Kind extends OperationKind> = {
   operationKey?: OperationKey<Kind>;
 };
 
+export type MessageContentPart =
+  | {
+      type: "text";
+      text: string;
+      textElements?: {
+        byteRange: { start: number; end: number };
+        placeholder: string | null;
+      }[];
+      annotations?: unknown;
+    }
+  | { type: "thinking"; text: string; signature?: string }
+  | { type: "redacted_thinking"; data: string }
+  | {
+      type: "image";
+      source: "url";
+      url: string;
+      detail?: "auto" | "low" | "high" | "original";
+    }
+  | {
+      type: "image";
+      source: "bytes";
+      data: string;
+      mediaType?: string;
+      detail?: "auto" | "low" | "high" | "original";
+    }
+  | { type: "image"; source: "unavailable"; reason: "read_failed" }
+  | { type: "audio"; source: "url"; url: string }
+  | {
+      type: "audio";
+      source: "bytes";
+      data: string;
+      mediaType?: string;
+    }
+  | { type: "audio"; source: "unavailable"; reason: "read_failed" }
+  | { type: "reference"; referenceType: "skill" | "mention"; name: string }
+  | { type: "tool_call"; toolKey: ToolKey }
+  | { type: "tool_result"; toolKey: ToolKey }
+  | {
+      type: "opaque";
+      harness: HarnessId;
+      nativeType: string;
+      value: unknown;
+    };
+export type MessageContent = string | MessageContentPart[];
+
 export type HarnessId = "codex" | "qoder";
 
 export type SpawnInput = {
@@ -296,7 +341,7 @@ export type AgentFact =
       type: "message";
       messageKey: MessageKey;
       role: "caller" | "worker";
-      content: string;
+      content: MessageContent;
       /** 仅上游明确报告正文截断时出现。 */
       nativeTruncated?: true;
     })
@@ -409,6 +454,18 @@ export type ErrorCause = {
   message: string;
 };
 
+type ControlEventType =
+  | "session.created"
+  | "turn.started"
+  | "text.delta"
+  | "message"
+  | "tool.requested"
+  | "tool.completed"
+  | "permission.requested"
+  | "permission.resolved"
+  | "turn.completed"
+  | "session.killed";
+
 type FailureFactsByCode = {
   consumer_context_required: Record<never, never>;
   runtime_scope_invalid: Record<never, never>;
@@ -440,14 +497,35 @@ type FailureFactsByCode = {
     cause?: ErrorCause;
     cleanupCause?: ErrorCause;
   };
-  control_store_unavailable: {
-    operationKey: OperationKey<OperationKind>;
-    stage: "register" | "dispatch" | "commit" | "failure";
-    acceptance: "not_dispatched" | "unknown" | "accepted";
-    cause: ErrorCause;
-    acceptedResult?: SpawnResult;
-    cleanupCause?: ErrorCause;
-  };
+  control_store_unavailable:
+    | {
+        operationKey: OperationKey<OperationKind>;
+        stage: "register" | "dispatch" | "commit" | "failure";
+        acceptance: "not_dispatched" | "unknown" | "accepted";
+        cause: ErrorCause;
+        acceptedResult?: SpawnResult;
+        cleanupCause?: ErrorCause;
+      }
+    | {
+        stage: "event";
+        sessionHandle: SessionHandle;
+        eventType: ControlEventType;
+        turnHandle?: TurnHandle;
+        cause: ErrorCause;
+        cleanupCause?: ErrorCause;
+        cleanupSessionHandle?: SessionHandle;
+      }
+    | {
+        stage: "event_commit";
+        operationKey: OperationKey<OperationKind>;
+        acceptance: "accepted";
+        sessionHandle: SessionHandle;
+        eventType: ControlEventType;
+        turnHandle?: TurnHandle;
+        cause: ErrorCause;
+        cleanupCause?: ErrorCause;
+        cleanupSessionHandle?: SessionHandle;
+      };
   permission_not_pending: { permissionHandle: PermissionHandle };
   permission_resolution_mismatch: { permissionHandle: PermissionHandle };
   diagnostic_not_found: { diagnosticId: DiagnosticId };

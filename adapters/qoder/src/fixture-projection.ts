@@ -2,7 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 
 import type { SDKMessage } from "@qodercn-ai/qodercn-agent-sdk";
 
-export const RECORDED_QODER_PROJECTION_VERSION = 3 as const;
+export const RECORDED_QODER_PROJECTION_VERSION = 4 as const;
 
 export type RecordedUsage = {
   input_tokens: number;
@@ -28,6 +28,8 @@ export type RecordedUsage = {
 
 type RecordedContentBlock =
   | { type: "text"; text: string }
+  | { type: "thinking"; thinking: string; signature?: string }
+  | { type: "redacted_thinking"; data: string }
   | { type: "tool_use"; id: string; name: string; input?: unknown }
   | {
       type: "tool_result";
@@ -320,7 +322,20 @@ function projectAssistant(
   const content: RecordedContentBlock[] = [];
   for (const candidate of message.content) {
     const block = record(candidate);
-    if (block.type === "thinking") continue;
+    if (block.type === "thinking") {
+      content.push({
+        type: "thinking",
+        thinking: string(block.thinking),
+        ...(block.signature === undefined
+          ? {}
+          : { signature: string(block.signature) }),
+      });
+      continue;
+    }
+    if (block.type === "redacted_thinking") {
+      content.push({ type: "redacted_thinking", data: string(block.data) });
+      continue;
+    }
     if (block.type === "text") {
       content.push({ type: "text", text: string(block.text) });
       continue;

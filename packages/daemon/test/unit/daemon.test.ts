@@ -32,6 +32,7 @@ import {
   isSideEffectMethod,
   encodeResumeCursor,
   operationKeyClaimsSchema,
+  parseOperationKey,
   serializeOperationKey,
   initializeResultSchema,
   machineErrorSchema,
@@ -134,7 +135,6 @@ function startDaemon(
   adapters: AdapterRegistry,
   options?: {
     idleTimeoutMs?: number;
-    eventLogLimit?: number;
     identity?: { session(): SessionId };
     runtimeScopeId?: RuntimeScopeId;
     beforeAttachReplay?: (sessionId: SessionId) => void;
@@ -153,9 +153,6 @@ function startDaemon(
     diagnostics: testDiagnostics,
     runtimeScopeId: options?.runtimeScopeId ?? testRuntimeScopeId,
     idleTimeoutMs: options?.idleTimeoutMs ?? 60_000,
-    ...(options?.eventLogLimit === undefined
-      ? {}
-      : { eventLogLimit: options.eventLogLimit }),
     ...(options?.beforeAttachReplay === undefined
       ? {}
       : { beforeAttachReplay: options.beforeAttachReplay }),
@@ -896,10 +893,11 @@ describe("daemon 协议面（缝 C）", () => {
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId, replayed: 2 },
+      result: { sessionId, replayed: 3 },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "turn.started",
+      "message",
       "turn.completed",
     ]);
     expect(collector.ended).toEqual([{ sessionId, reason: "end_turn" }]);
@@ -1398,11 +1396,12 @@ describe("daemon 协议面（缝 C）", () => {
       sessionId,
       replay: { mode: "available" },
     });
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 2 } });
+    expect(attached).toMatchObject({ result: { sessionId, replayed: 3 } });
     expect(order).toEqual([
       "response",
       "session.created",
       "turn.started",
+      "live",
       "live",
     ]);
   });
@@ -1436,13 +1435,21 @@ describe("daemon 协议面（缝 C）", () => {
       replay: { mode: "available" },
     });
 
-    expect(attached).toMatchObject({ result: { sessionId, replayed: 6 } });
+    expect(attached).toMatchObject({ result: { sessionId, replayed: 7 } });
     expect(
       collector.events.filter(
         (event) =>
           event.type !== "session.created" && event.type !== "turn.started",
       ),
     ).toEqual([
+      {
+        type: "message",
+        sessionId,
+        turnId: "t1",
+        messageId: "m1",
+        role: "caller",
+        content: "first",
+      },
       { type: "text.delta", sessionId, turnId: "t1", messageId, delta: "pre" },
       {
         type: "tool.requested",
@@ -1489,10 +1496,11 @@ describe("daemon 协议面（缝 C）", () => {
       replay: { mode: "available" },
     });
 
-    expect(attached).toMatchObject({ result: { replayed: 4 } });
+    expect(attached).toMatchObject({ result: { replayed: 5 } });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "text.delta",
       "turn.completed",
     ]);
@@ -1540,14 +1548,12 @@ describe("daemon 协议面（缝 C）", () => {
     expect(idleCollector.events).toEqual([]);
   });
 
-  test("available reports strict truncation during an unfinished stream and retains the bounded tail", async () => {
+  test("available replays full durable history without truncation", async () => {
     const fake = createFakeHarness({
       harness: "codex",
       modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
-      eventLogLimit: 2,
-    });
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
@@ -1568,9 +1574,9 @@ describe("daemon 协议面（缝 C）", () => {
       replay: { mode: "available" },
     });
     expect(active).toMatchObject({
-      result: { replayed: 2, window: { truncated: true } },
+      result: { replayed: 7, window: { truncated: false } },
     });
-    expect(activeCollector.events).toHaveLength(2);
+    expect(activeCollector.events).toHaveLength(7);
 
     fake.controls.completeTurn("end_turn", "abcd");
     const idleClient = server.connect();
@@ -1582,7 +1588,7 @@ describe("daemon 协议面（缝 C）", () => {
       replay: { mode: "available" },
     });
     expect(completed).toMatchObject({
-      result: { replayed: 2, window: { truncated: true } },
+      result: { replayed: 8, window: { truncated: false } },
     });
     expect(idleCollector.events.at(-1)).toMatchObject({
       type: "turn.completed",
@@ -1618,7 +1624,7 @@ describe("daemon 协议面（缝 C）", () => {
       sessionId,
       replay: { mode: "available" },
     });
-    expect(attached).toMatchObject({ result: { replayed: 3 } });
+    expect(attached).toMatchObject({ result: { replayed: 4 } });
     expect(
       collector.events.filter((event) => event.type === "text.delta"),
     ).toEqual([
@@ -1817,14 +1823,12 @@ describe("daemon 协议面（缝 C）", () => {
     expect(collector.ended).toEqual([{ sessionId, reason: "session_killed" }]);
   });
 
-  test("observation keeps the active attach target when the event ring truncates", async () => {
+  test("observation keeps the active attach target across complete history", async () => {
     const fake = createFakeHarness({
       harness: "codex",
       modelCatalog: emptyModelCatalog("codex"),
     });
-    const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
-      eventLogLimit: 1,
-    });
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
     const client = server.connect();
     await flush();
     const requester = makeRequester(client);
@@ -1848,7 +1852,7 @@ describe("daemon 协议面（缝 C）", () => {
       replay: { mode: "available" },
     });
 
-    expect(attached).toMatchObject({ result: { replayed: 1 } });
+    expect(attached).toMatchObject({ result: { replayed: 2 } });
     expect(collector.ended).toEqual([]);
     fake.controls.completeTurn();
     await waitFor(() => collector.ended.length === 1);
@@ -1896,11 +1900,12 @@ describe("daemon 协议面（缝 C）", () => {
     });
     expect(attached).toMatchObject({
       kind: "response",
-      result: { sessionId, replayed: 4 },
+      result: { sessionId, replayed: 5 },
     });
     expect(collector.events.map((event) => event.type)).toEqual([
       "session.created",
       "turn.started",
+      "message",
       "turn.completed",
       "session.killed",
     ]);
@@ -2357,10 +2362,20 @@ describe("daemon 空闲退出", () => {
     expect(stopped).toMatchObject({
       error: {
         code: "control_store_unavailable",
-        stage: "commit",
+        stage: "event_commit",
         acceptance: "accepted",
+        sessionId: first.sessionId,
+        eventType: "turn.completed",
+        operationKey: expect.any(String),
       },
     });
+    if (
+      !("error" in stopped) ||
+      stopped.error.code !== "control_store_unavailable" ||
+      stopped.error.stage !== "event_commit"
+    )
+      throw new Error("预期主动停止提交故障");
+    expect(parseOperationKey(stopped.error.operationKey).kind).toBe("kill");
     expect(fake.calls.terminated).toContain(first.sessionId);
     expect(await requester("list", {})).toMatchObject({
       result: [{ sessionId: first.sessionId, state: "busy" }],
@@ -2415,19 +2430,88 @@ describe("daemon 空闲退出", () => {
     const stopped = await requester("kill", { sessionId: spawned.sessionId });
     expect(stopped).toMatchObject({
       error: {
-        code: "internal_error",
-        cause: { message: "原生停止请求被拒绝" },
-        cleanupCause: {
+        code: "control_store_unavailable",
+        stage: "event",
+        sessionId: spawned.sessionId,
+        eventType: "message",
+        turnId: expect.any(String),
+        cause: {
           kind: "io",
           message: expect.stringContaining("先前事件无法写入存储"),
         },
+        cleanupCause: {
+          kind: "closed",
+          message: expect.stringContaining("原生停止请求被拒绝"),
+        },
       },
     });
-    expect(terminationAttempts).toBe(1);
+    expect(stopped).not.toHaveProperty("error.operationKey");
+    expect(terminationAttempts).toBeGreaterThan(0);
     connection.close();
     await expect(daemon.stop()).rejects.toThrow();
     await expect(running).rejects.toThrow();
     expect(terminationAttempts).toBe(2);
+  });
+
+  test("普通事件写入失败会停止对应worker并隔离其他会话", async () => {
+    const backingStore = createInMemoryControlStore();
+    let failEventWrite = false;
+    const controlStore: ControlStore = {
+      ...backingStore,
+      recordEvent(event, session) {
+        if (failEventWrite) throw new Error("事件正文写入失败");
+        return backingStore.recordEvent(event, session);
+      },
+    };
+    const codex = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const qoder = createFakeHarness({
+      harness: "qoder",
+      modelCatalog: emptyModelCatalog("qoder"),
+    });
+    const server = createInMemoryTransportServer<ProtocolMessage>();
+    const daemon = createDaemon({
+      transport: server,
+      adapters: new Map([
+        ["codex", codex.adapter],
+        ["qoder", qoder.adapter],
+      ]),
+      identity: testIdentity,
+      diagnostics: testDiagnostics,
+      runtimeScopeId: testRuntimeScopeId,
+      controlStore,
+      idleTimeoutMs: 60_000,
+    });
+    const running = daemon.start();
+    const connection = server.connect();
+    const requester = makeRequester(connection);
+    const first = resultOf(
+      await requester("spawn", {
+        harness: "codex",
+        sessionLabel: "event-write-failure",
+        message: "运行 A",
+      }),
+    ) as { sessionId: SessionId };
+    const second = resultOf(
+      await requester("spawn", {
+        harness: "qoder",
+        sessionLabel: "unaffected-session",
+        message: "运行 B",
+      }),
+    ) as { sessionId: SessionId };
+
+    failEventWrite = true;
+    codex.controls.emitWorkerMessage("正文无法提交");
+    await waitFor(() => codex.calls.terminated.includes(first.sessionId));
+
+    expect(codex.calls.terminated).toEqual([first.sessionId]);
+    expect(qoder.calls.terminated).toEqual([]);
+    expect(second.sessionId).not.toBe(first.sessionId);
+    connection.close();
+    await expect(daemon.stop()).rejects.toThrow();
+    await expect(running).rejects.toThrow();
   });
 
   test("提交已落盘但回执丢失时保留持久成功结果", async () => {
@@ -4126,14 +4210,12 @@ test("命令结果恢复：接纳请求后立即断连不撤销原消费者下�
   }
 });
 
-test("none turn scope ends from authoritative terminal history after event retention discards that turn", async () => {
+test("none turn scope ends from authoritative terminal state while retaining full history", async () => {
   const fake = createFakeHarness({
     harness: "codex",
     modelCatalog: emptyModelCatalog("codex"),
   });
-  const { server } = startDaemon(new Map([["codex", fake.adapter]]), {
-    eventLogLimit: 1,
-  });
+  const { server } = startDaemon(new Map([["codex", fake.adapter]]));
   const client = server.connect();
   await flush();
   const request = makeRequester(client);
@@ -4213,7 +4295,7 @@ test("after freezes its replay prefix and buffers live events before the establi
   });
   await flush();
   expect(ack).toMatchObject({
-    result: { replayed: 2, window: { oldest: 1, head: 3, truncated: false } },
+    result: { replayed: 3, window: { oldest: 1, head: 4, truncated: false } },
   });
   expect(wire[0]).toMatchObject({
     kind: "response",
@@ -4226,9 +4308,9 @@ test("after freezes its replay prefix and buffers live events before the establi
     notifications
       .filter((message) => message.method === "event")
       .map((message) => message.params.eventId),
-  ).toEqual([2, 3, 4, 5, 6]);
+  ).toEqual([2, 3, 4, 5, 6, 7]);
   expect(notifications.at(-1)).toMatchObject({
     method: "attach.ended",
-    params: { reason: "end_turn", lastEventId: 6 },
+    params: { reason: "end_turn", lastEventId: 7 },
   });
 });
