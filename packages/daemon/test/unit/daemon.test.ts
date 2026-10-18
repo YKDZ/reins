@@ -393,6 +393,7 @@ function createFakeHarness(options: {
     emitText(messageId: MessageId, delta: string): void;
     emitToolRequest(toolCallId: ToolCallId, name: string): void;
     emitSnapshot(messageId: MessageId, content: string): void;
+    markControlUnavailable(): void;
   };
 } {
   const calls: FakeCalls = {
@@ -405,6 +406,7 @@ function createFakeHarness(options: {
     terminated: [],
   };
   let emitEvent: ((event: DomainEvent) => void) | null = null;
+  let markSessionUnavailable: (() => void) | null = null;
   let beginAutonomousTurn:
     | ((cause?: AutonomousTurnCause) => Promise<TurnId>)
     | null = null;
@@ -457,6 +459,7 @@ function createFakeHarness(options: {
     driverFactory: ((context) => {
       calls.factoryCalls += 1;
       emitEvent = context.emit;
+      markSessionUnavailable = context.markControlUnavailable ?? null;
       beginAutonomousTurn = context.beginAutonomousTurn ?? null;
       return driver;
     }) satisfies AdapterDriverFactory,
@@ -540,6 +543,11 @@ function createFakeHarness(options: {
           role: "worker",
           content,
         });
+      },
+      markControlUnavailable() {
+        if (markSessionUnavailable === null)
+          throw new Error("测试 adapter 尚无会话可用性回调");
+        markSessionUnavailable();
       },
     },
   };
@@ -1367,6 +1375,105 @@ describe("daemon 协议面（缝 C）", () => {
     expect(fake.calls.delivered).toEqual([
       { sessionId, turnId: "t1", message: "边界消息" },
     ]);
+  });
+
+  test("单会话控制流丢失结束 wait 与 attach，但保留其他会话和清理路由", async () => {
+    const fake = createFakeHarness({
+      harness: "codex",
+      modelCatalog: emptyModelCatalog("codex"),
+    });
+    const { server } = startDaemon(new Map([["codex", fake.adapter]]));
+    const client = server.connect();
+    await flush();
+    const requester = makeRequester(client);
+    const first = await requester("spawn", {
+      sessionLabel: "healthy",
+      harness: "codex",
+      message: "first",
+    });
+    const firstSessionId = (resultOf(first) as { sessionId: SessionId })
+      .sessionId;
+    const second = await requester("spawn", {
+      sessionLabel: "unavailable",
+      harness: "codex",
+      message: "second",
+    });
+    const secondSessionId = (resultOf(second) as { sessionId: SessionId })
+      .sessionId;
+    const notifications = collectNotifications(client);
+
+    await requester("attach", {
+      scope: "session",
+      sessionId: firstSessionId,
+      start: { mode: "snapshot" },
+    });
+    await requester("attach", {
+      scope: "session",
+      sessionId: secondSessionId,
+      start: { mode: "snapshot" },
+    });
+    const waiting = requester("wait", {
+      targets: [{ sessionId: secondSessionId, turnId: "t2" }],
+      completion: "all",
+    });
+
+    fake.controls.markControlUnavailable();
+
+    expect(await waiting).toMatchObject({
+      result: {
+        status: "unreachable",
+        completed: [],
+        pending: [],
+        unreachable: [
+          { sessionId: secondSessionId, turnId: "t2", reason: "control_lost" },
+        ],
+      },
+    });
+    const listed = resultOf(await requester("list", {})) as Array<{
+      sessionId: SessionId;
+      state: string;
+      activeTurnId?: string;
+      lastKnownState?: string;
+      lastKnownActiveTurn?: string;
+      unreachableReason?: string;
+    }>;
+    expect(listed).toContainEqual(
+      expect.objectContaining({
+        sessionId: firstSessionId,
+        state: "busy",
+        activeTurnId: "t1",
+      }),
+    );
+    expect(listed).toContainEqual(
+      expect.objectContaining({
+        sessionId: secondSessionId,
+        state: "unreachable",
+        lastKnownState: "busy",
+        lastKnownActiveTurn: "t2",
+        unreachableReason: "control_lost",
+      }),
+    );
+    await waitFor(() => notifications.ended.length === 1);
+    expect(notifications.ended).toEqual([
+      { sessionId: secondSessionId, reason: "control_unavailable" },
+    ]);
+
+    await requester("attach", {
+      scope: "session",
+      sessionId: secondSessionId,
+      start: { mode: "snapshot" },
+    });
+    await waitFor(() => notifications.ended.length === 2);
+    expect(notifications.ended[1]).toEqual({
+      sessionId: secondSessionId,
+      reason: "control_unavailable",
+    });
+
+    await requester("kill", { sessionId: secondSessionId });
+    expect(fake.calls.terminated).toContain(secondSessionId);
+    expect(
+      resultOf(await requester("list", { sessionId: firstSessionId })),
+    ).toMatchObject([{ sessionId: firstSessionId, state: "busy" }]);
   });
 
   test("idle 中 send 触发新回合", async () => {

@@ -10,10 +10,12 @@ import {
   type WorkerSpec,
   type PermissionId,
   type MessageId,
+  type MessageContent,
   type TurnId,
   type MachineError,
   WorkerDeliveryFailure,
   WorkerInterruptFailure,
+  WorkerPermissionFailure,
   WorkerStartFailure,
   makeErrorCause,
 } from "@reins/protocol";
@@ -23,6 +25,7 @@ import type { UserInput } from "#/generated/v2/UserInput";
 import { initializeCodexTransport } from "./initialization.ts";
 import {
   derivePermissionOptions,
+  codexMessageBody,
   mapNotification,
   resolutionToResponse,
 } from "./mapper.ts";
@@ -71,7 +74,11 @@ export function createCodexDriver(deps: {
   }) => CodexTransport;
   terminateTimeoutMs?: number;
 }): AdapterDriverFactory {
-  return ({ emit, diagnostics: runtimeDiagnostics }) => {
+  return ({
+    emit,
+    diagnostics: runtimeDiagnostics,
+    markControlUnavailable = () => undefined,
+  }) => {
     const diagnosticSink = runtimeDiagnostics;
     let transport: CodexTransport | null = null;
     let session: HarnessSession<CodexApproval> | null = null;
@@ -82,12 +89,19 @@ export function createCodexDriver(deps: {
     let terminationFailure: MachineError | undefined;
     let terminationPromise: Promise<void> | null = null;
     let workerExitedUnexpectedly = false;
+    let controlLost = false;
     let activeTurnId: string | null = null;
     let ended = false;
     let runPromise: Promise<void> | undefined;
     let turnOverrides: { readonly model?: string; readonly effort?: string } =
       {};
     const nativeTurns = new Map<TurnId, Promise<string>>();
+    const nativeTurnToReins = new Map<string, TurnId>();
+    const pendingNativeStartTurnIds = new Set<TurnId>();
+    const pendingTurnNotifications: Array<{
+      message: Extract<InboundMessage, { kind: "notification" }>;
+      callerContent?: Promise<MessageContent>;
+    }> = [];
     const pendingByRequest = new Map<number, PermissionId>();
     const pendingCallerMessages: Array<{
       readonly messageId: MessageId;
@@ -132,17 +146,91 @@ export function createCodexDriver(deps: {
       if (index >= 0) pendingCallerMessages.splice(index, 1);
     }
 
+    function nativeTurnIdOf(
+      message: Extract<InboundMessage, { kind: "notification" }>,
+    ): string | undefined {
+      if (message.method === "turn/completed") return message.params.turn.id;
+      if (
+        message.method === "item/started" ||
+        message.method === "item/completed"
+      )
+        return message.params.turnId;
+      return undefined;
+    }
+
+    async function processNotification(
+      message: Extract<InboundMessage, { kind: "notification" }>,
+      callerContent?: Promise<MessageContent>,
+    ): Promise<void> {
+      if (session === null) return;
+      if (message.method === "serverRequest/resolved") {
+        const requestId = message.params.requestId;
+        const permissionId = pendingByRequest.get(requestId);
+        if (permissionId !== undefined) {
+          session.takePending(permissionId);
+          pendingByRequest.delete(requestId);
+        }
+        return;
+      }
+      if (
+        message.method === "turn/completed" &&
+        message.params.turn.id !== activeTurnId
+      )
+        return;
+      const callerMessageId = takeCallerMessage(message);
+      const factTurnId =
+        message.method === "item/started" || message.method === "item/completed"
+          ? message.params.turnId === undefined
+            ? undefined
+            : (nativeTurnToReins.get(message.params.turnId) ?? null)
+          : undefined;
+      const events = await mapNotification(
+        session,
+        message,
+        callerMessageId,
+        factTurnId,
+        callerContent === undefined ? undefined : await callerContent,
+      );
+      for (const event of events) {
+        if (event.type === "turn.completed") {
+          activeTurnId = null;
+          pendingByRequest.clear();
+        }
+        emit(event);
+      }
+    }
+
+    async function flushPendingTurnNotifications(
+      nativeTurnId: string,
+    ): Promise<void> {
+      const matching = pendingTurnNotifications.filter(
+        ({ message }) => nativeTurnIdOf(message) === nativeTurnId,
+      );
+      for (let index = pendingTurnNotifications.length - 1; index >= 0; index--)
+        if (
+          nativeTurnIdOf(pendingTurnNotifications[index]!.message) ===
+          nativeTurnId
+        )
+          pendingTurnNotifications.splice(index, 1);
+      for (const pending of matching)
+        await processNotification(pending.message, pending.callerContent);
+      if (pendingNativeStartTurnIds.size === 0)
+        pendingTurnNotifications.length = 0;
+    }
+
     async function startTurn(
+      reinsTurnId: TurnId,
       message: string,
       messageId: MessageId | undefined,
       onDispatch?: () => void,
     ): Promise<string> {
-      if (transport === null || threadId === "" || ended)
+      if (transport === null || threadId === "" || ended || controlLost)
         throw new Error("Codex session is unavailable");
       if (onDispatch !== undefined && transport.isClosed())
         throw new Error("codex app-server closed");
       if (messageId !== undefined)
         pendingCallerMessages.push({ messageId, content: message });
+      pendingNativeStartTurnIds.add(reinsTurnId);
       const pendingTurn = transport.request("turn/start", {
         threadId,
         input: [textInput(message)],
@@ -153,15 +241,21 @@ export function createCodexDriver(deps: {
       try {
         turn = await pendingTurn;
       } catch (error) {
+        pendingNativeStartTurnIds.delete(reinsTurnId);
+        if (pendingNativeStartTurnIds.size === 0)
+          pendingTurnNotifications.length = 0;
         if (messageId !== undefined) removePendingCallerMessage(messageId);
         throw error;
       }
       activeTurnId = turn.turn.id;
+      nativeTurnToReins.set(turn.turn.id, reinsTurnId);
       const pendingCaller = pendingCallerMessages.find(
         (candidate) => candidate.messageId === messageId,
       );
       if (pendingCaller !== undefined)
         pendingCaller.nativeTurnId = turn.turn.id;
+      pendingNativeStartTurnIds.delete(reinsTurnId);
+      await flushPendingTurnNotifications(turn.turn.id);
       return turn.turn.id;
     }
 
@@ -218,33 +312,26 @@ export function createCodexDriver(deps: {
       try {
         for await (const message of transport.messages) {
           if (message.kind === "notification") {
-            if (message.method === "serverRequest/resolved") {
-              const requestId = message.params.requestId;
-              const permissionId = pendingByRequest.get(requestId);
-              if (permissionId !== undefined) {
-                session.takePending(permissionId);
-                pendingByRequest.delete(requestId);
-              }
-              continue;
-            }
+            const nativeTurnId = nativeTurnIdOf(message);
             if (
-              message.method === "turn/completed" &&
-              message.params.turn.id !== activeTurnId
-            )
+              nativeTurnId !== undefined &&
+              !nativeTurnToReins.has(nativeTurnId) &&
+              pendingNativeStartTurnIds.size > 0
+            ) {
+              pendingTurnNotifications.push({
+                message,
+                ...(message.method === "item/completed" &&
+                message.params.item.type === "userMessage"
+                  ? {
+                      callerContent: codexMessageBody(
+                        message.params.item.content,
+                      ),
+                    }
+                  : {}),
+              });
               continue;
-            const callerMessageId = takeCallerMessage(message);
-            const events = await mapNotification(
-              session,
-              message,
-              callerMessageId,
-            );
-            for (const event of events) {
-              if (event.type === "turn.completed") {
-                activeTurnId = null;
-                pendingByRequest.clear();
-              }
-              emit(event);
             }
+            await processNotification(message);
           } else {
             handleRequest(message);
           }
@@ -284,17 +371,9 @@ export function createCodexDriver(deps: {
           }
           if (ended) return;
         }
-        if (session.turnId === null) {
-          if (evidence !== undefined) await session.diagnostic(evidence);
-        } else {
-          await session.failActiveTurn(
-            {
-              failureCategory: "runtime_unavailable",
-              retryDisposition: "external_state_change",
-            },
-            evidence,
-          );
-        }
+        controlLost = true;
+        markControlUnavailable();
+        if (evidence !== undefined) await session.diagnostic(evidence);
       }
     }
 
@@ -346,7 +425,7 @@ export function createCodexDriver(deps: {
         try {
           await initializeCodexTransport(startingTransport);
           const thread = await startingTransport.request("thread/start", {
-            ephemeral: true,
+            ephemeral: false,
             cwd: spec.cwd,
             ...(spec.authorizationMode === "allowAll"
               ? {
@@ -360,7 +439,7 @@ export function createCodexDriver(deps: {
           threadId = thread?.thread.id ?? "";
           workerInitialized = true;
           resolveInitial(
-            await startTurn(spec.message, spec.messageId, () => {
+            await startTurn(spec.turnId, spec.message, spec.messageId, () => {
               initialTurnDispatched = true;
             }),
           );
@@ -391,7 +470,12 @@ export function createCodexDriver(deps: {
         });
       },
       async deliver(sessionId, turnId, message, placement, messageId) {
-        if (session === null || session.sessionId !== sessionId || ended)
+        if (
+          session === null ||
+          session.sessionId !== sessionId ||
+          ended ||
+          controlLost
+        )
           throw new WorkerDeliveryFailure(
             "Codex session is unavailable before turn dispatch",
             "not_accepted",
@@ -399,7 +483,7 @@ export function createCodexDriver(deps: {
         if (placement === "new_turn") {
           session.beginTurn(turnId);
           let dispatched = false;
-          const ready = startTurn(message, messageId, () => {
+          const ready = startTurn(turnId, message, messageId, () => {
             dispatched = true;
           });
           nativeTurns.set(turnId, ready);
@@ -425,7 +509,12 @@ export function createCodexDriver(deps: {
             turnId,
           } satisfies MachineError;
         const expectedTurnId = await ready;
-        if (session.turnId !== turnId || ended || transport === null)
+        if (
+          session.turnId !== turnId ||
+          ended ||
+          controlLost ||
+          transport === null
+        )
           throw {
             code: "turn_not_active",
             sessionId,
@@ -469,7 +558,8 @@ export function createCodexDriver(deps: {
           session === null ||
           session.sessionId !== sessionId ||
           ready === undefined ||
-          ended
+          ended ||
+          controlLost
         )
           throw {
             code: "turn_not_active",
@@ -509,6 +599,11 @@ export function createCodexDriver(deps: {
         }
       },
       resolvePermission(sessionId, permissionId, resolution) {
+        if (controlLost)
+          throw new WorkerPermissionFailure(
+            "Codex app-server control is unavailable",
+            "not_accepted",
+          );
         const entry = session?.takePending(permissionId, resolution);
         if (entry === undefined) {
           if (session !== null) {

@@ -11,6 +11,7 @@ import {
   type MessageId,
   type PermissionOption,
   type PermissionResolution,
+  type TurnId,
 } from "@reins/protocol";
 
 import type {
@@ -63,11 +64,19 @@ function isFailedStatus(status: string): boolean {
 function mapItemStarted(
   session: TurnJournal,
   item: CodexInboundItem,
+  turnId: TurnId | null,
 ): DomainEvent[] {
   if (
     item.type === "agentMessage" ||
     item.type === "userMessage" ||
-    session.turnId === null
+    item.type === "plan" ||
+    item.type === "reasoning" ||
+    item.type === "hookPrompt" ||
+    item.type === "enteredReviewMode" ||
+    item.type === "exitedReviewMode" ||
+    item.type === "imageView" ||
+    item.type === "subAgentActivity" ||
+    turnId === null
   )
     return [];
   session.toolNames.set(item.id, item.type);
@@ -80,30 +89,51 @@ function mapItemStarted(
           ? item.arguments
           : item.type === "dynamicToolCall"
             ? item.arguments
-            : undefined;
+            : item.type === "webSearch"
+              ? { query: item.query, action: item.action }
+              : item.type === "sleep"
+                ? { durationMs: item.durationMs }
+                : item.type === "collabAgentToolCall"
+                  ? {
+                      tool: item.tool,
+                      prompt: item.prompt,
+                      model: item.model,
+                      reasoningEffort: item.reasoningEffort,
+                    }
+                  : undefined;
   const name =
     item.type === "dynamicToolCall"
       ? item.namespace === null
         ? item.tool
         : `${item.namespace}.${item.tool}`
       : item.type;
-  return [
+  const events: DomainEvent[] = [
     {
       type: "tool.requested",
       sessionId: session.sessionId,
-      turnId: session.turnId,
+      turnId,
       toolCallId: session.toolCallId(item.id),
       name,
       ...(input === undefined ? {} : { input }),
     },
   ];
+  if (item.type === "collabAgentToolCall")
+    events.push({
+      type: "background.activity",
+      sessionId: session.sessionId,
+      source: { kind: "codex_collaboration", id: item.id },
+      status: "active",
+      causedBy: { turnId, toolCallId: session.toolCallId(item.id) },
+    });
+  return events;
 }
 
-function mapItemCompleted(
+async function mapItemCompleted(
   session: TurnJournal,
   item: CodexInboundItem,
-): DomainEvent[] {
-  if (session.turnId === null) return [];
+  turnId: TurnId | null,
+): Promise<DomainEvent[]> {
+  if (turnId === null) return [];
   if (item.type === "userMessage") return [];
   if (item.type === "agentMessage") {
     session.setFinalText(item.text);
@@ -111,10 +141,43 @@ function mapItemCompleted(
       {
         type: "message",
         sessionId: session.sessionId,
-        turnId: session.turnId,
+        turnId,
         messageId: session.messageId(item.id),
         role: "worker",
         content: item.text,
+      },
+    ];
+  }
+  if (
+    item.type === "plan" ||
+    item.type === "reasoning" ||
+    item.type === "hookPrompt" ||
+    item.type === "enteredReviewMode" ||
+    item.type === "exitedReviewMode"
+  ) {
+    const value =
+      item.type === "plan"
+        ? { text: item.text }
+        : item.type === "reasoning"
+          ? { summary: item.summary, content: item.content }
+          : item.type === "hookPrompt"
+            ? { fragments: item.fragments.map(({ text }) => text) }
+            : { review: item.review };
+    return [
+      {
+        type: "message",
+        sessionId: session.sessionId,
+        turnId,
+        messageId: session.messageId(item.id),
+        role: "worker",
+        content: [
+          {
+            type: "opaque",
+            harness: "codex",
+            nativeType: item.type,
+            value,
+          },
+        ],
       },
     ];
   }
@@ -123,7 +186,7 @@ function mapItemCompleted(
       {
         type: "tool.completed",
         sessionId: session.sessionId,
-        turnId: session.turnId,
+        turnId,
         toolCallId: session.toolCallId(item.id),
         name: session.toolNames.get(item.id) ?? "commandExecution",
         result: item.output,
@@ -136,7 +199,7 @@ function mapItemCompleted(
       {
         type: "tool.completed",
         sessionId: session.sessionId,
-        turnId: session.turnId,
+        turnId,
         toolCallId: session.toolCallId(item.id),
         name: session.toolNames.get(item.id) ?? "fileChange",
         result: item.changes,
@@ -149,7 +212,7 @@ function mapItemCompleted(
       {
         type: "tool.completed",
         sessionId: session.sessionId,
-        turnId: session.turnId,
+        turnId,
         toolCallId: session.toolCallId(item.id),
         name: session.toolNames.get(item.id) ?? "mcpToolCall",
         result: item.result,
@@ -165,7 +228,7 @@ function mapItemCompleted(
       {
         type: "tool.completed",
         sessionId: session.sessionId,
-        turnId: session.turnId,
+        turnId,
         toolCallId: session.toolCallId(item.id),
         name,
         result: item.contentItems,
@@ -173,10 +236,129 @@ function mapItemCompleted(
       },
     ];
   }
+  if (item.type === "webSearch")
+    return [
+      {
+        type: "tool.completed",
+        sessionId: session.sessionId,
+        turnId,
+        toolCallId: session.toolCallId(item.id),
+        name: session.toolNames.get(item.id) ?? "webSearch",
+        result: item.results,
+        isError: item.results === null,
+      },
+    ];
+  if (item.type === "sleep")
+    return [
+      {
+        type: "tool.completed",
+        sessionId: session.sessionId,
+        turnId,
+        toolCallId: session.toolCallId(item.id),
+        name: session.toolNames.get(item.id) ?? "sleep",
+        result: { durationMs: item.durationMs },
+        isError: false,
+      },
+    ];
+  if (item.type === "imageGeneration") {
+    const result: Record<string, unknown> = {
+      status: item.status,
+      revisedPrompt: item.revisedPrompt,
+      result: item.result,
+      ...(item.transparentBackground === undefined
+        ? {}
+        : { transparentBackground: item.transparentBackground }),
+    };
+    if (item.savedPath !== undefined) {
+      try {
+        const data = await readFile(item.savedPath);
+        result.image = {
+          type: "image",
+          source: "bytes",
+          data: data.toString("base64"),
+        };
+      } catch {
+        result.image = {
+          type: "image",
+          source: "unavailable",
+          reason: "read_failed",
+        };
+      }
+    }
+    return [
+      {
+        type: "tool.completed",
+        sessionId: session.sessionId,
+        turnId,
+        toolCallId: session.toolCallId(item.id),
+        name: session.toolNames.get(item.id) ?? "imageGeneration",
+        result,
+        isError: item.status !== "completed",
+      },
+    ];
+  }
+  if (item.type === "imageView") {
+    let content: MessageContentPart;
+    try {
+      const data = await readFile(item.path);
+      content = {
+        type: "image",
+        source: "bytes",
+        data: data.toString("base64"),
+      };
+    } catch {
+      content = { type: "image", source: "unavailable", reason: "read_failed" };
+    }
+    return [
+      {
+        type: "message",
+        sessionId: session.sessionId,
+        turnId,
+        messageId: session.messageId(item.id),
+        role: "worker",
+        content: [content],
+      },
+    ];
+  }
+  if (item.type === "collabAgentToolCall")
+    return [
+      {
+        type: "tool.completed",
+        sessionId: session.sessionId,
+        turnId,
+        toolCallId: session.toolCallId(item.id),
+        name: session.toolNames.get(item.id) ?? "collabAgentToolCall",
+        result: item.agentsStates,
+        isError: item.status === "failed",
+      },
+      {
+        type: "background.activity",
+        sessionId: session.sessionId,
+        source: { kind: "codex_collaboration", id: item.id },
+        status: item.status === "failed" ? "failed" : "completed",
+        causedBy: { turnId, toolCallId: session.toolCallId(item.id) },
+      },
+    ];
   return [];
 }
 
-async function codexMessageBody(
+function mapSubAgentActivity(
+  session: TurnJournal,
+  item: Extract<CodexInboundItem, { type: "subAgentActivity" }>,
+  turnId: TurnId | null,
+): DomainEvent[] {
+  return [
+    {
+      type: "background.activity",
+      sessionId: session.sessionId,
+      source: { kind: "codex_subagent", id: item.id },
+      status: item.kind === "interrupted" ? "cancelled" : "active",
+      ...(turnId === null ? {} : { causedBy: { turnId } }),
+    },
+  ];
+}
+
+export async function codexMessageBody(
   content: Extract<CodexInboundItem, { type: "userMessage" }>["content"],
 ): Promise<MessageContent> {
   const parts: MessageContentPart[] = [];
@@ -259,16 +441,18 @@ async function mapCallerMessage(
   session: TurnJournal,
   item: Extract<CodexInboundItem, { type: "userMessage" }>,
   messageId: MessageId | undefined,
+  turnId: TurnId | null,
+  content?: MessageContent,
 ): Promise<DomainEvent[]> {
-  if (session.turnId === null || messageId === undefined) return [];
+  if (turnId === null || messageId === undefined) return [];
   return [
     {
       type: "message",
       sessionId: session.sessionId,
-      turnId: session.turnId,
+      turnId,
       messageId,
       role: "caller",
-      content: await codexMessageBody(item.content),
+      content: content ?? (await codexMessageBody(item.content)),
     },
   ];
 }
@@ -277,25 +461,38 @@ export async function mapNotification(
   session: TurnJournal,
   message: Extract<InboundMessage, { kind: "notification" }>,
   callerMessageId?: MessageId,
+  factTurnId?: TurnId | null,
+  callerContent?: MessageContent,
 ): Promise<DomainEvent[]> {
+  const turnId = factTurnId === undefined ? session.turnId : factTurnId;
   switch (message.method) {
     case "item/agentMessage/delta":
-      if (session.turnId === null) return [];
+      if (turnId === null) return [];
       return [
         {
           type: "text.delta",
           sessionId: session.sessionId,
-          turnId: session.turnId,
+          turnId,
           messageId: session.messageId(message.params.itemId),
           delta: message.params.delta,
         },
       ];
     case "item/started":
-      return mapItemStarted(session, message.params.item);
+      return message.params.item.type === "subAgentActivity"
+        ? mapSubAgentActivity(session, message.params.item, turnId)
+        : mapItemStarted(session, message.params.item, turnId);
     case "item/completed":
       if (message.params.item.type === "userMessage")
-        return mapCallerMessage(session, message.params.item, callerMessageId);
-      return mapItemCompleted(session, message.params.item);
+        return mapCallerMessage(
+          session,
+          message.params.item,
+          callerMessageId,
+          turnId,
+          callerContent,
+        );
+      if (message.params.item.type === "subAgentActivity")
+        return mapSubAgentActivity(session, message.params.item, turnId);
+      return mapItemCompleted(session, message.params.item, turnId);
     case "thread/tokenUsage/updated":
       session.setUsage({ ...message.params.tokenUsage });
       return [];

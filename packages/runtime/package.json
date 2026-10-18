@@ -54,7 +54,7 @@
     "lint": "oxlint --quiet --format=unix --config ../../oxlint.config.ts --ignore-pattern node_modules .",
     "lint:fix": "oxlint --format=unix --config ../../oxlint.config.ts . --fix",
     "typecheck": "tsc -p tsconfig.json --noEmit --pretty false",
-    "test:live:codex-control": "REINS_CODEX_CONTROL_LIVE=1 vitest run test/e2e/sdk-codex-control.test.ts --reporter=verbose"
+    "test:live:codex-contract": "REINS_CODEX_CONTRACT_LIVE=1 vitest run test/e2e/sdk-codex-contract.test.ts --reporter=verbose"
   },
   "dependencies": {
     "@reins/protocol": "workspace:*",

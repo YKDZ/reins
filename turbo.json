@@ -151,7 +151,7 @@
       "cache": false,
       "dependsOn": ["build"]
     },
-    "@ykdz/reins#test:live:codex-control": {
+    "@ykdz/reins#test:live:codex-contract": {
       "cache": false,
       "dependsOn": ["build"],
       "tags": ["quality:conditional"]

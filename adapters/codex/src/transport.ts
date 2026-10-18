@@ -178,6 +178,23 @@ export type CodexInboundItem =
       content: readonly UserInput[];
     }
   | { type: "agentMessage"; id: string; text: string }
+  | { type: "plan"; id: string; text: string }
+  | {
+      type: "reasoning";
+      id: string;
+      summary: readonly string[];
+      content: readonly string[];
+    }
+  | {
+      type: "hookPrompt";
+      id: string;
+      fragments: readonly { text: string; hookRunId: string }[];
+    }
+  | {
+      type: "enteredReviewMode" | "exitedReviewMode";
+      id: string;
+      review: string;
+    }
   | {
       type: "commandExecution";
       id: string;
@@ -208,6 +225,39 @@ export type CodexInboundItem =
       arguments: unknown;
       contentItems: unknown[] | null;
       success: boolean | null;
+    }
+  | {
+      type: "webSearch";
+      id: string;
+      query: string;
+      action: unknown;
+      results: unknown[] | null;
+    }
+  | {
+      type: "imageGeneration";
+      id: string;
+      status: string;
+      revisedPrompt: string | null;
+      result: string;
+      transparentBackground?: boolean;
+      savedPath?: string;
+    }
+  | { type: "imageView"; id: string; path: string }
+  | { type: "sleep"; id: string; durationMs: number }
+  | {
+      type: "collabAgentToolCall";
+      id: string;
+      tool: "spawnAgent" | "sendInput" | "resumeAgent" | "wait" | "closeAgent";
+      status: "inProgress" | "completed" | "failed";
+      prompt: string | null;
+      model: string | null;
+      reasoningEffort: string | null;
+      agentsStates: readonly { status: string; message: string | null }[];
+    }
+  | {
+      type: "subAgentActivity";
+      id: string;
+      kind: "started" | "interacted" | "interrupted";
     };
 
 type TokenCounts = {
@@ -808,20 +858,7 @@ export function createCodexTransport(options: {
     );
   }
 
-  const ignoredItemTypes = new Set([
-    "hookPrompt",
-    "plan",
-    "reasoning",
-    "collabAgentToolCall",
-    "subAgentActivity",
-    "webSearch",
-    "imageView",
-    "sleep",
-    "imageGeneration",
-    "enteredReviewMode",
-    "exitedReviewMode",
-    "contextCompaction",
-  ]);
+  const ignoredItemTypes = new Set(["contextCompaction"]);
 
   function parseToolStatus(value: unknown): ToolItemStatus | null {
     return value === "inProgress" ||
@@ -872,6 +909,195 @@ export function createCodexTransport(options: {
             item: { type: "agentMessage", id: value.id, text: value.text },
           }
         : null;
+    }
+    if (value.type === "plan")
+      return typeof value.text === "string"
+        ? {
+            status: "mapped",
+            item: { type: "plan", id: value.id, text: value.text },
+          }
+        : null;
+    if (value.type === "enteredReviewMode" || value.type === "exitedReviewMode")
+      return typeof value.review === "string"
+        ? {
+            status: "mapped",
+            item: {
+              type: value.type,
+              id: value.id,
+              review: value.review,
+            },
+          }
+        : null;
+    if (value.type === "reasoning") {
+      if (
+        !Array.isArray(value.summary) ||
+        !value.summary.every((part) => typeof part === "string") ||
+        !Array.isArray(value.content) ||
+        !value.content.every((part) => typeof part === "string")
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "reasoning",
+          id: value.id,
+          summary: value.summary,
+          content: value.content,
+        },
+      };
+    }
+    if (value.type === "hookPrompt") {
+      if (
+        !Array.isArray(value.fragments) ||
+        !value.fragments.every(
+          (fragment) =>
+            isRecord(fragment) &&
+            typeof fragment.text === "string" &&
+            typeof fragment.hookRunId === "string",
+        )
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "hookPrompt",
+          id: value.id,
+          fragments: value.fragments.map((fragment) => ({
+            text: (fragment as Record<string, unknown>).text as string,
+            hookRunId: (fragment as Record<string, unknown>)
+              .hookRunId as string,
+          })),
+        },
+      };
+    }
+    if (value.type === "webSearch") {
+      if (
+        typeof value.query !== "string" ||
+        (value.action !== null && !isRecord(value.action)) ||
+        (value.results !== null && !Array.isArray(value.results))
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "webSearch",
+          id: value.id,
+          query: value.query,
+          action: value.action,
+          results: value.results,
+        },
+      };
+    }
+    if (value.type === "imageGeneration") {
+      if (
+        typeof value.status !== "string" ||
+        (value.revisedPrompt !== null &&
+          typeof value.revisedPrompt !== "string") ||
+        typeof value.result !== "string" ||
+        (value.transparentBackground !== undefined &&
+          typeof value.transparentBackground !== "boolean") ||
+        (value.savedPath !== undefined && typeof value.savedPath !== "string")
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "imageGeneration",
+          id: value.id,
+          status: value.status,
+          revisedPrompt: value.revisedPrompt as string | null,
+          result: value.result,
+          ...(typeof value.transparentBackground === "boolean"
+            ? { transparentBackground: value.transparentBackground }
+            : {}),
+          ...(typeof value.savedPath === "string"
+            ? { savedPath: value.savedPath }
+            : {}),
+        },
+      };
+    }
+    if (value.type === "imageView") {
+      return typeof value.path === "string"
+        ? {
+            status: "mapped",
+            item: { type: "imageView", id: value.id, path: value.path },
+          }
+        : null;
+    }
+    if (value.type === "sleep") {
+      return typeof value.durationMs === "number"
+        ? {
+            status: "mapped",
+            item: { type: "sleep", id: value.id, durationMs: value.durationMs },
+          }
+        : null;
+    }
+    if (value.type === "collabAgentToolCall") {
+      const tools = [
+        "spawnAgent",
+        "sendInput",
+        "resumeAgent",
+        "wait",
+        "closeAgent",
+      ] as const;
+      const statuses = ["inProgress", "completed", "failed"] as const;
+      const agentsStates = value.agentsStates;
+      if (
+        !tools.includes(value.tool as (typeof tools)[number]) ||
+        !statuses.includes(value.status as (typeof statuses)[number]) ||
+        (value.prompt !== null && typeof value.prompt !== "string") ||
+        (value.model !== null && typeof value.model !== "string") ||
+        (value.reasoningEffort !== null &&
+          typeof value.reasoningEffort !== "string") ||
+        !isRecord(agentsStates) ||
+        !Object.values(agentsStates).every(
+          (state) =>
+            isRecord(state) &&
+            typeof state.status === "string" &&
+            (state.message === null || typeof state.message === "string"),
+        ) ||
+        typeof value.senderThreadId !== "string" ||
+        !Array.isArray(value.receiverThreadIds) ||
+        !value.receiverThreadIds.every(
+          (threadId) => typeof threadId === "string",
+        )
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "collabAgentToolCall",
+          id: value.id,
+          tool: value.tool as (typeof tools)[number],
+          status: value.status as (typeof statuses)[number],
+          prompt: value.prompt as string | null,
+          model: value.model as string | null,
+          reasoningEffort: value.reasoningEffort as string | null,
+          agentsStates: Object.values(agentsStates).map((state) => ({
+            status: (state as Record<string, unknown>).status as string,
+            message: (state as Record<string, unknown>).message as
+              | string
+              | null,
+          })),
+        },
+      };
+    }
+    if (value.type === "subAgentActivity") {
+      const kinds = ["started", "interacted", "interrupted"] as const;
+      if (
+        !kinds.includes(value.kind as (typeof kinds)[number]) ||
+        typeof value.agentThreadId !== "string" ||
+        typeof value.agentPath !== "string"
+      )
+        return null;
+      return {
+        status: "mapped",
+        item: {
+          type: "subAgentActivity",
+          id: value.id,
+          kind: value.kind as (typeof kinds)[number],
+        },
+      };
     }
     if (value.type === "commandExecution") {
       const status = parseToolStatus(value.status);

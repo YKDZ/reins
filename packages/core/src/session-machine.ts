@@ -419,6 +419,10 @@ export type SessionMachine = {
   list(filter?: ListFilter): SessionInfo[];
   assertTurnTarget(target: TurnTarget): void;
   subscribe(listener: (event: DomainEvent) => void): () => void;
+  isControlUnavailable(sessionId: SessionId): boolean;
+  subscribeControlUnavailable(
+    listener: (sessionId: SessionId) => void,
+  ): () => void;
   pendingSpawnIds(): SessionId[];
   terminatePendingSpawns(): Promise<void>;
 };
@@ -625,12 +629,27 @@ export function createSessionMachine(options: {
   let bus: EventBus;
   let driver: WorkerDriver;
   let ingestDriverEvent: (event: DomainEvent) => void = () => undefined;
+  const controlUnavailableListeners = new Set<(sessionId: SessionId) => void>();
+  const controlUnavailableSessions = new Set<SessionId>();
 
   function turnTargetKey(sessionId: SessionId, turnId: TurnId): string {
     return `${sessionId}/${turnId}`;
   }
 
-  driver = options.driverFactory((event) => ingestDriverEvent(event));
+  driver = options.driverFactory(
+    (event) => ingestDriverEvent(event),
+    (sessionId) => {
+      if (controlUnavailableSessions.has(sessionId)) return;
+      controlUnavailableSessions.add(sessionId);
+      for (const listener of Array.from(controlUnavailableListeners)) {
+        try {
+          listener(sessionId);
+        } catch {
+          // 可用性通知不能中断原生事实或资源清理。
+        }
+      }
+    },
+  );
 
   function assertNotTerminating(sessionId: SessionId): void {
     if (terminations.has(sessionId)) {
@@ -2269,6 +2288,13 @@ export function createSessionMachine(options: {
     assertTurnTarget,
     subscribe(listener) {
       return bus.subscribe(listener);
+    },
+    isControlUnavailable(sessionId) {
+      return controlUnavailableSessions.has(sessionId);
+    },
+    subscribeControlUnavailable(listener) {
+      controlUnavailableListeners.add(listener);
+      return () => controlUnavailableListeners.delete(listener);
     },
   };
 }

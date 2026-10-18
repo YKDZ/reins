@@ -29,7 +29,7 @@ export function createRoutingDriverFactory(
     throw new Error("Autonomous turn control is unavailable");
   },
 ): WorkerDriverFactory {
-  return (emit) => {
+  return (emit, markControlUnavailable = () => undefined) => {
     const drivers = new Map<SessionId, WorkerDriver>();
     const sessionHarness = new Map<SessionId, HarnessId>();
     const sessionTurn = new Map<SessionId, TurnId>();
@@ -106,6 +106,7 @@ export function createRoutingDriverFactory(
         }
         const driver = adapter.driverFactory({
           emit,
+          markControlUnavailable: () => markControlUnavailable(spec.sessionId),
           beginAutonomousTurn: (cause) =>
             beginAutonomousTurn({
               sessionId: spec.sessionId,

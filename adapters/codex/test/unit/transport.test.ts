@@ -828,6 +828,162 @@ describe("codex transport", () => {
     await transport.close();
   });
 
+  test("公开消息、内置工具与协作活动保留正文并移除原生线程路由", async () => {
+    const fake = fakeChild();
+    const diagnostics: DriverDiagnosticFact[] = [];
+    const transport = createCodexTransport({
+      diagnostics: async (input) => {
+        diagnostics.push(input);
+        return undefined;
+      },
+      spawnChild: () => fake.child,
+    });
+    transport.start();
+    const iterator = transport.messages[Symbol.asyncIterator]();
+    const items = [
+      { type: "plan", id: "plan-1", text: "计划正文" },
+      {
+        type: "reasoning",
+        id: "reasoning-1",
+        summary: ["摘要"],
+        content: ["正文"],
+      },
+      {
+        type: "hookPrompt",
+        id: "hook-1",
+        fragments: [{ text: "hook 正文", hookRunId: "native-hook-id" }],
+      },
+      {
+        type: "webSearch",
+        id: "search-1",
+        query: "搜索问题",
+        action: { type: "search", queries: ["搜索问题"] },
+        results: [{ title: "结果", url: "https://example.test" }],
+      },
+      {
+        type: "imageGeneration",
+        id: "image-1",
+        status: "completed",
+        revisedPrompt: "修订提示",
+        result: "image-result",
+        transparentBackground: true,
+        savedPath: "/tmp/native-image.png",
+      },
+      { type: "imageView", id: "view-1", path: "/tmp/view.png" },
+      { type: "sleep", id: "sleep-1", durationMs: 321 },
+      {
+        type: "collabAgentToolCall",
+        id: "collab-1",
+        tool: "spawnAgent",
+        status: "completed",
+        senderThreadId: "private-sender-thread",
+        receiverThreadIds: ["private-receiver-thread"],
+        prompt: "委派提示正文",
+        model: "custom-model",
+        reasoningEffort: "high",
+        agentsStates: {
+          "private-receiver-thread": {
+            status: "completed",
+            message: "子代理正文",
+          },
+        },
+      },
+      {
+        type: "subAgentActivity",
+        id: "subagent-1",
+        kind: "interrupted",
+        agentThreadId: "private-agent-thread",
+        agentPath: "/private/route",
+      },
+      {
+        type: "enteredReviewMode",
+        id: "review-enter-1",
+        review: "审查正文",
+      },
+      {
+        type: "exitedReviewMode",
+        id: "review-exit-1",
+        review: "审查完成正文",
+      },
+    ];
+    for (const item of items)
+      fake.stdout.write(
+        `${JSON.stringify({
+          method: "item/completed",
+          params: { item, turnId: "native-turn" },
+        })}\n`,
+      );
+    fake.stdout.write(
+      `${JSON.stringify({
+        method: "item/agentMessage/delta",
+        params: { itemId: "sentinel", delta: "done" },
+      })}\n`,
+    );
+
+    const expected = [
+      { type: "plan", id: "plan-1", text: "计划正文" },
+      {
+        type: "reasoning",
+        id: "reasoning-1",
+        summary: ["摘要"],
+        content: ["正文"],
+      },
+      {
+        type: "hookPrompt",
+        id: "hook-1",
+        fragments: [{ text: "hook 正文", hookRunId: "native-hook-id" }],
+      },
+      {
+        type: "webSearch",
+        id: "search-1",
+        query: "搜索问题",
+        action: { type: "search", queries: ["搜索问题"] },
+        results: [{ title: "结果", url: "https://example.test" }],
+      },
+      {
+        type: "imageGeneration",
+        id: "image-1",
+        status: "completed",
+        revisedPrompt: "修订提示",
+        result: "image-result",
+        transparentBackground: true,
+        savedPath: "/tmp/native-image.png",
+      },
+      { type: "imageView", id: "view-1", path: "/tmp/view.png" },
+      { type: "sleep", id: "sleep-1", durationMs: 321 },
+      {
+        type: "collabAgentToolCall",
+        id: "collab-1",
+        tool: "spawnAgent",
+        status: "completed",
+        prompt: "委派提示正文",
+        model: "custom-model",
+        reasoningEffort: "high",
+        agentsStates: [{ status: "completed", message: "子代理正文" }],
+      },
+      { type: "subAgentActivity", id: "subagent-1", kind: "interrupted" },
+      {
+        type: "enteredReviewMode",
+        id: "review-enter-1",
+        review: "审查正文",
+      },
+      {
+        type: "exitedReviewMode",
+        id: "review-exit-1",
+        review: "审查完成正文",
+      },
+    ];
+    for (const item of expected)
+      await expect(iterator.next()).resolves.toMatchObject({
+        value: { method: "item/completed", params: { item } },
+      });
+    await expect(iterator.next()).resolves.toMatchObject({
+      value: { method: "item/agentMessage/delta" },
+    });
+    expect(diagnostics).toEqual([]);
+    await transport.close();
+  });
+
   test("已知 item notification 中未知 variant 不得当作无关消息忽略", async () => {
     const fake = fakeChild();
     const diagnostics: DriverDiagnosticFact[] = [];
