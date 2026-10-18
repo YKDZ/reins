@@ -1554,6 +1554,94 @@ async function runRuntimeFactsAcceptance(options: {
   }
 }
 
+async function runEventHistoryAcceptance(options: {
+  readonly sdkConsumer: string;
+  readonly daemonPath: string;
+  readonly temporaryRoot: string;
+  readonly logsDirectory: string;
+  readonly handles: Set<DaemonHandle>;
+}): Promise<void> {
+  const directory = join(options.temporaryRoot, "event-history");
+  const socketPath = join(directory, "reins.sock");
+  const workerCwd = join(directory, "workspace");
+  mkdirSync(workerCwd, { recursive: true });
+  const env: NodeJS.ProcessEnv = {
+    ...process.env,
+    REINS_SOCKET: socketPath,
+    REINS_STATE_DIR: join(directory, "state"),
+    REINS_CONSUMER_CONTEXT: "packed-runtime-event-history",
+    REINS_ADAPTERS_MODULE: join(
+      options.sdkConsumer,
+      "fixtures",
+      "adapter-registry.ts",
+    ),
+    REINS_IDLE_TIMEOUT_MS: "120000",
+    REINS_HISTORY_GATE: join(directory, "history.release"),
+    REINS_WORKER_CWD: workerCwd,
+  };
+  const daemon = await startDirectDaemon({
+    label: "packed SDK event-history daemon",
+    executable: options.daemonPath,
+    env,
+    socketPath,
+    logPath: join(options.logsDirectory, "event-history-daemon.log"),
+    handles: options.handles,
+  });
+  try {
+    const history = await runSdkMode(
+      options.sdkConsumer,
+      env,
+      options.logsDirectory,
+      "replay-window",
+    );
+    assert(
+      typeof history.sessionHandle === "string" &&
+        typeof history.turnHandle === "string" &&
+        typeof history.staleCursor === "string" &&
+        history.retainedMessages === 999 &&
+        history.factCount === 1000 &&
+        isRecord(history.window) &&
+        history.window.truncated === true &&
+        typeof history.window.oldest === "number" &&
+        history.window.oldest > 1 &&
+        typeof history.window.head === "number" &&
+        isRecord(history.expired) &&
+        history.expired.code === "event_cursor_expired" &&
+        isRecord(history.expired.facts) &&
+        history.expired.facts.oldest === history.window.oldest &&
+        history.expired.facts.head === history.window.head,
+      "SDK 未返回精确的事件保留窗口与过期游标事实",
+    );
+    const prepared = await runSdkMode(
+      options.sdkConsumer,
+      env,
+      options.logsDirectory,
+      "prepare-kill",
+      { REINS_TARGET_SESSION: String(history.sessionHandle) },
+    );
+    assert(
+      prepared.prepared === true && typeof prepared.intent === "string",
+      "SDK 未创建历史场景清理凭据",
+    );
+    const killed = await runSdkMode(
+      options.sdkConsumer,
+      env,
+      options.logsDirectory,
+      "kill-recover",
+      {
+        REINS_OPERATION_INTENT_JSON: prepared.intent,
+        REINS_EXPECTED_TURN_HANDLE: String(history.turnHandle),
+      },
+    );
+    assert(
+      isRecord(killed.result) && killed.result.status === "killed",
+      "SDK 未清理历史窗口场景会话",
+    );
+  } finally {
+    await stopDirectDaemon(daemon, options.handles);
+  }
+}
+
 async function runExactWaitAcceptance(options: {
   readonly sdkConsumer: string;
   readonly daemonPath: string;
@@ -1883,6 +1971,13 @@ async function main(): Promise<void> {
       handles,
     });
     await runRuntimeFactsAcceptance({
+      sdkConsumer,
+      daemonPath,
+      temporaryRoot,
+      logsDirectory,
+      handles,
+    });
+    await runEventHistoryAcceptance({
       sdkConsumer,
       daemonPath,
       temporaryRoot,
