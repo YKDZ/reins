@@ -278,7 +278,8 @@ function assertProcessRunning(label: string, pid: number): void {
 async function stopInstalledDaemon(pidPath: string): Promise<void> {
   if (!existsSync(pidPath)) return;
   const pid = Number(readFileSync(pidPath, "utf8").trim());
-  if (!Number.isInteger(pid) || pid <= 0) return;
+  if (!Number.isInteger(pid) || pid <= 0)
+    throw new Error("运行包启动的 daemon PID 无效");
   try {
     process.kill(pid, "SIGTERM");
   } catch (error) {
@@ -2083,7 +2084,7 @@ async function runDshRuntimeAcceptance(options: {
   writeFileSync(join(workerCwd, "evidence.txt"), "OFFICIAL_TOOL_READ_ONCE\n");
   writeFileSync(
     launcherPath,
-    `#!/bin/sh\nprintf '%s\\n' "$" > ${shellQuote(pidPath)}\nexec ${shellQuote(options.daemonPath)} "$@"\n`,
+    `#!/bin/sh\nprintf '%s\\n' "$$" > ${shellQuote(pidPath)}\nexec ${shellQuote(options.daemonPath)} "$@"\n`,
     { mode: 0o700 },
   );
   const provider = await startDshProviderFixture();

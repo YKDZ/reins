@@ -75,6 +75,7 @@ export class DshHostClient {
     signal: NodeJS.Signals | null;
   }) => void;
   private nextId = 0;
+  private spawned = false;
   private ready = false;
   private exited = false;
   private closedNormally = false;
@@ -104,29 +105,30 @@ export class DshHostClient {
       serialization: "advanced",
       stdio: ["ignore", "ignore", "ignore", "ipc"],
     });
+    this.child.once("spawn", () => {
+      this.spawned = true;
+    });
     this.child.on("message", (message: unknown) => this.onMessage(message));
     this.child.once("error", () => {
-      this.failPending(
-        new DshHostRequestError("The Reins DSH host process failed", "unknown"),
+      const error = new DshHostRequestError(
+        "The Reins DSH host process failed",
+        this.ready ? "unknown" : "not_accepted",
       );
+      if (this.spawned) {
+        if (!this.ready) this.rejectReady(error);
+        this.failPending(error);
+      } else {
+        this.completeExit({ code: null, signal: null }, error);
+      }
     });
     this.child.once("exit", (code, signal) => {
-      this.exited = true;
-      this.resolveExit({ code, signal });
-      this.failPending(
+      this.completeExit(
+        { code, signal },
         new DshHostRequestError(
           "The Reins DSH host exited before replying",
-          "unknown",
+          this.ready ? "unknown" : "not_accepted",
         ),
       );
-      if (!this.ready)
-        this.rejectReady(
-          new DshHostRequestError(
-            "The Reins DSH host exited before the profile was ready",
-            "not_accepted",
-          ),
-        );
-      for (const listener of this.exitListeners) listener();
     });
   }
 
@@ -209,6 +211,10 @@ export class DshHostClient {
 
   async close(): Promise<void> {
     if (this.closedNormally) return;
+    if (this.exited && !this.spawned) {
+      this.closedNormally = true;
+      return;
+    }
     if (this.exited)
       throw new DshHostRequestError(
         "The DSH host exited before normal shutdown was requested",
@@ -255,7 +261,11 @@ export class DshHostClient {
       );
     } catch {
       this.signalProcessTree("SIGKILL");
-      await this.exitPromise;
+      await withTimeout(
+        this.exitPromise,
+        HOST_CLOSE_TIMEOUT_MS,
+        () => new Error("The DSH host did not exit after SIGKILL"),
+      );
     }
   }
 
@@ -335,11 +345,25 @@ export class DshHostClient {
       pending.reject(
         new DshHostRequestError(
           error.message,
-          acceptanceAfterSend(pending.type),
+          error.acceptance === "not_accepted"
+            ? "not_accepted"
+            : acceptanceAfterSend(pending.type),
           error.failure,
         ),
       );
     }
     this.pending.clear();
+  }
+
+  private completeExit(
+    exit: { code: number | null; signal: NodeJS.Signals | null },
+    error: DshHostRequestError,
+  ): void {
+    if (this.exited) return;
+    this.exited = true;
+    this.resolveExit(exit);
+    if (!this.ready) this.rejectReady(error);
+    this.failPending(error);
+    for (const listener of this.exitListeners) listener();
   }
 }
