@@ -170,6 +170,7 @@ export type {
   DiagnosticsResult,
   KillInput,
   KillResult,
+  SessionCloseEffect,
   SendInput,
   SendResult,
   WaitInput,
@@ -653,7 +654,8 @@ async function connectClient(
             claims.kind !== "spawn" &&
             claims.kind !== "send" &&
             claims.kind !== "interrupt" &&
-            claims.kind !== "resolvePermission"
+            claims.kind !== "resolvePermission" &&
+            claims.kind !== "kill"
           )
             throw new Error("Operation kind is not recoverable");
           kind = claims.kind;
@@ -1191,11 +1193,21 @@ function projectSpawnResult(
   };
 }
 
+function projectKillResult(
+  result: ProtocolResult<"kill">,
+): import("./contracts.ts").KillResult {
+  return {
+    sessionHandle: parseSessionHandle(result.sessionId),
+    status: result.status,
+  };
+}
+
 type ProjectedOperationResultByKind = {
   spawn: SpawnResult;
   send: SendResult;
   interrupt: InterruptResult;
   resolvePermission: ResolvePermissionResult;
+  kill: import("./contracts.ts").KillResult;
 };
 
 function projectOperationRecord<Kind extends RecoverableOperationKind>(
@@ -1312,6 +1324,10 @@ function projectOperationResult<Kind extends RecoverableOperationKind>(
   if (kind === "interrupt")
     return projectInterruptResult(
       result as ProtocolResult<"interrupt">,
+    ) as ProjectedOperationResultByKind[Kind];
+  if (kind === "kill")
+    return projectKillResult(
+      result as ProtocolResult<"kill">,
     ) as ProjectedOperationResultByKind[Kind];
   const permissionResult = result as ProtocolResult<"resolvePermission">;
   return {
@@ -1468,26 +1484,38 @@ function projectFailure(
           ...(failure.acceptedResult === undefined
             ? {}
             : {
-                acceptedResult:
-                  "deliveryPoint" in failure.acceptedResult
-                    ? projectSendResult(
-                        failure.acceptedResult,
-                        parseProtocolOperationKey(failure.operationKey)
-                          .generation,
-                      )
-                    : "cwd" in failure.acceptedResult
-                      ? projectSpawnResult(failure.acceptedResult)
-                      : parseProtocolOperationKey(failure.operationKey).kind ===
-                          "resolvePermission"
-                        ? {
-                            permissionHandle: parsePermissionHandle(
-                              encodePermissionHandle(
-                                failure.acceptedResult as ProtocolResult<"resolvePermission">,
-                              ),
-                            ),
-                            status: "resolved" as const,
-                          }
-                        : projectInterruptResult(failure.acceptedResult),
+                acceptedResult: (() => {
+                  const kind = parseProtocolOperationKey(
+                    failure.operationKey,
+                  ).kind;
+                  if (kind === "send")
+                    return projectSendResult(
+                      failure.acceptedResult as ProtocolResult<"send">,
+                      parseProtocolOperationKey(failure.operationKey)
+                        .generation,
+                    );
+                  if (kind === "kill")
+                    return projectKillResult(
+                      failure.acceptedResult as ProtocolResult<"kill">,
+                    );
+                  if (kind === "interrupt")
+                    return projectInterruptResult(
+                      failure.acceptedResult as ProtocolResult<"interrupt">,
+                    );
+                  if (kind === "resolvePermission") {
+                    const permissionResult =
+                      failure.acceptedResult as ProtocolResult<"resolvePermission">;
+                    return {
+                      permissionHandle: parsePermissionHandle(
+                        encodePermissionHandle(permissionResult),
+                      ),
+                      status: "resolved" as const,
+                    };
+                  }
+                  return projectSpawnResult(
+                    failure.acceptedResult as ProtocolResult<"spawn">,
+                  );
+                })(),
               }),
           ...(failure.cleanupCause === undefined
             ? {}

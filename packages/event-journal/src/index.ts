@@ -4,6 +4,7 @@ export {
   type ControlOperation,
   type ControlOperationInput,
   type ResolvePermissionControlOperationInput,
+  type KillControlOperationInput,
   type SendControlOperationInput,
   type ControlStore,
   type SessionEventsPage,

@@ -113,12 +113,14 @@ export type RecoverableOperationKind =
   | "spawn"
   | "send"
   | "interrupt"
-  | "resolvePermission";
+  | "resolvePermission"
+  | "kill";
 type OperationResultByKind = {
   spawn: SpawnResult;
   send: SendResult;
   interrupt: InterruptResult;
   resolvePermission: ResolvePermissionResult;
+  kill: KillResult;
 };
 type OperationRecordForKind<Kind extends RecoverableOperationKind> =
   | {
@@ -177,6 +179,16 @@ type OperationRecordForKind<Kind extends RecoverableOperationKind> =
           };
           cause: ErrorCause;
         }
+      : never)
+  | (Kind extends "kill"
+      ? {
+          status: "partial_effect_uncommitted" | "partial_effect_unconfirmed";
+          operationKey: OperationKey<"kill">;
+          error: Extract<ReinsFailure, { code: "internal_error" }> & {
+            facts: { effect: SessionCloseEffect };
+          };
+          cause: ErrorCause;
+        }
       : never);
 export type OperationRecord<
   Kind extends RecoverableOperationKind = RecoverableOperationKind,
@@ -187,6 +199,10 @@ export type KillInput = { sessionHandle: SessionHandle };
 export type KillResult = {
   sessionHandle: SessionHandle;
   status: "killed" | "not_found";
+};
+export type SessionCloseEffect = {
+  kind: "session_closed";
+  sessionHandle: SessionHandle;
 };
 export type SendInput =
   | {
@@ -983,7 +999,8 @@ type FailureFactsByCode = {
           | SpawnResult
           | SendResult
           | InterruptResult
-          | ResolvePermissionResult;
+          | ResolvePermissionResult
+          | KillResult;
         cleanupCause?: ErrorCause;
         effect?: OperationEffect;
       }

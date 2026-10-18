@@ -79,6 +79,53 @@ test("failed 与其他终态严格区分，事件和 wait 共用失败事实", (
   });
 });
 
+test("部分关闭事实只作为精确 kill 操作记录暴露", () => {
+  const runtimeScopeId = v.parse(
+    runtimeScopeIdSchema,
+    "00000000-0000-4000-8000-000000000000",
+  );
+  const consumer = v.parse(consumerContextSchema, "protocol-kill-test");
+  const generation = v.parse(daemonGenerationSchema, "killtest");
+  const nonce = "00000000-0000-4000-8000-000000000001";
+  const killKey = serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, {
+      runtimeScopeId,
+      consumer,
+      kind: "kill",
+      generation,
+      nonce,
+    }),
+  );
+  const spawnKey = serializeOperationKey(
+    v.parse(operationKeyClaimsSchema, {
+      runtimeScopeId,
+      consumer,
+      kind: "spawn",
+      generation,
+      nonce: "00000000-0000-4000-8000-000000000002",
+    }),
+  );
+  const partial = {
+    status: "partial_effect_uncommitted",
+    operationKey: killKey,
+    error: {
+      code: "internal_error",
+      cause: { kind: "closed", message: "owned resource release failed" },
+      effect: {
+        kind: "session_closed",
+        sessionId: `session:${runtimeScopeId}:${generation}:1`,
+      },
+    },
+    cause: { kind: "io", message: "failure record could not be written" },
+  };
+
+  ok(operationRecordSchemaFor("kill"), partial);
+  bad(operationRecordSchemaFor("spawn"), {
+    ...partial,
+    operationKey: spawnKey,
+  });
+});
+
 test("部分取消效果只属于 send 操作记录", () => {
   const baseClaims = {
     runtimeScopeId: v.parse(

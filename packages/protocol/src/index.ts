@@ -749,6 +749,11 @@ export const killResultSchema = v.strictObject({
   status: v.union([v.literal("killed"), v.literal("not_found")]),
 });
 export type KillResult = v.InferOutput<typeof killResultSchema>;
+export const sessionCloseEffectSchema = v.strictObject({
+  kind: v.literal("session_closed"),
+  sessionId: sessionIdSchema,
+});
+export type SessionCloseEffect = v.InferOutput<typeof sessionCloseEffectSchema>;
 
 const completedTurnSummarySchema = v.strictObject({
   turnId: turnIdSchema,
@@ -2470,6 +2475,7 @@ export const machineErrorSchema = v.union([
         sendAckSchema,
         interruptAckSchema,
         resolvePermissionAckSchema,
+        killResultSchema,
       ]),
     ),
     cleanupCause: v.optional(errorCauseSchema),
@@ -2959,13 +2965,15 @@ export type RecoverableOperationKind =
   | "spawn"
   | "send"
   | "interrupt"
-  | "resolvePermission";
+  | "resolvePermission"
+  | "kill";
 
 type RecoverableOperationResult = {
   spawn: SpawnAck;
   send: SendAck;
   interrupt: InterruptAck;
   resolvePermission: ResolvePermissionAck;
+  kill: KillResult;
 };
 
 export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
@@ -3018,6 +3026,18 @@ export type OperationRecordForKind<Kind extends RecoverableOperationKind> =
           };
           readonly cause: ErrorCause;
         }
+      : never)
+  | (Kind extends "kill"
+      ? {
+          readonly status:
+            | "partial_effect_uncommitted"
+            | "partial_effect_unconfirmed";
+          readonly operationKey: OperationKey<"kill">;
+          readonly error: Extract<MachineError, { code: "internal_error" }> & {
+            readonly effect: SessionCloseEffect;
+          };
+          readonly cause: ErrorCause;
+        }
       : never);
 
 export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
@@ -3050,8 +3070,16 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
         ? sendAckSchema
         : kind === "interrupt"
           ? interruptAckSchema
-          : resolvePermissionAckSchema;
-  const partialEffectSchema = v.strictObject({
+          : kind === "kill"
+            ? killResultSchema
+            : resolvePermissionAckSchema;
+  const schemas: v.GenericSchema[] = [
+    v.strictObject({
+      status: v.literal("unknown"),
+      operationKey: keySchema,
+    }),
+  ];
+  const partialSendEffectSchema = v.strictObject({
     status: v.picklist([
       "partial_effect_uncommitted",
       "partial_effect_unconfirmed",
@@ -3066,11 +3094,22 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
     }),
     cause: errorCauseSchema,
   });
-  return v.union([
-    v.strictObject({
-      status: v.literal("unknown"),
-      operationKey: keySchema,
+  const partialKillEffectSchema = v.strictObject({
+    status: v.picklist([
+      "partial_effect_uncommitted",
+      "partial_effect_unconfirmed",
+    ]),
+    operationKey: keySchema,
+    error: v.strictObject({
+      code: v.literal("internal_error"),
+      cause: v.optional(errorCauseSchema),
+      diagnosticId: v.optional(diagnosticIdSchema),
+      cleanupCause: v.optional(errorCauseSchema),
+      effect: sessionCloseEffectSchema,
     }),
+    cause: errorCauseSchema,
+  });
+  schemas.push(
     v.strictObject({
       status: v.literal("unavailable"),
       operationKey: keySchema,
@@ -3120,13 +3159,18 @@ export function operationRecordSchemaFor<Kind extends RecoverableOperationKind>(
       cause: errorCauseSchema,
       cleanupCause: v.optional(errorCauseSchema),
     }),
-    ...(kind === "send" ? [partialEffectSchema] : []),
-  ]) as unknown as v.GenericSchema<unknown, OperationRecordForKind<Kind>>;
+  );
+  if (kind === "send") schemas.push(partialSendEffectSchema);
+  if (kind === "kill") schemas.push(partialKillEffectSchema);
+  return v.union(
+    schemas as unknown as [v.GenericSchema, ...v.GenericSchema[]],
+  ) as unknown as v.GenericSchema<unknown, OperationRecordForKind<Kind>>;
 }
 
 export const operationRecordSchema = v.union([
   operationRecordSchemaFor("spawn"),
   operationRecordSchemaFor("send"),
+  operationRecordSchemaFor("kill"),
   operationRecordSchemaFor("interrupt"),
   operationRecordSchemaFor("resolvePermission"),
 ]);

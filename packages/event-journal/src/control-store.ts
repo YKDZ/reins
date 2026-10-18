@@ -10,6 +10,8 @@ import {
   machineErrorSchema,
   consumerContextSchema,
   daemonGenerationSchema,
+  killParamsSchema,
+  killResultSchema,
   operationKeySchema,
   parseOperationKey,
   permissionResolutionSchemaFor,
@@ -27,6 +29,8 @@ import {
   type DaemonGeneration,
   type DomainEvent,
   type EventId,
+  type KillParams,
+  type KillResult,
   type InterruptAck,
   type InterruptParams,
   type MachineError,
@@ -68,6 +72,10 @@ export type ResolvePermissionControlOperationInput = ControlOperationOwner & {
   readonly request: ResolvePermissionParams;
 };
 
+export type KillControlOperationInput = ControlOperationOwner & {
+  readonly request: KillParams;
+};
+
 type ControlOperationStatus<Result> =
   | { readonly status: "pending" }
   | { readonly status: "dispatched" }
@@ -91,7 +99,9 @@ export type ControlOperation =
   | (ResolvePermissionControlOperationInput &
       ControlOperationStatus<ResolvePermissionAck> & {
         readonly kind: "resolvePermission";
-      });
+      })
+  | (KillControlOperationInput &
+      ControlOperationStatus<KillResult> & { readonly kind: "kill" });
 
 export type StoredSession = {
   readonly info: SessionInfo;
@@ -191,6 +201,22 @@ export type ControlStore = {
     operationKey: StoredOperationKey,
     error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
   ): void;
+  registerKill(input: KillControlOperationInput): {
+    readonly created: boolean;
+    readonly operation: Extract<ControlOperation, { kind: "kill" }>;
+  };
+  markKillDispatched(operationKey: StoredOperationKey): void;
+  commitKill(input: {
+    readonly operationKey: StoredOperationKey;
+    readonly result: KillResult;
+    readonly session?: StoredSession;
+    readonly events: readonly DomainEvent[];
+  }): readonly StoredCommittedEvent[];
+  failKill(operationKey: StoredOperationKey, error: MachineError): void;
+  recordKillOutcomeUnknown(
+    operationKey: StoredOperationKey,
+    error: Extract<MachineError, { code: "operation_outcome_unknown" }>,
+  ): void;
   recordEvent(event: DomainEvent, session?: SessionInfo): StoredCommittedEvent;
   getOperation(operationKey: StoredOperationKey): ControlOperation | undefined;
   getSession(sessionId: SessionId): StoredSession | undefined;
@@ -247,7 +273,8 @@ function operationFromRow(row: OperationRow): ControlOperation {
     claims.kind !== "spawn" &&
     claims.kind !== "send" &&
     claims.kind !== "interrupt" &&
-    claims.kind !== "resolvePermission"
+    claims.kind !== "resolvePermission" &&
+    claims.kind !== "kill"
   )
     throw new Error(
       "Stored operation kind is not supported by this control store",
@@ -267,7 +294,7 @@ function operationFromRow(row: OperationRow): ControlOperation {
   const errorJson =
     row.error_json === null ? null : v.parse(v.string(), row.error_json);
   if (resultJson !== null && status !== "succeeded")
-    throw new Error("Stored operation has inconsistent result fields");
+    throw new Error("Stored spawn operation has inconsistent result fields");
   const owner = {
     operationKey,
     runtimeScopeId,
@@ -327,11 +354,18 @@ function operationFromRow(row: OperationRow): ControlOperation {
       request: parseJson(interruptParamsSchema, row.request_json),
       ...statusFields<InterruptAck>(interruptAckSchema),
     };
+  if (claims.kind === "resolvePermission")
+    return {
+      ...owner,
+      kind: "resolvePermission",
+      request: parseJson(resolvePermissionParamsSchema, row.request_json),
+      ...statusFields<ResolvePermissionAck>(resolvePermissionAckSchema),
+    };
   return {
     ...owner,
-    kind: "resolvePermission",
-    request: parseJson(resolvePermissionParamsSchema, row.request_json),
-    ...statusFields<ResolvePermissionAck>(resolvePermissionAckSchema),
+    kind: "kill",
+    request: parseJson(killParamsSchema, row.request_json),
+    ...statusFields<KillResult>(killResultSchema),
   };
 }
 
@@ -426,7 +460,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
 
   function validatedOperationKey(
     value: StoredOperationKey,
-    expectedKind?: "spawn" | "send" | "interrupt" | "resolvePermission",
+    expectedKind?: ControlOperation["kind"],
   ): StoredOperationKey {
     const operationKey = v.parse(operationKeySchema, value);
     const claims = parseOperationKey(operationKey);
@@ -434,7 +468,8 @@ function createControlStore(database: DatabaseSync): ControlStore {
       (claims.kind !== "spawn" &&
         claims.kind !== "send" &&
         claims.kind !== "interrupt" &&
-        claims.kind !== "resolvePermission") ||
+        claims.kind !== "resolvePermission" &&
+        claims.kind !== "kill") ||
       (expectedKind !== undefined && claims.kind !== expectedKind)
     )
       throw new Error("OperationKey kind does not match the stored operation");
@@ -443,7 +478,7 @@ function createControlStore(database: DatabaseSync): ControlStore {
 
   function validateOperationOwnership(
     operationKey: StoredOperationKey,
-    expectedKind: "spawn" | "send" | "interrupt" | "resolvePermission",
+    expectedKind: ControlOperation["kind"],
     runtimeScopeId: RuntimeScopeId,
     consumer: ConsumerContext,
     generation: DaemonGeneration,
@@ -510,7 +545,10 @@ function createControlStore(database: DatabaseSync): ControlStore {
       .get(operationKey) as OperationRow | undefined;
     if (row === undefined) return undefined;
     const operation = operationFromRow(row);
-    if (operation.status === "succeeded") {
+    if (
+      operation.status === "succeeded" &&
+      !(operation.kind === "kill" && operation.result.status === "not_found")
+    ) {
       const sessionRow = database
         .prepare("SELECT * FROM sessions WHERE session_id = ?")
         .get(operation.result.sessionId) as SessionRow | undefined;
@@ -996,6 +1034,55 @@ function createControlStore(database: DatabaseSync): ControlStore {
         throw new Error("Permission resolution registration disappeared");
       return { created: true, operation };
     },
+    registerKill(input) {
+      const operationKey = validatedOperationKey(input.operationKey, "kill");
+      const runtimeScopeId = v.parse(
+        runtimeScopeIdSchema,
+        input.runtimeScopeId,
+      );
+      const consumer = v.parse(consumerContextSchema, input.consumer);
+      const generation = v.parse(daemonGenerationSchema, input.generation);
+      validateOperationOwnership(
+        operationKey,
+        "kill",
+        runtimeScopeId,
+        consumer,
+        generation,
+      );
+      const parsedRequest = v.parse(killParamsSchema, input.request);
+      const requestJson = stableJson(parsedRequest);
+      const current = readOperation(operationKey);
+      if (current !== undefined) {
+        const row = database
+          .prepare(
+            "SELECT request_json FROM operations WHERE operation_key = ?",
+          )
+          .get(operationKey) as Record<string, unknown> | undefined;
+        const storedRequestJson =
+          row === undefined ? undefined : v.parse(v.string(), row.request_json);
+        if (
+          current.kind !== "kill" ||
+          storedRequestJson === undefined ||
+          current.runtimeScopeId !== runtimeScopeId ||
+          current.consumer !== consumer ||
+          current.generation !== generation ||
+          storedRequestJson !== requestJson
+        )
+          throw { code: "operation_key_conflict" };
+        return { created: false, operation: current };
+      }
+      transaction(() => {
+        database
+          .prepare(
+            "INSERT INTO operations(operation_key, runtime_scope_id, consumer, generation, request_json, status) VALUES (?, ?, ?, ?, ?, 'pending')",
+          )
+          .run(operationKey, runtimeScopeId, consumer, generation, requestJson);
+      });
+      const operation = readOperation(operationKey);
+      if (operation === undefined || operation.kind !== "kill")
+        throw new Error("Kill registration disappeared");
+      return { created: true, operation };
+    },
     markSpawnDispatched(operationKey) {
       operationKey = validatedOperationKey(operationKey, "spawn");
       transaction(() => {
@@ -1125,6 +1212,18 @@ function createControlStore(database: DatabaseSync): ControlStore {
         return undefined;
       });
       if (pendingError !== undefined) throw pendingError;
+    },
+    markKillDispatched(operationKey) {
+      operationKey = validatedOperationKey(operationKey, "kill");
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'dispatched' WHERE operation_key = ? AND status = 'pending'",
+          )
+          .run(operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error("Kill operation is not awaiting dispatch");
+      });
     },
     commitSend(input) {
       const operationKey = validatedOperationKey(input.operationKey, "send");
@@ -1357,6 +1456,138 @@ function createControlStore(database: DatabaseSync): ControlStore {
       if ("pendingError" in committed) throw committed.pendingError;
       return committed.entry;
     },
+    commitKill(input) {
+      const operationKey = validatedOperationKey(input.operationKey, "kill");
+      const parsedResult = v.parse(killResultSchema, input.result);
+      const events = input.events.map((event) =>
+        v.parse(domainEventSchema, event),
+      );
+      const sessionInput =
+        input.session === undefined
+          ? undefined
+          : validateSessionIdentity(input.session);
+      if (events.some((event) => event.sessionId !== parsedResult.sessionId))
+        throw new Error("Kill events do not match their result");
+      if (parsedResult.status === "not_found") {
+        if (sessionInput !== undefined || events.length !== 0)
+          throw new Error("A not-found kill cannot commit session facts");
+      } else {
+        if (
+          sessionInput === undefined ||
+          sessionInput.info.sessionId !== parsedResult.sessionId ||
+          sessionInput.info.state !== "killed"
+        )
+          throw new Error("A killed result requires its terminal session");
+      }
+      return transaction(() => {
+        const operation = readOperation(operationKey);
+        if (
+          operation?.kind !== "kill" ||
+          operation.status !== "dispatched" ||
+          operation.request.sessionId !== parsedResult.sessionId
+        )
+          throw new Error("Kill operation was not dispatched for its target");
+        if (sessionInput !== undefined) {
+          validateOperationOwnership(
+            operationKey,
+            "kill",
+            sessionInput.runtimeScopeId,
+            sessionInput.consumer,
+            sessionInput.generation,
+          );
+          const existingSession = readSession(parsedResult.sessionId);
+          if (
+            existingSession === undefined ||
+            existingSession.runtimeScopeId !== sessionInput.runtimeScopeId ||
+            existingSession.consumer !== sessionInput.consumer ||
+            existingSession.generation !== sessionInput.generation
+          )
+            throw new Error("Kill target is not the recorded session");
+          const previous = existingSession.info;
+          if (previous.state === "killed") {
+            if (
+              events.length !== 0 ||
+              stableJson(previous) !== stableJson(sessionInput.info)
+            )
+              throw new Error("Already-killed session facts must be unchanged");
+          } else {
+            const sessionKilledEvents = events.filter(
+              (event) => event.type === "session.killed",
+            );
+            if (
+              events.at(-1)?.type !== "session.killed" ||
+              sessionKilledEvents.length !== 1
+            )
+              throw new Error(
+                "Kill events do not end with the session terminal",
+              );
+            const terminalEvents = events.filter(
+              (event) => event.type === "turn.completed",
+            );
+            const terminal = terminalEvents[0];
+            const expectedTerminalCount = previous.state === "busy" ? 1 : 0;
+            if (
+              terminalEvents.length !== expectedTerminalCount ||
+              (previous.state === "busy" &&
+                (terminal?.type !== "turn.completed" ||
+                  terminal.turnId !== previous.activeTurnId ||
+                  terminal.stopReason !== "killed" ||
+                  terminal.finalReply !== null))
+            )
+              throw new Error(
+                "Kill turn completion does not match its session",
+              );
+            if (
+              previous.state === "busy" &&
+              (sessionInput.info.turns !== previous.turns + 1 ||
+                sessionInput.info.lastCompletedTurn?.turnId !==
+                  terminal?.turnId ||
+                sessionInput.info.lastCompletedTurn?.stopReason !== "killed")
+            )
+              throw new Error("Killed session projection lost its active turn");
+            if (
+              previous.state === "idle" &&
+              (sessionInput.info.turns !== previous.turns ||
+                stableJson(sessionInput.info.lastCompletedTurn) !==
+                  stableJson(previous.lastCompletedTurn))
+            )
+              throw new Error(
+                "Killed session projection changed its last turn",
+              );
+          }
+        }
+        const currentOperation = readOperation(operationKey);
+        if (
+          currentOperation?.kind !== "kill" ||
+          currentOperation.status !== "dispatched" ||
+          currentOperation.request.sessionId !== parsedResult.sessionId
+        )
+          throw new Error("Kill operation is no longer awaiting commit");
+        const currentSession = readSession(parsedResult.sessionId);
+        if (sessionInput === undefined) {
+          if (parsedResult.status !== "not_found")
+            throw new Error("A killed result has no session projection");
+        } else if (
+          currentSession === undefined ||
+          currentSession.runtimeScopeId !== sessionInput.runtimeScopeId ||
+          currentSession.consumer !== sessionInput.consumer ||
+          currentSession.generation !== sessionInput.generation
+        ) {
+          throw new Error("Kill session changed before commit");
+        }
+        if (sessionInput !== undefined)
+          commitSessionProjection(parsedResult.sessionId, sessionInput.info);
+        const entries = events.map(appendEvent);
+        const updated = database
+          .prepare(
+            "UPDATE operations SET status = 'succeeded', result_json = ? WHERE operation_key = ? AND status = 'dispatched' AND error_json IS NULL",
+          )
+          .run(stableJson(parsedResult), operationKey);
+        if (Number(updated.changes) !== 1)
+          throw new Error("Kill operation is no longer awaiting commit");
+        return entries;
+      });
+    },
     failSpawn(operationKey, error) {
       operationKey = validatedOperationKey(operationKey, "spawn");
       const parsedError = v.parse(machineErrorSchema, error);
@@ -1500,6 +1731,41 @@ function createControlStore(database: DatabaseSync): ControlStore {
           throw new Error(
             "Permission resolution operation is not awaiting an unknown outcome",
           );
+        }
+      });
+    },
+    failKill(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "kill");
+      const parsedError = v.parse(machineErrorSchema, error);
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET status = 'failed', error_json = ? WHERE operation_key = ? AND status IN ('pending', 'dispatched') AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1)
+          throw new Error("Kill operation is not pending");
+      });
+    },
+    recordKillOutcomeUnknown(operationKey, error) {
+      operationKey = validatedOperationKey(operationKey, "kill");
+      const parsedError = v.parse(machineErrorSchema, error);
+      if (parsedError.code !== "operation_outcome_unknown")
+        throw new Error("Kill outcome error has the wrong code");
+      transaction(() => {
+        const result = database
+          .prepare(
+            "UPDATE operations SET error_json = ? WHERE operation_key = ? AND status = 'dispatched' AND error_json IS NULL",
+          )
+          .run(stableJson(parsedError), operationKey);
+        if (Number(result.changes) !== 1) {
+          const operation = readOperation(operationKey);
+          if (
+            operation?.status === "outcome_unknown" &&
+            stableJson(operation.error) === stableJson(parsedError)
+          )
+            return;
+          throw new Error("Kill operation is not awaiting an unknown outcome");
         }
       });
     },
