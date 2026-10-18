@@ -319,6 +319,11 @@ describe("qoder driver 事件映射", () => {
     const { fake, driver } = await setup("interactive", undefined, {
       autoQueueAcceptance: false,
     });
+    const initial = fake.controls.delivered()[0];
+    if (initial?.uuid === undefined)
+      throw new Error("Qoder did not receive the initial input UUID");
+    fake.controls.finish(initial.uuid);
+    await flush();
     const delivery = driver.deliver(
       sessionId,
       secondTurnId,
@@ -336,7 +341,7 @@ describe("qoder driver 事件映射", () => {
     void delivery.then(() => {
       accepted = true;
     });
-    fake.controls.acknowledge("00000000-0000-4000-8000-000000000099");
+    fake.controls.acknowledge(initial.uuid, "completed");
     await flush();
     expect(accepted).toBe(false);
 
@@ -989,26 +994,37 @@ describe("qoder driver 事件映射", () => {
     ]);
   });
 
-  test("拒绝 active_turn 后保留未完成 tool state", async () => {
+  test("active_turn 只在旧 root 已取消后发送新 UUID", async () => {
     const { events, fake, driver } = await setup();
     fake.controls.push(assistantToolUseBlock("request-t1", "tc-active"));
     await flush();
 
-    await expect(
-      driver.deliver(sessionId, firstTurnId, "补充消息", "active_turn"),
-    ).rejects.toMatchObject({
-      code: "unsupported_feature",
-      feature: "active_turn",
-    });
-    fake.controls.push(userToolResultBlock("result-t1", "tc-active", "ok"));
+    const initial = fake.controls.delivered()[0];
+    if (initial?.uuid === undefined)
+      throw new Error("Qoder did not receive the initial input UUID");
+    fake.controls.acknowledge(initial.uuid, "started");
+    const delivery = driver.deliver(
+      sessionId,
+      firstTurnId,
+      "补充消息",
+      "active_turn",
+    );
     await flush();
+    expect(fake.controls.interruptCount()).toBe(1);
+    expect(fake.controls.delivered()).toHaveLength(1);
+    fake.controls.pushRaw({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      uuid: "cancelled-root-result",
+      session_id: "qoder-session",
+    } as unknown as SDKMessage);
+    fake.controls.acknowledge(initial.uuid, "cancelled");
+    await delivery;
 
     expect(
-      events.filter(
-        (event) =>
-          event.type === "tool.requested" || event.type === "tool.completed",
-      ),
-    ).toEqual([
+      events.filter((event) => event.type === "tool.requested"),
+    ).toMatchObject([
       {
         type: "tool.requested",
         sessionId,
@@ -1017,33 +1033,33 @@ describe("qoder driver 事件映射", () => {
         name: "Bash",
         input: { command: "ls" },
       },
-      {
-        type: "tool.completed",
-        sessionId,
-        turnId: firstTurnId,
-        toolCallId: "c1",
-        name: "Bash",
-        result: "ok",
-        isError: false,
-      },
     ]);
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+    expect(fake.controls.delivered()).toHaveLength(2);
+    expect(fake.controls.delivered()[1]?.uuid).not.toBe(initial.uuid);
   });
 
-  test("拒绝 active_turn 后保留 pending snapshot", async () => {
+  test("自然完成赢过 active_turn 竞争时不发送迟到纠偏", async () => {
     const { events, fake, driver } = await setup();
     fake.controls.push(
       assistantText("snapshot-t1", "pending", "native-active"),
     );
     await flush();
 
-    await expect(
-      driver.deliver(sessionId, firstTurnId, "补充消息", "active_turn"),
-    ).rejects.toMatchObject({
-      code: "unsupported_feature",
-      feature: "active_turn",
-    });
-    fake.controls.push(idle());
+    const delivery = driver.deliver(
+      sessionId,
+      firstTurnId,
+      "迟到纠偏",
+      "active_turn",
+    );
     await flush();
+    fake.controls.push(idle());
+    await expect(delivery).rejects.toMatchObject({
+      code: "turn_not_active",
+      turnId: firstTurnId,
+    });
 
     expect(
       events.filter(
@@ -1067,6 +1083,7 @@ describe("qoder driver 事件映射", () => {
         usage: { input_tokens: 12, output_tokens: 34 },
       },
     ]);
+    expect(fake.controls.delivered()).toHaveLength(1);
   });
 
   test("新回合丢弃迟到工具结果并允许复用原生 tool id", async () => {
@@ -1559,6 +1576,8 @@ describe("permission 桥", () => {
     const { events, fake, driver } = await setup();
     const canUseTool = fake.controls.lastOptions()?.canUseTool;
     expect(canUseTool).toBeTypeOf("function");
+    fake.controls.pushRaw(assistantToolUseBlock("assistant-tu1", "tu1"));
+    await flush();
     const signal = new AbortController().signal;
     const suggestion = {
       type: "addRules" as const,
@@ -1609,6 +1628,8 @@ describe("permission 桥", () => {
   test("deny feedback：原样翻译调用方 message", async () => {
     const { fake, driver } = await setup();
     const canUseTool = fake.controls.lastOptions()?.canUseTool;
+    fake.controls.pushRaw(assistantToolUseBlock("assistant-tu2", "tu2"));
+    await flush();
     const resultPromise = canUseTool?.(
       "Bash",
       { command: "rm -rf /" },
@@ -1691,11 +1712,12 @@ describe("interrupt 与 kill", () => {
     fake.controls.end();
   });
 
-  test("精确 interrupt 不受公开原生入口支持，拒绝前不调用会话 interrupt", async () => {
+  test("过期 TurnId 的 interrupt 在原生派发前拒绝", async () => {
     const { events, fake, driver } = await setup();
-    await expect(driver.interrupt(sessionId, firstTurnId)).rejects.toEqual({
-      code: "unsupported_feature",
-      feature: "interrupt",
+    await expect(driver.interrupt(sessionId, secondTurnId)).rejects.toEqual({
+      code: "turn_not_active",
+      sessionId,
+      turnId: secondTurnId,
     });
     expect(fake.controls.interruptCount()).toBe(0);
 
@@ -1746,6 +1768,10 @@ describe("interrupt 与 kill", () => {
 
 test("adapter refuses unavailable session scope and preserves the caller feedback callback", async () => {
   const { fake, driver } = await setup();
+  fake.controls.pushRaw(
+    assistantToolUseBlock("assistant-native-tool", "native-tool"),
+  );
+  await flush();
   const callback = fake.controls.lastOptions()!.canUseTool!;
   const answer = callback(
     "Bash",
@@ -1774,28 +1800,38 @@ test("adapter refuses unavailable session scope and preserves the caller feedbac
   expect(fake.controls.delivered()).toHaveLength(before);
 });
 
-test("QoderCN 无精确原生接受入口时 active_turn 在输入副作用前类型化拒绝", async () => {
-  const { driver, fake } = await setup();
-  await flush();
-  const before = fake.controls.delivered();
+test("interrupt ACK 不提前结算，等精确根取消和 error result", async () => {
+  const { driver, fake, events } = await setup();
+  const initial = fake.controls.delivered()[0];
+  if (initial?.uuid === undefined)
+    throw new Error("Qoder did not receive the initial input UUID");
+  fake.controls.acknowledge(initial.uuid, "started");
   try {
-    await expect(
-      Promise.resolve().then(() =>
-        driver.deliver(
-          sessionId,
-          firstTurnId,
-          "rejected private task",
-          "active_turn",
-        ),
-      ),
-    ).rejects.toMatchObject({
-      code: "unsupported_feature",
-      feature: "active_turn",
-    });
+    await driver.interrupt(sessionId, firstTurnId);
+    expect(fake.controls.interruptCount()).toBe(1);
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual(
+      [],
+    );
+    expect(fake.controls.delivered()).toHaveLength(1);
+    fake.controls.pushRaw({
+      type: "result",
+      subtype: "error_during_execution",
+      is_error: true,
+      uuid: "interrupt-root-result",
+      session_id: "qoder-session",
+    } as unknown as SDKMessage);
+    fake.controls.acknowledge(initial.uuid, "cancelled");
     await flush();
-    expect(fake.controls.delivered()).toEqual(before);
+    expect(events.filter((event) => event.type === "turn.completed")).toEqual([
+      {
+        type: "turn.completed",
+        sessionId,
+        turnId: firstTurnId,
+        stopReason: "cancelled",
+        finalReply: null,
+      },
+    ]);
   } finally {
-    fake.controls.end();
     await driver.terminate(sessionId);
   }
 });

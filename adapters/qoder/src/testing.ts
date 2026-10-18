@@ -293,14 +293,38 @@ export function createQoderFixtureSdk(
         for await (const input of prompt) {
           if (replayed) continue;
           replayed = true;
+          const sessionId = "00000000-0000-4000-8000-000000000001";
           replies.push({
             type: "command_lifecycle",
             command_uuid: input.uuid,
             state: "queued",
             uuid: randomUUID(),
-            session_id: "00000000-0000-4000-8000-000000000001",
+            session_id: sessionId,
+          });
+          replies.push({
+            type: "command_lifecycle",
+            command_uuid: input.uuid,
+            state: "started",
+            uuid: randomUUID(),
+            session_id: sessionId,
           });
           for (const message of messages) replies.push(message);
+          if (!messages.some((message) => message.type === "result")) {
+            replies.push({
+              type: "result",
+              subtype: "error_during_execution",
+              is_error: true,
+              uuid: randomUUID(),
+              session_id: sessionId,
+            });
+          }
+          replies.push({
+            type: "command_lifecycle",
+            command_uuid: input.uuid,
+            state: "completed",
+            uuid: randomUUID(),
+            session_id: sessionId,
+          });
         }
       })();
       void promptReader.catch(() => undefined);
@@ -310,6 +334,9 @@ export function createQoderFixtureSdk(
           return {};
         },
         async interrupt() {},
+        async cancelAsyncMessage() {
+          return false;
+        },
         async close() {
           replies.end();
           await promptReader;

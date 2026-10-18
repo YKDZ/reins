@@ -6,11 +6,14 @@ import type {
   AdapterDriverFactory,
   WorkerSpec,
   MachineError,
+  DomainEvent,
   MessageId,
+  OperationEffect,
 } from "@reins/protocol";
 import {
   makeTextEvidence,
   WorkerDeliveryFailure,
+  WorkerInterruptFailure,
   WorkerStartFailure,
 } from "@reins/protocol";
 
@@ -26,6 +29,7 @@ import type {
   QoderOptions,
   QoderSdk,
   SDKMessage,
+  SDKResultMessage,
   SDKUserMessage,
 } from "./sdk-seam.ts";
 
@@ -37,11 +41,36 @@ type PendingEntry = {
   suggestions: PermissionUpdate[] | undefined;
 };
 
-type PendingDelivery = {
-  readonly resolve: () => void;
-  readonly reject: (error: unknown) => void;
-};
 type CallerMessage = { messageId: MessageId; content: string };
+type NativePhaseOutcome =
+  | { readonly kind: "completed" }
+  | { readonly kind: "cancelled" }
+  | { readonly kind: "unknown"; readonly error: unknown };
+type NativePhase = {
+  readonly uuid: string;
+  readonly turnId: WorkerSpec["turnId"];
+  state: "submitted" | "queued" | "started" | "completed" | "cancelled";
+  result: SDKResultMessage | undefined;
+  terminal: Extract<DomainEvent, { type: "turn.completed" }> | undefined;
+  accepted: boolean;
+  acceptedPromise: Promise<void>;
+  accept: () => void;
+  rejectAcceptance: (error: unknown) => void;
+  readonly outcome: Promise<NativePhaseOutcome>;
+  settleOutcome: (outcome: NativePhaseOutcome) => void;
+  outcomeValue: NativePhaseOutcome | undefined;
+  queueRemovalConfirmed: boolean;
+  steering: boolean;
+  permissionsOpen: boolean;
+  closed: boolean;
+};
+
+class UnownedQueuedInputError extends Error {
+  constructor() {
+    super("Qoder interrupt returned an unowned queued UUID");
+    this.name = "UnownedQueuedInputError";
+  }
+}
 
 function inputText(content: SDKUserMessage["message"]["content"]): string {
   if (typeof content === "string") return content;
@@ -64,6 +93,66 @@ function userMessage(
     priority,
     shouldQuery,
     uuid,
+  };
+}
+
+function interruptedReply(value: unknown): { stillQueued: string[] } {
+  const candidate = record(value);
+  if (candidate === undefined)
+    throw new Error("Qoder interrupt response was malformed");
+  const keys = Object.keys(candidate).sort();
+  if (
+    keys.join(",") !== "still_queued" ||
+    !Array.isArray(candidate.still_queued) ||
+    !candidate.still_queued.every(
+      (uuid) =>
+        typeof uuid === "string" &&
+        /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu.test(
+          uuid,
+        ),
+    )
+  )
+    throw new Error(
+      "Qoder interrupt response did not match the pinned CLI shape",
+    );
+  return { stillQueued: candidate.still_queued as string[] };
+}
+
+function makeNativePhase(
+  turnId: WorkerSpec["turnId"],
+  uuid: string,
+): NativePhase {
+  let accept!: () => void;
+  let rejectAcceptance!: (error: unknown) => void;
+  let settleOutcome!: (outcome: NativePhaseOutcome) => void;
+  const acceptedPromise = new Promise<void>((resolve, reject) => {
+    accept = resolve;
+    rejectAcceptance = reject;
+  });
+  // The initial root is observed through start() and may not have a consumer
+  // awaiting this promise. Keep a rejection observed while retaining it for a
+  // later delivery waiter.
+  void acceptedPromise.catch(() => undefined);
+  const outcome = new Promise<NativePhaseOutcome>((resolve) => {
+    settleOutcome = resolve;
+  });
+  return {
+    uuid,
+    turnId,
+    state: "submitted",
+    result: undefined,
+    terminal: undefined,
+    accepted: false,
+    acceptedPromise,
+    accept,
+    rejectAcceptance,
+    outcome,
+    settleOutcome,
+    outcomeValue: undefined,
+    queueRemovalConfirmed: false,
+    steering: false,
+    permissionsOpen: true,
+    closed: false,
   };
 }
 
@@ -158,23 +247,187 @@ export function createQoderDriver(deps: {
     let closedDiagnosticEmitted = false;
     let initialInputUuid: string | null = null;
     const callerMessagesByUuid = new Map<string, CallerMessage>();
+    const phasesByUuid = new Map<string, NativePhase>();
+    let currentPhase: NativePhase | null = null;
+    const phaseByToolUseId = new Map<string, NativePhase>();
     let initialInputSent = false;
     let nativeSessionId: string | null = null;
     let startSettled = false;
     let resolveStart: (() => void) | undefined;
     let rejectStart: ((error: unknown) => void) | undefined;
-    const pendingDeliveries = new Map<string, PendingDelivery>();
+    let operationTail: Promise<void> = Promise.resolve();
 
-    function rejectPendingDeliveries(error: unknown): void {
-      for (const [uuid, pending] of pendingDeliveries) {
-        pendingDeliveries.delete(uuid);
-        pending.reject(
-          new WorkerDeliveryFailure(
-            "Qoder stream ended before confirming the queued command",
-            "unknown",
-            { cause: error },
-          ),
-        );
+    async function exclusive<T>(action: () => Promise<T>): Promise<T> {
+      const previous = operationTail;
+      let release!: () => void;
+      operationTail = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      await previous;
+      try {
+        return await action();
+      } finally {
+        release();
+      }
+    }
+
+    function executionPhaseEffect(phase: NativePhase): OperationEffect {
+      return {
+        kind: "execution_phase_cancelled",
+        sessionId: session!.sessionId,
+        turnId: phase.turnId,
+      };
+    }
+
+    function phaseIsFailed(phase: NativePhase): boolean {
+      return (
+        phase.result?.is_error === true ||
+        phase.result?.subtype.startsWith("error") === true
+      );
+    }
+
+    function stopPhasePermissions(phase: NativePhase): void {
+      phase.permissionsOpen = false;
+      session?.clearPending();
+    }
+
+    function recordToolUseOwners(
+      message: SDKMessage,
+      phase: NativePhase,
+    ): void {
+      if (message.type !== "assistant") return;
+      for (const block of message.message.content) {
+        if (block.type !== "tool_use" || typeof block.id !== "string") continue;
+        phaseByToolUseId.set(block.id, phase);
+      }
+    }
+
+    async function settlePhase(phase: NativePhase): Promise<void> {
+      if (phase.closed) return;
+      if (phase.state !== "completed" && phase.state !== "cancelled") return;
+      stopPhasePermissions(phase);
+
+      let outcome: NativePhaseOutcome;
+      if (phase.state === "cancelled") {
+        if (phase.result === undefined && !phase.queueRemovalConfirmed) return;
+        if (phase.result !== undefined && !phaseIsFailed(phase))
+          throw new Error(
+            "Qoder cancelled a root input without an error result",
+          );
+        outcome = { kind: "cancelled" };
+        if (session === null) return;
+        if (phase.steering) {
+          session.beginTurn(phase.turnId);
+        } else {
+          if (session.turnId !== phase.turnId) session.beginTurn(phase.turnId);
+          phase.terminal = session.endTurn("cancelled") as Extract<
+            DomainEvent,
+            { type: "turn.completed" }
+          >;
+          emit(phase.terminal);
+        }
+      } else {
+        if (phase.result === undefined) return;
+        if (session === null) return;
+        if (phaseIsFailed(phase)) {
+          if (phase.terminal?.stopReason !== "failed") {
+            if (session.turnId !== phase.turnId)
+              session.beginTurn(phase.turnId);
+            phase.terminal = (await session.failTurn(
+              {
+                failureCategory: "unclassified",
+                retryDisposition: "unknown",
+              },
+              {
+                kind: "turn_failure",
+                operation: "run_turn",
+                reason: "worker_reported_failure",
+                message: makeTextEvidence("worker reported a failed turn"),
+              },
+            )) as Extract<DomainEvent, { type: "turn.completed" }>;
+          }
+          if (phase.terminal === undefined)
+            throw new Error("Qoder failure ended without a turn result");
+          emit(phase.terminal);
+          outcome = { kind: "completed" };
+        } else {
+          if (session.turnId === phase.turnId) {
+            const completed = session.endTurn("end_turn");
+            if (phase.terminal === undefined)
+              phase.terminal = completed as Extract<
+                DomainEvent,
+                { type: "turn.completed" }
+              >;
+          } else if (phase.terminal === undefined) {
+            session.beginTurn(phase.turnId);
+            phase.terminal = session.endTurn("end_turn") as Extract<
+              DomainEvent,
+              { type: "turn.completed" }
+            >;
+          }
+          emit(phase.terminal);
+          outcome = { kind: "completed" };
+        }
+      }
+
+      phase.closed = true;
+      if (currentPhase === phase) currentPhase = null;
+      phase.outcomeValue = outcome;
+      phase.settleOutcome(outcome);
+    }
+
+    function failOpenPhases(error: unknown): void {
+      for (const phase of phasesByUuid.values()) {
+        if (phase.closed) continue;
+        stopPhasePermissions(phase);
+        phase.closed = true;
+        if (!phase.accepted) {
+          phase.rejectAcceptance(
+            new WorkerDeliveryFailure(
+              "Qoder stream ended before confirming the queued command",
+              "unknown",
+              { cause: error },
+            ),
+          );
+        }
+        const outcome: NativePhaseOutcome = { kind: "unknown", error };
+        phase.outcomeValue = outcome;
+        phase.settleOutcome(outcome);
+      }
+      currentPhase = null;
+    }
+
+    function makePhase(
+      turnId: WorkerSpec["turnId"],
+      uuid: string,
+    ): NativePhase {
+      const phase = makeNativePhase(turnId, uuid);
+      phasesByUuid.set(uuid, phase);
+      currentPhase = phase;
+      return phase;
+    }
+
+    async function confirmQueuedCancellation(
+      phase: NativePhase,
+      stillQueued: readonly string[],
+    ): Promise<void> {
+      if (phase.closed) return;
+      for (const uuid of stillQueued) {
+        const queuedPhase = phasesByUuid.get(uuid);
+        if (queuedPhase === undefined || queuedPhase !== phase)
+          throw new UnownedQueuedInputError();
+        const cancelled = await query!.cancelAsyncMessage(uuid);
+        if (typeof cancelled !== "boolean")
+          throw new Error("Qoder cancelAsyncMessage response was malformed");
+        if (cancelled) {
+          if (phase.state !== "queued" && phase.state !== "cancelled")
+            throw new Error(
+              "Qoder removed an input that was not in the queued lifecycle state",
+            );
+          phase.queueRemovalConfirmed = true;
+          phase.state = "cancelled";
+          await settlePhase(phase);
+        }
       }
     }
 
@@ -191,6 +444,17 @@ export function createQoderDriver(deps: {
           // 不变式失败：回调只在 start 注册后才可达。
           throw new Error("canUseTool called before session creation");
         }
+        const phase = phaseByToolUseId.get(options.toolUseID);
+        if (
+          phase === undefined ||
+          phase !== currentPhase ||
+          phase.closed ||
+          !phase.permissionsOpen ||
+          phase.turnId !== session.turnId
+        )
+          throw new Error(
+            "Qoder permission callback belongs to a closed input root",
+          );
         const entry: PendingEntry = {
           resolve: () => {},
           reject: () => {},
@@ -198,23 +462,26 @@ export function createQoderDriver(deps: {
           toolUseID: options.toolUseID,
           suggestions: options.suggestions,
         };
-        const permissionId = session.requestPermission(
-          `tool:${toolName}`,
-          input,
-          derivePermissionOptions(options.suggestions),
-          entry,
-        );
         return await new Promise<PermissionResult>((resolve, reject) => {
           entry.resolve = resolve;
           entry.reject = reject;
-          options.signal.addEventListener(
-            "abort",
-            () => {
-              // harness 已取消请求：丢弃登记，SDK 侧由 signal race 自行结束。
-              session?.takePending(permissionId);
-            },
-            { once: true },
+          const permissionId = session!.requestPermission(
+            `tool:${toolName}`,
+            input,
+            derivePermissionOptions(options.suggestions),
+            entry,
           );
+          const removePending = () => {
+            session?.takePending(permissionId);
+            reject(new Error("Qoder permission request was aborted"));
+          };
+          if (options.signal.aborted) {
+            removePending();
+          } else {
+            options.signal.addEventListener("abort", removePending, {
+              once: true,
+            });
+          }
         });
       };
     }
@@ -232,29 +499,46 @@ export function createQoderDriver(deps: {
             } else if (nativeSessionId !== lifecycle.session_id) {
               throw new Error("Qoder command_lifecycle changed session_id");
             }
-            if (
-              lifecycle.command_uuid === initialInputUuid &&
-              lifecycle.state === "queued"
-            )
-              settleStart();
-            if (lifecycle.state === "queued") {
-              const pending = pendingDeliveries.get(lifecycle.command_uuid);
-              if (pending !== undefined) {
-                pendingDeliveries.delete(lifecycle.command_uuid);
-                pending.resolve();
-              }
-            } else if (lifecycle.state === "cancelled") {
-              const pending = pendingDeliveries.get(lifecycle.command_uuid);
-              if (pending !== undefined) {
-                pendingDeliveries.delete(lifecycle.command_uuid);
-                pending.reject(
-                  new WorkerDeliveryFailure(
-                    "Qoder cancelled the command before queue acceptance",
+            const phase = phasesByUuid.get(lifecycle.command_uuid);
+            if (phase === undefined)
+              throw new Error(
+                "Qoder command_lifecycle referenced an unowned input UUID",
+              );
+            if (phase.closed) {
+              if (phase.state !== lifecycle.state)
+                throw new Error("Qoder changed a closed input lifecycle");
+              continue;
+            }
+            if (phase.state === lifecycle.state) continue;
+            const nextState = lifecycle.state;
+            const validTransition =
+              (phase.state === "submitted" && nextState === "queued") ||
+              (phase.state === "queued" &&
+                ["started", "completed", "cancelled"].includes(nextState)) ||
+              (phase.state === "started" &&
+                ["completed", "cancelled"].includes(nextState));
+            if (!validTransition)
+              throw new Error("Qoder input lifecycle moved out of order");
+            phase.state = nextState;
+            if (nextState === "queued") {
+              phase.accepted = true;
+              phase.accept();
+              if (lifecycle.command_uuid === initialInputUuid) settleStart();
+            } else if (nextState === "cancelled" && !phase.accepted) {
+              const rejection = new WorkerDeliveryFailure(
+                "Qoder cancelled the command before confirming it queued",
+                "not_accepted",
+              );
+              phase.rejectAcceptance(rejection);
+              if (lifecycle.command_uuid === initialInputUuid)
+                settleStart(
+                  new WorkerStartFailure(
+                    "Qoder cancelled the initial command before queue acceptance",
                     "not_accepted",
                   ),
                 );
-              }
             }
+            await settlePhase(phase);
             continue;
           }
           const version = systemInit(rawMessage);
@@ -270,6 +554,28 @@ export function createQoderDriver(deps: {
           }
           if (!sdkMessage(rawMessage))
             throw new Error("Qoder SDK returned an unrecognized message");
+          const phase = currentPhase;
+          if (rawMessage.type === "result") {
+            if (phase === null || phase.closed)
+              throw new Error(
+                "Qoder returned a result without an open input root",
+              );
+            if (phase.result !== undefined)
+              throw new Error(
+                "Qoder returned multiple results for one input root",
+              );
+            phase.result = rawMessage;
+            if (record(rawMessage.usage) !== undefined)
+              session.setUsage(record(rawMessage.usage)!);
+            await settlePhase(phase);
+            continue;
+          }
+          if (phase === null || phase.closed) continue;
+          recordToolUseOwners(rawMessage, phase);
+          const callerReplay =
+            rawMessage.type === "user" && rawMessage.uuid === phase.uuid;
+          if (phase.terminal !== undefined && !callerReplay) continue;
+          if (session.turnId !== phase.turnId) session.setTurnId(phase.turnId);
           let callerMessageId: MessageId | undefined;
           if (rawMessage.type === "user" && rawMessage.uuid !== undefined) {
             const callerMessage = callerMessagesByUuid.get(rawMessage.uuid);
@@ -292,11 +598,20 @@ export function createQoderDriver(deps: {
           )
             callerMessagesByUuid.delete(rawMessage.uuid);
           for (const event of events) {
-            emit(event);
+            if (event.type === "turn.completed") {
+              stopPhasePermissions(phase);
+              if (phase.terminal !== undefined)
+                throw new Error(
+                  "Qoder emitted more than one terminal for an input root",
+                );
+              phase.terminal = event;
+            } else {
+              emit(event);
+            }
           }
         }
       } catch (error) {
-        rejectPendingDeliveries(error);
+        failOpenPhases(error);
         if (!startSettled)
           settleStart(
             error instanceof WorkerStartFailure
@@ -318,9 +633,10 @@ export function createQoderDriver(deps: {
         }
       }
       if (!readFailed && !terminating) {
-        rejectPendingDeliveries(
-          new Error("Qoder stream ended before queue acceptance"),
+        const streamEnd = new Error(
+          "Qoder stream ended before queue acceptance",
         );
+        failOpenPhases(streamEnd);
         if (!startSettled)
           settleStart(
             new WorkerStartFailure(
@@ -340,6 +656,12 @@ export function createQoderDriver(deps: {
         };
       }
       if (!terminating) {
+        if (session.turnId === null && evidence !== undefined) {
+          const unresolved = [...phasesByUuid.values()].find(
+            (phase) => phase.outcomeValue?.kind === "unknown",
+          );
+          if (unresolved !== undefined) session.setTurnId(unresolved.turnId);
+        }
         if (session.turnId === null) {
           if (evidence !== undefined) await session.diagnostic(evidence);
         } else {
@@ -375,7 +697,10 @@ export function createQoderDriver(deps: {
         queryClosePromise = null;
         closedDiagnosticEmitted = false;
         initialInputUuid = randomUUID();
-        pendingDeliveries.clear();
+        phasesByUuid.clear();
+        phaseByToolUseId.clear();
+        currentPhase = null;
+        operationTail = Promise.resolve();
         callerMessagesByUuid.clear();
         if (spec.messageId !== undefined)
           callerMessagesByUuid.set(initialInputUuid, {
@@ -393,12 +718,19 @@ export function createQoderDriver(deps: {
           sessionId: spec.sessionId,
           emit,
           diagnostics: diagnosticSink,
-          onClearPending: () => {
-            // 回合终态作废未决请求：直接丢弃，不结算、不写文案。
+          onClearPending: (entries) => {
+            for (const entry of entries) {
+              entry.reject(
+                new Error(
+                  "Qoder execution phase ended before permission resolution",
+                ),
+              );
+            }
           },
         });
         mappingState = createQoderMappingState();
         session.beginTurn(spec.turnId);
+        makePhase(spec.turnId, initialInputUuid);
         abortController = new AbortController();
         stream = createAsyncQueue<SDKUserMessage>();
         const options: QoderOptions = {
@@ -459,42 +791,209 @@ export function createQoderDriver(deps: {
         return accepted;
       },
       async deliver(sessionId, turnId, message, placement, messageId) {
-        if (placement === "active_turn") {
-          throw { code: "unsupported_feature", feature: "active_turn" };
-        }
-        if (
-          session === null ||
-          session.sessionId !== sessionId ||
-          stream === null
-        )
-          throw new WorkerDeliveryFailure(
-            "Qoder session is unavailable before command dispatch",
-            "not_accepted",
-          );
-        if (session?.turnId !== turnId) {
-          mappingState = createQoderMappingState();
-        }
-        session?.setTurnId(turnId);
-        const uuid = randomUUID();
-        const queued = new Promise<void>((resolve, reject) => {
-          pendingDeliveries.set(uuid, { resolve, reject });
+        await exclusive(async () => {
+          if (
+            session === null ||
+            session.sessionId !== sessionId ||
+            stream === null ||
+            query === null
+          )
+            throw new WorkerDeliveryFailure(
+              "Qoder session is unavailable before command dispatch",
+              "not_accepted",
+            );
+
+          if (placement === "new_turn") {
+            if (session.turnId !== null || currentPhase !== null)
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
+            mappingState = createQoderMappingState();
+            const uuid = randomUUID();
+            const phase = makePhase(turnId, uuid);
+            if (messageId !== undefined)
+              callerMessagesByUuid.set(uuid, { messageId, content: message });
+            try {
+              stream.push(userMessage(message, "next", true, uuid));
+            } catch (error) {
+              phase.closed = true;
+              currentPhase = null;
+              callerMessagesByUuid.delete(uuid);
+              throw new WorkerDeliveryFailure(
+                "Qoder did not receive the command input",
+                "not_accepted",
+                { cause: error },
+              );
+            }
+            session.beginTurn(turnId);
+            await phase.acceptedPromise;
+            return;
+          }
+
+          const phase = currentPhase;
+          if (
+            phase === null ||
+            phase.closed ||
+            phase.turnId !== turnId ||
+            (session.turnId !== turnId && phase.terminal === undefined)
+          )
+            throw {
+              code: "turn_not_active",
+              sessionId,
+              turnId,
+            } satisfies MachineError;
+
+          phase.steering = true;
+          session.cancelling = true;
+          let acknowledgement: { stillQueued: string[] };
+          try {
+            acknowledgement = interruptedReply(await query.interrupt());
+            if (phase.closed && phase.outcomeValue?.kind === "completed")
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
+            await confirmQueuedCancellation(phase, acknowledgement.stillQueued);
+          } catch (error) {
+            if (error instanceof UnownedQueuedInputError) {
+              phase.steering = false;
+              session.cancelling = false;
+              throw new WorkerDeliveryFailure(
+                "Qoder reported an input outside the active Reins phase",
+                "unknown",
+                { cause: error },
+                phase.outcomeValue?.kind === "cancelled"
+                  ? executionPhaseEffect(phase)
+                  : undefined,
+              );
+            }
+            if (phase.outcomeValue?.kind === "cancelled") {
+              if (session.turnId !== turnId) session.beginTurn(turnId);
+              const cancelled = session.endTurn("cancelled");
+              emit(cancelled);
+              throw new WorkerDeliveryFailure(
+                "Qoder stopped the execution but did not confirm the continuation request",
+                "not_accepted",
+                { cause: error },
+                executionPhaseEffect(phase),
+              );
+            }
+            if (phase.outcomeValue?.kind === "completed")
+              throw {
+                code: "turn_not_active",
+                sessionId,
+                turnId,
+              } satisfies MachineError;
+            phase.steering = false;
+            session.cancelling = false;
+            throw new WorkerDeliveryFailure(
+              "Qoder interrupt acceptance is unknown; continuation was not sent",
+              "unknown",
+              { cause: error },
+            );
+          }
+
+          const outcome = phase.outcomeValue ?? (await phase.outcome);
+          if (outcome.kind === "completed")
+            throw {
+              code: "turn_not_active",
+              sessionId,
+              turnId,
+            } satisfies MachineError;
+          if (outcome.kind === "unknown")
+            throw new WorkerDeliveryFailure(
+              "Qoder execution stop could not be confirmed",
+              "unknown",
+              { cause: outcome.error },
+            );
+
+          if (session.turnId !== turnId) session.beginTurn(turnId);
+          const uuid = randomUUID();
+          const continuation = makePhase(turnId, uuid);
+          if (messageId !== undefined)
+            callerMessagesByUuid.set(uuid, { messageId, content: message });
+          try {
+            stream.push(userMessage(message, "next", true, uuid));
+          } catch (error) {
+            continuation.closed = true;
+            currentPhase = null;
+            callerMessagesByUuid.delete(uuid);
+            const cancelled = session.endTurn("cancelled");
+            emit(cancelled);
+            throw new WorkerDeliveryFailure(
+              "Qoder stopped the previous execution but rejected the continuation before input dispatch",
+              "not_accepted",
+              { cause: error },
+              executionPhaseEffect(phase),
+            );
+          }
+          try {
+            await continuation.acceptedPromise;
+          } catch (error) {
+            if (
+              error instanceof WorkerDeliveryFailure &&
+              error.acceptance === "not_accepted"
+            ) {
+              if (session.turnId !== turnId) session.beginTurn(turnId);
+              const cancelled = session.endTurn("cancelled");
+              emit(cancelled);
+              throw new WorkerDeliveryFailure(
+                "Qoder stopped the previous execution but did not queue the continuation",
+                "not_accepted",
+                { cause: error },
+                executionPhaseEffect(phase),
+              );
+            }
+            throw new WorkerDeliveryFailure(
+              "Qoder continuation acceptance is unknown after stopping the previous execution",
+              "unknown",
+              { cause: error },
+              executionPhaseEffect(phase),
+            );
+          }
         });
-        if (messageId !== undefined)
-          callerMessagesByUuid.set(uuid, { messageId, content: message });
-        try {
-          stream.push(userMessage(message, "next", true, uuid));
-        } catch (error) {
-          pendingDeliveries.delete(uuid);
-          throw new WorkerDeliveryFailure(
-            "Qoder did not receive the command input",
-            "not_accepted",
-            { cause: error },
-          );
-        }
-        await queued;
       },
-      async interrupt() {
-        throw { code: "unsupported_feature", feature: "interrupt" };
+      async interrupt(sessionId, turnId) {
+        await exclusive(async () => {
+          if (
+            session === null ||
+            session.sessionId !== sessionId ||
+            query === null
+          )
+            throw {
+              code: "turn_not_active",
+              sessionId,
+              turnId,
+            } satisfies MachineError;
+          const phase = currentPhase;
+          if (
+            phase === null ||
+            phase.closed ||
+            phase.turnId !== turnId ||
+            (session.turnId !== turnId && phase.terminal === undefined)
+          )
+            throw {
+              code: "turn_not_active",
+              sessionId,
+              turnId,
+            } satisfies MachineError;
+          session.cancelling = true;
+          try {
+            const acknowledgement = interruptedReply(await query.interrupt());
+            if (phase.closed && phase.outcomeValue?.kind === "completed")
+              return;
+            await confirmQueuedCancellation(phase, acknowledgement.stillQueued);
+          } catch (error) {
+            throw new WorkerInterruptFailure(
+              "Qoder interrupt acceptance is unknown",
+              "unknown",
+              { cause: error },
+            );
+          }
+        });
       },
       resolvePermission(sessionId, permissionId, resolution) {
         const entry = session?.takePending(permissionId, resolution);
@@ -556,7 +1055,7 @@ export function createQoderDriver(deps: {
 
         const pending = (async () => {
           terminating = true;
-          rejectPendingDeliveries(
+          failOpenPhases(
             new Error("Qoder worker was terminated before queue acceptance"),
           );
           // 先结束 Reins 提供的 prompt，再主动调用并保存 SDK 的首次 close。

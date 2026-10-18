@@ -88,6 +88,7 @@ const qoderFactory: ReturnType<typeof createQoderDriver> = (options) => {
           [Symbol.asyncIterator]: () => replies[Symbol.asyncIterator](),
           initializationResult: async () => ({}),
           interrupt: async () => {},
+          cancelAsyncMessage: async () => false,
           close: () => {
             if (closePromise !== undefined) return closePromise;
             endReplies();
