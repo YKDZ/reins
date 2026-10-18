@@ -333,9 +333,15 @@ describe("per-method 参数与结果 schema", () => {
       message: "hello",
       sessionLabel: "reviewer",
     });
-    bad(protocolParamsSchemaFor("spawn"), {
+    ok(protocolParamsSchemaFor("spawn"), {
       cwd: "/tmp",
       harness: "dsh",
+      message: "hello",
+      sessionLabel: "reviewer",
+    });
+    bad(protocolParamsSchemaFor("spawn"), {
+      cwd: "/tmp",
+      harness: "unknown",
       message: "hello",
       sessionLabel: "reviewer",
     });

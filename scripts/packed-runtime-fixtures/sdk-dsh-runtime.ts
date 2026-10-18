@@ -120,7 +120,7 @@ try {
   const firstFacts = await collect(
     await connection.attach(
       { scope: "turn", turnHandle: started.turnHandle },
-      { mode: "available" },
+      { mode: "history" },
     ),
   );
   const callerMessages = firstFacts.filter(
@@ -208,7 +208,7 @@ try {
   const secondFacts = await collect(
     await connection.attach(
       { scope: "turn", turnHandle: second.turnHandle },
-      { mode: "available" },
+      { mode: "history" },
     ),
   );
   const secondCallerMessages = secondFacts.filter(
