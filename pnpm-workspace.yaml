@@ -32,7 +32,7 @@ catalog:
   "@qodercn-ai/qodercn-agent-sdk": ^1.0.23
   "@types/node": ^24.13.3
   "@types/proper-lockfile": ^4.1.4
-  "oxfmt": ^0.71.0
+  "oxfmt": ^0.73.0
   "oxlint": ^1.77.0
   "oxlint-tsgolint": ^7.0.2001
   "proper-lockfile": ^4.1.2
