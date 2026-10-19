@@ -37,7 +37,7 @@ catalog:
   "oxlint-tsgolint": ^7.0.2001
   "proper-lockfile": ^4.1.2
   "rolldown": ^1.2.4
-  "turbo": 2.11.7
+  "turbo": 2.11.8
   "typescript-7": npm:typescript@^7.0.2
   "valibot": ^1.4.2
   "@deepseek-ai/dsh-attachment": 0.2.1-rc.2
