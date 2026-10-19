@@ -252,8 +252,8 @@ catalogs:
       specifier: 0.2.1-rc.2
       version: 0.2.1-rc.2
     '@qodercn-ai/qodercn-agent-sdk':
-      specifier: ^1.0.23
-      version: 1.0.23
+      specifier: ^1.0.53
+      version: 1.0.53
     '@types/js-yaml':
       specifier: ^4.0.9
       version: 4.0.9
@@ -501,7 +501,7 @@ importers:
     dependencies:
       '@qodercn-ai/qodercn-agent-sdk':
         specifier: 'catalog:'
-        version: 1.0.23(zod@4.4.3)
+        version: 1.0.53(zod@4.4.3)
       '@reins/adapter-kit':
         specifier: workspace:*
         version: link:../../packages/adapter-kit
@@ -4205,8 +4205,8 @@ packages:
   '@protobufjs/utf8@1.1.2':
     resolution: {integrity: sha512-b1UQwcEZ4yCnMCD8DAL1VlbvBJE9/IX4FTIp7BG1xYpf29SLazLSrqUkj4w7Y5y7cCVP6E5tcqqcI0xemPkHug==}
 
-  '@qodercn-ai/qodercn-agent-sdk@1.0.23':
-    resolution: {integrity: sha512-x2NPsN+n6xhW8RZQcR8wV9AM5OT6xnDwVJWMQRyaBpZXLvN8hyLwpDwVSYDpokkTq4/lJPq0NJfd1cKkEyk7aA==}
+  '@qodercn-ai/qodercn-agent-sdk@1.0.53':
+    resolution: {integrity: sha512-MkaeSID12x7C1EP9Wk0ohO4S2EHilUIMNvOMpUmyMMDT6rCXvElulPT9CQCaVKUb9Qt0il9AfM8PtIk1Strx6A==}
     engines: {node: '>=18.0.0'}
     peerDependencies:
       zod: ^3.25.0 || ^4.0.0
@@ -5238,10 +5238,6 @@ packages:
 
   negotiator@0.6.4:
     resolution: {integrity: sha512-myRT3DiWPHqho5PrJaIRyaMv2kgYf0mUVgBNOYMuCH5Ki1yEiQaf/ZJuQ62nvpc44wL5WDbTX7yGJi1Neevw8w==}
-    engines: {node: '>= 0.6'}
-
-  negotiator@1.0.0:
-    resolution: {integrity: sha512-8Ofs/AUQh8MaEcrlq5xOX0CQ9ypTF5dl78mjlMNfOK08fzpgTHQRQPBxcPlEtIw0yRpws+Zo/3r+5WRby7u3Gg==}
     engines: {node: '>= 0.6'}
 
   negotiator@1.1.0:
@@ -9890,7 +9886,7 @@ snapshots:
 
   '@protobufjs/utf8@1.1.2': {}
 
-  '@qodercn-ai/qodercn-agent-sdk@1.0.23(zod@4.4.3)':
+  '@qodercn-ai/qodercn-agent-sdk@1.0.53(zod@4.4.3)':
     dependencies:
       '@modelcontextprotocol/sdk': 1.30.0(zod@4.4.3)
       zod: 4.4.3
@@ -10205,7 +10201,7 @@ snapshots:
   accepts@2.0.0:
     dependencies:
       mime-types: 3.0.2
-      negotiator: 1.0.0
+      negotiator: 1.1.0
 
   agent-base@7.1.4: {}
 
@@ -10815,8 +10811,6 @@ snapshots:
   nanoid@3.3.18: {}
 
   negotiator@0.6.4: {}
-
-  negotiator@1.0.0: {}
 
   negotiator@1.1.0:
     dependencies:
